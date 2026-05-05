@@ -100,20 +100,34 @@
       - disable_warnings
   description: "Disabled — disable_warnings is a smell, not a vuln; flag manually."
 - id: python.tls.pyopenssl_verify_off
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: python
   tag: weak-tls
   severity: medium
   packages:
   - pyOpenSSL
+  - OpenSSL
   cwe:
   - CWE-295
   match:
     kind: call
     callee:
-      attribute:
-      - Context
-      - set_verify
-  description: "Disabled — flag only when set_verify(VERIFY_NONE) (constraint TBD)."
+      name: set_verify
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(^|\.)(VERIFY_NONE)$'
+  match_examples:
+  - name: pyopenssl verify none
+    code: |
+      from OpenSSL import SSL
+      def configure(ctx):
+          ctx.set_verify(SSL.VERIFY_NONE, lambda *args: True)
+    expect_match_text: [ctx.set_verify]
+  - name: pyopenssl verify peer negative
+    code: |
+      from OpenSSL import SSL
+      def configure(ctx):
+          ctx.set_verify(SSL.VERIFY_PEER, callback)
+    expect_no_match: true
+  description: "OpenSSL.SSL.Context.set_verify(VERIFY_NONE, ...) — disables certificate verification."

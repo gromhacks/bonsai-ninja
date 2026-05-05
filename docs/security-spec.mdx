@@ -135,6 +135,21 @@ argument:
   size)` needs separate rules. Tainted pointer reachability is not a
   tainted allocation size.
 
+## Taint Semantics
+
+Rules can declare taint-transfer details when the vulnerable API shape
+is not simply "return value is tainted" or "arg N is tainted."
+
+| Field | Rule kind | Effect |
+|---|---|---|
+| `taint_semantics.source_output_args: [N, ...]` | source | Treat only the listed call arguments as tainted outputs. Use for C/C++ out-buffer APIs such as `recv(fd, buf, len, flags)` and `SSL_read(ssl, buf, len)`. |
+| `taint_semantics.clean_output_overwrite` | sanitizer | Treat an output argument as clean when the configured value inputs are clean. |
+
+`source_output_args` is intentionally narrow. It prevents source calls
+from tainting unrelated operands such as file descriptors, size
+arguments, flags, or handles while still introducing taint at the source
+call site for the real output buffer.
+
 ## OnlyWhenPackaged lax-tail
 
 For attribute rules where the receiver is type-like (uppercase first
@@ -158,7 +173,7 @@ matched sources         matched sinks
        └────────────┬──────────┘
                     ▼
            build_findings_chain_aware
-           (interprocedural taint analysis)
+           (source-specific interprocedural taint)
                     │
                     ▼
               call_records
@@ -188,6 +203,13 @@ matched sources         matched sinks
 The finding ID is stable: same source/sink/group/language → same ID
 across runs. SARIF and JSON outputs use the same ID.
 
+Security taint analysis builds an exact graph per matched source seed.
+The seed set comes from the source rule match and nearby adapter
+`FlowEvent` facts, then the engine records tainted call edges and terminal
+tainted calls. The cached workspace dataflow graph is still used by
+navigation and export surfaces, but source-to-sink findings and their
+rendered flow IDs come from this source-specific taint evidence.
+
 ## Sanitizer credit
 
 Sanitizer rules don't change the engine's propagation. After the engine
@@ -206,12 +228,12 @@ Three:
 
 - **text** (default) — themed terminal output.
 - **json** — stable schema documented in `crates/security/src/report.rs`.
-- **sarif** — SARIF 2.1.0 for GitHub code scanning and the
-  CVEBench-SAST harness.
+- **sarif** — SARIF 2.1.0 for `security taint-analysis` findings,
+  GitHub code scanning, and the CVEBench-SAST harness.
 
-JSON and SARIF are content-stable: the same workspace produces the same
-bytes (sorted findings, deterministic `finding_id`s, no timestamps in the
-default emission). That property is exercised by
+Finding JSON and SARIF are content-stable: the same workspace produces
+the same bytes (sorted findings, deterministic `finding_id`s, no
+timestamps in the default emission). That property is exercised by
 `crates/security/tests/report_stability.rs`.
 
 ## Source-analysis mode
@@ -220,6 +242,26 @@ default emission). That property is exercised by
 source without requiring a sink rule. Useful for "where does this data
 go" investigations. The report shape is similar to taint-analysis but
 without the sink-attribution stage.
+
+Source-analysis uses the same source-seed extraction as taint-analysis.
+That means a source such as `request.args.get("cmd")` follows the value it
+introduced, not every parameter, local, or unrelated branch in the entry
+function. Text output is labelled `SOURCE FLOW` to distinguish these paths
+from generic `inspect` call flows.
+
+## Text flow labels
+
+Text output uses distinct labels for different evidence surfaces:
+
+| Label | Surface | Evidence |
+|---|---|---|
+| `FLOW` | `inspect` and navigation views | Resolved call/fact reachability. |
+| `SOURCE FLOW` | `security source-analysis` | Taint propagation from a source rule without sink attribution. |
+| `TAINT FLOW` | `security taint-analysis` | Source-to-sink propagation with tainted args, receiver evidence, sanitizer context, and sink attribution. |
+
+JSON and SARIF expose the same underlying propagation as structured
+fields. In SARIF, the path is emitted through `codeFlows`; in native JSON,
+the corresponding steps live under the finding's taint path metadata.
 
 ## Validation
 

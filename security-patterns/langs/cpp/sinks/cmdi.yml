@@ -267,7 +267,7 @@
   - boost/process.hpp
   - boost
 - id: cpp.cmdi.boost_process_spawn
-  enabled: false
+  enabled: true
   language: cpp
   tag: command-injection
   severity: critical
@@ -281,15 +281,23 @@
       attribute:
       - process
       - spawn
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted boost process spawn command
     code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  process::spawn(arg);\n}\n"
+  - name: literal boost process spawn negative
+    code: |
+      #include <boost/process.hpp>
+      void example() {
+        process::spawn("/usr/bin/true");
+      }
+    expect_no_match: true
   description: "boost::process::spawn — flag string command-line form."
   imports:
   - boost/process.hpp
   - boost
-  disabled_reason:
-    code: over-broad
 - id: cpp.cmdi.boost_process_child
   enabled: true
   language: cpp
@@ -382,7 +390,7 @@
   - QtCore
   - QtCore/Qt
 - id: cpp.cmdi.qt_qprocess_execute
-  enabled: false
+  enabled: true
   language: cpp
   tag: command-injection
   severity: critical
@@ -396,15 +404,23 @@
       attribute:
       - QProcess
       - execute
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted qprocess execute command
     code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::execute(arg);\n}\n"
+  - name: literal qprocess execute negative
+    code: |
+      #include <QtCore/Qt>
+      void example() {
+        QProcess::execute("/usr/bin/true");
+      }
+    expect_no_match: true
   description: "Qt QProcess::execute — static exec; flag string form."
   imports:
   - QtCore
   - QtCore/Qt
-  disabled_reason:
-    code: over-broad
 - id: cpp.cmdi.qt_qprocess_start_detached
   enabled: true
   language: cpp
@@ -728,7 +744,7 @@
     expect_no_match: true
   description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
 - id: cpp.cmdi.boost_process_v2_process
-  enabled: false
+  enabled: true
   language: cpp
   tag: command-injection
   severity: critical
@@ -742,15 +758,23 @@
       attribute:
       - process_v2
       - process
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted boost process v2 process
     code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new process_v2::process(arg);\n}\n"
+  - name: literal boost process v2 negative
+    code: |
+      #include <boost/process.hpp>
+      void example() {
+        auto *x = new process_v2::process("/usr/bin/true");
+      }
+    expect_no_match: true
   description: "Boost.Process v2 process(...) — modern API; tainted exe path or args = code-exec."
   imports:
   - boost/process.hpp
   - boost
-  disabled_reason:
-    code: over-broad
 - id: cpp.cmdi.boost_process_shell
   enabled: true
   language: cpp

@@ -85,3 +85,75 @@
   description: "Phoenix.HTML.Safe.to_iodata/1 — converts a value implementing the Safe protocol; custom impls that return raw binaries bypass escaping."
   imports:
   - Phoenix_html
+- id: elixir.xss.plug_send_resp_body
+  enabled: true
+  language: elixir
+  tag: xss
+  severity: high
+  frameworks: [plug, phoenix]
+  packages: [plug]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, send_resp]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted plug html response body
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.send_resp(conn, 200, input)
+        end
+      end
+  - name: literal plug response body negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn) do
+          Plug.Conn.send_resp(conn, 200, "<p>ok</p>")
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Conn.send_resp(conn, status, tainted_body) — raw response body can reflect attacker-controlled HTML/JS when content type is HTML."
+  imports:
+  - Plug
+- id: elixir.xss.phoenix_controller_html
+  enabled: true
+  language: elixir
+  tag: xss
+  severity: high
+  frameworks: [phoenix]
+  packages: [phoenix]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Phoenix, Controller, html]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted phoenix html body
+    code: |
+      alias Phoenix
+      defmodule App do
+        def test(conn, input) do
+          Phoenix.Controller.html(conn, input)
+        end
+      end
+  - name: literal phoenix html body negative
+    code: |
+      alias Phoenix
+      defmodule App do
+        def test(conn) do
+          Phoenix.Controller.html(conn, "<p>ok</p>")
+        end
+      end
+    expect_no_match: true
+  description: "Phoenix.Controller.html(conn, tainted_body) — sends raw HTML response content without template escaping."
+  imports:
+  - Phoenix

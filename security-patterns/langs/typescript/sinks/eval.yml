@@ -329,9 +329,7 @@
   description: "Disabled — `import(x)` is a language form, rarely surfaced as an identifier call; use module-resolution analysis instead."
 
 - id: typescript.eval.require_dynamic
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   tag: code-injection
   severity: high
@@ -340,13 +338,22 @@
     kind: call
     callee:
       name: require
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: require dynamic
     code: |
       function demo(input, req, obj) {
         return require(input);
       }
-  description: "Disabled — bare `name: require` matches every literal CJS module load `require(\"foo\")`, the canonical import statement. No canonical exists (javascript.eval.require_dynamic is also disabled). Re-enable when adapter supports an arg-shape constraint requiring the argument to be a non-literal."
+  - name: require literal negative
+    code: |
+      function demo() {
+        return require("express");
+      }
+    expect_no_match: true
+  description: "require(tainted) — attacker-controlled CommonJS module specifier can load unintended code or files."
 
 # Reflection-based dynamic invocation (T406). Tag
 # code-injection so reviewer enumerates with `security sinks

@@ -9,16 +9,16 @@
     kind: call
     callee:
       name: recv
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
   - name: generated direct match
     code: |
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        recv(arg);
+        char buf[4096];
+        recv(0, buf, sizeof(buf), 0);
       }
-  description: "BSD socket recv — remote bytes."
+  description: "BSD socket recv(fd, buf, len, flags) — remote bytes taint the caller-supplied buffer argument."
 - id: cpp.input.recvfrom
   enabled: true
   language: cpp
@@ -29,16 +29,16 @@
     kind: call
     callee:
       name: recvfrom
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
   - name: generated direct match
     code: |
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        recvfrom(arg);
+        char buf[4096];
+        recvfrom(0, buf, sizeof(buf), 0, 0, 0);
       }
-  description: "BSD socket recvfrom — UDP remote bytes."
+  description: "BSD socket recvfrom(fd, buf, len, flags, ...) — remote datagram bytes taint the caller buffer."
 - id: cpp.input.read_socket
   enabled: false
   disabled_reason:
@@ -178,19 +178,16 @@
     kind: call
     callee:
       attribute: [http, read]
+  taint_semantics:
+    source_output_args: [2]
   match_examples:
   - name: generated direct match
     code: |
       #include <boost/beast.hpp>
-      #include <boost/beast.hpp>
-      #include <boost/beast.hpp>
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        http::read(arg);
+        http::read(stream, buffer, request);
       }
-  description: "Boost.Beast http::read — remote HTTP message."
+  description: "Boost.Beast http::read(stream, buffer, message) — remote HTTP message bytes taint the parsed message argument."
 
   imports:
   - boost/beast.hpp
@@ -206,17 +203,14 @@
     kind: call
     callee:
       attribute: [asio, read]
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
   - name: generated direct match
     code: |
       #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        asio::read(arg);
+        asio::read(socket, buffer);
       }
   description: "Boost.Asio asio::read(socket, buf) — remote socket bytes."
 
@@ -234,17 +228,14 @@
     kind: call
     callee:
       attribute: [asio, async_read]
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
   - name: generated direct match
     code: |
       #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        asio::async_read(arg);
+        asio::async_read(socket, buffer, handler);
       }
   description: "Boost.Asio asio::async_read — async remote socket bytes."
 
@@ -297,17 +288,14 @@
     kind: call
     callee:
       attribute: [socket, async_receive]
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: generated direct match
     code: |
       #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        socket::async_receive(arg);
+        socket::async_receive(buffer, handler);
       }
   description: "Boost.Asio socket::async_receive — async UDP/TCP datagram bytes from peer."
 
@@ -325,17 +313,14 @@
     kind: call
     callee:
       attribute: [socket, async_receive_from]
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: generated direct match
     code: |
       #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
-      #include <boost/asio.hpp>
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        socket::async_receive_from(arg);
+        socket::async_receive_from(buffer, endpoint, handler);
       }
   description: "Boost.Asio socket::async_receive_from — async UDP datagram bytes."
 

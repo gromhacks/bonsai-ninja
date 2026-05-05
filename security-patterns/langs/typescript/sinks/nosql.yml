@@ -223,7 +223,7 @@
     expect_no_match: true
   description: mongodb collection.deleteOne.
 - id: typescript.nosql.mongo_command
-  enabled: false
+  enabled: true
   language: typescript
   tag: nosql-injection
   severity: high
@@ -237,12 +237,16 @@
       attribute:
       - db
       - command
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: mongo command
     code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return db.command(input, { \"$where\": input });\n}\n"
+  - name: mongo command literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(db: any) {\n  return db.command({ ping: 1 });\n}\n"
+    expect_no_match: true
   description: "mongodb db.command — arbitrary command document."
-  disabled_reason:
-    code: over-broad
 - id: typescript.nosql.mongoose_model_find
   enabled: false
   disabled_reason:
@@ -276,7 +280,7 @@
   - typescript.nosql.mongoose_findoneandreplace
   - typescript.nosql.mongoose_model_findone_body_spread
 - id: typescript.nosql.mongoose_where
-  enabled: false
+  enabled: true
   language: typescript
   tag: nosql-injection
   severity: high
@@ -292,12 +296,16 @@
       attribute:
       - Model
       - where
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: mongoose where
     code: "const _u = require(\"mongoose\");\nfunction demo(input, req, obj) {\n  return Model.where(input, { \"$where\": input });\n}\n"
+  - name: mongoose where literal negative
+    code: "const _u = require(\"mongoose\");\nfunction demo(Model: any) {\n  return Model.where({ active: true });\n}\n"
+    expect_no_match: true
   description: "Mongoose Model.where — $where operator allows JS execution."
-  disabled_reason:
-    code: over-broad
 - id: typescript.nosql.mongoose_updatemany
   enabled: false
   disabled_reason:
@@ -316,7 +324,7 @@
       regex: ^Model\.updateMany$
   description: "Subsumed by typescript.nosql.mongo_updatemany — the receiver-agnostic regex covers both `collection.updateMany` and `Model.updateMany` (mongoose) shapes."
 - id: typescript.nosql.redis_eval
-  enabled: false
+  enabled: true
   language: typescript
   tag: nosql-injection
   severity: high
@@ -331,14 +339,18 @@
       attribute:
       - client
       - eval
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: redis eval
     code: "const _u = require(\"redis\");\nfunction demo(input, req, obj) {\n  return client.eval(input, { \"$where\": input });\n}\n"
+  - name: redis eval literal negative
+    code: "const _u = require(\"redis\");\nfunction demo(client: any) {\n  return client.eval(\"return 1\", { keys: [] });\n}\n"
+    expect_no_match: true
   description: "redis/ioredis client.eval — tainted Lua script."
-  disabled_reason:
-    code: over-broad
 - id: typescript.nosql.redis_evalsha
-  enabled: false
+  enabled: true
   language: typescript
   tag: nosql-injection
   severity: high
@@ -353,12 +365,16 @@
       attribute:
       - client
       - evalsha
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: redis evalsha
     code: "const _u = require(\"redis\");\nfunction demo(input, req, obj) {\n  return client.evalsha(input, { \"$where\": input });\n}\n"
+  - name: redis evalsha literal negative
+    code: "const _u = require(\"redis\");\nfunction demo(client: any) {\n  return client.evalsha(\"2fd4e1c67a2d28fced849ee1bb76e7391b93eb12\", { keys: [] });\n}\n"
+    expect_no_match: true
   description: redis/ioredis client.evalsha.
-  disabled_reason:
-    code: over-broad
 - id: typescript.nosql.ioredis_eval
   enabled: true
   language: typescript
@@ -385,7 +401,7 @@
     expect_no_match: true
   description: "ioredis redis.eval — tainted Lua script."
 - id: typescript.nosql.elasticsearch_search
-  enabled: false
+  enabled: true
   language: typescript
   tag: nosql-injection
   severity: high
@@ -399,12 +415,16 @@
       attribute:
       - Client
       - search
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: elasticsearch search
     code: "const _u = require(\"@elastic/elasticsearch\");\nfunction demo(input, req, obj) {\n  return Client.search(input, { \"$where\": input });\n}\n"
+  - name: elasticsearch search literal negative
+    code: "const _u = require(\"@elastic/elasticsearch\");\nfunction demo(Client: any) {\n  return Client.search({ index: \"users\", query: { match_all: {} } });\n}\n"
+    expect_no_match: true
   description: elasticsearch Client.search(body=tainted DSL).
-  disabled_reason:
-    code: over-broad
 - id: typescript.nosql.couchdb_find
   enabled: false
   disabled_reason:
@@ -692,7 +712,7 @@
     expect_no_match: true
   description: "mongodb collection.mapReduce(map, reduce, options) — tainted options can carry server-side finalize JavaScript."
 - id: typescript.nosql.mongo_db_eval
-  enabled: false
+  enabled: true
   language: typescript
   tag: code-injection
   severity: critical
@@ -706,14 +726,18 @@
       attribute:
       - db
       - eval
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: mongo db eval
     code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return db.eval(input, { \"$where\": input });\n}\n"
+  - name: mongo db eval literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(db: any) {\n  return db.eval(\"function(){ return 1; }\");\n}\n"
+    expect_no_match: true
   description: "mongodb db.eval(script) — runs an arbitrary JS program inside mongod (legacy <4.2)."
-  disabled_reason:
-    code: over-broad
 - id: typescript.nosql.mongoose_aggregate
-  enabled: false
+  enabled: true
   language: typescript
   tag: nosql-injection
   severity: high
@@ -727,12 +751,16 @@
       attribute:
       - Model
       - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: mongoose aggregate
     code: "const _u = require(\"mongoose\");\nfunction demo(input, req, obj) {\n  return Model.aggregate(input, { \"$where\": input });\n}\n"
+  - name: mongoose aggregate literal negative
+    code: "const _u = require(\"mongoose\");\nfunction demo(Model: any) {\n  return Model.aggregate([{ $match: { active: true } }]);\n}\n"
+    expect_no_match: true
   description: "Mongoose Model.aggregate — tainted pipeline stages allow $where/$expr/$function code execution."
-  disabled_reason:
-    code: over-broad
 - id: typescript.nosql.prisma_queryraw
   enabled: true
   language: typescript

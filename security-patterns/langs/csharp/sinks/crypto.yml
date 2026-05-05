@@ -158,9 +158,7 @@
   description: "Disabled — flag only when Padding=Zeros (constraint TBD)."
 
 - id: csharp.crypto.random_ctor
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: weak-randomness
   severity: medium
@@ -169,12 +167,15 @@
     kind: new
     callee:
       name: Random
-  description: "Disabled — System.Random is non-cryptographic; flag only on security-sensitive paths."
+  match_examples:
+  - name: system random constructor
+    code: |
+      class Random { public Random(dynamic seed = null) { } }
+      class App { void Test() { var result = new Random(); } }
+  description: "new System.Random — non-cryptographic PRNG; use RandomNumberGenerator for secrets, tokens, nonces, and keys."
 
 - id: csharp.crypto.rfc2898_low_iters
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: csharp
   tag: weak-crypto
   severity: medium
@@ -183,7 +184,29 @@
     kind: new
     callee:
       name: Rfc2898DeriveBytes
-  description: "Disabled — flag only when iteration count < 100k (constraint TBD)."
+  constraints:
+  - arg_lt:
+      index: 2
+      value: 100000
+  match_examples:
+  - name: PBKDF2 low iteration count
+    code: |
+      using System.Security.Cryptography;
+      class App {
+        object Derive(string password, byte[] salt) {
+          return new Rfc2898DeriveBytes(password, salt, 1000);
+        }
+      }
+  - name: PBKDF2 adequate iteration count negative
+    code: |
+      using System.Security.Cryptography;
+      class App {
+        object Derive(string password, byte[] salt) {
+          return new Rfc2898DeriveBytes(password, salt, 200000);
+        }
+      }
+    expect_no_match: true
+  description: "new Rfc2898DeriveBytes(..., iterations) with iterations < 100000 — weak PBKDF2 work factor."
 
 - id: csharp.crypto.bouncycastle_des
   enabled: true
@@ -350,9 +373,7 @@
   description: "BouncyCastle RC4Engine — broken stream cipher."
 
 - id: csharp.crypto.random_next_seeded
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: weak-randomness
   severity: medium
@@ -361,4 +382,40 @@
     kind: call
     callee:
       attribute: [Random, Next]
-  description: "Disabled — System.Random.Next is non-cryptographic; enable in audits where token / nonce generation is the surface."
+  match_examples:
+  - name: system random next
+    code: |
+      class App { void Test() { Random.Next(); } }
+  description: "System.Random.Next — non-cryptographic PRNG output; use RandomNumberGenerator for security-sensitive randomness."
+
+- id: csharp.crypto.random_nextbytes
+  enabled: true
+  language: csharp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [Random, NextBytes]
+  match_examples:
+  - name: system random next bytes
+    code: |
+      class App { void Test(byte[] bytes) { Random.NextBytes(bytes); } }
+  description: "System.Random.NextBytes — non-cryptographic byte stream; use RandomNumberGenerator.Fill for secrets, tokens, nonces, and keys."
+
+- id: csharp.crypto.random_nextdouble
+  enabled: true
+  language: csharp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [Random, NextDouble]
+  match_examples:
+  - name: system random next double
+    code: |
+      class App { void Test() { Random.NextDouble(); } }
+  description: "System.Random.NextDouble — non-cryptographic PRNG output; do not use for security-sensitive random values."

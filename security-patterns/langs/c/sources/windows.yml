@@ -227,9 +227,7 @@
   - advapi32
   - advapi32.h
 - id: c.input.win_wsa_recv
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: remote
   tag: network-input
@@ -239,11 +237,22 @@
     kind: call
     callee:
       name: WSARecv
-  description: "Disabled — WSARecv writes into a caller-supplied WSABUF; needs pointer-out source modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: WSARecv output buffers
+    code: |
+      #include <winsock.h>
+      #include <winsock2.h>
+      void handle(SOCKET s, LPWSABUF buffers, LPDWORD read, LPDWORD flags) {
+        WSARecv(s, buffers, 1, read, flags, 0, 0);
+      }
+    expect_match_text: [WSARecv]
+  description: "WSARecv(socket, buffers, ...) — network bytes taint the caller-supplied WSABUF array."
 - id: c.input.win_recv
   enabled: false
   disabled_reason:
-    code: requires-constraint
+    code: subsumed
   language: c
   trust: remote
   tag: network-input
@@ -253,4 +262,15 @@
     kind: call
     callee:
       name: recv
-  description: "Disabled — Winsock recv writes into the caller buffer; needs pointer-out modeling (same shape as POSIX recv)."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: Winsock recv output buffer
+    code: |
+      #include <winsock2.h>
+      void handle(SOCKET s) {
+        char buf[4096];
+        recv(s, buf, sizeof(buf), 0);
+      }
+    expect_match_text: [recv]
+  description: "Disabled duplicate — Winsock recv(socket, buf, len, flags) has the same call shape as c.input.recv, which now models the output buffer precisely."

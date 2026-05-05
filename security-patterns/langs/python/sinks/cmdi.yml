@@ -995,7 +995,7 @@
     expect_no_match: true
   description: "kubernetes.stream.stream(..., command=tainted) — executes attacker-controlled command inside a pod."
 - id: python.cmdi.ansible_runner
-  enabled: false
+  enabled: true
   language: python
   tag: command-injection
   severity: critical
@@ -1009,10 +1009,14 @@
       attribute:
       - ansible_runner
       - run
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: cmdi ansible runner
     code: "import ansible_runner\ndef example(user_input):\n    return ansible_runner.run(user_input)\n"
+  - name: ansible runner literal negative
+    code: "import ansible_runner\n\ndef example(user_input):\n    return ansible_runner.run('safe_playbook.yml')\n"
+    expect_no_match: true
   description: "ansible_runner.run \u2014 executes ad-hoc Ansible modules; tainted\
     \ module / args = remote code exec across inventory."
-  disabled_reason:
-    code: over-broad

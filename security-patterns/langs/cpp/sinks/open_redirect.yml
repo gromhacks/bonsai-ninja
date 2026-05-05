@@ -58,7 +58,7 @@
     expect_no_match: true
   description: "Drogon HttpResponse::newRedirectionResponse(tainted) — unchecked redirect."
 - id: cpp.open_redirect.crow_location
-  enabled: false
+  enabled: true
   language: cpp
   tag: open-redirect
   severity: high
@@ -72,16 +72,22 @@
       attribute:
       - response
       - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
-    code: "#include <crow.h> /* crow */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  response::redirect(target);\n}\n"
+  - name: tainted crow redirect
+    code: "#include <crow.h> /* crow */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  response::redirect(arg);\n}\n"
+  - name: literal crow redirect negative
+    code: |
+      #include <crow.h>
+      void example() {
+        response::redirect("/dashboard");
+      }
+    expect_no_match: true
   description: "crow response::redirect(tainted) — unchecked redirect."
-  disabled_reason:
-    code: over-broad
 - id: cpp.open_redirect.poco_set_location
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: cpp
   tag: open-redirect
   severity: medium
@@ -96,4 +102,22 @@
       attribute:
       - HTTPResponse
       - redirect
-  description: "Disabled — Poco::Net::HTTPServerResponse::redirect(tainted); enable if host-allow-list is not enforced."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted poco redirect
+    code: |
+      #include <Poco/Net/HTTPServerResponse.h>
+      void example() {
+        const char *arg = "tainted";
+        HTTPResponse::redirect(arg);
+      }
+  - name: literal poco redirect negative
+    code: |
+      #include <Poco/Net/HTTPServerResponse.h>
+      void example() {
+        HTTPResponse::redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: "Poco::Net::HTTPServerResponse::redirect(tainted) — unchecked external redirect unless the target is constrained to local paths or an allowlist."

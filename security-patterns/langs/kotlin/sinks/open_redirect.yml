@@ -66,12 +66,10 @@
   imports:
   - org.springframework.web.servlet
 - id: kotlin.open_redirect.spring_modelandview_redirect
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: kotlin
   tag: open-redirect
-  severity: high
+  severity: medium
   packages:
   - org.springframework.web.servlet
   cwe:
@@ -80,7 +78,46 @@
     kind: new
     callee:
       name: ModelAndView
-  description: "Disabled — `new ModelAndView(...)` is ubiquitous and only a redirect when first arg starts with `redirect:`; needs string-prefix constraint."
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: 'redirect:'
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spring modelandview redirect concat
+    code: |
+      import org.springframework.web.servlet.*
+      class App {
+        fun handle(next: String): Any {
+          return ModelAndView("redirect:" + next)
+        }
+      }
+      class ModelAndView(vararg args: Any?)
+    expect_match_text: [ModelAndView]
+  - name: literal non redirect negative
+    code: |
+      import org.springframework.web.servlet.*
+      class App {
+        fun handle(): Any {
+          return ModelAndView("home")
+        }
+      }
+      class ModelAndView(vararg args: Any?)
+    expect_no_match: true
+  - name: tainted non redirect view negative
+    code: |
+      import org.springframework.web.servlet.*
+      class App {
+        fun handle(view: String): Any {
+          return ModelAndView(view)
+        }
+      }
+      class ModelAndView(vararg args: Any?)
+    expect_no_match: true
+  description: "Spring ModelAndView(\"redirect:\" + target) — tainted redirect view suffix can send users to attacker-controlled locations."
+  imports:
+  - org.springframework.web.servlet
 - id: kotlin.open_redirect.jaxrs_response_seeother
   enabled: true
   language: kotlin

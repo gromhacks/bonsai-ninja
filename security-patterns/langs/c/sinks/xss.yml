@@ -126,9 +126,7 @@
   description: "civetweb mg_printf_html with tainted body."
 
 - id: c.xss.fcgi_print
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: c
   tag: xss
   severity: low
@@ -138,4 +136,22 @@
     kind: call
     callee:
       name: FCGI_printf
-  description: "Disabled — FCGI_printf; flag with HTTP body context."
+  constraints:
+  - any_arg_tainted: true
+  match_examples:
+  - name: tainted fcgi response body
+    code: |
+      #include <fcgi.h>
+      #include <fcgi_stdio.h>
+      void example(char *body) {
+        FCGI_printf("%s", body);
+      }
+  - name: literal fcgi response body negative
+    code: |
+      #include <fcgi.h>
+      #include <fcgi_stdio.h>
+      void example(void) {
+        FCGI_printf("%s", "safe");
+      }
+    expect_no_match: true
+  description: "FCGI_printf(..., tainted) — writes attacker-controlled bytes into a FastCGI HTTP response body; dangerous when the response is HTML."

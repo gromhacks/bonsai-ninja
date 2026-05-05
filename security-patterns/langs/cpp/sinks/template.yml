@@ -1,5 +1,5 @@
 - id: cpp.template.inja_render
-  enabled: false
+  enabled: true
   language: cpp
   tag: ssti
   severity: high
@@ -14,12 +14,20 @@
       attribute:
       - Environment
       - render
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
-    code: "#include <inja.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Environment::render(\"{{ user }}\");\n}\n"
+  - name: tainted inja render template
+    code: "#include <inja.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Environment::render(arg);\n}\n"
+  - name: literal inja render template negative
+    code: |
+      #include <inja.h>
+      void example() {
+        Environment::render("{{ user }}");
+      }
+    expect_no_match: true
   description: "inja Environment::render(tainted_template, data) — tainted template source = SSTI."
-  disabled_reason:
-    code: over-broad
 - id: cpp.template.inja_render_file
   enabled: true
   language: cpp

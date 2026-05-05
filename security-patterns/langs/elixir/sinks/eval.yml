@@ -147,9 +147,7 @@
     expect_no_match: true
   description: "Code.require_file/1 — loads and evaluates the file."
 - id: elixir.eval.kernel_apply
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: elixir
   tag: code-injection
   severity: high
@@ -158,7 +156,56 @@
     kind: call
     callee:
       name: apply
-  description: "Disabled — only tainted module/function args are code injection; v1 sink taint checks any arg, making apply/3 too noisy."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted apply module or function
+    code: |
+      defmodule App do
+        def test(input) do
+          apply(input, :run, [])
+        end
+      end
+  - name: tainted apply argument list negative
+    code: |
+      defmodule App do
+        def test(input) do
+          apply(SafeModule, :run, [input])
+        end
+      end
+    expect_no_match: true
+  description: "apply/2,3 with a tainted function or module operand — attacker controls dynamic dispatch. The argument-list operand alone is intentionally not a sink."
+- id: elixir.eval.kernel_apply_function_name
+  enabled: true
+  language: elixir
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: apply
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted apply function name
+    code: |
+      defmodule App do
+        def test(input) do
+          apply(SafeModule, input, [])
+        end
+      end
+  - name: tainted apply args negative
+    code: |
+      defmodule App do
+        def test(input) do
+          apply(SafeModule, :run, [input])
+        end
+      end
+    expect_no_match: true
+  description: "apply(Module, tainted_function, args) — attacker controls which exported function is invoked."
 - id: elixir.eval.string_to_atom
   enabled: true
   language: elixir

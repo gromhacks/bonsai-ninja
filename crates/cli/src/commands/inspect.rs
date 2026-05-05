@@ -2205,11 +2205,22 @@ pub(crate) fn render_flow_block(
     header_name: &str,
     seen_bodies: &mut BodySet,
 ) {
+    render_flow_block_with_heading(u, render, flow, header_name, seen_bodies, "FLOW");
+}
+
+pub(crate) fn render_flow_block_with_heading(
+    u: &Ui,
+    render: &InspectRenderOptions,
+    flow: &InspectFlowRendered,
+    header_name: &str,
+    seen_bodies: &mut BodySet,
+    heading: &str,
+) {
     cli_println!();
     cli_println!("{}", u.ruler('═', 70));
     cli_println!(
         "{} {} {}{}",
-        u.annotation(&format!("FLOW {}", flow.flow_label)),
+        u.annotation(&format!("{heading} {}", flow.flow_label)),
         u.dim(&flow.flow_id),
         u.name(header_name),
         precision_header_suffix(u, flow.precision),

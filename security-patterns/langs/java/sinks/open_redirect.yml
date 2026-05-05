@@ -80,6 +80,9 @@
     callee:
       name: ModelAndView
   constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: 'redirect:'
   - arg_tainted:
       index: 0
   match_examples:
@@ -103,6 +106,18 @@
         void handle(String input) throws Exception {
           new ModelAndView("home");
         }
+      }
+    expect_no_match: true
+  - name: tainted non redirect view negative
+    code: |
+      import org.springframework.web.servlet.*;
+      class App {
+        Object handle(String view) {
+          return new ModelAndView(view);
+        }
+      }
+      class ModelAndView {
+        ModelAndView(Object... args) {}
       }
     expect_no_match: true
   description: "Spring ModelAndView(\"redirect:\" + target) — tainted redirect view suffix can send users to attacker-controlled locations."

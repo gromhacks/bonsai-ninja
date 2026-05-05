@@ -92,9 +92,7 @@
   description: "JavaScriptCore JSContext -evaluateScript: — executes arbitrary JS in-process. Constrained to JSContext receivers."
 
 - id: objc.eval.nsinvocation_set_selector
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   tag: code-injection
   severity: high
@@ -103,7 +101,18 @@
     kind: call
     callee:
       name: setSelector
-  description: "Disabled — NSInvocation -setSelector: with tainted SEL name enables forwardInvocation: dispatch to arbitrary method. Enable when SEL originates from user input."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted invocation selector
+    code: |
+      void test(SEL input) { [NSInvocation setSelector:input]; }
+  - name: literal invocation selector negative
+    code: |
+      void test(void) { [NSInvocation setSelector:@selector(runSafe:)]; }
+    expect_no_match: true
+  description: "NSInvocation -setSelector: with a tainted selector enables forwardInvocation: dispatch to attacker-chosen methods."
 
 - id: objc.eval.nsselectorfromstring
   enabled: true

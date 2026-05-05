@@ -21,6 +21,607 @@
         }
       }
   description: "HttpServletRequest.getParameter — Scala servlet / Spring handler parameter."
+
+- id: scala.servlet.get_parameter_values
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getParameterValues
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet parameter values
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest, name: String): Unit = {
+          servletRequest.getParameterValues(name)
+        }
+      }
+      trait HttpServletRequest {
+        def getParameterValues(args: Any*): Array[String] = Array.empty
+      }
+    expect_match_text: [servletRequest.getParameterValues]
+  description: "HttpServletRequest.getParameterValues(name) — query/form parameter values supplied by the HTTP client."
+
+- id: scala.servlet.get_parameter_map
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getParameterMap
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet parameter map
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getParameterMap()
+        }
+      }
+      trait HttpServletRequest {
+        def getParameterMap(args: Any*): Map[String, Array[String]] = Map.empty
+      }
+    expect_match_text: [servletRequest.getParameterMap]
+  description: "HttpServletRequest.getParameterMap() — map of attacker-controlled query/form parameter names and values."
+
+- id: scala.servlet.get_parameter_names
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getParameterNames
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet parameter names
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getParameterNames()
+        }
+      }
+      trait HttpServletRequest {
+        def getParameterNames(args: Any*): java.util.Enumeration[String] = null
+      }
+    expect_match_text: [servletRequest.getParameterNames]
+  description: "HttpServletRequest.getParameterNames() — attacker-controlled query/form parameter names."
+
+- id: scala.servlet.get_header
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getHeader
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet header
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest, name: String): Unit = {
+          servletRequest.getHeader(name)
+        }
+      }
+      trait HttpServletRequest {
+        def getHeader(args: Any*): String = ""
+      }
+    expect_match_text: [servletRequest.getHeader]
+  description: "HttpServletRequest.getHeader(name) — client-supplied HTTP header value."
+
+- id: scala.servlet.get_headers
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getHeaders
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet headers enumeration
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest, name: String): Unit = {
+          servletRequest.getHeaders(name)
+        }
+      }
+      trait HttpServletRequest {
+        def getHeaders(args: Any*): java.util.Enumeration[String] = null
+      }
+    expect_match_text: [servletRequest.getHeaders]
+  description: "HttpServletRequest.getHeaders(name) — all client-supplied values for an HTTP header."
+
+- id: scala.servlet.get_header_names
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getHeaderNames
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet header names
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getHeaderNames()
+        }
+      }
+      trait HttpServletRequest {
+        def getHeaderNames(args: Any*): java.util.Enumeration[String] = null
+      }
+    expect_match_text: [servletRequest.getHeaderNames]
+  description: "HttpServletRequest.getHeaderNames() — attacker-controlled HTTP header names."
+
+- id: scala.servlet.get_cookies
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getCookies
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet cookies
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getCookies()
+        }
+      }
+      trait HttpServletRequest {
+        def getCookies(args: Any*): Array[Cookie] = Array.empty
+      }
+      trait Cookie
+    expect_match_text: [servletRequest.getCookies]
+  description: "HttpServletRequest.getCookies() — cookie array supplied by the HTTP client."
+
+- id: scala.servlet.cookie_get_value
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getValue
+  constraints:
+  - receiver_name_in:
+    - cookie
+    - theCookie
+    - httpCookie
+    - requestCookie
+    - servletCookie
+    - c
+  match_examples:
+  - name: servlet cookie value
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(cookie: Cookie): Unit = {
+          cookie.getValue()
+        }
+      }
+      trait Cookie {
+        def getValue(args: Any*): String = ""
+      }
+    expect_match_text: [cookie.getValue]
+  description: "javax.servlet.http.Cookie.getValue() — cookie value from an HTTP request; covers elements returned by request.getCookies()."
+
+- id: scala.servlet.cookie_get_name
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getName
+  constraints:
+  - receiver_name_in:
+    - cookie
+    - theCookie
+    - httpCookie
+    - requestCookie
+    - servletCookie
+    - c
+  match_examples:
+  - name: servlet cookie name
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(theCookie: Cookie): Unit = {
+          theCookie.getName()
+        }
+      }
+      trait Cookie {
+        def getName(args: Any*): String = ""
+      }
+    expect_match_text: [theCookie.getName]
+  description: "javax.servlet.http.Cookie.getName() — attacker-chosen cookie name from an HTTP request."
+
+- id: scala.servlet.get_input_stream
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getInputStream
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet input stream
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getInputStream()
+        }
+      }
+      trait HttpServletRequest {
+        def getInputStream(args: Any*): Any = null
+      }
+    expect_match_text: [servletRequest.getInputStream]
+  description: "HttpServletRequest.getInputStream() — raw request body bytes supplied by the HTTP client."
+
+- id: scala.servlet.get_reader
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getReader
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet reader
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getReader()
+        }
+      }
+      trait HttpServletRequest {
+        def getReader(args: Any*): Any = null
+      }
+    expect_match_text: [servletRequest.getReader]
+  description: "HttpServletRequest.getReader() — text request body supplied by the HTTP client."
+
+- id: scala.servlet.get_query_string
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getQueryString
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet query string
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getQueryString()
+        }
+      }
+      trait HttpServletRequest {
+        def getQueryString(args: Any*): String = ""
+      }
+    expect_match_text: [servletRequest.getQueryString]
+  description: "HttpServletRequest.getQueryString() — raw query string supplied by the HTTP client."
+
+- id: scala.servlet.get_request_uri
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getRequestURI
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet request uri
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getRequestURI()
+        }
+      }
+      trait HttpServletRequest {
+        def getRequestURI(args: Any*): String = ""
+      }
+    expect_match_text: [servletRequest.getRequestURI]
+  description: "HttpServletRequest.getRequestURI() — request path supplied by the HTTP client."
+
+- id: scala.servlet.get_request_url
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [url]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getRequestURL
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet request url
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getRequestURL()
+        }
+      }
+      trait HttpServletRequest {
+        def getRequestURL(args: Any*): StringBuffer = new StringBuffer("")
+      }
+    expect_match_text: [servletRequest.getRequestURL]
+  description: "HttpServletRequest.getRequestURL() — full request URL supplied by the HTTP client."
+
+- id: scala.servlet.get_path_info
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getPathInfo
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet path info
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(servletRequest: HttpServletRequest): Unit = {
+          servletRequest.getPathInfo()
+        }
+      }
+      trait HttpServletRequest {
+        def getPathInfo(args: Any*): String = ""
+      }
+    expect_match_text: [servletRequest.getPathInfo]
+  description: "HttpServletRequest.getPathInfo() — extra request path supplied by the HTTP client."
+
+- id: scala.servlet.session_get_attribute
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  category: session-input
+  payload_types: [text]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getAttribute
+  constraints:
+  - receiver_name_in:
+    - session
+    - httpSession
+    - userSession
+    - servletSession
+  - min_args: 1
+  match_examples:
+  - name: servlet session attribute
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(session: HttpSession, key: String): Unit = {
+          session.getAttribute(key)
+        }
+      }
+      trait HttpSession {
+        def getAttribute(args: Any*): Any = null
+      }
+    expect_match_text: [session.getAttribute]
+  description: "HttpSession.getAttribute(name) — session data may originate from earlier remote requests and should be treated as untrusted when it reaches sensitive sinks."
+
 - id: scala.play.request_param
   enabled: true
   language: scala
@@ -65,16 +666,23 @@
   tag: http-input
   payload_types: [query]
   frameworks: [play]
+  packages: [play.api.mvc]
   match:
     kind: call
     callee:
       name: getQueryString
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - playRequest
   match_examples:
   - name: generated shape example
     code: |
+      import play.api.mvc._
       object App {
-        def handle(value: String): Unit = {
-          getQueryString(value)
+        def handle(playRequest: Request[AnyContent], value: String): Unit = {
+          playRequest.getQueryString(value)
         }
       }
   description: "Play request.getQueryString(...)."

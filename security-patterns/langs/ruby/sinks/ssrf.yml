@@ -262,7 +262,7 @@
     expect_no_match: true
   description: RestClient.get.
 - id: ruby.ssrf.rest_client_execute
-  enabled: false
+  enabled: true
   language: ruby
   tag: ssrf
   severity: high
@@ -276,13 +276,18 @@
       attribute:
       - RestClient::Request
       - execute
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: ruby.ssrf.rest_client_execute example
     code: "require \"rest-client\"\ndef example(input, url, id, payload, request,\
       \ params)\n  RestClient::Request.execute(input)\nend\n"
+  - name: ruby.ssrf.rest_client_execute literal negative
+    code: "require \"rest-client\"\ndef example(input, url, id, payload, request,\
+      \ params)\n  RestClient::Request.execute(\"https://example.com\")\nend\n"
+    expect_no_match: true
   description: RestClient::Request.execute.
-  disabled_reason:
-    code: over-broad
 - id: ruby.ssrf.http_rb_get
   enabled: true
   language: ruby

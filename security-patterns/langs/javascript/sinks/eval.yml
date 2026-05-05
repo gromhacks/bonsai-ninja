@@ -352,9 +352,7 @@
   description: "Disabled — bare `import(x)` fires on every dynamic import; dangerous only when the module specifier is tainted. Enable with source-proximity."
 
 - id: javascript.eval.require_dynamic
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: javascript
   tag: code-injection
   severity: high
@@ -363,7 +361,22 @@
     kind: call
     callee:
       name: require
-  description: "Disabled — bare `require(...)` fires on every module load; dangerous only when the specifier is tainted. Enable with source-proximity."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: require dynamic
+    code: |
+      function demo(input, req, obj) {
+        return require(input);
+      }
+  - name: require literal negative
+    code: |
+      function demo() {
+        return require("express");
+      }
+    expect_no_match: true
+  description: "require(tainted) — attacker-controlled CommonJS module specifier can load unintended code or files."
 
 # Reflection-based dynamic invocation (T406). Tag
 # code-injection so reviewer enumerates with `security sinks

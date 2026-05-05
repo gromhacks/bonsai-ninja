@@ -935,7 +935,7 @@
   - flutter/flutter.dart
   - flutter/material.dart
 - id: dart.ssrf.webview_load_request
-  enabled: false
+  enabled: true
   language: dart
   tag: ssrf
   severity: high
@@ -949,6 +949,9 @@
       attribute:
       - controller
       - loadRequest
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: 'import ''package:webview_flutter/webview_flutter.dart'';
@@ -965,11 +968,14 @@
       }
 
       '
-  description: WebViewController.loadRequest(tainted URI).
+  - name: literal webview request negative
+    code: |
+      import 'package:webview_flutter/webview_flutter.dart';
+      void test() { controller.loadRequest(Uri.parse("https://example.com")); }
+    expect_no_match: true
+  description: "WebViewController.loadRequest(tainted URI) — loads attacker-controlled URL in an embedded browser."
   imports:
   - webview_flutter/webview_flutter.dart
-  disabled_reason:
-    code: over-broad
 - id: dart.ssrf.webview_load_html_string
   enabled: false
   language: dart

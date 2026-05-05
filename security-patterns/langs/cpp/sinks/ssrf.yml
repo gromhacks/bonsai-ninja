@@ -53,7 +53,7 @@
     expect_no_match: true
   description: "curlpp::options::Url(tainted) — URL option consumed by cURL wrapper."
 - id: cpp.ssrf.cpp_httplib_get
-  enabled: false
+  enabled: true
   language: cpp
   tag: ssrf
   severity: high
@@ -67,17 +67,25 @@
       attribute:
       - Client
       - Get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted cpp-httplib get path
     code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Get(arg);\n}\n"
+  - name: literal cpp-httplib get path negative
+    code: |
+      #include <httplib.h>
+      void example() {
+        Client::Get("/health");
+      }
+    expect_no_match: true
   description: cpp-httplib Client::Get(tainted_path).
   imports:
   - httplib.h
   - httplib
-  disabled_reason:
-    code: over-broad
 - id: cpp.ssrf.cpp_httplib_post
-  enabled: false
+  enabled: true
   language: cpp
   tag: ssrf
   severity: high
@@ -91,17 +99,25 @@
       attribute:
       - Client
       - Post
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted cpp-httplib post path
     code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Post(arg);\n}\n"
+  - name: literal cpp-httplib post path negative
+    code: |
+      #include <httplib.h>
+      void example() {
+        Client::Post("/submit", "safe", "text/plain");
+      }
+    expect_no_match: true
   description: cpp-httplib Client::Post(tainted_path, body).
   imports:
   - httplib.h
   - httplib
-  disabled_reason:
-    code: over-broad
 - id: cpp.ssrf.cpp_httplib_put
-  enabled: false
+  enabled: true
   language: cpp
   tag: ssrf
   severity: high
@@ -115,17 +131,25 @@
       attribute:
       - Client
       - Put
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted cpp-httplib put path
     code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Put(arg);\n}\n"
+  - name: literal cpp-httplib put path negative
+    code: |
+      #include <httplib.h>
+      void example() {
+        Client::Put("/upload", "safe", "text/plain");
+      }
+    expect_no_match: true
   description: cpp-httplib Client::Put.
   imports:
   - httplib.h
   - httplib
-  disabled_reason:
-    code: over-broad
 - id: cpp.ssrf.cpp_httplib_delete
-  enabled: false
+  enabled: true
   language: cpp
   tag: ssrf
   severity: high
@@ -139,15 +163,23 @@
       attribute:
       - Client
       - Delete
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted cpp-httplib delete path
     code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Client::Delete(arg);\n}\n"
+  - name: literal cpp-httplib delete path negative
+    code: |
+      #include <httplib.h>
+      void example() {
+        Client::Delete("/cache");
+      }
+    expect_no_match: true
   description: cpp-httplib Client::Delete.
   imports:
   - httplib.h
   - httplib
-  disabled_reason:
-    code: over-broad
 - id: cpp.ssrf.cpprestsdk_request
   enabled: true
   language: cpp

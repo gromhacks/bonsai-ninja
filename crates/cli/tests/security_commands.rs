@@ -1061,13 +1061,13 @@ def run(cmd):
     .unwrap();
 
     let source = out
-        .find("[FLOW 1 SOURCE: python.test.user_param")
+        .find("[TAINT FLOW 1 SOURCE: python.test.user_param")
         .expect("missing source taint annotation");
     let taint = out
-        .find("[FLOW 1 TAINT: handle -> run arg[0] user -> cmd]")
+        .find("[TAINT FLOW 1 TAINT: handle -> run arg[0] user -> cmd]")
         .expect("missing arg-preserving taint annotation");
     let sink = out
-        .find("[FLOW 1 SINK: python.test.os_system arg[0] cmd]")
+        .find("[TAINT FLOW 1 SINK: python.test.os_system arg[0] cmd]")
         .expect("missing sink arg annotation");
     assert!(
         source < taint && taint < sink,
@@ -1239,7 +1239,7 @@ fn c_mega_flow_renders_folded_steps_and_function_pointer_hop() {
         "function-pointer call should resolve through the real caller chain:\n{out}"
     );
     assert!(
-        out.contains("joiner(joined, sizeof(joined), \" \", tok);  # [FLOW")
+        out.contains("joiner(joined, sizeof(joined), \" \", tok);  # [TAINT FLOW")
             && out.contains("-> joiner_impl arg["),
         "function-pointer hop should render at the alias call site, not as an over-approx def-line fallback:\n{out}"
     );
@@ -1273,6 +1273,40 @@ fn source_analysis_maps_python_entrypoint_paths() {
     assert!(out.contains("\"source\""), "expected source metadata:\n{out}");
     assert!(out.contains("\"flow\""), "expected rendered source flow:\n{out}");
     assert!(out.contains("python.flask"), "got:\n{out}");
+}
+
+#[test]
+fn source_analysis_rejects_sarif_format_instead_of_emitting_json() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = Command::new(&bin)
+        .args([
+            "security",
+            ws.to_str().unwrap(),
+            "source-analysis",
+            "--rules-dir",
+            &rules_dir(),
+            "--format",
+            "sarif",
+            "--all",
+            "--no-color",
+        ])
+        .output()
+        .expect("run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "source-analysis --format sarif should fail rather than emit non-SARIF JSON"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not emit SARIF"),
+        "error should explain SARIF support boundary, got:\n{stderr}"
+    );
 }
 
 #[test]

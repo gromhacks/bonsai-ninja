@@ -2,9 +2,7 @@
 # These RTOS APIs deliver bytes that originated outside the firmware (peer device,
 # network peer, ISR) so are inherently untrusted at the application layer.
 - id: c.input.freertos_xqueue_receive
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: service
   tag: network-input
@@ -14,11 +12,20 @@
     kind: call
     callee:
       name: xQueueReceive
-  description: "Disabled — FreeRTOS xQueueReceive writes into the caller-supplied pvBuffer; needs pointer-out source modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: FreeRTOS queue receive output buffer
+    code: |
+      #include <freertos/FreeRTOS.h>
+      void handle(void *queue) {
+        char item[128];
+        xQueueReceive(queue, item, 0);
+      }
+    expect_match_text: [xQueueReceive]
+  description: "FreeRTOS xQueueReceive(queue, pvBuffer, ticks) — queue data taints the caller-supplied buffer."
 - id: c.input.freertos_xstream_buffer_receive
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: service
   tag: network-input
@@ -28,11 +35,20 @@
     kind: call
     callee:
       name: xStreamBufferReceive
-  description: "Disabled — FreeRTOS xStreamBufferReceive copies into a caller buffer; needs pointer-out modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: FreeRTOS stream buffer receive output buffer
+    code: |
+      #include <freertos/FreeRTOS.h>
+      void handle(void *stream) {
+        char buf[128];
+        xStreamBufferReceive(stream, buf, sizeof(buf), 0);
+      }
+    expect_match_text: [xStreamBufferReceive]
+  description: "FreeRTOS xStreamBufferReceive(stream, pvRxData, len, ticks) — received bytes taint the caller buffer."
 - id: c.input.freertos_xmessage_buffer_receive
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: service
   tag: network-input
@@ -42,7 +58,18 @@
     kind: call
     callee:
       name: xMessageBufferReceive
-  description: "Disabled — FreeRTOS xMessageBufferReceive copies a message frame into a caller buffer; needs pointer-out modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: FreeRTOS message buffer receive output buffer
+    code: |
+      #include <freertos/FreeRTOS.h>
+      void handle(void *messages) {
+        char buf[128];
+        xMessageBufferReceive(messages, buf, sizeof(buf), 0);
+      }
+    expect_match_text: [xMessageBufferReceive]
+  description: "FreeRTOS xMessageBufferReceive(buffer, pvRxData, len, ticks) — message bytes taint the caller buffer."
 - id: c.input.lwip_netconn_recv
   enabled: true
   language: c
@@ -86,9 +113,7 @@
       }
   description: "lwIP netconn_recv_tcp_pbuf — returns a pbuf chain holding TCP segment payload from the network."
 - id: c.input.lwip_netbuf_data
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: remote
   tag: network-input
@@ -98,4 +123,16 @@
     kind: call
     callee:
       name: netbuf_data
-  description: "Disabled — netbuf_data writes the data pointer/len through out-params; needs pointer-out modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: lwIP netbuf_data output pointer
+    code: |
+      #include <lwip/api.h>
+      void handle(struct netbuf *nb) {
+        void *data;
+        unsigned short len;
+        netbuf_data(nb, &data, &len);
+      }
+    expect_match_text: [netbuf_data]
+  description: "lwIP netbuf_data(netbuf, dataptr, len) — exposes network-payload bytes through the data out-parameter."

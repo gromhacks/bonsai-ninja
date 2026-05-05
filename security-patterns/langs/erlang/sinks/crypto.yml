@@ -9,13 +9,24 @@
     kind: call
     callee:
       regex: "^crypto:hash"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(md5|sha|sha1|sha_?1)$"
   match_examples:
     - name: declared shape
       code: |
         -module(example).
         -export([test/1]).
         test(Input) ->
-          crypto:hash(Input).
+          crypto:hash(md5, Input).
+    - name: strong hash negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          crypto:hash(sha256, Input).
+      expect_no_match: true
   description: "crypto:hash — algorithm argument may be md5/sha (collision-broken); use sha256+."
 - id: erlang.crypto.des
   enabled: true
@@ -27,13 +38,24 @@
     kind: call
     callee:
       regex: "^crypto:block_encrypt"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(des|des3|des_ede3|des_cbc|des_ecb|rc4|aes_.*_ecb|aes_ecb)$"
   match_examples:
     - name: declared shape
       code: |
         -module(example).
         -export([test/1]).
         test(Input) ->
-          crypto:block_encrypt(Input).
+          crypto:block_encrypt(des_cbc, <<"12345678">>, Input).
+    - name: strong cipher negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          crypto:block_encrypt(aes_gcm, <<"1234567890123456">>, Input).
+      expect_no_match: true
   description: "crypto:block_encrypt — flag des_cbc/3des/rc4/aes_ecb (no integrity/weak or ECB mode)."
 - id: erlang.crypto.rand_uniform
   enabled: true

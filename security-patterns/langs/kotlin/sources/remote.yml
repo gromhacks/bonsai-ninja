@@ -471,6 +471,39 @@
       }
   description: "HttpServletRequest.getParameterMap."
 
+- id: kotlin.source.servlet_getparameternames
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      name: getParameterNames
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet parameter names
+    code: |
+      class App {
+        fun handle() {
+          request.getParameterNames()
+        }
+      }
+    expect_match_text: [request.getParameterNames]
+  description: "HttpServletRequest.getParameterNames() — attacker-controlled query/form parameter names."
+
 - id: kotlin.source.servlet_getheader
   enabled: true
   language: kotlin
@@ -596,6 +629,72 @@
         }
       }
   description: "HttpServletRequest.getCookies."
+
+- id: kotlin.source.servlet_cookie_getvalue
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  match:
+    kind: call
+    callee:
+      name: getValue
+  constraints:
+  - receiver_name_in:
+    - cookie
+    - theCookie
+    - httpCookie
+    - requestCookie
+    - servletCookie
+    - c
+  match_examples:
+  - name: servlet cookie value
+    code: |
+      class App {
+        fun handle(cookie: Cookie) {
+          cookie.getValue()
+        }
+      }
+      class Cookie {
+        fun getValue(): String = ""
+      }
+    expect_match_text: [cookie.getValue]
+  description: "javax.servlet.http.Cookie.getValue() — cookie value from an HTTP request; covers elements produced by request.getCookies()."
+
+- id: kotlin.source.servlet_cookie_getname
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  match:
+    kind: call
+    callee:
+      name: getName
+  constraints:
+  - receiver_name_in:
+    - cookie
+    - theCookie
+    - httpCookie
+    - requestCookie
+    - servletCookie
+    - c
+  match_examples:
+  - name: servlet cookie name
+    code: |
+      class App {
+        fun handle(theCookie: Cookie) {
+          theCookie.getName()
+        }
+      }
+      class Cookie {
+        fun getName(): String = ""
+      }
+    expect_match_text: [theCookie.getName]
+  description: "javax.servlet.http.Cookie.getName() — attacker-chosen cookie name from an HTTP request."
 
 - id: kotlin.source.servlet_getinputstream
   enabled: true
@@ -786,6 +885,38 @@
         }
       }
   description: "HttpServletRequest.getPathInfo."
+
+- id: kotlin.source.servlet_session_getattribute
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: session-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getAttribute
+  constraints:
+  - receiver_name_in:
+    - session
+    - httpSession
+    - userSession
+    - servletSession
+  - min_args: 1
+  match_examples:
+  - name: servlet session attribute
+    code: |
+      class App {
+        fun handle(session: HttpSession, key: String) {
+          session.getAttribute(key)
+        }
+      }
+      class HttpSession {
+        fun getAttribute(vararg args: Any?): Any? = null
+      }
+    expect_match_text: [session.getAttribute]
+  description: "HttpSession.getAttribute(name) — session data may originate from earlier remote requests and should be treated as untrusted when it reaches sensitive sinks."
 
 - id: kotlin.source.servlet_part_getsubmittedfilename
   enabled: true

@@ -86,9 +86,7 @@
     expect_no_match: true
   description: "child_process.exec \u2014 shell-interprets its first arg."
 - id: typescript.cmdi.exec_imported
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: typescript
   tag: command-injection
   severity: critical
@@ -103,10 +101,19 @@
     kind: call
     callee:
       regex: ^exec$
-  description: "Disabled duplicate \u2014 v1 matching normalizes imported `exec(...)`\
-    \ to the same adapter fact as typescript.cmdi.exec."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: exec imported
+    code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj) {\n  return exec(input);\n}\n"
+  - name: exec imported literal negative
+    code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj) {\n  return exec(\"echo safe\");\n}\n"
+    expect_no_match: true
+  description: "Named-import exec from child_process \u2014 shell-interprets its\
+    \ first argument."
 - id: typescript.cmdi.spawn
-  enabled: false
+  enabled: true
   language: typescript
   tag: command-injection
   severity: critical
@@ -120,14 +127,49 @@
       attribute:
       - child_process
       - spawn
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: spawn
     code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
       \ {\n  return child_process.spawn(input, { shell: true });\n}\n"
+  - name: spawn literal negative
+    code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
+      \ {\n  return child_process.spawn(\"ls\", { shell: true });\n}\n"
+    expect_no_match: true
   description: "child_process.spawn({shell: true}) \u2014 shell-interpreted command\
     \ execution."
-  disabled_reason:
-    code: over-broad
+- id: typescript.cmdi.spawn_args
+  enabled: true
+  language: typescript
+  tag: command-injection
+  severity: critical
+  packages:
+  - child_process
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - child_process
+      - spawn
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: spawn shell args
+    code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
+      \ {\n  return child_process.spawn(\"sh\", input, { shell: true });\n}\n"
+  - name: spawn shell args literal negative
+    code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
+      \ {\n  return child_process.spawn(\"sh\", [\"-c\", \"whoami\"], { shell: true });\n}\n"
+    expect_no_match: true
+  description: "child_process.spawn(cmd, taintedArgs, {shell: true}) \u2014 tainted\
+    \ argv is shell-interpreted."
 - id: typescript.cmdi.spawn_sync
   enabled: true
   language: typescript
@@ -355,9 +397,7 @@
   description: "Named-import execFileSync from child_process \u2014 tainted binary\
     \ path = arbitrary exec."
 - id: typescript.cmdi.fork
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: typescript
   tag: command-injection
   severity: medium
@@ -371,8 +411,19 @@
       attribute:
       - child_process
       - fork
-  description: "Disabled \u2014 fork runs a Node script; tainted module path = RCE,\
-    \ but requires narrow taint analysis."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fork tainted module path
+    code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
+      \ {\n  return child_process.fork(input);\n}\n"
+  - name: fork literal module path negative
+    code: "const _u = require(\"child_process\");\nfunction demo(input, req, obj)\
+      \ {\n  return child_process.fork(\"./worker.js\");\n}\n"
+    expect_no_match: true
+  description: "child_process.fork(taintedModulePath) \u2014 attacker-controlled Node\
+    \ module path is arbitrary code execution."
 - id: typescript.cmdi.shelljs_exec
   enabled: true
   language: typescript
@@ -431,6 +482,7 @@
     callee:
       name: execa
   constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
   - arg_tainted:
       index: 0
   match_examples:
@@ -521,7 +573,7 @@
     expect_no_match: true
   description: "new Deno.Command(cmd, {args}) \u2014 tainted args or cmd = RCE."
 - id: typescript.cmdi.deno_run
-  enabled: false
+  enabled: true
   language: typescript
   tag: command-injection
   severity: critical
@@ -533,14 +585,18 @@
       attribute:
       - Deno
       - run
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: deno run
     code: "function demo(input, req, obj) {\n  return Deno.run(input);\n}\n"
+  - name: deno run literal negative
+    code: "function demo(input, req, obj) {\n  return Deno.run({ cmd: [\"echo\", \"safe\"] });\n}\n"
+    expect_no_match: true
   description: "Deno.run (legacy) \u2014 subprocess execution."
-  disabled_reason:
-    code: over-broad
 - id: typescript.cmdi.bun_spawn
-  enabled: false
+  enabled: true
   language: typescript
   tag: command-injection
   severity: critical
@@ -552,17 +608,21 @@
       attribute:
       - Bun
       - spawn
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: bun spawn
     code: "function demo(input, req, obj) {\n  return Bun.spawn(input);\n}\n"
+  - name: bun spawn literal negative
+    code: "function demo(input, req, obj) {\n  return Bun.spawn([\"echo\", \"safe\"]);\n}\n"
+    expect_no_match: true
   description: "Bun.spawn \u2014 tainted executable path or argv launches arbitrary\
     \ process. TODO(only_when_packaged): Bun runtime global has no canonical ecosystem\
     \ package, so OnlyWhenPackaged lax-tail can never fire \u2014 strict `['Bun',\
     \ 'spawn']` match only."
-  disabled_reason:
-    code: over-broad
 - id: typescript.cmdi.nodepty_spawn
-  enabled: false
+  enabled: true
   language: typescript
   tag: command-injection
   severity: critical
@@ -576,14 +636,19 @@
       attribute:
       - pty
       - spawn
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: nodepty spawn
     code: "const _u = require(\"node-pty\");\nfunction demo(input, req, obj) {\n \
       \ return pty.spawn(input);\n}\n"
+  - name: nodepty spawn literal negative
+    code: "const _u = require(\"node-pty\");\nfunction demo(input, req, obj) {\n \
+      \ return pty.spawn(\"bash\");\n}\n"
+    expect_no_match: true
   description: "node-pty spawn runs an interactive shell \u2014 tainted command or\
     \ args can control a live terminal."
-  disabled_reason:
-    code: over-broad
 - id: typescript.cmdi.cross_spawn_shell
   enabled: true
   language: typescript

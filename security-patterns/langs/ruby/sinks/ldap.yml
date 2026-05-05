@@ -96,7 +96,7 @@
     expect_no_match: true
   description: Net::LDAP::Filter.from_rfc2254(tainted_string).
 - id: ruby.ldap.ruby_ldap_search
-  enabled: false
+  enabled: true
   language: ruby
   tag: ldap-injection
   severity: high
@@ -110,10 +110,15 @@
       attribute:
       - LDAP::Conn
       - search
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: ruby.ldap.ruby_ldap_search example
     code: "require \"ruby-ldap\"\ndef example(input, url, id, payload, request, params)\n\
-      \  LDAP::Conn.search(\"(uid=user)\")\nend\n"
+      \  LDAP::Conn.search(input)\nend\n"
+  - name: ruby ldap search literal negative
+    code: "require \"ruby-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  LDAP::Conn.search(\"(uid=alice)\")\nend\n"
+    expect_no_match: true
   description: ruby-ldap LDAP::Conn#search.
-  disabled_reason:
-    code: over-broad

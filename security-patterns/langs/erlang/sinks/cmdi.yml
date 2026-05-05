@@ -139,25 +139,8 @@
     expect_no_match: true
   description: "erlexec exec:shell — spawns /bin/sh with tainted string."
 
-- id: erlang.cmdi.erlang_spawn_mfa
-  enabled: false
-  disabled_reason:
-    code: over-broad
-  language: erlang
-  tag: command-injection
-  severity: high
-  category: process-exec
-  cwe: [CWE-78]
-  match:
-    kind: call
-    callee:
-      regex: "^erlang:spawn$"
-  description: "Disabled — erlang:spawn/3 with tainted MFA atoms ≈ apply/3 RCE; noisy without atom-source tracking."
-
 - id: erlang.cmdi.rebar3_sh
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: erlang
   tag: command-injection
   severity: medium
@@ -167,4 +150,23 @@
     kind: call
     callee:
       regex: "^rebar_utils:sh$"
-  description: "Disabled — build-tool only."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rebar sh
+    code: |
+      -module(example).
+      -include_lib("rebar3/include/rebar.hrl").
+      -export([test/1]).
+      test(Input) ->
+        rebar_utils:sh(Input).
+  - name: literal rebar sh negative
+    code: |
+      -module(example).
+      -include_lib("rebar3/include/rebar.hrl").
+      -export([test/0]).
+      test() ->
+        rebar_utils:sh("git --version").
+    expect_no_match: true
+  description: "rebar_utils:sh/1 — build-tool shell execution; tainted command strings are CI/build RCE."

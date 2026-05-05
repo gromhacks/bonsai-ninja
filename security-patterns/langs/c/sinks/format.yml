@@ -277,9 +277,7 @@
     expect_no_match: true
   description: "GNU asprintf(&dst, tainted_fmt, ...) — allocates and formats; tainted format string = format-string bug."
 - id: c.format.warn_tainted
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: c
   tag: format-string
   severity: medium
@@ -288,7 +286,22 @@
     kind: call
     callee:
       name: warn
-  description: "Disabled — BSD warn(fmt, ...) format-string sink; common but high noise outside BSD codebases."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted warn format
+    code: |
+      void example(char *input) {
+        warn(input);
+      }
+  - name: literal warn format negative
+    code: |
+      void example(void) {
+        warn("%s", "safe");
+      }
+    expect_no_match: true
+  description: "BSD warn(tainted_fmt, ...) — logs attacker-controlled format strings; `%n` / `%s` directives can crash or leak process memory."
 - id: c.format.syslog_tainted
   aliases:
     - c.info_disclosure.syslog_secret

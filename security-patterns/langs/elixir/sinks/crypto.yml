@@ -12,14 +12,26 @@
     kind: call
     callee:
       regex: "^:crypto\\.hash$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^:(md5|sha|sha1|sha_?1)$"
   match_examples:
   - name: declared shape
     code: |
       defmodule App do
         def test(input) do
-          :crypto.hash(:md5)
+          :crypto.hash(:md5, input)
         end
       end
+  - name: strong hash negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :crypto.hash(:sha256, input)
+        end
+      end
+    expect_no_match: true
   description: ":crypto.hash(:md5, _) — MD5 is collision-broken; forbidden for integrity, signatures, or password hashing. Also covers merged aliases: elixir.crypto.hash_sha1."
 
 - id: elixir.crypto.hmac_md5
@@ -34,14 +46,26 @@
     kind: call
     callee:
       regex: "^:crypto\\.mac$"
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: "^:(md5|sha|sha1|sha_?1)$"
   match_examples:
   - name: declared shape
     code: |
       defmodule App do
         def test(input) do
-          :crypto.mac(input, :md5)
+          :crypto.mac(:hmac, :md5, "key", input)
         end
       end
+  - name: strong hmac negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :crypto.mac(:hmac, :sha256, "key", input)
+        end
+      end
+    expect_no_match: true
   description: ":crypto.mac(:hmac, :md5, _, _) — HMAC-MD5 is not collision-resistant and leaks key under chosen-prefix; use :sha256. Also covers merged aliases: elixir.crypto.hmac_sha1."
 
 - id: elixir.crypto.block_encrypt_des
@@ -58,14 +82,26 @@
     kind: call
     callee:
       regex: "^:crypto\\.crypto_one_time$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^:(des|des3|des_ede3|des_cbc|des_ecb|rc4|aes_.*_ecb|aes_ecb)$"
   match_examples:
   - name: declared shape
     code: |
       defmodule App do
         def test(input) do
-          :crypto.crypto_one_time(:des_cbc)
+          :crypto.crypto_one_time(:des_cbc, "key12345", input, true)
         end
       end
+  - name: authenticated cipher negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :crypto.crypto_one_time(:aes_256_gcm, "key", input, true)
+        end
+      end
+    expect_no_match: true
   description: ":crypto.crypto_one_time(:des_cbc, _, _, _, _) — DES has a 56-bit key, brute-forceable in hours. Also covers merged aliases: elixir.crypto.block_encrypt_rc4, elixir.crypto.block_encrypt_aes_ecb, elixir.crypto.block_encrypt_aes_ecb_256."
 
 - id: elixir.crypto.rand_uniform

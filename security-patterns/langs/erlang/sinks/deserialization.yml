@@ -111,17 +111,3 @@
           ets:select(Table, [{{'$1'}, [], ['$1']}]).
       expect_no_match: true
   description: "ets:select/match/match_object/match_delete — tainted match-spec or pattern enables full-table scan DoS or unauthorized row read."
-
-- id: erlang.deser.gen_server_call_timeout
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: erlang
-  tag: timeout-bypass
-  severity: low
-  cwe: [CWE-400]
-  match:
-    kind: call
-    callee:
-      regex: "^gen_server:call$"
-  description: "Disabled — gen_server:call/3 with tainted Timeout (esp. infinity) blocks the caller indefinitely; needs arg-index taint to avoid noise on non-Timeout args."

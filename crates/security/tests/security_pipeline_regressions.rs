@@ -9,10 +9,10 @@
 
 use bonsai_lang_api::FlowEvent;
 use bonsai_security::loader::LanguagePack;
-use bonsai_security::rule::Severity;
+use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
-    run_taint_analysis, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget, Rulepack,
-    TaintAnalysisOptions, TrustClass,
+    run_taint_analysis, ConstraintKind, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
+    Rulepack, TaintAnalysisOptions, TrustClass,
 };
 use bonsai_workspace::Workspace;
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
@@ -310,6 +310,46 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
     pack
 }
 
+fn c_recv_output_rulepack() -> Rulepack {
+    let mut pack = Rulepack::default();
+    let mut source = rule(
+        "c",
+        RuleKind::Source,
+        "c.test.recv_output_source",
+        Some(TrustClass::Remote),
+        None,
+        "recv",
+    );
+    source.taint_semantics = Some(TaintSemantics {
+        clean_output_overwrite: None,
+        source_output_args: vec![1],
+    });
+    let mut sink = rule(
+        "c",
+        RuleKind::Sink,
+        "c.test.dangerous_sink",
+        None,
+        Some(Severity::Critical),
+        "dangerous",
+    );
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    pack.packs.insert(
+        "c".to_string(),
+        LanguagePack {
+            language: "c".to_string(),
+            sources: vec![source],
+            sinks: vec![sink],
+            sanitizers: Vec::new(),
+        },
+    );
+    pack
+}
+
 fn rule(
     lang: &str,
     kind: RuleKind,
@@ -387,6 +427,60 @@ fn assert_finding_with_options(fixture: Fixture, options: TaintAnalysisOptions) 
         fixture.name,
         matching
     );
+}
+
+#[test]
+fn c_output_arg_source_taints_only_declared_buffer_arg() {
+    let ws = workspace(&[(
+        "main.c",
+        r#"
+void dangerous(void *p);
+int recv(int fd, void *buf, unsigned long len, int flags);
+
+void handle(int fd) {
+    char buf[128];
+    recv(fd, buf, sizeof(buf), 0);
+    dangerous(buf);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &c_recv_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+}
+
+#[test]
+fn c_output_arg_source_does_not_taint_fd_or_size_args() {
+    let ws = workspace(&[(
+        "main.c",
+        r#"
+void dangerous(int p);
+int recv(int fd, void *buf, unsigned long len, int flags);
+
+void handle(int fd) {
+    char buf[128];
+    recv(fd, buf, sizeof(buf), 0);
+    dangerous(fd);
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &c_recv_output_rulepack(),
+        TaintAnalysisOptions {
+            include_inferred_sources: false,
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(report.findings.is_empty(), "{:#?}", report.findings);
 }
 
 #[test]

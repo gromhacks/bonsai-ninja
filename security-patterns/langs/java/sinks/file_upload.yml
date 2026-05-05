@@ -45,8 +45,9 @@
   match:
     kind: call
     callee:
-      attribute: [Part, write]
+      name: write
   constraints:
+  - receiver_name_in: [part, uploadPart, filePart, requestPart, servletPart]
   - arg_tainted:
       index: 0
   match_examples:
@@ -54,24 +55,24 @@
     code: |
       import javax.servlet.*;
       class App {
-        void handle(String input) throws Exception {
-          Part.write(input);
+        void handle(Part part, String input) throws Exception {
+          part.write(input);
         }
       }
   - name: jakarta servlet part write
     code: |
       import jakarta.servlet.*;
       class App {
-        void handle(String input) throws Exception {
-          Part.write(input);
+        void handle(Part uploadPart, String input) throws Exception {
+          uploadPart.write(input);
         }
       }
   - name: arg tainted literal negative
     code: |
       import javax.servlet.*;
       class App {
-        void handle(String input) throws Exception {
-          Part.write("safe");
+        void handle(Part part, String input) throws Exception {
+          part.write("safe");
         }
       }
     expect_no_match: true

@@ -12,6 +12,10 @@
     kind: call
     callee:
       attribute: [log, info]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\\n|\\r|format!\(|\+)'
   match_examples:
   - name: generated direct match
     code: |
@@ -21,4 +25,11 @@
           let query = "user";
           log::info("user\\n");
       }
+  - name: rust log info ordinary negative
+    code: |
+      use log::dummy;
+      fn example(user: &str) {
+          log::info("user={}", user);
+      }
+    expect_no_match: true
   description: 'log::info!("... {user} ...\n") — newline in user text forges log entries.'

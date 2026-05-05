@@ -95,3 +95,59 @@
         mongo:aggregate(Conn, Collection, []).
     expect_no_match: true
   description: "mongodb-erlang mongo:aggregate — tainted aggregation pipeline can inject operators such as $lookup / $where and bypass authorization logic."
+- id: erlang.nosql.mnesia_select_matchspec
+  enabled: true
+  language: erlang
+  tag: nosql-injection
+  severity: medium
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^mnesia:select$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted mnesia match spec
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(Table, Input) ->
+        mnesia:select(Table, Input).
+  - name: literal mnesia match spec negative
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Table) ->
+        mnesia:select(Table, [{{'$1'}, [], ['$1']}]).
+    expect_no_match: true
+  description: "mnesia:select(Table, tainted_match_spec) — attacker-controlled match specs can bypass intended filters or force expensive table scans."
+- id: erlang.nosql.mnesia_match_object
+  enabled: true
+  language: erlang
+  tag: nosql-injection
+  severity: medium
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^mnesia:match_object$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mnesia match object pattern
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mnesia:match_object(Input).
+  - name: literal mnesia match object negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        mnesia:match_object({users, '_', '_'}).
+    expect_no_match: true
+  description: "mnesia:match_object(tainted_pattern) — attacker-controlled term patterns can bypass application-level query restrictions."

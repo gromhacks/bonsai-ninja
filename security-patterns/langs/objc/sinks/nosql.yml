@@ -107,9 +107,7 @@
   description: "libmongoc mongoc_collection_find(_with_opts) — tainted BSON filter permits NoSQL injection."
 
 - id: objc.nosql.couchbase_query
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: objc
   tag: nosql-injection
   severity: high
@@ -119,4 +117,17 @@
     kind: call
     callee:
       regex: "^(createQueryWhere|queryWithN1QL|n1qlQueryWithString)$"
-  description: "Disabled — Couchbase Lite N1QL / createQueryWhere: with tainted string. Off by default; enable for apps using CouchbaseLite."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted couchbase n1ql query
+    code: |
+      #import <CouchbaseLite/CouchbaseLite.h>
+      void test(id input) { queryWithN1QL(input); }
+  - name: literal couchbase n1ql query negative
+    code: |
+      #import <CouchbaseLite/CouchbaseLite.h>
+      void test(void) { queryWithN1QL(@"SELECT * FROM bucket WHERE type = 'safe'"); }
+    expect_no_match: true
+  description: "Couchbase Lite N1QL / createQueryWhere: with a tainted query string permits NoSQL injection."

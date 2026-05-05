@@ -1009,7 +1009,7 @@ fn render_taint_analysis_text_page(
                 &fc.chain_funcs,
                 (*i + 1) as u32,
                 &label,
-                bonsai_common::Precision::Exact,
+                precision_from_finding_label(&fc.finding.precision),
                 None,
                 filters,
             )?;
@@ -1022,6 +1022,7 @@ fn render_taint_analysis_text_page(
                 &fc.additional_sources,
                 &fc.finding.taint_path,
                 Some(&fc.finding.sink),
+                SecurityFlowKind::Taint,
             );
             Some(flow)
         })
@@ -1050,9 +1051,23 @@ fn render_taint_analysis_text_page(
                 };
                 if no_compact {
                     let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
-                    crate::commands::render_flow_block(u, &render_opts, flow, &header_name, &mut local_seen);
+                    crate::commands::render_flow_block_with_heading(
+                        u,
+                        &render_opts,
+                        flow,
+                        &header_name,
+                        &mut local_seen,
+                        "TAINT FLOW",
+                    );
                 } else {
-                    crate::commands::render_flow_block(u, &render_opts, flow, &header_name, &mut seen_bodies);
+                    crate::commands::render_flow_block_with_heading(
+                        u,
+                        &render_opts,
+                        flow,
+                        &header_name,
+                        &mut seen_bodies,
+                        "TAINT FLOW",
+                    );
                 }
             }
             None => render_finding_block_compact(u, fc, pack, ws),
@@ -1126,7 +1141,12 @@ fn cmd_source_analysis(
     };
 
     match format {
-        BrowseFormat::Json | BrowseFormat::Sarif => {
+        BrowseFormat::Sarif => {
+            anyhow::bail!(
+                "security source-analysis does not emit SARIF; use --format json for source-flow data or security taint-analysis --format sarif for SARIF findings"
+            );
+        }
+        BrowseFormat::Json => {
             if paging_cfg.json_wrapped() {
                 page_cache::emit_paged_text(
                     workspace,
@@ -1241,20 +1261,22 @@ fn render_source_analysis_text_page(
         render_source_analysis_header(u, item.flow.flow_number as usize, item, pack);
         if no_compact {
             let mut local_seen: crate::commands::BodySet = ahash::AHashSet::new();
-            crate::commands::render_flow_block(
+            crate::commands::render_flow_block_with_heading(
                 u,
                 &render_opts,
                 &item.flow,
                 &item.source.rule_id,
                 &mut local_seen,
+                "SOURCE FLOW",
             );
         } else {
-            crate::commands::render_flow_block(
+            crate::commands::render_flow_block_with_heading(
                 u,
                 &render_opts,
                 &item.flow,
                 &item.source.rule_id,
                 &mut seen_bodies,
+                "SOURCE FLOW",
             );
         }
     }
@@ -1302,6 +1324,7 @@ fn render_source_analysis_candidate(
         &item.additional_sources,
         &item.taint_path,
         None,
+        SecurityFlowKind::Source,
     );
     Some(CombinedSourceAnalysisFlow {
         source: item.source.clone(),
@@ -1310,12 +1333,28 @@ fn render_source_analysis_candidate(
     })
 }
 
+#[derive(Copy, Clone)]
+enum SecurityFlowKind {
+    Taint,
+    Source,
+}
+
+impl SecurityFlowKind {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Taint => "TAINT FLOW",
+            Self::Source => "SOURCE FLOW",
+        }
+    }
+}
+
 fn annotate_taint_flow(
     flow: &mut crate::commands::InspectFlowRendered,
     source: &FindingMatch,
     additional_sources: &[FindingMatch],
     taint_path: &[TaintPropagationStep],
     sink: Option<&FindingMatch>,
+    kind: SecurityFlowKind,
 ) {
     for func in &mut flow.functions {
         for line in &mut func.lines {
@@ -1339,7 +1378,15 @@ fn annotate_taint_flow(
     });
     for source in sources {
         let marker = format!("SOURCE: {} {}", source.rule_id, truncate_text(&source.text, 80));
-        add_flow_line_annotation(flow, &source.file, source.line, &label, marker, &mut step_counter);
+        add_flow_line_annotation(
+            flow,
+            &source.file,
+            source.line,
+            &label,
+            marker,
+            kind,
+            &mut step_counter,
+        );
     }
 
     let mut sink_annotated = false;
@@ -1360,13 +1407,29 @@ fn annotate_taint_flow(
                 format_taint_args(&step.tainted_args)
             )
         };
-        add_flow_line_annotation(flow, &step.file, step.line, &label, marker, &mut step_counter);
+        add_flow_line_annotation(
+            flow,
+            &step.file,
+            step.line,
+            &label,
+            marker,
+            kind,
+            &mut step_counter,
+        );
     }
 
     if let Some(sink) = sink {
         if !sink_annotated {
             let marker = format!("SINK: {} {}", sink.rule_id, format_sink_args(sink));
-            add_flow_line_annotation(flow, &sink.file, sink.line, &label, marker, &mut step_counter);
+            add_flow_line_annotation(
+                flow,
+                &sink.file,
+                sink.line,
+                &label,
+                marker,
+                kind,
+                &mut step_counter,
+            );
         }
     }
 }
@@ -1377,6 +1440,7 @@ fn add_flow_line_annotation(
     line_no: u32,
     flow_label: &str,
     marker: String,
+    kind: SecurityFlowKind,
     step_counter: &mut u32,
 ) {
     for func in &mut flow.functions {
@@ -1390,7 +1454,7 @@ fn add_flow_line_annotation(
             *step_counter += 1;
             line.step = Some(*step_counter);
         }
-        let annotation = format!("[FLOW {flow_label} {marker}]");
+        let annotation = format!("[{} {flow_label} {marker}]", kind.heading());
         match line.annotation.as_mut() {
             Some(existing) => {
                 existing.push(' ');
@@ -1515,8 +1579,8 @@ fn render_source_analysis_source(u: &Ui, source: &FindingMatch, pack: &Rulepack)
 /// that each read as short prose (what the input is, what the dangerous
 /// operation is, why it's dangerous) plus the rule id, location, and
 /// supporting taxonomy metadata (CWE, OWASP, category, packages,
-/// frameworks). Goes above the inspect-style FLOW block so a reviewer
-/// sees the finding *as a vulnerability* before reading the call chain.
+/// frameworks). Goes above the taint-flow block so a reviewer sees
+/// the finding *as a vulnerability* before reading the propagation.
 fn render_finding_security_header(u: &Ui, idx: usize, combined: &CombinedFindingWithChain, pack: &Rulepack) {
     let f = &combined.finding;
     let sev = f
@@ -2075,6 +2139,16 @@ fn precision_filter_to_common(precision: PrecisionFilter) -> Precision {
         PrecisionFilter::Narrowed => Precision::Narrowed,
         PrecisionFilter::OverApproximate => Precision::OverApproximate,
         PrecisionFilter::Unknown => Precision::Unknown,
+    }
+}
+
+fn precision_from_finding_label(label: &str) -> Precision {
+    match label {
+        "exact" => Precision::Exact,
+        "narrowed" => Precision::Narrowed,
+        "over-approximate" | "over_approximate" => Precision::OverApproximate,
+        "unknown" => Precision::Unknown,
+        _ => Precision::Unknown,
     }
 }
 

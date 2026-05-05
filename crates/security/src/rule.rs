@@ -263,6 +263,13 @@ fn is_zero_u32(value: &u32) -> bool {
 pub struct TaintSemantics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean_output_overwrite: Option<CleanOutputOverwriteSemantics>,
+    /// Source rules only: argument indices that receive attacker-
+    /// controlled output from the call. This covers C-style APIs such
+    /// as `recv(fd, buf, len, flags)` and `SSL_read(ssl, buf, len)`
+    /// where the return value is a byte count but the buffer argument
+    /// becomes tainted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_output_args: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

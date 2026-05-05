@@ -113,9 +113,7 @@
       name: srand
   description: "Disabled \u2014 srand seeding the insecure PRNG."
 - id: ruby.crypto.bcrypt_low_cost
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: ruby
   tag: weak-crypto
   severity: medium
@@ -129,5 +127,30 @@
       attribute:
       - BCrypt::Password
       - create
-  description: "Disabled \u2014 BCrypt::Password.create cost defaults to 12 in bcrypt-ruby; flag only when explicit cost:\
-    \ < 10 (requires per-call value check)."
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: 'cost:\s*[0-9]\b'
+  match_examples:
+  - name: bcrypt low cost
+    code: |
+      require "bcrypt"
+      def hash(password)
+        BCrypt::Password.create(password, cost: 4)
+      end
+    expect_match_text: [BCrypt::Password.create]
+  - name: bcrypt default cost negative
+    code: |
+      require "bcrypt"
+      def hash(password)
+        BCrypt::Password.create(password)
+      end
+    expect_no_match: true
+  - name: bcrypt acceptable cost negative
+    code: |
+      require "bcrypt"
+      def hash(password)
+        BCrypt::Password.create(password, cost: 12)
+      end
+    expect_no_match: true
+  description: "BCrypt::Password.create(password, cost: N) with explicit cost < 10 — too cheap to compute; the default cost remains safe."

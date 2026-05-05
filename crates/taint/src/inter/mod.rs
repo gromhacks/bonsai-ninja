@@ -147,6 +147,12 @@ pub struct InterTaintConfig {
     /// that want library-specific modeling must supply these facts from
     /// a rulepack, adapter, or higher-level configuration.
     pub clean_output_overwrites: Vec<CleanOutputOverwrite>,
+    /// Declarative source calls whose listed output arguments receive
+    /// untrusted data. Used to suppress the generic unresolved-call
+    /// side-effect heuristic for calls like `recv(fd, buf, len)`: the
+    /// output buffer is tainted by the source, but the fd/len operands
+    /// are not.
+    pub source_output_args: Vec<SourceOutputArgs>,
     /// Configured method tails that invoke a callable receiver. Kept
     /// outside the engine so `call`, `apply`, framework-specific names,
     /// etc. are not baked into the common taint transfer logic.
@@ -169,6 +175,12 @@ pub struct CleanOutputOverwrite {
     pub callee: String,
     pub output_arg_index: usize,
     pub value_start_arg_index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceOutputArgs {
+    pub callee: String,
+    pub output_arg_indices: Vec<usize>,
 }
 
 /// Reusable resolver-side caches for batches of interprocedural taint
@@ -194,6 +206,7 @@ impl Default for InterTaintConfig {
             intra_worklist_cap: None,
             source_bearing_functions: AHashSet::default(),
             clean_output_overwrites: Vec::new(),
+            source_output_args: Vec::new(),
             callback_invocation_methods: AHashSet::default(),
             collection_append_methods: AHashSet::default(),
             lattice_mode: crate::value_flow::LatticeMode::default(),
@@ -1345,7 +1358,9 @@ fn propagate_call_event(
         ctx.config,
     );
     if candidates.is_empty() {
-        if apply_unresolved_call_side_effects(args, &tainted_at_call, state) {
+        if !configured_source_output_call(name, &tainted_at_call, ctx.config)
+            && apply_unresolved_call_side_effects(args, &tainted_at_call, state)
+        {
             *ctx.precision = ctx.precision.meet(Precision::OverApproximate);
         }
         return;
@@ -1722,6 +1737,24 @@ fn apply_clean_output_call_overwrite(
     if value_args_are_clean {
         remove_target_taint(state, output);
     }
+}
+
+fn configured_source_output_call(
+    name: &str,
+    tainted_at_call: &[(usize, String)],
+    config: &InterTaintConfig,
+) -> bool {
+    let Some(shape) = config
+        .source_output_args
+        .iter()
+        .find(|shape| configured_name_match(&shape.callee, name))
+    else {
+        return false;
+    };
+    !tainted_at_call.is_empty()
+        && tainted_at_call
+            .iter()
+            .all(|(idx, _)| shape.output_arg_indices.contains(idx))
 }
 
 fn configured_name_match(configured: &str, observed: &str) -> bool {

@@ -1,5 +1,5 @@
 - id: typescript.ldap.ldapjs_search
-  enabled: false
+  enabled: true
   language: typescript
   tag: ldap-injection
   severity: high
@@ -17,18 +17,23 @@
       attribute:
       - client
       - search
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: ldapjs search
     code: "const _u = require(\"ldapjs\");\nfunction demo(input, req, obj) {\n  return\
       \ client.search(\"(uid=\" + input + \")\");\n}\n"
     expect_match_text:
     - client.search
+  - name: ldapjs search literal negative
+    code: "const _u = require(\"ldapjs\");\nfunction demo(input, req, obj) {\n  return\
+      \ client.search(\"(uid=alice)\");\n}\n"
+    expect_no_match: true
   description: "ldapjs/ldapts client.search \u2014 tainted filter/DN enables LDAP\
     \ injection."
-  disabled_reason:
-    code: over-broad
 - id: typescript.ldap.ldapjs_event_search
-  enabled: false
+  enabled: true
   language: typescript
   tag: ldap-injection
   severity: high
@@ -44,15 +49,20 @@
       attribute:
       - ev
       - search
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: ldapjs event search filter
     code: "const _u = require(\"ldapjs\");\nfunction demo(ev: any, input: string)\
       \ {\n  return ev.search(\"(uid=\" + input + \")\");\n}\n"
     expect_match_text:
     - ev.search
+  - name: ldapjs event search literal negative
+    code: "const _u = require(\"ldapjs\");\nfunction demo(ev: any, input: string)\
+      \ {\n  return ev.search(\"(uid=alice)\");\n}\n"
+    expect_no_match: true
   description: "ldapjs ev.search(filter) \u2014 tainted LDAP filter expression."
-  disabled_reason:
-    code: over-broad
 - id: typescript.ldap.ldapjs_modify
   enabled: true
   language: typescript

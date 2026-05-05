@@ -12,11 +12,21 @@
       attribute:
       - console
       - log
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: console log secret
     code: "function demo(secretToken) {\n  console.log(secretToken);\n}\n"
     expect_match_text:
     - console.log
+  - name: console log ordinary value negative
+    code: |
+      function demo(username) {
+        console.log(username);
+      }
+    expect_no_match: true
   description: "console.log(secret/token/password) — secret-shaped data written to process logs or captured stdout. Merged aliases: javascript.log_injection.console_newline."
   aliases:
   - javascript.log_injection.console_newline

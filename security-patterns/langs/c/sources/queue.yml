@@ -32,13 +32,14 @@
     kind: call
     callee:
       name: zmq_recv
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
   - name: generated direct match
     code: |
       #include <libzmq/zmq.h>
       void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        zmq_recv(arg);
+        char buf[4096];
+        zmq_recv(0, buf, sizeof(buf), 0);
       }
   description: "libzmq zmq_recv — receives a frame from the socket; peer is another service but payload is still untrusted."

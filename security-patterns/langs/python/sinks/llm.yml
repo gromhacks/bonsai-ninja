@@ -157,7 +157,7 @@
     expect_no_match: true
   description: "anthropic client.messages.create — tainted user content can hijack instructions, exfiltrate via tool_use, or inject untrusted output."
 - id: python.llm.cohere_chat
-  enabled: false
+  enabled: true
   language: python
   tag: web-llm
   severity: medium
@@ -174,12 +174,17 @@
       attribute:
       - client
       - chat
+  constraints:
+  - min_args: 1
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: llm cohere chat
     code: "import cohere\ndef example(user_input):\n    return client.chat(user_input)\n"
+  - name: llm cohere chat literal negative
+    code: "import cohere\ndef example(user_input):\n    return client.chat(\"safe prompt\")\n"
+    expect_no_match: true
   description: "cohere client.chat — tainted user message steers Cohere chat completions. `min_args: 1` rejects unrelated `client.chat()` 0-arg accessors (chat-room/IM helpers that share the verb)."
-  disabled_reason:
-    code: over-broad
 - id: python.llm.boto3_bedrock_invokemodel
   enabled: true
   language: python
@@ -208,7 +213,7 @@
     expect_no_match: true
   description: "boto3 bedrock-runtime invoke_model — tainted body steers underlying foundation model (Claude/Llama/Titan)."
 - id: python.llm.google_genai_generate_content
-  enabled: false
+  enabled: true
   language: python
   tag: web-llm
   severity: medium
@@ -224,14 +229,19 @@
       attribute:
       - model
       - generate_content
+  constraints:
+  - min_args: 1
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: llm google genai generate content
     code: "import googlegenerativeai\ndef example(user_input):\n    return model.generate_content(user_input)\n"
+  - name: llm google genai generate content literal negative
+    code: "import googlegenerativeai\ndef example(user_input):\n    return model.generate_content(\"safe prompt\")\n"
+    expect_no_match: true
   description: "google.generativeai model.generate_content — tainted prompt steers Gemini output and tool calls. `min_args: 1` rejects 0-arg decoys."
   imports:
   - googlegenerativeai
-  disabled_reason:
-    code: over-broad
 
 - id: python.llm.langchain_llmchain_invoke
   enabled: true

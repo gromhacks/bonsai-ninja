@@ -603,6 +603,11 @@ Pair these selectors with `--from`/`--to` when you need to prove a caller → si
 | `security sinks` | Inventory dangerous operations. | Use to review sensitive APIs even without source reachability. |
 | `security sanitizers` | Inventory credited sanitizers. | Use to verify auth/escaping/validation coverage. |
 
+Security text labels carry evidence semantics. `SOURCE FLOW` is a
+source-seeded forward taint map without sink attribution. `TAINT FLOW` is
+a source-to-sink finding path with tainted argument and receiver evidence.
+Generic `FLOW` remains the navigation-oriented label used by `inspect`.
+
 ### Debug Dumps
 
 | Command | Use it for |

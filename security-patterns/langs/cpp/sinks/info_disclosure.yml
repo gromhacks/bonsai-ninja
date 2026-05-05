@@ -10,6 +10,10 @@
     kind: call
     callee:
       attribute: [spdlog, error]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: generated direct match
     code: |
@@ -21,6 +25,13 @@
         spdlog::error("api_key={}", arg);
       }
     expect_match_text: [spdlog::error]
+  - name: spdlog ordinary error negative
+    code: |
+      #include <spdlog/spdlog.h>
+      void example(const char *user) {
+        spdlog::error("user={}", user);
+      }
+    expect_no_match: true
   description: "spdlog::error with secret-shaped values persists sensitive data in application logs."
 
 - id: cpp.info_disclosure.fmt_print_secret
@@ -34,6 +45,10 @@
     kind: call
     callee:
       attribute: [fmt, print]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: generated direct match
     code: |
@@ -45,4 +60,11 @@
         fmt::print("secret={}", arg);
       }
     expect_match_text: [fmt::print]
+  - name: fmt print ordinary value negative
+    code: |
+      #include <fmt.h>
+      void example(const char *user) {
+        fmt::print("user={}", user);
+      }
+    expect_no_match: true
   description: "fmt::print of secret-shaped values can expose tokens on stdout or stderr."

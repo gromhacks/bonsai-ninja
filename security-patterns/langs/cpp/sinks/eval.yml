@@ -30,9 +30,7 @@
   description: "dlopen(tainted) — loads arbitrary shared library as code."
 
 - id: cpp.eval.dlsym
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: cpp
   tag: code-injection
   severity: medium
@@ -41,7 +39,22 @@
     kind: call
     callee:
       name: dlsym
-  description: "Disabled — dlsym is benign unless the symbol name is tainted."
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted dlsym symbol
+    code: |
+      void example(void *handle, const char *symbol) {
+        dlsym(handle, symbol);
+      }
+  - name: literal dlsym symbol negative
+    code: |
+      void example(void *handle) {
+        dlsym(handle, "plugin_init");
+      }
+    expect_no_match: true
+  description: "dlsym(handle, tainted_symbol) — resolves an attacker-chosen symbol from a loaded shared object; unsafe plugin dispatch can become code execution."
 
 - id: cpp.eval.loadlibrary
   enabled: true

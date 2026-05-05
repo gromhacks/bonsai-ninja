@@ -116,3 +116,34 @@
         yaws_api:htmlize(<<"ok">>).
     expect_no_match: true
   description: "yaws_api:htmlize / Yaws HTML response helpers — flag tainted content that is prepared for raw HTML output."
+- id: erlang.xss.cowboy_stream_body
+  enabled: true
+  language: erlang
+  tag: xss
+  severity: high
+  packages: [cowboy]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:stream_body$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted cowboy stream body
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Req, Input) ->
+        cowboy_req:stream_body(Input, nofin, Req).
+  - name: literal cowboy stream body negative
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Req) ->
+        cowboy_req:stream_body(<<"ok">>, fin, Req).
+    expect_no_match: true
+  description: "cowboy_req:stream_body/3 — streams raw response bytes; tainted HTML/JS reflects to the client."

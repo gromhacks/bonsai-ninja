@@ -290,6 +290,51 @@
       end
   description: "Plug.Conn.get_req_header/2 — attacker-controlled request header values."
 
+- id: elixir.plug.conn_query_decode
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, Query, decode]
+  match_examples:
+  - name: plug query decode
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Conn.Query.decode(input)
+        end
+      end
+  description: "Plug.Conn.Query.decode/1 — parsed query-string values; commonly fed by conn.query_string and therefore attacker-controlled."
+  imports:
+  - Plug
+
+- id: elixir.uri_decode_query
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      attribute: [URI, decode_query]
+  match_examples:
+  - name: uri decode query
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.decode_query(input)
+        end
+      end
+  description: "URI.decode_query/1,2 — query-string parser; when used on request URLs the returned parameter values are remote input."
+
 - id: elixir.phoenix.channel_handle_in
   enabled: true
   language: elixir

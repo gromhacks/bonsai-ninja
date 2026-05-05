@@ -424,9 +424,7 @@
   description: "Uri.file(tainted) — constructs a file:// URI that can later be fed to File/HttpClient.openUrl, enabling local file disclosure when paired with traversal payloads."
 
 - id: dart.path.file_constructor
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   tag: path-traversal
   severity: high
@@ -435,17 +433,23 @@
     kind: new
     callee:
       name: File
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: tainted file constructor
     code: |
       class File { File([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var input = "x"; var result = File(input); }
-  description: "Disabled broad duplicate — v1 adapter facts cannot distinguish File(path) construction from File.* operation receivers; concrete File read/write/delete/copy/rename operation rules are the canonical path-traversal sinks."
+  - name: literal file constructor negative
+    code: |
+      class File { File([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var result = File("config/app.txt"); }
+    expect_no_match: true
+  description: "File(path) constructor — tainted path stored on the File receiver before later read/write/delete operations."
 
 - id: dart.path.directory_constructor
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: dart
   tag: path-traversal
   severity: medium
@@ -454,9 +458,17 @@
     kind: new
     callee:
       name: Directory
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: tainted directory constructor
     code: |
       class Directory { Directory([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var input = "x"; var result = Directory(input); }
-  description: "Disabled broad duplicate — v1 adapter facts cannot distinguish Directory(path) construction from Directory.* operation receivers; concrete Directory create/delete/rename operation rules are the canonical path-traversal sinks."
+  - name: literal directory constructor negative
+    code: |
+      class Directory { Directory([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var result = Directory("/var/app/data"); }
+    expect_no_match: true
+  description: "Directory(path) constructor — tainted directory path controls later filesystem operations."

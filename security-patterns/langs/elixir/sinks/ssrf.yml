@@ -1,5 +1,5 @@
 - id: elixir.ssrf.httpoison_get
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -13,18 +13,33 @@
       attribute:
       - HTTPoison
       - get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Httpoison\ndefmodule App do\n  def test(input) do\n    HTTPoison.get(input)\n\
-      \  end\nend\n"
+  - name: tainted httpoison get url
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test(input) do
+          HTTPoison.get(input)
+        end
+      end
+  - name: literal httpoison get url negative
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test() do
+          HTTPoison.get("https://example.com")
+        end
+      end
+    expect_no_match: true
   description: "HTTPoison.get/3 \u2014 tainted URL fetches attacker-chosen endpoints,\
     \ including cloud metadata (169.254.169.254) and internal services."
   imports:
   - Httpoison
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.httpoison_post
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -38,16 +53,31 @@
       attribute:
       - HTTPoison
       - post
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Httpoison\ndefmodule App do\n  def test(input) do\n    HTTPoison.post(input)\n\
-      \  end\nend\n"
+  - name: tainted httpoison post url
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test(input) do
+          HTTPoison.post(input, "body")
+        end
+      end
+  - name: tainted httpoison post body negative
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test(input) do
+          HTTPoison.post("https://example.com", input)
+        end
+      end
+    expect_no_match: true
   description: "HTTPoison.post/4 \u2014 tainted URL sends the request body to attacker-controlled\
     \ host."
   imports:
   - Httpoison
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.httpoison_request
   enabled: true
   language: elixir
@@ -84,7 +114,7 @@
   imports:
   - Httpoison
 - id: elixir.ssrf.tesla_get
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -98,18 +128,33 @@
       attribute:
       - Tesla
       - get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Tesla\ndefmodule App do\n  def test(input) do\n    Tesla.get(input)\n\
-      \  end\nend\n"
+  - name: tainted tesla get url
+    code: |
+      alias Tesla
+      defmodule App do
+        def test(input) do
+          Tesla.get(input)
+        end
+      end
+  - name: literal tesla get url negative
+    code: |
+      alias Tesla
+      defmodule App do
+        def test() do
+          Tesla.get("https://example.com")
+        end
+      end
+    expect_no_match: true
   description: "Tesla.get/3 \u2014 tainted URL reaches arbitrary hosts (cloud metadata,\
     \ internal svc) regardless of the configured adapter."
   imports:
   - Tesla
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.tesla_post
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -123,15 +168,30 @@
       attribute:
       - Tesla
       - post
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Tesla\ndefmodule App do\n  def test(input) do\n    Tesla.post(input)\n\
-      \  end\nend\n"
+  - name: tainted tesla post url
+    code: |
+      alias Tesla
+      defmodule App do
+        def test(input) do
+          Tesla.post(input, "body")
+        end
+      end
+  - name: tainted tesla post body negative
+    code: |
+      alias Tesla
+      defmodule App do
+        def test(input) do
+          Tesla.post("https://example.com", input)
+        end
+      end
+    expect_no_match: true
   description: "Tesla.post/4 \u2014 tainted URL sends body to attacker-chosen host."
   imports:
   - Tesla
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.tesla_request
   enabled: true
   language: elixir
@@ -238,7 +298,7 @@
   imports:
   - Finch
 - id: elixir.ssrf.req_get
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -252,18 +312,35 @@
       attribute:
       - Req
       - get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Req\ndefmodule App do\n  def test(input) do\n    Req.get(input)\n\
-      \  end\nend\n"
+  - name: tainted req get url
+    code: |
+      alias Req
+      defmodule App do
+        def test(input) do
+          Req.get(input)
+        end
+      end
+  - name: literal req get url negative
+    code: |
+      alias Req
+      defmodule App do
+        def test() do
+          Req.get("https://example.com")
+        end
+      end
+    expect_no_match: true
   description: "Req.get/2 \u2014 tainted URL reaches arbitrary hosts; Req follows\
     \ redirects by default so DNS rebinding / 302-to-metadata tricks apply."
   imports:
   - Req
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.req_post
   enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: ssrf
   severity: high
@@ -278,14 +355,26 @@
       - Req
       - post
   match_examples:
-  - name: declared shape
-    code: "alias Req\ndefmodule App do\n  def test(input) do\n    Req.post(input)\n\
-      \  end\nend\n"
-  description: "Req.post/2 \u2014 tainted URL sends body to attacker-chosen host."
+  - name: tainted req post url or options
+    code: |
+      alias Req
+      defmodule App do
+        def test(input) do
+          Req.post(input)
+        end
+      end
+  - name: tainted req post body negative
+    code: |
+      alias Req
+      defmodule App do
+        def test(input) do
+          Req.post(url: "https://example.com", body: input)
+        end
+      end
+    expect_no_match: true
+  description: "Disabled — Req.post/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
   imports:
   - Req
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.req_request
   enabled: true
   language: elixir
@@ -476,7 +565,7 @@
   description: "Erlang :httpc.request/1..4 \u2014 stdlib HTTP client; tainted URL\
     \ issues attacker-directed request."
 - id: elixir.ssrf.httpoison_put
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -490,18 +579,33 @@
       attribute:
       - HTTPoison
       - put
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Httpoison\ndefmodule App do\n  def test(input) do\n    HTTPoison.put(input)\n\
-      \  end\nend\n"
+  - name: tainted httpoison put url
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test(input) do
+          HTTPoison.put(input, "body")
+        end
+      end
+  - name: tainted httpoison put body negative
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test(input) do
+          HTTPoison.put("https://example.com", input)
+        end
+      end
+    expect_no_match: true
   description: "HTTPoison.put/4 \u2014 tainted URL writes attacker-chosen body to\
     \ attacker-chosen host."
   imports:
   - Httpoison
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.httpoison_delete
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -515,18 +619,33 @@
       attribute:
       - HTTPoison
       - delete
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Httpoison\n# uses httpoison\ndefmodule App do\n  def test(input)\
-      \ do\n    HTTPoison.delete(input)\n  end\nend\n"
+  - name: tainted httpoison delete url
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test(input) do
+          HTTPoison.delete(input)
+        end
+      end
+  - name: literal httpoison delete url negative
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test() do
+          HTTPoison.delete("https://example.com")
+        end
+      end
+    expect_no_match: true
   description: "HTTPoison.delete/3 \u2014 tainted URL issues DELETE against attacker-chosen\
     \ endpoint."
   imports:
   - Httpoison
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.tesla_put
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -540,17 +659,32 @@
       attribute:
       - Tesla
       - put
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Tesla\ndefmodule App do\n  def test(input) do\n    Tesla.put(input)\n\
-      \  end\nend\n"
+  - name: tainted tesla put url
+    code: |
+      alias Tesla
+      defmodule App do
+        def test(input) do
+          Tesla.put(input, "body")
+        end
+      end
+  - name: tainted tesla put body negative
+    code: |
+      alias Tesla
+      defmodule App do
+        def test(input) do
+          Tesla.put("https://example.com", input)
+        end
+      end
+    expect_no_match: true
   description: "Tesla.put/4 \u2014 tainted URL writes body to attacker-chosen host."
   imports:
   - Tesla
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.tesla_delete
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -564,18 +698,35 @@
       attribute:
       - Tesla
       - delete
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Tesla\n# uses tesla\ndefmodule App do\n  def test(input) do\n   \
-      \ Tesla.delete(input)\n  end\nend\n"
+  - name: tainted tesla delete url
+    code: |
+      alias Tesla
+      defmodule App do
+        def test(input) do
+          Tesla.delete(input)
+        end
+      end
+  - name: literal tesla delete url negative
+    code: |
+      alias Tesla
+      defmodule App do
+        def test() do
+          Tesla.delete("https://example.com")
+        end
+      end
+    expect_no_match: true
   description: "Tesla.delete/3 \u2014 tainted URL issues DELETE against attacker-chosen\
     \ endpoint."
   imports:
   - Tesla
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.req_put
   enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: ssrf
   severity: high
@@ -590,17 +741,28 @@
       - Req
       - put
   match_examples:
-  - name: declared shape
-    code: "alias Req\ndefmodule App do\n  def test(input) do\n    Req.put(input)\n\
-      \  end\nend\n"
-  description: "Req.put/2 \u2014 tainted URL writes body to attacker-chosen host;\
-    \ Req follows redirects by default."
+  - name: tainted req put url or options
+    code: |
+      alias Req
+      defmodule App do
+        def test(input) do
+          Req.put(input)
+        end
+      end
+  - name: tainted req put body negative
+    code: |
+      alias Req
+      defmodule App do
+        def test(input) do
+          Req.put(url: "https://example.com", body: input)
+        end
+      end
+    expect_no_match: true
+  description: "Disabled — Req.put/2 takes URL/options and body in one keyword-list operand, so current arg-level taint cannot distinguish `url:` taint from harmless `body:` taint."
   imports:
   - Req
-  disabled_reason:
-    code: over-broad
 - id: elixir.ssrf.req_delete
-  enabled: false
+  enabled: true
   language: elixir
   tag: ssrf
   severity: high
@@ -614,13 +776,28 @@
       attribute:
       - Req
       - delete
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: "alias Req\n# uses req\ndefmodule App do\n  def test(input) do\n    Req.delete(input)\n\
-      \  end\nend\n"
+  - name: tainted req delete url or options
+    code: |
+      alias Req
+      defmodule App do
+        def test(input) do
+          Req.delete(input)
+        end
+      end
+  - name: literal req delete url negative
+    code: |
+      alias Req
+      defmodule App do
+        def test() do
+          Req.delete("https://example.com")
+        end
+      end
+    expect_no_match: true
   description: "Req.delete/2 \u2014 tainted URL issues DELETE against attacker-chosen\
     \ endpoint."
   imports:
   - Req
-  disabled_reason:
-    code: over-broad

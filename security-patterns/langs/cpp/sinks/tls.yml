@@ -131,7 +131,7 @@
   description: "Poco::Net::Context(...) \u2014 flag when constructed with VERIFY_NONE\
     \ verification mode."
 - id: cpp.tls.cpphttplib_server_verify_off
-  enabled: false
+  enabled: true
   language: cpp
   tag: weak-tls
   severity: high
@@ -145,16 +145,25 @@
       attribute:
       - Client
       - enable_server_certificate_verification
+  constraints:
+  - arg_equals:
+      index: 0
+      value: "false"
   match_examples:
-  - name: generated direct match
+  - name: cpp-httplib verification disabled
     code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char\
       \ *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n\
       \  Client::enable_server_certificate_verification(false);\n}\n"
+  - name: cpp-httplib verification enabled negative
+    code: |
+      #include <httplib.h>
+      void example() {
+        Client::enable_server_certificate_verification(true);
+      }
+    expect_no_match: true
   description: "cpp-httplib Client::enable_server_certificate_verification(false)\
     \ \u2014 disables verification. Arg-equals constraint scopes the rule to the disabling\
     \ form; the `(true)` call does NOT fire."
   imports:
   - httplib.h
   - httplib
-  disabled_reason:
-    code: over-broad

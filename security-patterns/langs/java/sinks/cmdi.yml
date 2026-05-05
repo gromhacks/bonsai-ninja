@@ -22,6 +22,45 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.getRuntime.exec(\"safe\");\n  }\n}\n"
     expect_no_match: true
   description: "Runtime.getRuntime().exec(tainted) — shell-parsed on Unix for String form."
+
+- id: java.cmdi.runtime_exec_local
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: exec
+  constraints:
+  - receiver_name_in:
+    - runtime
+    - rt
+    - runTime
+    - javaRuntime
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: stored Runtime exec
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          rt.exec(input);
+        }
+      }
+    expect_match_text: [rt.exec]
+  - name: local Runtime exec literal negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          rt.exec("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Runtime.exec(tainted) through a stored Runtime receiver — attacker-controlled command execution."
+
 - id: java.cmdi.runtime_exec_string
   enabled: false
   disabled_reason:
@@ -133,6 +172,50 @@
     code: "class App {\n  void handle(String input) throws Exception {\n    ProcessBuilder.command(\"/bin/echo\");\n  }\n}\n"
     expect_no_match: true
   description: "ProcessBuilder.command(tainted) — replaces the command list with attacker-controlled executable tokens."
+- id: java.cmdi.processbuilder_command_local
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: command
+  constraints:
+  - receiver_name_in:
+    - pb
+    - builder
+    - processBuilder
+    - procBuilder
+    - commandBuilder
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: local process builder command
+    code: |
+      class App {
+        void handle(ProcessBuilder pb, String input) throws Exception {
+          pb.command(input);
+        }
+      }
+      class ProcessBuilder {
+        ProcessBuilder command(Object... args) { return this; }
+      }
+    expect_match_text: [pb.command]
+  - name: local process builder command literal negative
+    code: |
+      class App {
+        void handle(ProcessBuilder pb) throws Exception {
+          pb.command("/bin/echo");
+        }
+      }
+      class ProcessBuilder {
+        ProcessBuilder command(Object... args) { return this; }
+      }
+    expect_no_match: true
+  description: "ProcessBuilder.command(tainted) on a local builder variable — attacker-controlled executable tokens are later launched by start()."
 - id: java.cmdi.commons_exec_commandline_parse
   enabled: true
   language: java
