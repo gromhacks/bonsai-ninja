@@ -1,0 +1,40 @@
+- id: rust.queue.send_message
+  enabled: true
+  language: rust
+  tag: queue-injection
+  severity: high
+  packages: [aws_sdk_sqs]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "\\.send_message$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use aws_sdk_sqs;
+      use aws_sdk_sqs;
+      use aws_sdk_sqs::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.send_message(target);
+      }
+  description: "aws-sdk-sqs send_message — tainted queue target/body injects arbitrary broker payloads."
+
+  imports:
+  - aws_sdk_sqs
+- id: rust.queue.publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: queue-injection
+  severity: high
+  packages: [aws_sdk_sns, google_cloud_pubsub]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "\\.publish$"
+  description: "Disabled — cloud publish is real queue fanout, but bare `.publish` is too generic across Rust clients and app code."

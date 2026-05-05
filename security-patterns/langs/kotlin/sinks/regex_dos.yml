@@ -1,0 +1,71 @@
+- id: kotlin.redos.regex_constructor
+  enabled: true
+  language: kotlin
+  tag: redos
+  severity: medium
+  packages: [kotlin]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      name: Regex
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.*
+      class App {
+        fun handle(input: String) {
+          Regex(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import kotlin.*
+      class App {
+      fun handle(input: String) {
+        Regex("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Regex(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+
+  imports:
+  - kotlin
+- id: kotlin.redos.pattern_compile
+  enabled: true
+  language: kotlin
+  tag: redos
+  severity: medium
+  packages: ["java.util.regex"]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [Pattern, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.util.regex.*
+      // uses java.util.regex
+      class App {
+        fun handle(input: String) {
+          Pattern.compile(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.util.regex.*
+      // uses java.util.regex
+      class App {
+      fun handle(input: String) {
+        Pattern.compile("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Pattern.compile(tainted_pattern) — JVM regex compilation from user data can trigger ReDoS."

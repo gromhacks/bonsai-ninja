@@ -1,0 +1,55 @@
+# Erlang weak crypto and weak RNG.
+- id: erlang.crypto.hash_md5
+  enabled: true
+  language: erlang
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^crypto:hash"
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          crypto:hash(Input).
+  description: "crypto:hash — algorithm argument may be md5/sha (collision-broken); use sha256+."
+- id: erlang.crypto.des
+  enabled: true
+  language: erlang
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^crypto:block_encrypt"
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          crypto:block_encrypt(Input).
+  description: "crypto:block_encrypt — flag des_cbc/3des/rc4/aes_ecb (no integrity/weak or ECB mode)."
+- id: erlang.crypto.rand_uniform
+  enabled: true
+  language: erlang
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      regex: "^(random|rand):uniform"
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          random:uniform(Input).
+  description: "random:uniform / rand:uniform — PRNG seeded from wall clock; not for tokens/keys. Use crypto:strong_rand_bytes."

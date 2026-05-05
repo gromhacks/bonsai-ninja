@@ -1,0 +1,106 @@
+# Java memory-safety / lifecycle audit-pair sites.
+# These rules fire on the *use-after-transition* call (read / write /
+# get / etc.) and gate the finding on a preceding lifecycle transition
+# emitted by the adapter (close / cancel / unlock). The
+# `requires_state` constraint (engine P6 — see
+# docs/contributing/analysis-roadmap.mdx) is what flips an over-broad audit-pair
+# heuristic into a precise UAF / use-after-close / use-after-cancel
+# finding: the rule fires only when the binding is in the expected
+# lifecycle state at the call site.
+
+- id: java.memory.closeable_close
+  enabled: true
+  language: java
+  tag: memory-safety
+  severity: medium
+  packages: [java.io, java.sql, java.nio]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - requires_state:
+      name: in
+      expected: closed
+  match_examples:
+  - name: use after close
+    code: |
+      import java.io.*;
+      class App {
+        void handle(InputStream in) throws Exception {
+          in.close();
+          in.read();
+        }
+      }
+    expect_match_text: [in.read]
+  - name: read without preceding close
+    code: |
+      import java.io.*;
+      class App {
+        void handle(InputStream in) throws Exception {
+          in.read();
+        }
+      }
+    expect_no_match: true
+  description: "Use-after-close — `<Closeable>.read()` on a handle whose preceding `<Closeable>.close()` released the underlying file/socket/connection. Reads/writes on a closed handle throw IOException at runtime (CWE-416/CWE-404). The `requires_state` constraint gates the rule on the binding's actual `closed` lifecycle state, so explicit-close-then-reuse is flagged while RAII shapes (try-with-resources) stay silent."
+- id: java.memory.future_cancel
+  enabled: true
+  language: java
+  tag: memory-safety
+  severity: medium
+  packages: [java.util.concurrent]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      name: get
+  constraints:
+  - requires_state:
+      name: f
+      expected: cancelled
+  match_examples:
+  - name: get after cancel
+    code: |
+      import java.util.concurrent.*;
+      class App {
+        void handle(Future<?> f) throws Exception {
+          f.cancel(true);
+          f.get();
+        }
+      }
+    expect_match_text: [f.get]
+  - name: get without preceding cancel
+    code: |
+      import java.util.concurrent.*;
+      class App {
+        void handle(Future<?> f) throws Exception {
+          f.get();
+        }
+      }
+    expect_no_match: true
+  description: "Use-after-cancel — `Future.get()` on a future whose preceding `Future.cancel()` invalidated the result. The awaited value is stale and the call throws CancellationException (CWE-672). The `requires_state` constraint gates the rule on the binding's actual `cancelled` lifecycle state."
+- id: java.memory.lock_unlock
+  enabled: true
+  language: java
+  tag: memory-safety
+  severity: medium
+  packages: [java.util.concurrent.locks]
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.unlock$
+  match_examples:
+  - name: lock unlock site
+    code: |
+      import java.util.concurrent.locks.*;
+      class App {
+        void handle(Lock lock) {
+          lock.unlock();
+        }
+      }
+    expect_match_text: [lock.unlock]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. <Lock>.unlock() releases the mutex; subsequent guarded-region reads/writes without a re-lock are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair until a richer lattice query lands."
+# Connection.commit() / Connection.rollback() audit-pair sites live in
+# race.yml (tag: race) — transaction-after-error is a logical race shape.

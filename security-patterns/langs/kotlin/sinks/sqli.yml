@@ -1,0 +1,633 @@
+- id: kotlin.sqli.connection_createstatement
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Statement.executeQuery(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\nfun handle(input: String) {\n  Statement.executeQuery(\"safe\"\
+      )\n}\n}\n"
+    expect_no_match: true
+  description: JDBC Statement.executeQuery.
+- id: kotlin.sqli.statement_executeupdate
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Statement.executeUpdate(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\nfun handle(input: String) {\n  Statement.executeUpdate(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: JDBC Statement.executeUpdate with string-built SQL.
+- id: kotlin.sqli.statement_execute
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  packages:
+  - java.sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import java.sql.*\n// uses java.sql\nclass App {\n  fun handle(input: String)\
+      \ {\n    Statement.execute(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import java.sql.*\n// uses java.sql\nclass App {\nfun handle(input: String)\
+      \ {\n  Statement.execute(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: JDBC Statement.execute with string-built SQL.
+- id: kotlin.sqli.statement_executebatch
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - addBatch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Statement.addBatch(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\nfun handle(input: String) {\n  Statement.addBatch(\"safe\"\
+      )\n}\n}\n"
+    expect_no_match: true
+  description: JDBC Statement.addBatch accumulates raw SQL.
+- id: kotlin.sqli.jdbc_create_statement
+  enabled: false
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - createStatement
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Connection.createStatement(input)\n\
+      \  }\n}\n"
+  description: 'JDBC createStatement returns Statement (no params). `max_args: 2`
+    keeps the rule on canonical 0/1/2-arg JDBC overloads.'
+  disabled_reason:
+    code: over-broad
+- id: kotlin.sqli.jdbc_prepare_call
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - prepareCall
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Connection.prepareCall(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\nfun handle(input: String) {\n  Connection.prepareCall(\"safe\"\
+      )\n}\n}\n"
+    expect_no_match: true
+  description: "JDBC Connection.prepareCall \u2014 flag if SQL is string-built. Typed-receiver\
+    \ sqli; `min_args: 1` rejects 0-arg decoys."
+- id: kotlin.sqli.spring_jdbctemplate_query
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\n  fun handle(input: String) {\n    JdbcTemplate.query(input)\n  }\n\
+      }\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\nfun handle(input: String) {\n  JdbcTemplate.query(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: JdbcTemplate.query(sql) raw form.
+- id: kotlin.sqli.spring_jdbctemplate_queryforlist
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - queryForList
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*\nclass App {\n  fun handle(input: String)\
+      \ {\n    JdbcTemplate.queryForList(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\nclass App {\nfun handle(input: String)\
+      \ {\n  JdbcTemplate.queryForList(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Spring JdbcTemplate.queryForList(sql) raw form.
+- id: kotlin.sqli.spring_jdbctemplate_queryforobject
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - queryForObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*\nclass App {\n  fun handle(input: String)\
+      \ {\n    JdbcTemplate.queryForObject(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\nclass App {\nfun handle(input: String)\
+      \ {\n  JdbcTemplate.queryForObject(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Spring JdbcTemplate.queryForObject(sql) raw form.
+- id: kotlin.sqli.spring_jdbctemplate_update
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - update
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\n  fun handle(input: String) {\n    JdbcTemplate.update(input)\n  }\n\
+      }\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\nfun handle(input: String) {\n  JdbcTemplate.update(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: JdbcTemplate.update(sql) raw.
+- id: kotlin.sqli.spring_jdbctemplate_execute
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\n  fun handle(input: String) {\n    JdbcTemplate.execute(input)\n  }\n\
+      }\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\nfun handle(input: String) {\n  JdbcTemplate.execute(\"safe\")\n}\n\
+      }\n"
+    expect_no_match: true
+  description: Spring JdbcTemplate.execute(sql) raw form.
+- id: kotlin.sqli.hibernate_create_sql_query
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  packages:
+  - org.hibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - createSQLQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.hibernate.*\nclass App {\n  fun handle(input: String) {\n  \
+      \  Session.createSQLQuery(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.hibernate.*\nclass App {\nfun handle(input: String) {\n  Session.createSQLQuery(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Hibernate createSQLQuery \u2014 raw SQL. Typed-receiver sqli; `min_args:\
+    \ 1` rejects 0-arg decoys."
+- id: kotlin.sqli.hibernate_create_native_query
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  packages:
+  - org.hibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^Session\.createNativeQuery$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.hibernate.*\nclass App {\n  fun handle(input: String) {\n  \
+      \  Session.createNativeQuery(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.hibernate.*\nclass App {\nfun handle(input: String) {\n  Session.createNativeQuery(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Hibernate Session.createNativeQuery \u2014 raw SQL. Typed-receiver\
+    \ sqli; `min_args: 1` rejects 0-arg decoys."
+- id: kotlin.sqli.mybatis_select_one
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: sql-injection
+  severity: medium
+  packages:
+  - org.apache.ibatis
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlSession
+      - selectOne
+  description: "Disabled \u2014 MyBatis selectOne usually safe; flag with $ {} interpolation\
+    \ analysis."
+- id: kotlin.sqli.jpa_create_native_query
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  frameworks:
+  - jpa
+  - hibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^EntityManager\.createNativeQuery$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    EntityManager.createNativeQuery(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\nfun handle(input: String) {\n  EntityManager.createNativeQuery(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "EntityManager.createNativeQuery \u2014 raw SQL with interpolation."
+- id: kotlin.sqli.exposed_exec
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.jetbrains.exposed
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Transaction
+      - exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.jetbrains.exposed.*\nclass App {\n  fun handle(input: String)\
+      \ {\n    Transaction.exec(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.jetbrains.exposed.*\nclass App {\nfun handle(input: String)\
+      \ {\n  Transaction.exec(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Exposed Transaction.exec(rawSql) \u2014 raw SQL execution."
+- id: kotlin.sqli.exposed_transaction_exec_bare
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.jetbrains.exposed
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - transaction
+      - exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.jetbrains.exposed.*\nclass App {\n  fun handle(input: String)\
+      \ {\n    transaction.exec(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.jetbrains.exposed.*\nclass App {\nfun handle(input: String)\
+      \ {\n  transaction.exec(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Exposed `Database.transaction { exec(rawSql) }` \u2014 tail-match\
+    \ on the transaction-receiver lambda; raw SQL bypasses the type-safe DSL."
+- id: kotlin.sqli.jooq_fetch_string
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.jooq
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DSLContext
+      - fetch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.jooq.*\n// uses org.jooq\nclass App {\n  fun handle(input: String)\
+      \ {\n    DSLContext.fetch(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.jooq.*\n// uses org.jooq\nclass App {\nfun handle(input: String)\
+      \ {\n  DSLContext.fetch(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "jOOQ DSLContext.fetch(String) \u2014 raw SQL bypasses type-safe builder."
+- id: kotlin.sqli.spring_jdbctemplate_batchupdate
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - batchUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbc template batch update raw sql
+    code: "import org.springframework.jdbc.*\nclass App {\n  fun handle(sql: String)\
+      \ {\n    JdbcTemplate.batchUpdate(sql)\n  }\n}\n"
+    expect_match_text:
+    - JdbcTemplate.batchUpdate
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\nclass App {\nfun handle(sql: String)\
+      \ {\n  JdbcTemplate.batchUpdate(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Spring JdbcTemplate.batchUpdate(sql...) \u2014 raw SQL string batch\
+    \ form; use placeholders with BatchPreparedStatementSetter or argument arrays."
+- id: kotlin.sqli.namedparameterjdbctemplate_query
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NamedParameterJdbcTemplate
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: named parameter jdbc template query raw sql
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\n  fun handle(sql: String, params: Any) {\n    NamedParameterJdbcTemplate.query(sql,\
+      \ params)\n  }\n}\n"
+    expect_match_text:
+    - NamedParameterJdbcTemplate.query
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\nfun handle(sql: String, params: Any) {\n  NamedParameterJdbcTemplate.query(\"\
+      safe\", params)\n}\n}\n"
+    expect_no_match: true
+  description: "NamedParameterJdbcTemplate.query(sql, ...) \u2014 SQL text remains\
+    \ injectable when built from tainted input; named parameters only protect values."
+- id: kotlin.sqli.namedparameterjdbctemplate_update
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NamedParameterJdbcTemplate
+      - update
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: named parameter jdbc template update raw sql
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\n  fun handle(sql: String, params: Any) {\n    NamedParameterJdbcTemplate.update(sql,\
+      \ params)\n  }\n}\n"
+    expect_match_text:
+    - NamedParameterJdbcTemplate.update
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*\n// uses org.springframework.jdbc\nclass\
+      \ App {\nfun handle(sql: String, params: Any) {\n  NamedParameterJdbcTemplate.update(\"\
+      safe\", params)\n}\n}\n"
+    expect_no_match: true
+  description: "NamedParameterJdbcTemplate.update(sql, ...) \u2014 named placeholders\
+    \ bind values but do not sanitize tainted SQL text."
+- id: kotlin.sqli.r2dbc_databaseclient_sql
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.r2dbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DatabaseClient
+      - sql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: r2dbc database client sql
+    code: "import org.springframework.r2dbc.*\nclass App {\n  fun handle(sql: String):\
+      \ Any? {\n    return DatabaseClient.sql(sql)\n  }\n}\n"
+    expect_match_text:
+    - DatabaseClient.sql
+  - name: arg tainted literal negative
+    code: "import org.springframework.r2dbc.*\nclass App {\nfun handle(sql: String):\
+      \ Any? {\n  return DatabaseClient.sql(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Spring R2DBC DatabaseClient.sql(sql) \u2014 SQL text remains injectable\
+    \ when built from tainted input; bind values separately."
+- id: kotlin.sqli.jdbi_handle_createquery
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.jdbi
+  - org.hibernate
+  - javax.persistence
+  - jakarta.persistence
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: createQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbi handle create query raw sql
+    code: "import org.jdbi.*\nclass App {\n  fun handle(handle: Handle, sql: String):\
+      \ Any? {\n    return handle.createQuery(sql)\n  }\n}\nclass Handle {\n  fun\
+      \ createQuery(vararg args: Any?): Any? = null\n}\n"
+    expect_match_text:
+    - handle.createQuery
+  - name: arg tainted literal negative
+    code: "import org.jdbi.*\nclass App {\nfun handle(handle: Handle, sql: String):\
+      \ Any? {\n  return handle.createQuery(\"safe\")\n}\n}\nclass Handle {\nfun createQuery(vararg\
+      \ args: Any?): Any? = null\n}\n"
+    expect_no_match: true
+  description: "JDBI Handle.createQuery(sql) \u2014 raw SQL text remains injectable\
+    \ when built from attacker-controlled input. Merged collision aliases: kotlin.sqli.hibernate_create_query,\
+    \ kotlin.sqli.jpa_create_query."
+  aliases:
+  - kotlin.sqli.hibernate_create_query
+  - kotlin.sqli.jpa_create_query
+  frameworks:
+  - jpa
+  - hibernate

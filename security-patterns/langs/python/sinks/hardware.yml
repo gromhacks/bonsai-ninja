@@ -1,0 +1,230 @@
+# Python hardware-control / bus-write sinks (GPIO, PWM, I2C/SMBus, SPI, UART).
+- id: python.hardware.rpigpio_output
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [RPi.GPIO]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [GPIO, output]
+  match_examples:
+  - name: hardware rpigpio output
+    code: |
+      import RPi.GPIO
+      def example(user_input):
+          return GPIO.output(user_input)
+  description: "RPi.GPIO GPIO.output(pin, value) — tainted pin/value drives a physical output."
+
+- id: python.hardware.smbus_write_byte
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [smbus, smbus2]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: write_byte
+  match_examples:
+  - name: hardware smbus write byte
+    code: |
+      import smbus
+      def example(user_input):
+          return write_byte(user_input)
+  description: "SMBus write_byte — tainted bytes are sent to an I2C/SMBus device."
+
+- id: python.hardware.smbus_write_byte_data
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [smbus, smbus2]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: write_byte_data
+  match_examples:
+  - name: hardware smbus write byte data
+    code: |
+      import smbus
+      def example(user_input):
+          return write_byte_data(user_input)
+  description: "SMBus write_byte_data — tainted register/value mutates an attached peripheral."
+
+- id: python.hardware.smbus_write_word_data
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [smbus, smbus2]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: write_word_data
+  match_examples:
+  - name: hardware smbus write word data
+    code: |
+      import smbus
+      def example(user_input):
+          return write_word_data(user_input)
+  description: "SMBus write_word_data — tainted 16-bit register write controls hardware state."
+
+- id: python.hardware.smbus_write_i2c_block_data
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [smbus, smbus2]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: write_i2c_block_data
+  match_examples:
+  - name: hardware smbus write i2c block data
+    code: |
+      import smbus
+      def example(user_input):
+          return write_i2c_block_data(user_input)
+  description: "SMBus write_i2c_block_data — tainted block payload is sent to a peripheral over I2C."
+
+- id: python.hardware.spidev_writebytes
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [spidev]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: writebytes
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: hardware spidev writebytes
+    code: |
+      import spidev
+      def example(user_input):
+          return writebytes(user_input)
+  - name: spidev writebytes literal negative
+    code: |
+      import spidev
+
+      def example(user_input):
+          return writebytes('safe')
+    expect_no_match: true
+  description: "spidev writebytes — tainted SPI frame bytes are sent to external hardware."
+
+- id: python.hardware.spidev_xfer2
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [spidev]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: xfer2
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: hardware spidev xfer2
+    code: |
+      import spidev
+      def example(user_input):
+          return xfer2(user_input)
+  - name: spidev xfer2 literal negative
+    code: |
+      import spidev
+
+      def example(user_input):
+          return xfer2('safe')
+    expect_no_match: true
+  description: "spidev xfer2 — tainted full-duplex SPI transfer bytes drive a peripheral."
+
+- id: python.hardware.pyserial_write
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [pyserial]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [serial, write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: hardware pyserial write
+    code: |
+      import pyserial
+      def example(user_input):
+          return serial.write(user_input)
+  - name: pyserial write literal negative
+    code: |
+      import pyserial
+
+      def example(user_input):
+          return serial.write('safe')
+    expect_no_match: true
+  description: "serial.write(...) — tainted bytes are transmitted to a UART/serial-attached device."
+
+- id: python.hardware.pigpio_set_pwm_dutycycle
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [pigpio]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: set_PWM_dutycycle
+  match_examples:
+  - name: hardware pigpio set pwm dutycycle
+    code: |
+      import pigpio
+      def example(user_input):
+          return set_PWM_dutycycle(user_input)
+  description: "pigpio set_PWM_dutycycle — tainted duty cycle or pin selection drives PWM hardware."
+
+- id: python.hardware.pigpio_set_servo_pulsewidth
+  enabled: true
+  language: python
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [pigpio]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: set_servo_pulsewidth
+  match_examples:
+  - name: hardware pigpio set servo pulsewidth
+    code: |
+      import pigpio
+      def example(user_input):
+          return set_servo_pulsewidth(user_input)
+  description: "pigpio set_servo_pulsewidth — tainted pulse width commands a physical servo/actuator."

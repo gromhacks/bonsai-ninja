@@ -1,0 +1,333 @@
+# Dart SQL-injection sinks.
+- id: dart.sqli.sqflite_raw_query
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [sqflite]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: rawQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted sqflite raw query
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawQuery(input); }
+  - name: literal sqflite raw query negative
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawQuery("SELECT * FROM users WHERE id = ?", [input]); }
+    expect_no_match: true
+  description: "sqflite Database.rawQuery — concatenated SQL."
+
+  imports:
+  - sqflite/sqflite.dart
+- id: dart.sqli.sqflite_raw_insert
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [sqflite]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: rawInsert
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted sqflite raw insert
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawInsert(input); }
+  - name: literal sqflite raw insert negative
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawInsert("INSERT INTO users(name) VALUES (?)", [input]); }
+    expect_no_match: true
+  description: "sqflite Database.rawInsert."
+
+  imports:
+  - sqflite/sqflite.dart
+- id: dart.sqli.sqflite_raw_update
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [sqflite]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: rawUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted sqflite raw update
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawUpdate(input); }
+  - name: literal sqflite raw update negative
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawUpdate("UPDATE users SET name = ? WHERE id = 1", [input]); }
+    expect_no_match: true
+  description: "sqflite Database.rawUpdate."
+
+  imports:
+  - sqflite/sqflite.dart
+- id: dart.sqli.sqflite_raw_delete
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [sqflite]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: rawDelete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted sqflite raw delete
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawDelete(input); }
+  - name: literal sqflite raw delete negative
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      void test(String input) { rawDelete("DELETE FROM users WHERE id = ?", [input]); }
+    expect_no_match: true
+  description: "sqflite Database.rawDelete."
+
+  imports:
+  - sqflite/sqflite.dart
+- id: dart.sqli.sqlite3_execute
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: dart.sqli.postgres_execute
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  description: "Subsumed by dart.sqli.postgres_execute — same receiver-agnostic regex covers all Dart SQL driver `Connection.execute` shapes."
+- id: dart.sqli.drift_custom_statement
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [drift, moor]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: customStatement
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted drift custom statement
+    code: |
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      void test(String input) { customStatement(input); }
+  - name: literal drift custom statement negative
+    code: |
+      import 'package:drift/drift.dart';
+      void test() { customStatement("DELETE FROM sessions WHERE expired = 1"); }
+    expect_no_match: true
+  description: "Drift/Moor customStatement — raw SQL."
+
+  imports:
+  - drift/drift.dart
+- id: dart.sqli.drift_custom_select
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [drift, moor]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: customSelect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted drift custom select
+    code: |
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      import 'package:drift/drift.dart';
+      void test(String input) { customSelect(input); }
+  - name: literal drift custom select negative
+    code: |
+      import 'package:drift/drift.dart';
+      void test(String input) { customSelect("SELECT * FROM users WHERE id = ?", variables: [input]); }
+    expect_no_match: true
+  description: "Drift/Moor customSelect — raw SQL."
+
+  imports:
+  - drift/drift.dart
+- id: dart.sqli.postgres_execute
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [postgres, sqlite3, mysql_client]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted postgres execute
+    code: |
+      import 'package:postgres/postgres.dart';
+      void test(String input) { connection.execute(input); }
+  - name: literal postgres execute negative
+    code: |
+      import 'package:postgres/postgres.dart';
+      void test(String input) { connection.execute("SELECT * FROM users WHERE id = @id", parameters: {"id": input}); }
+    expect_no_match: true
+  description: "Dart driver Connection.execute (postgres / sqlite3 / mysql_client) with tainted SQL string — driver runs concatenated SQL. Use parameterised statements / placeholders. Subsumes dart.sqli.sqlite3_execute and dart.sqli.mysql_client_execute."
+  aliases:
+  - dart.sqli.sqlite3_execute
+  - dart.sqli.mysql_client_execute
+
+  imports:
+  - postgres/postgres.dart
+- id: dart.sqli.postgres_query
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [postgres, mysql1]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted postgres query
+    code: |
+      import 'package:postgres/postgres.dart';
+      void test(String input) { connection.query(input); }
+  - name: literal postgres query negative
+    code: |
+      import 'package:postgres/postgres.dart';
+      void test(String input) { connection.query("SELECT * FROM users WHERE id = @id", substitutionValues: {"id": input}); }
+    expect_no_match: true
+  description: "Dart driver Connection.query (postgres / mysql1) with tainted SQL string. Subsumes dart.sqli.mysql1_query."
+  aliases:
+  - dart.sqli.mysql1_query
+
+  imports:
+  - postgres/postgres.dart
+- id: dart.sqli.postgres_mapped_results_query
+  enabled: true
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [postgres]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: mappedResultsQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted postgres mapped results query
+    code: |
+      import 'package:postgres/postgres.dart';
+      import 'package:postgres/postgres.dart';
+      import 'package:postgres/postgres.dart';
+      import 'package:postgres/postgres.dart';
+      import 'package:postgres/postgres.dart';
+      void test(String input) { mappedResultsQuery(input); }
+  - name: literal postgres mapped results query negative
+    code: |
+      import 'package:postgres/postgres.dart';
+      void test() { mappedResultsQuery("SELECT * FROM users"); }
+    expect_no_match: true
+  description: "postgres Connection.mappedResultsQuery."
+
+  imports:
+  - postgres/postgres.dart
+- id: dart.sqli.mysql_client_execute
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: dart.sqli.postgres_execute
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [mysql_client]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  description: "Subsumed by dart.sqli.postgres_execute — same receiver-agnostic regex covers `mysql_client`, `postgres`, and `sqlite3` Connection.execute shapes; canonical rule should add mysql_client to its packages list (already covered by dart.sqli.postgres_execute's gate)."
+- id: dart.sqli.mysql1_query
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: dart.sqli.postgres_query
+  language: dart
+  tag: sql-injection
+  severity: high
+  packages: [mysql1]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
+  description: "Subsumed by dart.sqli.postgres_query — same receiver-agnostic regex covers `mysql1` and `postgres` Connection.query shapes."
+  imports:
+  - mysql1/mysql1.dart

@@ -1,0 +1,60 @@
+- id: cpp.queue.aws_sqs_send_message
+  enabled: true
+  language: cpp
+  tag: queue-injection
+  severity: high
+  packages: [aws-sdk-cpp-sqs]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "^SQSClient::SendMessage$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <aws-sdk-cpp-sqs.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        SQSClient::SendMessage(arg);
+      }
+  description: "AWS SDK C++ SQSClient::SendMessage — tainted queue target/body injects arbitrary SQS messages."
+
+- id: cpp.queue.aws_sns_publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: queue-injection
+  severity: high
+  packages: [aws-sdk-cpp-sns]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      attribute: [SNSClient, Publish]
+  description: "Disabled — SNS Publish is real queue fanout, but `Publish` is shared across several non-queue APIs in C++ bindings."
+
+- id: cpp.queue.azure_servicebus_send_message
+  enabled: true
+  language: cpp
+  tag: queue-injection
+  severity: high
+  packages: [azure-messaging-servicebus-cpp]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "^ServiceBusSender::SendMessage$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <azure-messaging-servicebus-cpp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        ServiceBusSender::SendMessage(arg);
+      }
+  description: "Azure ServiceBusSender::SendMessage — tainted entity path/payload injects arbitrary Service Bus messages."

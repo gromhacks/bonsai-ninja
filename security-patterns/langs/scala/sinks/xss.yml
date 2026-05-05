@@ -1,0 +1,399 @@
+- id: scala.xss.twirl_html_constructor
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  frameworks:
+  - play
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: Html
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    new Html(input)\n  }\n}\nclass Html(args: Any*)\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    new Html(\"safe\")\n  }\n}\nclass Html(args: Any*)\n"
+    expect_no_match: true
+  description: "Twirl Html(tainted) — bypasses auto-escaping."
+- id: scala.xss.twirl_html_apply
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages: [play.twirl.api]
+  frameworks:
+  - play
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Html
+      - apply
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play.twirl.api._
+      // uses play.twirl.api
+      object App {
+        def handle(input: String): Unit = {
+          Html.apply(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import play.twirl.api._
+      // uses play.twirl.api
+      object App {
+        def handle(input: String): Unit = {
+          Html.apply("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Twirl Html.apply(tainted) — companion-object form of Html(...)."
+- id: scala.xss.scalatags_raw
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages:
+  - scalatags
+  - play.twirl.api
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scalatags._
+      object App {
+        def handle(input: String): Unit = {
+          raw(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import scalatags._
+      object App {
+        def handle(input: String): Unit = {
+          raw("safe")
+        }
+      }
+    expect_no_match: true
+  description: "ScalaTags raw(str) — inserts unescaped HTML. Merged collision aliases: scala.xss.twirl_raw_helper."
+  aliases:
+  - scala.xss.twirl_raw_helper
+  frameworks:
+  - play
+- id: scala.xss.scalatags_rawfrag_new
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages:
+  - scalatags
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: RawFrag
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scalatags._
+      object App {
+        def handle(input: String): Unit = {
+          new RawFrag(input)
+        }
+      }
+      class RawFrag(args: Any*)
+  - name: arg tainted literal negative
+    code: |
+      import scalatags._
+      object App {
+        def handle(input: String): Unit = {
+          new RawFrag("safe")
+        }
+      }
+      class RawFrag(args: Any*)
+    expect_no_match: true
+  description: "ScalaTags RawFrag(str) constructor — unescaped HTML."
+- id: scala.xss.akka_http_complete_html
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  frameworks:
+  - akka-http
+  packages:
+  - com.typesafe.akka
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpEntity
+      - apply
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.typesafe.akka._
+      // uses com.typesafe.akka
+      object App {
+        def handle(input: String): Unit = {
+          HttpEntity.apply("text/html", input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.typesafe.akka._
+      // uses com.typesafe.akka
+      object App {
+        def handle(input: String): Unit = {
+          HttpEntity.apply(input, "safe")
+        }
+      }
+    expect_no_match: true
+  description: "akka-http HttpEntity(ContentTypes.text/html, tainted) — interpolated HTML response body; risk only if marshalled with text/html and tainted."
+- id: scala.xss.spring_responseentity_ok_html_concat
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.web
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: responseentity ok raw html
+    code: |
+      import org.springframework.web._
+      object App {
+        def handle(name: String): Any = {
+          ResponseEntity.ok(s"<p>$name</p>")
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.ok
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web._
+      object App {
+        def handle(name: String): Any = {
+          ResponseEntity.ok("<p>safe</p>")
+        }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  imports:
+  - org.springframework.web
+- id: scala.xss.webflux_serverresponse_bodyvalue_html_concat
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServerResponse
+      - bodyValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: serverresponse raw html body value
+    code: |
+      import org.springframework.web.reactive._
+      object App {
+        def handle(name: String): Any = {
+          ServerResponse.bodyValue(s"<p>$name</p>")
+        }
+      }
+    expect_match_text:
+    - ServerResponse.bodyValue
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.reactive._
+      object App {
+        def handle(name: String): Any = {
+          ServerResponse.bodyValue("<p>safe</p>")
+        }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: scala.xss.jaxrs_response_ok_html_concat
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages:
+  - javax.ws.rs
+  - jakarta.ws.rs
+  - io.quarkus
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jaxrs raw html response body
+    code: |
+      import javax.ws.rs._
+      object App {
+        def handle(name: String): Any = {
+          Response.ok(s"<h1>$name</h1>")
+        }
+      }
+    expect_match_text:
+    - Response.ok
+  - name: arg tainted literal negative
+    code: |
+      import javax.ws.rs._
+      object App {
+        def handle(name: String): Any = {
+          Response.ok("<h1>safe</h1>")
+        }
+      }
+    expect_no_match: true
+  description: "JAX-RS / Quarkus Response.ok(raw HTML concat) — reflected HTML response body built from attacker-controlled text."
+- id: scala.xss.play_results_ok_html_concat
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  frameworks:
+  - play
+  packages:
+  - play
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: Ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: play ok raw html
+    code: |
+      import play._
+      object App {
+        def handle(name: String): Unit = {
+          Ok(s"<p>$name</p>")
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import play._
+      object App {
+        def handle(name: String): Unit = {
+          Ok("<p>safe</p>")
+        }
+      }
+    expect_no_match: true
+  description: "Play Ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: scala.xss.vertx_response_end_html_concat
+  enabled: true
+  language: scala
+  tag: xss
+  severity: high
+  packages:
+  - io.vertx
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: end
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vertx response end raw html
+    code: |
+      import io.vertx._
+      object App {
+        def handle(response: HttpServerResponse, name: String): Unit = {
+          response.end(s"<p>$name</p>")
+        }
+      }
+      class HttpServerResponse {
+        def end(args: Any*): Unit = {}
+      }
+    expect_match_text:
+    - response.end
+  - name: arg tainted literal negative
+    code: |
+      import io.vertx._
+      object App {
+        def handle(response: HttpServerResponse, name: String): Unit = {
+          response.end("<p>safe</p>")
+        }
+      }
+      class HttpServerResponse {
+        def end(args: Any*): Unit = {}
+      }
+    expect_no_match: true
+  description: "Vert.x HttpServerResponse.end(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: scala.xss.html_string_concat
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: +
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    +(\"<b>\" + input)\n  }\n}\n"
+  description: Disabled broad concat shape. Raw HTML response APIs should be modeled as sinks; `+` alone is not an API sink in the taint-first rulepack.

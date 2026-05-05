@@ -1,0 +1,83 @@
+- id: php.header.setcookie
+  enabled: true
+  language: php
+  tag: header-injection
+  severity: medium
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      name: setcookie
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.header.setcookie value example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  setcookie('session', $input);\n}\n"
+  - name: php.header.setcookie literal value negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  setcookie('session', 'safe');\n}\n"
+    expect_no_match: true
+  description: "setcookie(name, tainted_value) — CRLF in cookie value can lead to response header injection."
+- id: php.header.setrawcookie
+  enabled: true
+  language: php
+  tag: header-injection
+  severity: high
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      name: setrawcookie
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.header.setrawcookie value example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  setrawcookie('session', $input);\n}\n"
+  - name: php.header.setrawcookie literal value negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  setrawcookie('session', 'safe');\n}\n"
+    expect_no_match: true
+  description: "setrawcookie(name, tainted_value) — explicit no-encoding cookie value can inject response headers."
+- id: php.header.symfony_response_headers_set
+  enabled: true
+  language: php
+  tag: header-injection
+  severity: high
+  packages:
+  - symfony/http-foundation
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - headers
+      - set
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.header.symfony_response_headers_set value example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $headers->set("X-Name", $input);
+      }
+  - name: php.header.symfony_response_headers_set literal value negative
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($input, $url, $id, $payload, $request) {
+        $headers->set("X-Name", "safe");
+      }
+    expect_no_match: true
+  description: "Symfony Response::headers->set(name, tainted_value) — CRLF response header injection."
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation

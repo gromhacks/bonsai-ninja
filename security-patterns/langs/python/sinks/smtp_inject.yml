@@ -1,0 +1,86 @@
+- id: python.smtpinj.smtp_sendmail_message
+  enabled: true
+  language: python
+  tag: smtp-injection
+  severity: medium
+  imports: [smtplib]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [SMTP, sendmail]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: smtpinj smtp sendmail message
+    code: |
+      import smtplib
+      def example(smtp, user_input):
+          return smtp.sendmail("from@example.com", ["to@example.com"], user_input)
+    expect_match_text: [smtp.sendmail]
+  - name: smtp sendmail message literal negative
+    code: |
+      import smtplib
+      def example(smtp, user_input):
+          return smtp.sendmail("from@example.com", ["to@example.com"], "Subject: safe\n\nbody")
+    expect_no_match: true
+  description: "SMTP.sendmail(from_addr, to_addrs, msg=tainted_message) — tainted message headers can inject SMTP headers or commands."
+
+- id: python.smtpinj.smtp_sendmail_from_addr
+  enabled: true
+  language: python
+  tag: smtp-injection
+  severity: medium
+  imports: [smtplib]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [SMTP, sendmail]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: smtpinj smtp sendmail from addr
+    code: |
+      import smtplib
+      def example(smtp, user_input):
+          return smtp.sendmail(user_input, ["to@example.com"], "Subject: safe\n\nbody")
+    expect_match_text: [smtp.sendmail]
+  - name: smtp sendmail from addr literal negative
+    code: |
+      import smtplib
+      def example(smtp, user_input):
+          return smtp.sendmail("from@example.com", ["to@example.com"], "Subject: safe\n\nbody")
+    expect_no_match: true
+  description: "SMTP.sendmail(from_addr=tainted_sender, to_addrs, msg) — tainted envelope sender can inject SMTP envelope data."
+
+- id: python.smtpinj.smtp_sendmail_to_addrs
+  enabled: true
+  language: python
+  tag: smtp-injection
+  severity: medium
+  imports: [smtplib]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [SMTP, sendmail]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: smtpinj smtp sendmail to addrs
+    code: |
+      import smtplib
+      def example(smtp, user_input):
+          return smtp.sendmail("from@example.com", user_input, "Subject: safe\n\nbody")
+    expect_match_text: [smtp.sendmail]
+  - name: smtp sendmail to addrs literal negative
+    code: |
+      import smtplib
+      def example(smtp, user_input):
+          return smtp.sendmail("from@example.com", ["to@example.com"], "Subject: safe\n\nbody")
+    expect_no_match: true
+  description: "SMTP.sendmail(from_addr, to_addrs=tainted_recipients, msg) — tainted envelope recipients can inject extra SMTP recipients."

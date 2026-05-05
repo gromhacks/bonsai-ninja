@@ -1,0 +1,910 @@
+- id: php.sqli.mysqli_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - mysqli
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.mysqli_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->query(\"SELECT * FROM users WHERE id = \" . $id);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
+    expect_no_match: true
+  description: mysqli::query — use prepared statements.
+- id: php.sqli.mysqli_real_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - mysqli
+      - real_query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.mysqli_real_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->real_query(\"SELECT * FROM users WHERE id = \" . $id);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->real_query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
+    expect_no_match: true
+  description: mysqli::real_query.
+- id: php.sqli.mysqli_multi_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - mysqli
+      - multi_query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.mysqli_multi_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->multi_query(\"SELECT * FROM users WHERE id = \" . $id);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->multi_query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
+    expect_no_match: true
+  description: mysqli::multi_query — multi-statement; severe blast radius.
+- id: php.sqli.mysqli_query_proc
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: mysqli_query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.sqli.mysqli_query_proc example
+    code: "<?php\nfunction example($conn, $input, $url, $id, $payload, $request) {\n  mysqli_query($conn, $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($conn, $input, $url, $id, $payload, $request) {\n  mysqli_query($conn, \"SELECT * FROM users WHERE id = 1\");\n}\n"
+    expect_no_match: true
+  description: Procedural mysqli_query().
+- id: php.sqli.pdo_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PDO
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.pdo_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  PDO::query(\"SELECT * FROM users WHERE id = \" . $id);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  PDO::query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
+    expect_no_match: true
+  description: 'PDO::query() with tainted SQL — raw string becomes the prepared statement; SQL injection regardless of the driver. TODO(only_when_packaged): PHP built-in PDO class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `[''PDO'', ''query'']` match only.'
+- id: php.sqli.pdo_prepare_concat
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: sql-injection
+  severity: medium
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PDO
+      - prepare
+  description: Disabled — prepare() is safe when bound; flag only on tainted string.
+- id: php.sqli.mysql_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: mysql_query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.mysql_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mysql_query($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mysql_query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
+    expect_no_match: true
+  description: Legacy ext/mysql mysql_query — removed in PHP 7.
+- id: php.sqli.pg_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: pg_query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.pg_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  pg_query($input);\n}\n"
+  - name: pg query literal sql negative
+    code: "<?php\nfunction example($input) {\n  pg_query(\"SELECT 1\");\n}\n"
+    expect_no_match: true
+  description: pg_query — Postgres raw.
+- id: php.sqli.pg_query_conn_sql
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: pg_query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.sqli.pg_query conn sql example
+    code: "<?php\nfunction example($conn, $input) {\n  pg_query($conn, $input);\n}\n"
+  - name: pg query literal sql negative
+    code: "<?php\nfunction example($conn, $input) {\n  pg_query($conn, \"SELECT 1\");\n}\n"
+    expect_no_match: true
+  description: pg_query(connection, tainted_sql) — Postgres raw SQL.
+- id: php.sqli.pg_send_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: pg_send_query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.pg_send_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  pg_send_query($input);\n}\n"
+  - name: pg send query literal sql negative
+    code: "<?php\nfunction example($input) {\n  pg_send_query(\"SELECT 1\");\n}\n"
+    expect_no_match: true
+  description: pg_send_query() — async Postgres query with tainted SQL allows SQL injection.
+- id: php.sqli.pg_send_query_conn_sql
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: pg_send_query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.sqli.pg_send_query conn sql example
+    code: "<?php\nfunction example($conn, $input) {\n  pg_send_query($conn, $input);\n}\n"
+  - name: pg send query literal sql negative
+    code: "<?php\nfunction example($conn, $input) {\n  pg_send_query($conn, \"SELECT 1\");\n}\n"
+    expect_no_match: true
+  description: pg_send_query(connection, tainted_sql) — async Postgres query with tainted SQL allows SQL injection.
+- id: php.sqli.sqlite_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SQLite3
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.sqlite_query example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  SQLite3::query(\"SELECT * FROM users WHERE id = \" . $id);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  SQLite3::query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
+    expect_no_match: true
+  description: 'SQLite3::query. TODO(only_when_packaged): PHP built-in SQLite3 class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `[''SQLite3'', ''query'']` match only.'
+- id: php.sqli.doctrine_dbal_execute_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - doctrine/dbal
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^Connection::executeQuery$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.doctrine_dbal_execute_query example
+    code: |
+      <?php
+      use doctrine\dbal;
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::executeQuery("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::executeQuery("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: Doctrine DBAL Connection::executeQuery — flag if SQL string concatenated.
+  imports:
+  - doctrine\dbal
+  - doctrine
+- id: php.sqli.doctrine_dbal_execute_statement
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - doctrine/dbal
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - executeStatement
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.doctrine_dbal_execute_statement example
+    code: |
+      <?php
+      use doctrine\dbal;
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::executeStatement("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::executeStatement("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: Doctrine DBAL Connection::executeStatement.
+  imports:
+  - doctrine\dbal
+  - doctrine
+- id: php.sqli.doctrine_orm_dql_concat
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - doctrine/orm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - EntityManager
+      - createQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.doctrine_orm_dql_concat example
+    code: |
+      <?php
+      use doctrine\orm;
+      use doctrine\orm;
+      function example($input, $url, $id, $payload, $request) {
+        EntityManager::createQuery("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use doctrine\orm;
+      function example($input, $url, $id, $payload, $request) {
+        EntityManager::createQuery("SELECT u FROM User u WHERE u.id = 1");
+      }
+    expect_no_match: true
+  description: Doctrine ORM createQuery(DQL) — flag tainted DQL fragment.
+  imports:
+  - doctrine\orm
+  - doctrine
+- id: php.sqli.doctrine_orm_native_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - doctrine/orm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - EntityManager
+      - createNativeQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.doctrine_orm_native_query example
+    code: |
+      <?php
+      use doctrine\orm;
+      use doctrine\orm;
+      function example($input, $url, $id, $payload, $request) {
+        EntityManager::createNativeQuery("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use doctrine\orm;
+      function example($input, $url, $id, $payload, $request) {
+        EntityManager::createNativeQuery("SELECT * FROM users WHERE id = 1", $mapping);
+      }
+    expect_no_match: true
+  description: Doctrine ORM createNativeQuery(SQL).
+  imports:
+  - doctrine\orm
+  - doctrine
+- id: php.sqli.eloquent_db_raw
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - illuminate/database
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DB
+      - raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.eloquent_db_raw example
+    code: |
+      <?php
+      use illuminate\database;
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::raw("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::raw("COUNT(*)");
+      }
+    expect_no_match: true
+  description: Laravel DB::raw — bypasses parameterization.
+  imports:
+  - illuminate\database
+  - illuminate
+- id: php.sqli.eloquent_db_select
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - illuminate/database
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DB
+      - select
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.eloquent_db_select example
+    code: |
+      <?php
+      use illuminate\database;
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::select("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::select("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: Laravel DB::select — flag concatenated SQL.
+  imports:
+  - illuminate\database
+  - illuminate
+- id: php.sqli.eloquent_db_statement
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - illuminate/database
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DB
+      - statement
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.eloquent_db_statement example
+    code: |
+      <?php
+      use illuminate\database;
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::statement("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::statement("UPDATE users SET active = 1 WHERE id = 1");
+      }
+    expect_no_match: true
+  description: Laravel DB::statement — raw.
+  imports:
+  - illuminate\database
+  - illuminate
+- id: php.sqli.eloquent_db_unprepared
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  packages:
+  - illuminate/database
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DB
+      - unprepared
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.eloquent_db_unprepared example
+    code: |
+      <?php
+      use illuminate\database;
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::unprepared("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        DB::unprepared("CREATE TEMPORARY TABLE report_ids (id INT)");
+      }
+    expect_no_match: true
+  description: Laravel DB::unprepared — explicit no-prepare.
+  imports:
+  - illuminate\database
+  - illuminate
+- id: php.sqli.eloquent_where_raw
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - illuminate/database
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: whereRaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.eloquent_where_raw example
+    code: |
+      <?php
+      use illuminate\database;
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        whereRaw($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        whereRaw("status = 1");
+      }
+    expect_no_match: true
+  description: Eloquent whereRaw.
+  imports:
+  - illuminate\database
+  - illuminate
+- id: php.sqli.eloquent_order_by_raw
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - illuminate/database
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: orderByRaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.eloquent_order_by_raw example
+    code: |
+      <?php
+      use illuminate\database;
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        orderByRaw($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\database;
+      function example($input, $url, $id, $payload, $request) {
+        orderByRaw("created_at DESC");
+      }
+    expect_no_match: true
+  description: Eloquent orderByRaw.
+  imports:
+  - illuminate\database
+  - illuminate
+- id: php.sqli.codeigniter_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - codeigniter4/framework
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.codeigniter_query example
+    code: |
+      <?php
+      use codeigniter4\framework;
+      use codeigniter4\framework;
+      function example($input, $url, $id, $payload, $request) {
+        $db->query("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use codeigniter4\framework;
+      function example($input, $url, $id, $payload, $request) {
+        $db->query("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: CodeIgniter \Database::query - flag string-built SQL. Constrained to fire only when arg 0 looks like raw SQL (keywords or PHP string concat).
+  imports:
+  - codeigniter4\framework
+  - codeigniter4
+- id: php.sqli.cakephp_execute
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - cakephp/cakephp
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.cakephp_execute example
+    code: |
+      <?php
+      use cakephp\cakephp;
+      use cakephp\cakephp;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::execute("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use cakephp\cakephp;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::execute("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: CakePHP Connection::execute.
+  imports:
+  - cakephp\cakephp
+  - cakephp
+- id: php.sqli.wordpress_get_results
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - wordpress
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - wpdb
+      - get_results
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.wordpress_get_results example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        $wpdb->get_results("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        $wpdb->get_results("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: WordPress wpdb::get_results — flag concatenated SQL (use wpdb::prepare).
+- id: php.sqli.wordpress_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - wordpress
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - wpdb
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.wordpress_query example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        $wpdb->query("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        $wpdb->query("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: WordPress wpdb::query.
+- id: php.sqli.doctrine_dbal_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - doctrine/dbal
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.doctrine_dbal_query example
+    code: |
+      <?php
+      use doctrine\dbal;
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::query("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        Connection::query("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: Doctrine DBAL Connection::query — legacy API, flag string-built SQL.
+  imports:
+  - doctrine\dbal
+  - doctrine
+- id: php.sqli.yii_set_text
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - yiisoft/yii2
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CDbCommand
+      - setText
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.yii_set_text example
+    code: |
+      <?php
+      use yiisoft\yii2;
+      use yiisoft\yii2;
+      function example($input, $url, $id, $payload, $request) {
+        CDbCommand::setText("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use yiisoft\yii2;
+      function example($input, $url, $id, $payload, $request) {
+        CDbCommand::setText("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: Yii CDbCommand::setText — sets raw SQL.
+  imports:
+  - yiisoft\yii2
+  - yiisoft
+- id: php.sqli.zend_db_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: high
+  packages:
+  - zendframework/zend-db
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Zend_Db_Adapter
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.sqli.zend_db_query example
+    code: |
+      <?php
+      use zendframework\zenddb;
+      use zendframework\zenddb;
+      use zendframework\zend-db;
+      function example($input, $url, $id, $payload, $request) {
+        Zend_Db_Adapter::query("SELECT * FROM users WHERE id = " . $id);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use zendframework\zenddb;
+      function example($input, $url, $id, $payload, $request) {
+        Zend_Db_Adapter::query("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: Zend_Db_Adapter::query — flag concatenated SQL.
+  imports:
+  - zendframework/zenddb
+  - zendframework
+  - zendframework\zenddb

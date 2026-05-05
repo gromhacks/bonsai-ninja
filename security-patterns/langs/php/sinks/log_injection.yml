@@ -1,0 +1,92 @@
+- id: php.log_injection.logger_info_concat
+  enabled: true
+  language: php
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - info
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.log_injection.logger_info_concat example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->info(\"bad\" . $payload);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->info(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "$logger->info(\"...\" . $tainted) \u2014 log-injection via concat (Monolog / PSR-3)."
+- id: php.log_injection.logger_warning_concat
+  enabled: true
+  language: php
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - warning
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.log_injection.logger_warning_concat example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->warning(\"bad\" . $payload);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->warning(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "$logger->warning \u2014 log-injection via concat."
+- id: php.log_injection.logger_error_concat
+  enabled: true
+  language: php
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - error
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.log_injection.logger_error_concat example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->error(\"bad\" . $payload);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->error(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "$logger->error \u2014 log-injection via concat."
+- id: php.log_injection.logger_critical_concat
+  enabled: true
+  language: php
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - critical
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.log_injection.logger_critical_concat example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->critical(\"bad\" . $payload);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $logger->critical(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "$logger->critical \u2014 log-injection via concat."

@@ -1,0 +1,139 @@
+# Scala local / CLI input sources.
+- id: scala.cli.argv
+  enabled: true
+  language: scala
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: param
+    target:
+      name: args
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(args: String): Unit = {
+          }
+        }
+  description: "Scala `def main(args: Array[String])` — CLI args."
+
+- id: scala.cli.stdin_readline
+  enabled: true
+  language: scala
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [StdIn, readLine]
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(value: String): Unit = {
+            StdIn.readLine(value)
+          }
+        }
+  description: "scala.io.StdIn.readLine — interactive CLI input."
+
+- id: scala.cli.stdin_readint
+  enabled: true
+  language: scala
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [StdIn, readInt]
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(value: String): Unit = {
+            StdIn.readInt(value)
+          }
+        }
+  description: "scala.io.StdIn.readInt — interactive numeric input."
+
+- id: scala.os.getenv
+  enabled: true
+  language: scala
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [System, getenv]
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(value: String): Unit = {
+            System.getenv(value)
+          }
+        }
+  description: "java.lang.System.getenv — environment variables."
+
+- id: scala.os.sys_env
+  enabled: true
+  language: scala
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [sys, env]
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(value: String): Unit = {
+            sys.env(value)
+          }
+        }
+  description: "scala.sys.env — wrapper around System.getenv."
+
+- id: scala.os.sys_props
+  enabled: true
+  language: scala
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [sys, props]
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(value: String): Unit = {
+            sys.props(value)
+          }
+        }
+  description: "scala.sys.props — JVM system properties."
+
+- id: scala.os.properties_envorelse
+  enabled: true
+  language: scala
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [Properties, envOrElse]
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(value: String): Unit = {
+            Properties.envOrElse(value)
+          }
+        }
+  description: "scala.util.Properties.envOrElse — env var fallback."

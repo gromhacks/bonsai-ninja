@@ -1,0 +1,248 @@
+- id: java.log_injection.log4j_jndi_lookup
+  enabled: true
+  language: java
+  tag: code-injection
+  severity: critical
+  packages:
+  - org.apache.logging.log4j.core
+  cwe:
+  - CWE-117
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - info
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: log4j tainted message
+    code: |
+      import org.apache.logging.log4j.core.*;
+      class App {
+        void handle(String input) throws Exception {
+          Logger.info(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.logging.log4j.core.*;
+      class App {
+        void handle(String input) throws Exception {
+          Logger.info("safe");
+        }
+      }
+    expect_no_match: true
+  description: 'Log4j 2 lookup-enabled appender + attacker-controlled message containing `${jndi:...}` is the Log4Shell CVE-2021-44228 shape. Merged aliases: java.log_injection.logger_info_concat.'
+  aliases:
+  - java.log_injection.logger_info_concat
+  imports:
+  - org.apache.logging.log4j.core
+- id: java.log_injection.jndi_manager_lookup
+  enabled: true
+  language: java
+  tag: code-injection
+  severity: critical
+  packages:
+  - org.apache.logging.log4j.core
+  cwe:
+  - CWE-917
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JndiManager
+      - lookup
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.logging.log4j.core.*;
+      class App {
+        void handle(String input) throws Exception {
+          JndiManager.lookup(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.logging.log4j.core.*;
+      class App {
+        void handle(String input) throws Exception {
+          JndiManager.lookup("safe");
+        }
+      }
+    expect_no_match: true
+  description: "log4j-core JndiManager.lookup(name) — receiver-narrowed Log4Shell sink. Identifies the canonical JndiLookup#lookup call site distinct from the broader Logger.info-with-${jndi:} message-shape rule above."
+  imports:
+  - org.apache.logging.log4j.core
+- id: java.log_injection.logger_debug_concat
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: low
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - debug
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Logger.debug(input + \"x\");\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Logger.debug("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Logger.debug(... + tainted) — log-injection via concat."
+- id: java.log_injection.logger_warn_concat
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - warn
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Logger.warn(input + \"x\");\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Logger.warn("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Logger.warn(... + tainted) — log-injection via concat."
+- id: java.log_injection.logger_trace_concat
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: low
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - trace
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Logger.trace(input + \"x\");\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Logger.trace("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Logger.trace(... + tainted) — log-injection via concat."
+- id: java.log_injection.logger_fatal_concat
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - fatal
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Logger.fatal(input + \"x\");\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Logger.fatal("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Logger.fatal(... + tainted) — log-injection via concat."
+- id: java.log_injection.mdc_put
+  enabled: true
+  language: java
+  tag: log-injection
+  severity: high
+  packages:
+  - org.slf4j
+  - org.apache.logging.log4j
+  - org.mongodb
+  cwe:
+  - CWE-117
+  - CWE-943
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MDC
+      - put
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mdc put tainted value
+    code: |
+      import org.slf4j.*;
+      class App {
+        void handle(String header) throws Exception {
+          MDC.put("x-request-id", header);
+        }
+      }
+  - name: mdc put request header
+    code: |
+      import org.slf4j.*;
+      class App {
+        void handle(String header) {
+          MDC.put("x-request-id", header);
+        }
+      }
+    expect_match_text:
+    - MDC.put
+  - name: arg tainted literal negative
+    code: |
+      import org.slf4j.*;
+      class App {
+        void handle(String header) throws Exception {
+          MDC.put(header, "safe");
+        }
+      }
+    expect_no_match: true
+  description: "MDC.put(key, tainted header) — attacker-controlled logging context value can forge structured logs or poison downstream log correlation. Merged collision aliases: java.nosql.basicdbobject_where_put, java.nosql.basicdbobjectbuilder_where."
+  aliases:
+  - java.nosql.basicdbobject_where_put
+  - java.nosql.basicdbobjectbuilder_where
+  - java.nosql.basicdbobject_operator_put

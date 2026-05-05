@@ -1,0 +1,28 @@
+[package]
+name = "bonsai_inspect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chain enumeration + filter engine — the SDK powering `bonsai-ninja inspect`."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_hash = { workspace = true }
+bonsai_callgraph = { workspace = true }
+bonsai_index = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_resolve = { workspace = true }
+bonsai_taint = { workspace = true }
+bonsai_workspace = { workspace = true }
+ahash = { workspace = true }
+regex = { workspace = true }
+parking_lot = { workspace = true }
+rayon = "1"
+
+[dev-dependencies]
+bonsai_lang_python = { workspace = true }
+
+[lints]
+workspace = true

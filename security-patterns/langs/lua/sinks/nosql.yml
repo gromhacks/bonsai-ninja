@@ -1,0 +1,182 @@
+# Lua NoSQL-injection sinks (lua-resty-mongol / lua-resty-redis / mongorover).
+- id: lua.nosql.resty_mongol_find
+  enabled: true
+  language: lua
+  tag: nosql-injection
+  severity: high
+  packages: [lua-resty-mongol, mongorover]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]find$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.nosql.resty_mongol_find example
+    code: |
+      local _lua_resty_mongol = require("lua-resty-mongol")
+      function example(input, url, id, payload, request, params, user)
+        collection.find(payload)
+      end
+  - name: literal filter negative
+    code: |
+      local _lua_resty_mongol = require("lua-resty-mongol")
+      function example(input, url, id, payload, request, params, user)
+        collection.find({ name = "alice" })
+      end
+    expect_no_match: true
+  description: "lua-resty-mongol collection:find(filter) — tainted filter table enables operator injection ($where / $ne)."
+
+- id: lua.nosql.resty_mongol_find_one
+  enabled: true
+  language: lua
+  tag: nosql-injection
+  severity: high
+  packages: [lua-resty-mongol]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]find_one$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.nosql.resty_mongol_find_one example
+    code: |
+      local _lua_resty_mongol = require("lua-resty-mongol")
+      function example(input, url, id, payload, request, params, user)
+        collection.find_one(payload)
+      end
+  - name: literal filter negative
+    code: |
+      local _lua_resty_mongol = require("lua-resty-mongol")
+      function example(input, url, id, payload, request, params, user)
+        collection.find_one({ name = "alice" })
+      end
+    expect_no_match: true
+  description: "lua-resty-mongol collection:find_one(filter) — tainted filter with $-operators."
+
+- id: lua.nosql.mongorover_find
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: lua.nosql.resty_mongol_find
+  language: lua
+  tag: nosql-injection
+  severity: high
+  packages: [mongorover]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]find$
+  description: "Subsumed by lua.nosql.resty_mongol_find — same shape; canonical rule covers all Lua MongoDB drivers."
+
+- id: lua.nosql.resty_redis_eval
+  enabled: true
+  language: lua
+  tag: nosql-injection
+  severity: high
+  packages: [lua-resty-redis, redis-lua]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]eval$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.nosql.resty_redis_eval example
+    code: |
+      local _lua_resty_redis = require("lua-resty-redis")
+      function example(input, url, id, payload, request, params, user)
+        red.eval(payload)
+      end
+  - name: literal script negative
+    code: |
+      local _lua_resty_redis = require("lua-resty-redis")
+      function example(input, url, id, payload, request, params, user)
+        red.eval("return 1")
+      end
+    expect_no_match: true
+  description: "lua-resty-redis red:eval(script, ...) — attacker-controlled Lua executed inside Redis."
+
+- id: lua.nosql.resty_redis_evalsha
+  enabled: true
+  language: lua
+  tag: nosql-injection
+  severity: high
+  packages: [lua-resty-redis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]evalsha$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.nosql.resty_redis_evalsha example
+    code: |
+      local _lua_resty_redis = require("lua-resty-redis")
+      function example(input, url, id, payload, request, params, user)
+        red.evalsha(payload)
+      end
+  - name: literal evalsha negative
+    code: |
+      local _lua_resty_redis = require("lua-resty-redis")
+      function example(input, url, id, payload, request, params, user)
+        red.evalsha("0123456789abcdef")
+      end
+    expect_no_match: true
+  description: "lua-resty-redis red:evalsha(sha, ...) — runs cached script; tainted args still reach KEYS/ARGV."
+
+- id: lua.nosql.redis_lua_eval
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: lua.nosql.resty_redis_eval
+  language: lua
+  tag: nosql-injection
+  severity: high
+  packages: [redis-lua]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]eval$
+  description: "Subsumed by lua.nosql.resty_redis_eval — same regex; canonical rule should add redis-lua to its packages list."
+
+- id: lua.nosql.cjson_encode_injection
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: nosql-injection
+  severity: low
+  packages: [cjson]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [cjson, encode]
+  description: "Disabled — cjson.encode is serialisation; only flag when output is embedded in a NoSQL query string."
+
+- id: lua.nosql.openresty_cosocket_redis_script
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: nosql-injection
+  severity: medium
+  packages: [openresty]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [red, script_load]
+  description: "Disabled — script_load caches a script but does not execute it; the sink is eval/evalsha."

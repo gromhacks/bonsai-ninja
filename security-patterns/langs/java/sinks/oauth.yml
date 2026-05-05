@@ -1,0 +1,26 @@
+# java oauth sinks.
+
+# OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
+# id_token verify off, redirect_uri substring match.
+- id: java.oauth.spring_oauth2_state_disabled
+  enabled: true
+  language: java
+  tag: oauth
+  severity: high
+  packages: [org.springframework.security.oauth2]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [OAuth2AuthorizationRequest, additionalParameters]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.oauth2.*;
+      class App {
+        void handle(String input) throws Exception {
+          OAuth2AuthorizationRequest.additionalParameters(input);
+        }
+      }
+  description: "Spring OAuth2AuthorizationRequest without state parameter — review for state-CSRF."
+

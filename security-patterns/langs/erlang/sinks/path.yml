@@ -1,0 +1,210 @@
+# Erlang path-traversal sinks. file:* module + archive extraction.
+- id: erlang.path.file_read_file
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:read_file$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:read_file(Input).
+    - name: arg tainted literal negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:read_file("priv/app.config").
+      expect_no_match: true
+  description: "file:read_file/1 — reads arbitrary path; traversal via ../ leaks secrets (/etc/passwd, keys)."
+- id: erlang.path.file_write_file
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:write_file"
+  description: "Disabled — only arg 0 is a traversal sink; v1 sink taint checks any arg and over-fires on tainted file content."
+- id: erlang.path.file_delete
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:delete$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:delete(Input).
+    - name: arg tainted literal negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:delete("tmp/cache.dat").
+      expect_no_match: true
+  description: "file:delete/1 — tainted path enables arbitrary file deletion (DoS)."
+- id: erlang.path.file_open
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:open$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:open(Input, [read]).
+    - name: arg tainted literal negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:open("priv/app.config", [read]).
+      expect_no_match: true
+  description: "file:open/2 — same traversal surface as read_file/write_file depending on modes."
+- id: erlang.path.file_make_dir
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:make_dir$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:make_dir(Input).
+    - name: arg tainted literal negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:make_dir("tmp/uploads").
+      expect_no_match: true
+  description: "file:make_dir/1 — tainted dir name allows directory creation outside intended root."
+- id: erlang.path.file_rename_source
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:rename$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted rename source
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:rename(Input, "tmp/out.dat").
+    - name: literal rename source negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:rename("tmp/in.dat", "tmp/out.dat").
+      expect_no_match: true
+  description: "file:rename/2 — tainted source path enables arbitrary file move."
+- id: erlang.path.file_rename_dest
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:rename$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted rename destination
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:rename("tmp/in.dat", Input).
+    - name: literal rename destination negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:rename("tmp/in.dat", "tmp/out.dat").
+      expect_no_match: true
+  description: "file:rename/2 — tainted destination path enables arbitrary overwrite."
+- id: erlang.path.zip_extract
+  enabled: true
+  language: erlang
+  tag: zip-slip
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^zip:extract$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          zip:extract(Input).
+    - name: literal archive negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          zip:extract("priv/archive.zip").
+      expect_no_match: true
+  description: "zip:extract — archive with ../ entries escapes target dir (zip-slip / arbitrary write)."

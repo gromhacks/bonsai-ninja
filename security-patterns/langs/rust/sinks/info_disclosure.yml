@@ -1,0 +1,68 @@
+# Rust information-disclosure sinks (logs, debug output, error responses).
+- id: rust.info_disclosure.log_error_secret
+  enabled: true
+  language: rust
+  tag: information-disclosure
+  severity: medium
+  packages: [log]
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [log, error]
+  match_examples:
+  - name: rust log error secret-shaped data
+    code: |
+      use log::dummy;
+      fn example() {
+          let token = "secret";
+          log::error("token={}", token);
+      }
+    expect_match_text: [log::error]
+  description: "log::error with secret-shaped data — credentials or tokens can leak to centralized logs."
+
+- id: rust.info_disclosure.eprintln_error
+  enabled: true
+  language: rust
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      name: eprintln
+  match_examples:
+  - name: rust eprintln error details
+    code: |
+      fn example() {
+          let err = "stack backtrace";
+          eprintln("error: {}", err);
+      }
+    expect_match_text: [eprintln]
+  description: "eprintln!(error/backtrace) — diagnostic internals can leak through stderr logs."
+
+- id: rust.info_disclosure.actix_internal_server_error_body
+  enabled: true
+  language: rust
+  tag: information-disclosure
+  severity: high
+  packages: [actix_web]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpResponse, InternalServerError]
+  match_examples:
+  - name: rust actix error response
+    code: |
+      use actix_web;
+      use actix_web;
+      use actix_web::dummy;
+      fn example() {
+          let err = "database stack";
+          HttpResponse::InternalServerError(err);
+      }
+    expect_match_text: [HttpResponse::InternalServerError]
+  description: "actix-web HttpResponse::InternalServerError(error text) — sends exception / stack details to clients."
+  imports:
+  - actix_web

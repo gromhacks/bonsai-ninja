@@ -1,0 +1,71 @@
+- id: go.redos.regexp_compile
+  enabled: true
+  language: go
+  tag: redos
+  severity: medium
+  packages: [stdlib]
+  imports: [regexp]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [regexp, Compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted regexp pattern
+    code: |
+      package main
+      import "regexp"
+
+      func compile(pattern string) {
+        regexp.Compile(pattern)
+      }
+    expect_match_text: [regexp.Compile]
+  - name: literal regexp pattern negative
+    code: |
+      package main
+      import "regexp"
+
+      func compile() {
+        regexp.Compile(`^[a-z]+$`)
+      }
+    expect_no_match: true
+  description: "regexp.Compile(tainted_pattern) — attacker-controlled regular expressions can consume excessive CPU."
+
+- id: go.redos.regexp_must_compile
+  enabled: true
+  language: go
+  tag: redos
+  severity: medium
+  packages: [stdlib]
+  imports: [regexp]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [regexp, MustCompile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mustcompile pattern
+    code: |
+      package main
+      import "regexp"
+
+      func compile(pattern string) {
+        regexp.MustCompile(pattern)
+      }
+    expect_match_text: [regexp.MustCompile]
+  - name: literal mustcompile pattern negative
+    code: |
+      package main
+      import "regexp"
+
+      func compile() {
+        regexp.MustCompile(`^[a-z]+$`)
+      }
+    expect_no_match: true
+  description: "regexp.MustCompile(tainted_pattern) — attacker-controlled regular expressions can consume excessive CPU or panic."

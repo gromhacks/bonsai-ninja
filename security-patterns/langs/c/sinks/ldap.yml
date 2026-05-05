@@ -1,0 +1,87 @@
+# C LDAP-injection (OpenLDAP).
+- id: c.ldap.ldap_search_ext_s
+  enabled: true
+  language: c
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_search_ext_s
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        ldap_search_ext_s(arg);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        ldap_search_ext_s("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search_ext_s — flag tainted filter (5th arg)."
+
+- id: c.ldap.ldap_search_s
+  enabled: true
+  language: c
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_search_s
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        ldap_search_s(arg);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        ldap_search_s("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search_s(ld, base, scope, tainted_filter, ...) — LDAP filter injection via unescaped metacharacters *()\\."
+
+- id: c.ldap.ldap_search
+  enabled: true
+  language: c
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_search
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        ldap_search(arg);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        ldap_search("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search(ld, base, scope, tainted_filter, ...) — deprecated async search; same filter-injection bug class."

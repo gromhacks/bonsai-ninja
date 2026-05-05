@@ -1,0 +1,27 @@
+# go prototype_pollution sinks.
+
+# Prototype-pollution sinks (round 3 — cross-language).
+- id: go.proto_pollution.mergo_map_with_body
+  enabled: true
+  language: go
+  tag: prototype-pollution
+  severity: low
+  packages: [github.com/imdario/mergo]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [mergo, MapWithOverwrite]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/imdario/mergo"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        mergo.MapWithOverwrite(target)
+      }
+  description: 'mergo.MapWithOverwrite(target, attacker_map) — recursive merge with overwrite semantics; cross-bound attacker keys leak into target struct.'

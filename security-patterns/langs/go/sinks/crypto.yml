@@ -1,0 +1,217 @@
+# Go weak-crypto / weak-randomness sinks.
+- id: go.crypto.md5_new
+  enabled: true
+  language: go
+  tag: weak-crypto
+  severity: low
+  packages: ["crypto/md5"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [md5, New]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/md5"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        md5.New(target)
+      }
+  description: "md5.New — MD5 is collision-broken; unsafe for integrity or password hashing."
+- id: go.crypto.md5_sum
+  enabled: true
+  language: go
+  tag: weak-crypto
+  severity: low
+  packages: ["crypto/md5"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [md5, Sum]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/md5"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        md5.Sum(target)
+      }
+  description: "md5.Sum — one-shot MD5; collision-broken."
+- id: go.crypto.sha1_new
+  enabled: true
+  language: go
+  tag: weak-crypto
+  severity: low
+  packages: ["crypto/sha1"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [sha1, New]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/sha1"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        sha1.New(target)
+      }
+  description: "sha1.New — SHA-1 collisions are practical; unsafe for signatures."
+- id: go.crypto.sha1_sum
+  enabled: true
+  language: go
+  tag: weak-crypto
+  severity: low
+  packages: ["crypto/sha1"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [sha1, Sum]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/sha1"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        sha1.Sum(target)
+      }
+  description: "sha1.Sum — one-shot SHA-1; collisions practical."
+- id: go.crypto.des_newcipher
+  enabled: true
+  language: go
+  tag: weak-crypto
+  severity: medium
+  packages: ["crypto/des"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [des, NewCipher]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/des"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        des.NewCipher(target)
+      }
+  description: "des.NewCipher — single-DES is broken (56-bit key)."
+- id: go.crypto.des_newtriple
+  enabled: true
+  language: go
+  tag: weak-crypto
+  severity: medium
+  packages: ["crypto/des"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [des, NewTripleDESCipher]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/des"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        des.NewTripleDESCipher(target)
+      }
+  description: "des.NewTripleDESCipher — 3DES is deprecated; sweet32."
+- id: go.crypto.rc4_newcipher
+  enabled: true
+  language: go
+  tag: weak-crypto
+  severity: medium
+  packages: ["crypto/rc4"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [rc4, NewCipher]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/rc4"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        rc4.NewCipher(target)
+      }
+  description: "rc4.NewCipher — RC4 is broken (biased keystream)."
+- id: go.crypto.math_rand_intn
+  enabled: true
+  language: go
+  tag: weak-randomness
+  severity: medium
+  packages: ["math/rand"]
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [rand, Intn]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "math/rand"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        rand.Intn(target)
+      }
+  description: "math/rand.Intn — non-cryptographic PRNG; use crypto/rand for tokens, IDs, passwords."
+- id: go.crypto.math_rand_read
+  enabled: true
+  language: go
+  tag: weak-randomness
+  severity: medium
+  packages: ["math/rand"]
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [rand, Read]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "math/rand"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        rand.Read(target)
+      }
+  description: "math/rand.Read — non-cryptographic PRNG output; use crypto/rand.Read for secrets."

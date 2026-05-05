@@ -1,0 +1,269 @@
+# Dart deserialization sinks — yaml + protobuf + json-with-reviver.
+#
+# Pure Dart doesn't have a gadget-chain deserialization primitive
+# like pickle or Java's ObjectInputStream — `jsonDecode` is
+# type-bounded. The real risks are:
+#   - package:yaml, which supports type tags and can instantiate
+#     unexpected Dart types on tainted input.
+#   - JSON reviver callbacks that call arbitrary functions per
+#     decoded value.
+#   - protobuf generic message parsing where the schema is derived
+#     from tainted input.
+
+- id: dart.deser.json_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: insecure-deserialization
+  severity: low
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: jsonDecode
+  description: "Disabled — jsonDecode without a reviver is type-bounded. Enable when the codebase passes `reviver:` and the reviver is attacker-influenceable."
+
+- id: dart.deser.json_decode_reviver
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: insecure-deserialization
+  severity: medium
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: jsonDecode
+  description: "Disabled — jsonDecode(json, reviver:) with a reviver can dispatch into arbitrary code paths, but the bonsai engine doesn't yet model `keyword_arg_present` narrowing. Enable manually after reviewer confirms `reviver:` is passed."
+
+- id: dart.deser.json_utf8_decoder
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: insecure-deserialization
+  severity: low
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [JsonUtf8Decoder, convert]
+  description: "Disabled — JsonUtf8Decoder is type-bounded; listed so auditors can trace UTF-8 JSON ingestion paths."
+
+- id: dart.deser.yaml_load
+  enabled: true
+  language: dart
+  tag: insecure-deserialization
+  severity: high
+  packages: [yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: loadYaml
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaml document
+    code: |
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart'; // yaml
+      void test(String input) { loadYaml(input); }
+  - name: literal yaml document negative
+    code: |
+      import 'package:yaml/yaml.dart';
+      void test() { loadYaml("name: safe"); }
+    expect_no_match: true
+  description: "yaml.loadYaml — parses a YAML document; tainted input with type tags (!!perl/code, !!python/object) or aliases can materialise unexpected types / cause billion-laughs DoS."
+
+  imports:
+  - yaml/yaml.dart
+- id: dart.deser.yaml_load_all
+  enabled: true
+  language: dart
+  tag: insecure-deserialization
+  severity: high
+  packages: [yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: loadYamlStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaml stream
+    code: |
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart';
+      import 'package:yaml/yaml.dart'; // yaml
+      void test(String input) { loadYamlStream(input); }
+  - name: literal yaml stream negative
+    code: |
+      import 'package:yaml/yaml.dart';
+      void test() { loadYamlStream("---\nname: safe\n"); }
+    expect_no_match: true
+  description: "yaml.loadYamlStream — multi-doc parser; tainted stream has the same type-tag and alias-bomb risks as loadYaml."
+
+  imports:
+  - yaml/yaml.dart
+- id: dart.deser.yaml_load_safe
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: insecure-deserialization
+  severity: low
+  packages: [yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: loadYamlNode
+  description: "Disabled — loadYamlNode returns the AST rather than materialising arbitrary types; listed so auditors can trace YAML ingestion paths."
+
+- id: dart.deser.yaml_load_safe_edge
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: dart
+  tag: insecure-deserialization
+  severity: low
+  packages: [yaml_edge]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: loadYaml
+  description: "Disabled — yaml_edge mirrors the stdlib yaml package; covered by dart.deser.yaml_load."
+
+- id: dart.deser.protobuf_message_merge
+  enabled: true
+  language: dart
+  tag: insecure-deserialization
+  severity: medium
+  packages: [protobuf]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [GeneratedMessage, mergeFromBuffer]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted protobuf bytes
+    code: |
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      void test(List<int> input) { GeneratedMessage.mergeFromBuffer(input); }
+  - name: literal protobuf bytes negative
+    code: |
+      import 'package:protobuf/protobuf.dart';
+      void test() { GeneratedMessage.mergeFromBuffer([8, 1]); }
+    expect_no_match: true
+  description: "protobuf GeneratedMessage.mergeFromBuffer — when the message type is derived from tainted input, attacker chooses which message gets instantiated."
+
+  imports:
+  - protobuf/protobuf.dart
+- id: dart.deser.protobuf_any_unpack
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  tag: insecure-deserialization
+  severity: high
+  packages: [protobuf]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Any, unpackInto]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      import 'package:protobuf/protobuf.dart';
+      void test() { var input = "x"; var amount = 1; Any.unpackInto(input); }
+  description: "Disabled until receiver-taint tracking exists — the hazardous value is the protobuf Any receiver, not the unpackInto(target) argument."
+
+  imports:
+  - protobuf/protobuf.dart
+- id: dart.deser.msgpack_decode
+  enabled: true
+  language: dart
+  tag: insecure-deserialization
+  severity: medium
+  packages: [msgpack_dart]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Deserializer, decode]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted msgpack bytes
+    code: |
+      import 'package:msgpack_dart/msgpack_dart.dart';
+      import 'package:msgpack_dart/msgpack_dart.dart';
+      import 'package:msgpack_dart/msgpack_dart.dart';
+      import 'package:msgpack_dart/msgpack_dart.dart';
+      import 'package:msgpack_dart/msgpack_dart.dart'; // msgpack_dart
+      void test(List<int> input) { Deserializer.decode(input); }
+  - name: literal msgpack bytes negative
+    code: |
+      import 'package:msgpack_dart/msgpack_dart.dart';
+      void test() { Deserializer.decode([0x81, 0xa4, 0x6e, 0x61, 0x6d, 0x65]); }
+    expect_no_match: true
+  description: "msgpack_dart Deserializer.decode — tainted MsgPack bytes can be crafted to trigger nested-type instantiation and resource exhaustion."
+
+  imports:
+  - msgpack_dart/msgpack_dart.dart
+- id: dart.deser.bson_decode
+  enabled: true
+  language: dart
+  tag: insecure-deserialization
+  severity: medium
+  packages: [bson]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [BSON, deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted bson bytes
+    code: |
+      import 'package:bson/bson.dart';
+      import 'package:bson/bson.dart';
+      import 'package:bson/bson.dart';
+      import 'package:bson/bson.dart';
+      import 'package:bson/bson.dart'; // bson
+      void test(List<int> input) { BSON.deserialize(input); }
+  - name: literal bson bytes negative
+    code: |
+      import 'package:bson/bson.dart';
+      void test() { BSON.deserialize([5, 0, 0, 0, 0]); }
+    expect_no_match: true
+  description: "bson.BSON.deserialize — tainted BSON bytes with cyclic references or oversized nesting trigger memory exhaustion / stack blow-up."
+  imports:
+  - bson/bson.dart

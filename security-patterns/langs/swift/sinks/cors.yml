@@ -1,0 +1,21 @@
+# swift CORS misconfiguration sinks (T403).
+- id: swift.cors.wildcard_origin_vapor
+  enabled: true
+  language: swift
+  tag: cors
+  severity: medium
+  packages: [vapor]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CORSMiddleware, Configuration]
+  match_examples:
+  - name: declared shape
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test() { let input = "x"; let amount = 1; CORSMiddleware.Configuration("all") }
+  description: |-
+    Vapor CORSMiddleware.Configuration(allowedOrigin: .all) — allow any origin.

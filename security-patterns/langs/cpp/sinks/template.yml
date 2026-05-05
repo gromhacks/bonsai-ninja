@@ -1,0 +1,79 @@
+- id: cpp.template.inja_render
+  enabled: false
+  language: cpp
+  tag: ssti
+  severity: high
+  packages:
+  - inja
+  cwe:
+  - CWE-1336
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - render
+  match_examples:
+  - name: generated direct match
+    code: "#include <inja.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Environment::render(\"{{ user }}\");\n}\n"
+  description: "inja Environment::render(tainted_template, data) — tainted template source = SSTI."
+  disabled_reason:
+    code: over-broad
+- id: cpp.template.inja_render_file
+  enabled: true
+  language: cpp
+  tag: ssti
+  severity: high
+  packages:
+  - inja
+  cwe:
+  - CWE-1336
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - render_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <inja.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Environment::render_file(\"{{ user }}\");\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Environment::render_file("safe");
+      }
+    expect_no_match: true
+  description: "inja Environment::render_file(tainted_path, data) — tainted template path."
+- id: cpp.template.drogon_view_response
+  enabled: true
+  language: cpp
+  tag: ssti
+  severity: high
+  packages:
+  - drogon
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - newHttpViewResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::newHttpViewResponse(\"{{ user }}\");\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpResponse::newHttpViewResponse("safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpResponse::newHttpViewResponse(tainted_view_name, ...) — attacker picks which CSP view to render."

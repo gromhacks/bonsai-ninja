@@ -1,0 +1,59 @@
+- id: elixir.graphql.absinthe_run
+  enabled: true
+  language: elixir
+  tag: graphql-injection
+  severity: high
+  packages: [absinthe]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^Absinthe\\.run$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: elixir.graphql.absinthe_run example
+    code: |
+      alias Absinthe
+      defmodule App do
+        def execute(query) do
+          Absinthe.run(query)
+        end
+      end
+  - name: literal absinthe run negative
+    code: |
+      alias Absinthe
+      defmodule App do
+        def execute(query) do
+          Absinthe.run("{ viewer { id } }")
+        end
+      end
+    expect_no_match: true
+  description: "Absinthe.run/2,3 with tainted GraphQL document/options — attacker-controlled operation reaches resolver execution."
+
+  imports:
+  - Absinthe
+- id: elixir.graphql.absinthe_plug_run
+  enabled: true
+  language: elixir
+  tag: graphql-injection
+  severity: medium
+  packages: [absinthe_plug]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^Absinthe\\.Plug\\.run$"
+  match_examples:
+  - name: elixir.graphql.absinthe_plug_run example
+    code: |
+      alias Absinthe_plug
+      defmodule App do
+        def call(conn) do
+          Absinthe.Plug.run(conn)
+        end
+      end
+  description: "Absinthe.Plug.run(conn, opts) — GraphQL query, variables, and operation name from the Plug request reach the Absinthe executor."
+  imports:
+  - Absinthe_plug

@@ -1,0 +1,45 @@
+# Lua file-upload sinks (OpenResty lua-resty-upload).
+- id: lua.upload.resty_upload_filename
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: lua
+  tag: file-upload
+  severity: medium
+  packages: [lua-resty-upload]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [upload, read]
+  match_examples:
+  - name: lua.upload.resty_upload_filename example
+    code: |
+      local _lua_resty_upload = require("lua-resty-upload")
+      function example(input, url, id, payload, request, params, user)
+        upload.read(input)
+      end
+  description: "Disabled until return-value/state tracking exists — upload:read() exposes a client filename, but the sink is the later filesystem write using that returned header."
+
+- id: lua.upload.resty_upload_receive
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: lua
+  tag: file-upload
+  severity: medium
+  packages: [lua-resty-upload]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [form, read]
+  match_examples:
+  - name: lua resty upload form read
+    code: |
+      local _lua_resty_upload = require("lua-resty-upload")
+      function example(input)
+        form.read(input)
+      end
+    expect_match_text: [form.read]
+  description: "Disabled until return-value/state tracking exists — form:read() exposes multipart metadata, but upload risk depends on a later write path."

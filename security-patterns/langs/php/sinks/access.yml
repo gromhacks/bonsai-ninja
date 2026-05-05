@@ -1,0 +1,183 @@
+- id: php.access.aws_get_object
+  enabled: true
+  language: php
+  tag: access-control
+  severity: high
+  packages:
+  - aws/aws-sdk-php
+  cwe:
+  - CWE-284
+  - CWE-639
+  match:
+    kind: call
+    callee:
+      name: getObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.access.aws_get_object example
+    code: |
+      <?php
+      use aws\awssdkphp;
+      use aws\awssdkphp;
+      use aws\aws-sdk-php;
+      function example($input, $url, $id, $payload, $request) {
+        getObject($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use aws\awssdkphp;
+      function example($input, $url, $id, $payload, $request) {
+        getObject(["Bucket" => "reports", "Key" => "public.json"]);
+      }
+    expect_no_match: true
+  description: AWS SDK for PHP getObject — tainted bucket/key selector reads arbitrary object data.
+  imports:
+  - aws
+  - aws/awssdkphp
+  - aws\awssdkphp
+- id: php.access.aws_put_object
+  enabled: true
+  language: php
+  tag: access-control
+  severity: high
+  packages:
+  - aws/aws-sdk-php
+  cwe:
+  - CWE-284
+  - CWE-639
+  match:
+    kind: call
+    callee:
+      name: putObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.access.aws_put_object example
+    code: |
+      <?php
+      use aws\awssdkphp;
+      use aws\awssdkphp;
+      use aws\aws-sdk-php;
+      function example($input, $url, $id, $payload, $request) {
+        putObject($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use aws\awssdkphp;
+      function example($input, $url, $id, $payload, $request) {
+        putObject(["Bucket" => "reports", "Key" => "public.json", "Body" => "safe"]);
+      }
+    expect_no_match: true
+  description: AWS SDK for PHP putObject — tainted bucket/key selector overwrites attacker-chosen object keys.
+  imports:
+  - aws
+  - aws/awssdkphp
+  - aws\awssdkphp
+- id: php.access.aws_get_secret_value
+  enabled: true
+  language: php
+  tag: access-control
+  severity: high
+  packages:
+  - aws/aws-sdk-php
+  cwe:
+  - CWE-284
+  match:
+    kind: call
+    callee:
+      name: getSecretValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.access.aws_get_secret_value example
+    code: |
+      <?php
+      use aws\awssdkphp;
+      use aws\awssdkphp;
+      use aws\aws-sdk-php;
+      function example($input, $url, $id, $payload, $request) {
+        getSecretValue($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use aws\awssdkphp;
+      function example($input, $url, $id, $payload, $request) {
+        getSecretValue(["SecretId" => "app/prod/db"]);
+      }
+    expect_no_match: true
+  description: AWS SDK for PHP getSecretValue — tainted secret id reads arbitrary secret material.
+  imports:
+  - aws
+  - aws/awssdkphp
+  - aws\awssdkphp
+- id: php.access.gcp_access_secret_version
+  enabled: true
+  language: php
+  tag: access-control
+  severity: high
+  packages:
+  - google/cloud-secret-manager
+  cwe:
+  - CWE-284
+  match:
+    kind: call
+    callee:
+      name: accessSecretVersion
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.access.gcp_access_secret_version example
+    code: |
+      <?php
+      use google\cloudsecretmanager;
+      use google\cloudsecretmanager;
+      use google\cloud-secret-manager;
+      function example($input, $url, $id, $payload, $request) {
+        accessSecretVersion($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use google\cloudsecretmanager;
+      function example($input, $url, $id, $payload, $request) {
+        accessSecretVersion("projects/app/secrets/db/versions/latest");
+      }
+    expect_no_match: true
+  description: GCP Secret Manager accessSecretVersion — tainted resource name reads arbitrary secret versions.
+  imports:
+  - google/cloudsecretmanager
+  - google
+  - google\cloudsecretmanager
+- id: php.access.wordpress_ajax_action
+  enabled: true
+  language: php
+  tag: access-control
+  severity: medium
+  packages:
+  - wordpress
+  cwe:
+  - CWE-285
+  match:
+    kind: call
+    callee:
+      name: add_action
+  match_examples:
+  - name: php.access.wordpress_ajax_action example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        add_action('wp_ajax_nopriv_export_report', 'export_report');
+      }
+    expect_match_text:
+    - add_action
+  description: WordPress wp_ajax/wp_ajax_nopriv hook registration — audit callback authorization checks such as current_user_can().

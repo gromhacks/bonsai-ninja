@@ -1,0 +1,495 @@
+- id: rust.cmdi.std_command_new
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: rust
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages:
+  - std
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      regex: ^Command::new$
+  description: "Disabled — bare Command::new with no arg constraint fires on every process spawn. The real RCE sinks are rust.cmdi.std_command_new_shell and rust.cmdi.std_command_new_bash (argv-form without a shell wrapper is safe)."
+- id: rust.cmdi.std_command_new_shell
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages:
+  - std
+  - tokio
+  - async_process
+  - async_std
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Command
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted command program
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          Command::new(target);
+      }
+  - name: literal command program negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          Command::new("true");
+      }
+    expect_no_match: true
+  description: "Command::new(tainted) — attacker-controlled program names select arbitrary binaries. Shell-wrapper command strings are covered by tainted Command.arg(...) calls. Merged collision aliases: rust.cmdi.tokio_command_new, rust.cmdi.async_process_command, rust.cmdi.async_std_command_new."
+  aliases:
+  - rust.cmdi.tokio_command_new
+  - rust.cmdi.async_process_command
+  - rust.cmdi.async_std_command_new
+- id: rust.cmdi.command_arg
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages:
+  - std
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: arg
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted command argument
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          c.arg(target);
+      }
+  - name: literal command argument negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          c.arg("safe");
+      }
+    expect_no_match: true
+  description: "Command.arg(tainted) — argument added to a shell-backed std::process::Command."
+- id: rust.cmdi.duct_cmd
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages:
+  - duct
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - duct
+      - cmd
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted duct command program
+    code: |
+      use duct::dummy;
+      fn example(target: &str) {
+          duct::cmd(target);
+      }
+  - name: literal duct command program negative
+    code: |
+      use duct::dummy;
+      fn example() {
+          duct::cmd("true");
+      }
+    expect_no_match: true
+  description: duct::cmd() builds a child-process command; tainted program or argv elements execute arbitrary binaries as the calling process.
+- id: rust.cmdi.duct_cmd_macro
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages:
+  - duct
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - duct
+      - sh
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      use duct::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          duct::sh(target);
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          duct::sh("safe");
+      }
+    expect_no_match: true
+  description: "duct sh — shell variant."
+- id: rust.cmdi.run_script_run
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages:
+  - run_script
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - run_script
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted run_script source
+    code: |
+      use run_script::dummy;
+      fn example(target: &str) {
+          run_script::run(target);
+      }
+  - name: literal run_script source negative
+    code: |
+      use run_script::dummy;
+      fn example() {
+          run_script::run("echo safe");
+      }
+    expect_no_match: true
+  description: "run_script::run — shell-style runner."
+- id: rust.cmdi.subprocess_exec
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Exec
+      - shell
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted subprocess shell command
+    code: |
+      use subprocess::dummy;
+      fn example(target: &str) {
+          Exec::shell(target);
+      }
+  - name: literal subprocess shell command negative
+    code: |
+      use subprocess::dummy;
+      fn example() {
+          Exec::shell("id");
+      }
+    expect_no_match: true
+  description: "subprocess Exec::shell — explicit shell."
+- id: rust.cmdi.cmd_lib_run
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages:
+  - cmd_lib
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: run_cmd
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      use cmd_lib::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          run_cmd(target);
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          run_cmd("safe");
+      }
+    expect_no_match: true
+  description: cmd_lib run_cmd! macro.
+- id: rust.cmdi.libc_system
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: critical
+  packages:
+  - libc
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - libc
+      - system
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted libc system command
+    code: |
+      use libc::dummy;
+      fn example(target: *const i8) {
+          libc::system(target);
+      }
+  - name: literal libc system negative
+    code: |
+      use libc::dummy;
+      fn example() {
+          libc::system("whoami");
+      }
+    expect_no_match: true
+  description: "libc::system — invokes /bin/sh."
+- id: rust.cmdi.libc_execv
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: high
+  packages:
+  - libc
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - libc
+      - execv
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted libc execv path
+    code: |
+      use libc::dummy;
+      fn example(target: *const i8) {
+          libc::execv(target);
+      }
+  - name: literal libc execv path negative
+    code: |
+      use libc::dummy;
+      fn example() {
+          libc::execv("/bin/true");
+      }
+    expect_no_match: true
+  description: "libc::execv — replaces the current process with tainted program + argv; direct arbitrary-binary execution."
+- id: rust.cmdi.nix_unistd_execvp
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: high
+  packages:
+  - nix
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - unistd
+      - execvp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted nix execvp file
+    code: |
+      use nix::dummy;
+      fn example(target: &str) {
+          unistd::execvp(target);
+      }
+  - name: literal nix execvp file negative
+    code: |
+      use nix::dummy;
+      fn example() {
+          unistd::execvp("true");
+      }
+    expect_no_match: true
+  description: "nix::unistd::execvp — tainted argv[0] replaces the process image with attacker binary."
+- id: rust.cmdi.nix_unistd_execv
+  enabled: true
+  language: rust
+  tag: command-injection
+  severity: high
+  packages:
+  - nix
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - unistd
+      - execv
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted nix execv path
+    code: |
+      use nix::dummy;
+      fn example(target: &str) {
+          unistd::execv(target);
+      }
+  - name: literal nix execv path negative
+    code: |
+      use nix::dummy;
+      fn example() {
+          unistd::execv("/bin/true");
+      }
+    expect_no_match: true
+  description: "nix::unistd::execv — tainted path/argv executes arbitrary binary."
+- id: rust.cmdi.command_env_tainted
+  enabled: true
+  language: rust
+  tag: env-leak
+  severity: medium
+  category: process-exec
+  packages:
+  - std
+  - tokio
+  cwe:
+  - CWE-454
+  - CWE-526
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Command
+      - env
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Command::env(target);
+      }
+  - name: literal arg 1 negative
+    code: |
+      fn example() {
+          Command::env("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Command::env(name, tainted) — injects an attacker-controlled environment variable into a child process; pair with missing env_clear() to detect env-bleed (PATH, LD_PRELOAD, AWS_*) into spawned processes."
+- id: rust.cmdi.command_env_name_tainted
+  enabled: true
+  language: rust
+  tag: env-leak
+  severity: medium
+  category: process-exec
+  packages:
+  - std
+  - tokio
+  cwe:
+  - CWE-454
+  - CWE-526
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Command
+      - env
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      use std::process::Command;
+      fn example(input: &str) {
+          Command::env(input);
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          Command::env("safe");
+      }
+    expect_no_match: true
+  description: "Command::env(name, value) — tainted environment variable names can override sensitive child-process settings."
+- id: rust.cmdi.command_envs_tainted
+  enabled: true
+  language: rust
+  tag: env-leak
+  severity: medium
+  category: process-exec
+  packages:
+  - std
+  - tokio
+  cwe:
+  - CWE-454
+  - CWE-526
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Command
+      - envs
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Command::envs(target);
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          Command::envs("safe");
+      }
+    expect_no_match: true
+  description: "Command::envs(iter) — bulk env injection; tainted map keys/values reach the child process."

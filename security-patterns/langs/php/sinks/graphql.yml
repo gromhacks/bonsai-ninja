@@ -1,0 +1,127 @@
+- id: php.graphql.execute_query
+  enabled: true
+  language: php
+  tag: graphql-injection
+  severity: high
+  packages:
+  - webonyx/graphql-php
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^GraphQL::executeQuery$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: graphql execute query
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      use webonyx\graphqlphp;
+      use webonyx\graphql-php;
+      function example($schema, $query) {
+        return GraphQL::executeQuery($schema, $query);
+      }
+    expect_match_text:
+    - GraphQL::executeQuery
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      function example($schema, $query) {
+        return GraphQL::executeQuery($schema, "{ viewer { id } }");
+      }
+    expect_no_match: true
+  description: GraphQL::executeQuery(schema, tainted_query) — dynamic documents reach resolver execution.
+  imports:
+  - webonyx
+  - webonyx/graphqlphp
+  - webonyx\graphqlphp
+- id: php.graphql.schema_execute
+  enabled: true
+  language: php
+  tag: graphql-injection
+  severity: high
+  packages:
+  - webonyx/graphql-php
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - schema
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: schema execute
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      use webonyx\graphqlphp;
+      use webonyx\graphql-php;
+      function example($schema, $query) {
+        return $schema->execute($query);
+      }
+    expect_match_text:
+    - $schema->execute
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      function example($schema, $query) {
+        return $schema->execute("{ viewer { id } }");
+      }
+    expect_no_match: true
+  description: $schema->execute(tainted_query) — schema execution with attacker-controlled document or context.
+  imports:
+  - webonyx
+  - webonyx/graphqlphp
+  - webonyx\graphqlphp
+- id: php.graphql.server_execute_psr_request
+  enabled: true
+  language: php
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - webonyx/graphql-php
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - server
+      - executePsrRequest
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: server execute psr request
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      use webonyx\graphqlphp;
+      use webonyx\graphql-php;
+      function example($server, $request) {
+        return $server->executePsrRequest($request);
+      }
+    expect_match_text:
+    - $server->executePsrRequest
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      function example($server) {
+        return $server->executePsrRequest(new ServerRequest("POST", "/graphql"));
+      }
+    expect_no_match: true
+  description: StandardServer executePsrRequest(request) — request-provided GraphQL query, variables, and operation reach execution.
+  imports:
+  - webonyx
+  - webonyx/graphqlphp
+  - webonyx\graphqlphp

@@ -1,0 +1,257 @@
+# Rust XXE sinks.
+#
+# Most pure-Rust XML parsers (quick-xml, xml-rs, roxmltree,
+# sxd-document) don't expand external entities by default — they're
+# listed disabled so an author can opt in per codebase after
+# reviewing whether the project configured entity expansion.
+#
+# The real RCE/file-disclosure surface is libxml2 bindings (`libxml`
+# crate), the `yaserde` serde-XML codec (which hands the buffer to
+# quick-xml but without disabling DTD loading in all configurations),
+# and anything routed through `xml-rs`'s DOCTYPE path.
+
+- id: rust.xxe.libxml_parse_string
+  enabled: true
+  language: rust
+  tag: xxe
+  severity: high
+  packages: [libxml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Parser, parse_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted libxml parse string
+    code: |
+      use libxml::dummy;
+      fn example(target: &str) {
+          Parser::parse_string(target);
+      }
+  - name: literal libxml parse string negative
+    code: |
+      use libxml::dummy;
+      fn example() {
+          Parser::parse_string("<root/>");
+      }
+    expect_no_match: true
+  description: "libxml Parser::parse_string — wraps libxml2 which DOES expand external entities by default; tainted XML = XXE (file-disclosure, SSRF via DTD)."
+
+- id: rust.xxe.libxml_parse_file
+  enabled: true
+  language: rust
+  tag: xxe
+  severity: high
+  packages: [libxml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Parser, parse_file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted libxml parse file path
+    code: |
+      use libxml::dummy;
+      fn example(target: &str) {
+          Parser::parse_file(target);
+      }
+  - name: literal libxml parse file path negative
+    code: |
+      use libxml::dummy;
+      fn example() {
+          Parser::parse_file("/var/app/input.xml");
+      }
+    expect_no_match: true
+  description: "libxml Parser::parse_file — same libxml2 backend; tainted file content with external-entity references = XXE."
+
+- id: rust.xxe.libxml_parse_xmlreader
+  enabled: true
+  language: rust
+  tag: xxe
+  severity: high
+  packages: [libxml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XmlReader, from]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted libxml xmlreader input
+    code: |
+      use libxml::dummy;
+      fn example(target: &str) {
+          XmlReader::from(target);
+      }
+  - name: literal libxml xmlreader input negative
+    code: |
+      use libxml::dummy;
+      fn example() {
+          XmlReader::from("<root/>");
+      }
+    expect_no_match: true
+  description: "libxml XmlReader::from — same libxml2 backend as Parser; DTD entities expand on attacker-controlled XML."
+
+- id: rust.xxe.yaserde_from_str
+  enabled: true
+  language: rust
+  tag: xxe
+  severity: high
+  packages: [yaserde]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [de, from_str]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaserde xml string
+    code: |
+      use yaserde::dummy;
+      fn example(target: &str) {
+          de::from_str(target);
+      }
+  - name: literal yaserde xml string negative
+    code: |
+      use yaserde::dummy;
+      fn example() {
+          de::from_str("<root/>");
+      }
+    expect_no_match: true
+  description: "yaserde::de::from_str — XML deserializer; flag tainted XML input because DTDs are not uniformly disabled in downstream configurations."
+
+- id: rust.xxe.yaserde_from_reader
+  enabled: true
+  language: rust
+  tag: xxe
+  severity: high
+  packages: [yaserde]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [de, from_reader]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaserde xml reader
+    code: |
+      use yaserde::dummy;
+      fn example(target: std::io::Cursor<Vec<u8>>) {
+          de::from_reader(target);
+      }
+  - name: safe yaserde xml reader negative
+    code: |
+      use yaserde::dummy;
+      fn example() {
+          de::from_reader(std::io::Cursor::new(b"<root/>".to_vec()));
+      }
+    expect_no_match: true
+  description: "yaserde::de::from_reader — stream deserializer; tainted reader over attacker XML can resolve DTDs in some configurations."
+
+- id: rust.xxe.serde_xml_rs_from_str
+  enabled: true
+  language: rust
+  tag: xxe
+  severity: high
+  packages: [serde_xml_rs]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [serde_xml_rs, from_str]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted serde xml string
+    code: |
+      use serde_xml_rs;
+      use serde_xml_rs;
+      use serde_xml_rs::dummy;
+      fn example(target: &str) {
+          serde_xml_rs::from_str(target);
+      }
+  - name: literal serde xml string negative
+    code: |
+      use serde_xml_rs;
+      use serde_xml_rs;
+      use serde_xml_rs::dummy;
+      fn example() {
+          serde_xml_rs::from_str("<root/>");
+      }
+    expect_no_match: true
+  description: "serde-xml-rs::from_str — backed by xml-rs; tainted XML traverses DOCTYPE handling before deserialization."
+
+  imports:
+  - serde_xml_rs
+- id: rust.xxe.xml_rs_parse
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: rust
+  tag: xxe
+  severity: medium
+  packages: [xml_rs]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [EventReader, new]
+  description: "Disabled — xml-rs exposes DOCTYPE events but does not fetch external entities unless the caller wires a resolver; enable on codebases that implement `EntityResolver`."
+
+- id: rust.xxe.sxd_document_parser
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: xxe
+  severity: low
+  packages: [sxd_document]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [parser, parse]
+  description: "Disabled — sxd-document doesn't resolve external entities."
+
+- id: rust.xxe.quick_xml_reader
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: xxe
+  severity: low
+  packages: [quick_xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Reader, from_str]
+  description: "Disabled — quick-xml doesn't resolve entities by default; enable if the codebase sets `expand_empty_elements(true)` with custom entity resolution."
+
+- id: rust.xxe.roxmltree_parse
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: xxe
+  severity: low
+  packages: [roxmltree]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Document, parse]
+  description: "Disabled — roxmltree rejects external entities; listed so an auditor can trace XML ingestion paths through the codebase."

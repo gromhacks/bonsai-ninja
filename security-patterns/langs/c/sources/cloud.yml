@@ -1,0 +1,33 @@
+# C cloud / serverless sources.
+# C does not have a common first-party handler signature across AWS/Azure/GCP,
+# so keep conservative scaffolding here rather than pretending remote socket
+# reads cover FaaS payloads.
+- id: c.cloud.aws_lambda_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  packages: [aws-lambda-c-runtime]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "Disabled — AWS Lambda custom-runtime `event` param is too broad without a runtime-specific bootstrap shape."
+
+- id: c.cloud.aws_lambda_context
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  trust: service
+  tag: cloud-event
+  payload_types: [event]
+  packages: [aws-lambda-c-runtime]
+  match:
+    kind: param
+    target:
+      name: context
+  description: "Disabled — Lambda context is runtime metadata; enable only with a concrete custom-runtime wrapper."

@@ -1,0 +1,164 @@
+---
+title: "Adapter Capabilities"
+description: "Optional Decl fields populated by each language adapter and what precision they unlock."
+---
+
+# Adapter Decl-field population
+
+Which **optional** `Decl` struct fields each language adapter
+populates. None of these fields are required for taint analysis to
+run — the engine works on every supported language without them.
+They're precision boosters: when an adapter fills the field, the
+resolver can narrow virtual edges, the taint engine can credit cross-
+method writes, etc., producing higher-confidence findings on a few
+specific rule shapes.
+
+## TL;DR
+
+- Every adapter populates the **required** `Decl` fields (name, kind,
+  span, params, flow events). That's what makes taint analysis work.
+- The table below tracks **seven optional** fields. Most adapters
+  fill some of them and leave the rest unpopulated.
+- A `—` cell means *the language has the construct, but the adapter
+  doesn't yet populate the field*. That's a precision-improvement
+  backlog item, not a bug.
+- An `n/a` cell means *the language has no equivalent construct*
+  (e.g. Erlang has no class hierarchy → no `bases`). Filling it
+  wouldn't make sense.
+- A `✓` means the adapter populates the field for typical cases.
+
+This is the **adapter-side** view ("does the adapter wire up these
+fields?"). The complementary [**engine-side**
+view](../COVERAGE_BASELINE.md) ("what does the engine model?") lives
+in `COVERAGE_BASELINE.md`.
+
+> **Reading this alongside [`TAINT_COVERAGE_MATRIX.md`](../TAINT_COVERAGE_MATRIX.md)?**
+> The taint matrix shows every applicable scenario × language cell as
+> `pass` — that's behavioural truth from real engine tests. A `—` in
+> the table below does NOT mean a taint scenario fails; it means the
+> adapter hasn't wired this *optional* field yet, so the engine falls
+> back to a slightly wider candidate set (more `OverApproximate`
+> findings, never wrong findings). Both views are correct
+> simultaneously.
+
+## What each field powers
+
+| Field | What it enables | If empty |
+|---|---|---|
+| `Visibility` | Resolver filters out private callees from foreign modules. | All decls treated as `Public` — wider candidate set, more `OverApproximate` edges. |
+| `type_aliases` | Resolver matches `MyTypedef` to the underlying class for receiver dispatch. | Calls through typedefs degrade to `Narrowed` precision. |
+| `bases` | Cross-class virtual dispatch narrows when the receiver type is known. | Dispatch falls back to name-only resolution → wider candidate set. |
+| `receiver_field_writes` | G3 cross-method field-taint inheritance: `def m1(x): self.f = x` → `def m2(): use(self.f)` propagates taint. | Field-aliased flows aren't crossed; intra-method propagation still works. |
+| `param_annotations` | Synthetic-source inference: `@route("/api")` on a Flask handler treats the params as remote sources without an explicit YAML rule. | Inferred sources need explicit rules instead. |
+| `export_aliases` | CommonJS resolver credits `module.exports = X` to the module's public surface. | `require()` consumers don't see the assignments. |
+| `super_dispatch` | `super.foo()` resolves precisely to the parent class's `foo`. | Falls back to name-only resolution. |
+
+**None of these gate taint analysis.** They all affect *precision* of
+findings, not whether the engine can analyse the language.
+
+## Capability matrix
+
+`✓` = adapter populates the field. `—` = language has the construct;
+adapter doesn't populate it (backlog candidate). `n/a` = language has
+no equivalent construct.
+
+| Adapter | Visibility | type_aliases | bases | receiver_field_writes | param_annotations | export_aliases | super_dispatch |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| lang_c | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a |
+| lang_cpp | ✓ | ✓ | ✓ | ✓ | n/a | n/a | partial |
+| lang_csharp | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_dart | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_elixir | ✓ | n/a | n/a | n/a | n/a | n/a | n/a |
+| lang_erlang | ✓ | n/a | n/a | n/a | n/a | n/a | n/a |
+| lang_go | ✓ | ✓ | n/a | — | — | n/a | n/a |
+| lang_java | ✓ | n/a | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_javascript | ✓ | n/a | ✓ | ✓ | n/a | ✓ | — |
+| lang_kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_lua | ✓ | n/a | n/a | — | n/a | n/a | n/a |
+| lang_objc | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
+| lang_perl | ✓ | n/a | ✓ | — | n/a | n/a | — |
+| lang_php | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_python | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_ruby | ✓ | ✓ | ✓ | ✓ | partial | n/a | ✓ |
+| lang_rust | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_scala | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
+| lang_solidity | ✓ | n/a | ✓ | ✓ | — | n/a | n/a |
+| lang_swift | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
+| lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+
+## What the cells mean for users
+
+If you're triaging a finding and wondering whether the adapter's
+gaps affect it:
+
+- **`Visibility = —`:** the engine includes private decls in the
+  candidate set across modules. Findings might cite a callee that
+  another module shouldn't be able to reach. Real risk for code
+  review; not a soundness issue (over-reporting, not under-reporting).
+- **`bases = —` / `super_dispatch = —`:** virtual dispatch on this
+  language's class hierarchy may produce wider candidate sets and
+  `OverApproximate` precision tags on the resulting flows. Filter
+  with `--precision exact,narrowed`.
+- **`receiver_field_writes = —`:** taint that flows through
+  `self.field = x` and is later read by another method on the same
+  object won't be tracked. Cross-method same-class flows degrade —
+  intra-method flows still work.
+- **`param_annotations = —`:** synthetic per-route entry-point
+  sources (Flask `@route`, FastAPI handlers, Spring `@RequestBody`)
+  are only inferred for languages where this is populated. Other
+  languages need explicit source rules in YAML.
+
+## Backlog candidates
+
+Visible from the matrix above:
+
+- **`lang_elixir` / `lang_erlang`:** no `Visibility` populated. Both
+  languages have visibility (Erlang's `-export([...])`, Elixir's
+  `defp`). Wiring this would unlock cross-module precision parity
+  with Java/Python.
+- **`lang_perl`, `lang_dart`, `lang_go`:** `Visibility` populated by
+  some other mechanism the audit script doesn't grep for, OR not
+  populated. If the latter, see same backlog as Elixir/Erlang above.
+- **`receiver_field_writes` populated only by `lang_ruby`.** Python,
+  Java, C#, JS/TS all have first-class field-write syntax; populating
+  this would let G3 cross-method field-taint inheritance fire for
+  more languages.
+- **`param_annotations` populated only by `lang_python` (FastAPI/
+  Flask) and partially by `lang_ruby`.** Java `@RequestBody`,
+  C# `[FromBody]`, Kotlin `@RequestBody` could populate this and
+  let `kind: param + target.annotation: ...` rules fire without
+  per-language YAML.
+- **`super_dispatch` is partial in many adapters that have
+  inheritance.** Java/Kotlin/PHP/Ruby/Rust have full support today;
+  C++/C#/Dart/ObjC/Python/Scala/Swift are partial.
+
+## How this matrix is gated
+
+The grep audit `scripts/audit-adapter-capabilities.sh` writes counts
+to `.snapshots/ADAPTER_CAPABILITIES.snapshot`. The CI gate
+(`hardening-checks.yml::capabilities`) runs `--check` which fails on
+drift between the script's live output and the snapshot.
+
+```sh
+# detect drift
+scripts/audit-adapter-capabilities.sh --check
+
+# regenerate the snapshot after intentional adapter changes
+scripts/audit-adapter-capabilities.sh > .snapshots/ADAPTER_CAPABILITIES.snapshot
+```
+
+The Markdown table above is a hand-curated rendering of the snapshot
+plus per-language applicability. If you change an adapter to populate
+a new `Decl` field, the count in the snapshot moves and you also
+update the table cell.
+
+## Related
+
+- [`COVERAGE_BASELINE.md`](../COVERAGE_BASELINE.md) — engine-side
+  capability levels (`Exact`/`Partial`/`Unsupported`) per language.
+  That's what determines whether rules anchored on a category are
+  accepted at rulepack load time.
+- `crates/lang_api/src/types.rs` — `Decl` struct definition for the
+  fields surveyed here.
+- Per-adapter sources (`crates/lang_<lang>/src/lib.rs`) — where each
+  field is (or isn't) populated.

@@ -1,0 +1,418 @@
+# Lua HTTP sources (OpenResty / Lapis / Kong).
+- id: lua.source.openresty_get_uri_args
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [openresty]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, get_uri_args]
+  match_examples:
+  - name: lua.source.openresty_get_uri_args example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.get_uri_args(input)
+      end
+  description: "ngx.req.get_uri_args — parsed query-string; attacker-controlled."
+
+- id: lua.source.openresty_get_post_args
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  packages: [openresty]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, get_post_args]
+  match_examples:
+  - name: lua.source.openresty_get_post_args example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.get_post_args(input)
+      end
+  description: "ngx.req.get_post_args — form-encoded body; attacker-controlled."
+
+- id: lua.source.openresty_get_body_data
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  packages: [openresty]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, get_body_data]
+  match_examples:
+  - name: lua.source.openresty_get_body_data example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.get_body_data(input)
+      end
+  description: "ngx.req.get_body_data — raw request body; attacker-controlled."
+
+- id: lua.source.openresty_get_body_file
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [openresty]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, get_body_file]
+  match_examples:
+  - name: lua.source.openresty_get_body_file example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.get_body_file(input)
+      end
+  description: "ngx.req.get_body_file — body spooled to temp file; contents attacker-controlled."
+
+- id: lua.source.openresty_resty_upload_read
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [multipart]
+  packages: [lua-resty-upload, openresty]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]read$
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: lua.source.openresty_resty_upload_read example
+    code: |
+      local _lua_resty_upload = require("lua-resty-upload")
+      function example(form)
+        form.read()
+      end
+  description: "lua-resty-upload form:read() — multipart headers/body chunks, including browser-supplied filename metadata."
+
+- id: lua.source.openresty_get_headers
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [openresty]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, get_headers]
+  match_examples:
+  - name: lua.source.openresty_get_headers example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.get_headers(input)
+      end
+  description: "ngx.req.get_headers — all request headers; attacker-controlled."
+
+- id: lua.source.openresty_read_body
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [openresty]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, read_body]
+  match_examples:
+  - name: lua.source.openresty_read_body example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.read_body(input)
+      end
+  description: "ngx.req.read_body — side-effect that reads request body into memory; precedes get_body_data."
+
+- id: lua.source.openresty_get_method
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [openresty]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, get_method]
+  match_examples:
+  - name: lua.source.openresty_get_method example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.get_method(input)
+      end
+  description: "ngx.req.get_method — HTTP method string; attacker-controlled (enum-bounded)."
+
+- id: lua.source.openresty_var_uri
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  packages: [openresty]
+  match:
+    kind: read
+    target:
+      attribute: [ngx, var, uri]
+  match_examples:
+  - name: lua.source.openresty_var_uri example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        local value = ngx.var.uri
+      end
+  description: "ngx.var.uri — normalised request path; attacker-controlled."
+
+- id: lua.source.openresty_var_args
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [openresty]
+  match:
+    kind: read
+    target:
+      attribute: [ngx, var, args]
+  match_examples:
+  - name: lua.source.openresty_var_args example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        local value = ngx.var.args
+      end
+  description: "ngx.var.args — raw query string; attacker-controlled."
+
+- id: lua.source.openresty_var_request_uri
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  packages: [openresty]
+  match:
+    kind: read
+    target:
+      attribute: [ngx, var, request_uri]
+  match_examples:
+  - name: lua.source.openresty_var_request_uri example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        local value = ngx.var.request_uri
+      end
+  description: "ngx.var.request_uri — full unparsed request URI; attacker-controlled."
+
+- id: lua.source.openresty_var_remote_addr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [openresty]
+  match:
+    kind: read
+    target:
+      attribute: [ngx, var, remote_addr]
+  description: "Disabled — client IP; spoofable via X-Forwarded-For only if downstream proxy trusted. Enable for log-injection / rate-limit bypass analyses."
+
+- id: lua.source.lapis_params
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      name: params
+  description: "Disabled — current Lua adapter does not emit `self.params` as a property-read source, and bare `params` overmatches local variables."
+
+- id: lua.source.lapis_session
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [lapis]
+  match:
+    kind: read
+    target:
+      name: session
+  description: "Disabled — Lapis self.session is HMAC-signed by default; enable only when session_secret is weak/missing."
+
+- id: lua.source.kong_request_get_query
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_query]
+  match_examples:
+  - name: lua.source.kong_request_get_query example
+    code: |
+      local _u = require("kong")
+      function example(input, url, id, payload, request, params, user)
+        kong.request.get_query(input)
+      end
+  description: "Kong PDK kong.request.get_query — parsed query args; attacker-controlled."
+
+- id: lua.source.kong_request_get_body
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_body]
+  match_examples:
+  - name: lua.source.kong_request_get_body example
+    code: |
+      local _u = require("kong")
+      function example(input, url, id, payload, request, params, user)
+        kong.request.get_body(input)
+      end
+  description: "Kong PDK kong.request.get_body — parsed body; attacker-controlled."
+
+- id: lua.source.kong_request_get_headers
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_headers]
+  match_examples:
+  - name: lua.source.kong_request_get_headers example
+    code: |
+      local _u = require("kong")
+      function example(input, url, id, payload, request, params, user)
+        kong.request.get_headers(input)
+      end
+  description: "Kong PDK kong.request.get_headers — all request headers; attacker-controlled."
+
+- id: lua.source.kong_request_get_raw_body
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_raw_body]
+  match_examples:
+  - name: lua.source.kong_request_get_raw_body example
+    code: |
+      local _u = require("kong")
+      function example(input, url, id, payload, request, params, user)
+        kong.request.get_raw_body(input)
+      end
+  description: "Kong PDK kong.request.get_raw_body — raw request body bytes; attacker-controlled."
+
+- id: lua.source.kong_request_get_path
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_path]
+  match_examples:
+  - name: lua.source.kong_request_get_path example
+    code: |
+      local _u = require("kong")
+      function example(input, url, id, payload, request, params, user)
+        kong.request.get_path(input)
+      end
+  description: "Kong PDK kong.request.get_path — request path; attacker-controlled."
+
+- id: lua.source.kong_request_get_header
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [kong]
+  match:
+    kind: call
+    callee:
+      attribute: [kong, request, get_header]
+  match_examples:
+  - name: lua.source.kong_request_get_header example
+    code: |
+      local _u = require("kong")
+      function example(input, url, id, payload, request, params, user)
+        kong.request.get_header(input)
+      end
+  description: "Kong PDK kong.request.get_header(name) — single request header value; attacker-controlled."
+
+# Property-read shape for OpenResty. `ngx.req.get_uri_args()` is a
+# call (covered above); `ngx.var.uri_args` style accesses surface
+# as reads. Provide a coarser-trust source-rule that matches the
+# `ngx.var.<name>` family without listing each property.
+- id: lua.source.ngx_uri_args
+  enabled: true
+  language: lua
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [openresty]
+  match:
+    kind: read
+    target:
+      attribute: [ngx, var, uri_args]
+  match_examples:
+  - name: lua.source.ngx_uri_args example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        local value = ngx.var.uri_args
+      end
+  description: "ngx.var.uri_args — OpenResty parsed query-string variable; attacker-controlled. Property-read shape complementary to the call-shape ngx.req.get_uri_args() rule."
+
+- id: lua.source.openresty_session_data
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: lua
+  trust: remote
+  tag: http-input
+  packages: [lua-resty-session]
+  match:
+    kind: read
+    target:
+      attribute: [session, data]
+  description: "Disabled — lua-resty-session session.data is HMAC/AES-protected by default; enable only when secret is weak/static or when modeling second-order taint from session payloads."

@@ -1,0 +1,265 @@
+# PHP XXE sinks.
+- id: php.xxe.simplexml_load_string
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: simplexml_load_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.xxe.simplexml_load_string example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          simplexml_load_string($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          simplexml_load_string("<root/>");
+        }
+      expect_no_match: true
+  description: "simplexml_load_string — flag if LIBXML_NOENT or LIBXML_DTDLOAD set."
+
+- id: php.xxe.simplexml_load_file
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: simplexml_load_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.xxe.simplexml_load_file example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          simplexml_load_file($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          simplexml_load_file("config/feed.xml");
+        }
+      expect_no_match: true
+  description: "simplexml_load_file."
+
+- id: php.xxe.domdocument_load
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [DOMDocument, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.xxe.domdocument_load example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          DOMDocument::load($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          DOMDocument::load("config/feed.xml");
+        }
+      expect_no_match: true
+  description: "DOMDocument::load — file-based loader."
+
+- id: php.xxe.domdocument_loadxml
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [DOMDocument, loadXML]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.xxe.domdocument_loadxml example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          DOMDocument::loadXML($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          DOMDocument::loadXML("<root/>");
+        }
+      expect_no_match: true
+  description: "DOMDocument::loadXML."
+
+- id: php.xxe.domdocument_loadhtml
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: xxe
+  severity: low
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [DOMDocument, loadHTML]
+  description: "Disabled — HTML loader doesn't honor DTDs."
+
+- id: php.xxe.xmlreader_open
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XMLReader, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.xxe.xmlreader_open example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          XMLReader::open($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          XMLReader::open("config/feed.xml");
+        }
+      expect_no_match: true
+  description: "XMLReader::open."
+
+- id: php.xxe.xmlreader_xml
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XMLReader, xml]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.xxe.xmlreader_xml example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          XMLReader::xml($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          XMLReader::xml("<root/>");
+        }
+      expect_no_match: true
+  description: "XMLReader::xml."
+
+- id: php.xxe.xml_parser_create
+  enabled: true
+  language: php
+  tag: xxe
+  severity: medium
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xml_parser_create
+  match_examples:
+    - name: php.xxe.xml_parser_create example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          xml_parser_create($input);
+        }
+  description: "xml_parser_create — expat (no DTD by default); paired with xml_parse feeds tainted XML."
+
+- id: php.xxe.xml_parse
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xml_parse
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: php.xxe.xml_parse example
+      code: |
+        <?php
+        function example($parser, $input, $url, $id, $payload, $request) {
+          xml_parse($parser, $input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($parser, $input, $url, $id, $payload, $request) {
+          xml_parse($parser, "<root/>");
+        }
+      expect_no_match: true
+  description: "xml_parse — expat parse on tainted XML; if options enable external entities, XXE applies."
+
+- id: php.xxe.soapclient_constructor
+  enabled: true
+  language: php
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: new
+    callee:
+      name: SoapClient
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.xxe.soapclient_constructor example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          new SoapClient($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          new SoapClient("service.wsdl");
+        }
+      expect_no_match: true
+  description: "SoapClient — uses libxml internally."

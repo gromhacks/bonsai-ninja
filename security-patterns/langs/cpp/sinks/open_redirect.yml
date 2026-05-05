@@ -1,0 +1,99 @@
+- id: cpp.open_redirect.cpphttplib_set_redirect
+  enabled: true
+  language: cpp
+  tag: open-redirect
+  severity: high
+  packages:
+  - cpp-httplib
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - set_redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Response::set_redirect(target);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Response::set_redirect("safe");
+      }
+    expect_no_match: true
+  description: "cpp-httplib Response::set_redirect(tainted) — unchecked URL allows phishing."
+  imports:
+  - httplib.h
+  - httplib
+- id: cpp.open_redirect.drogon_redirect
+  enabled: true
+  language: cpp
+  tag: open-redirect
+  severity: high
+  packages:
+  - drogon
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - newRedirectionResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::newRedirectionResponse(target);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpResponse::newRedirectionResponse("safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpResponse::newRedirectionResponse(tainted) — unchecked redirect."
+- id: cpp.open_redirect.crow_location
+  enabled: false
+  language: cpp
+  tag: open-redirect
+  severity: high
+  packages:
+  - crow
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - response
+      - redirect
+  match_examples:
+  - name: generated direct match
+    code: "#include <crow.h> /* crow */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  response::redirect(target);\n}\n"
+  description: "crow response::redirect(tainted) — unchecked redirect."
+  disabled_reason:
+    code: over-broad
+- id: cpp.open_redirect.poco_set_location
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: open-redirect
+  severity: medium
+  packages:
+  - Poco
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPResponse
+      - redirect
+  description: "Disabled — Poco::Net::HTTPServerResponse::redirect(tainted); enable if host-allow-list is not enforced."

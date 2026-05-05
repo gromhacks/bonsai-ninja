@@ -1,0 +1,580 @@
+use bonsai_lang_api::LanguageRegistry;
+use bonsai_security::rule::{
+    ArgRegexSpec, ConstraintKind, KeywordArgEqualsSpec, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
+    RuleTarget, Severity,
+};
+use bonsai_security::{match_rule_against_facts, match_rules_against_facts};
+use bonsai_workspace::Workspace;
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+fn python_ws(source: &str) -> Workspace {
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_python::PythonAdapter::new()));
+    let ws = Workspace::new(registry);
+    ws.vfs().write("app.py".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn java_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("App.java".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn csharp_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("App.cs".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn php_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("app.php".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn ruby_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("app.rb".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn lua_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("app.lua".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+#[test]
+fn precision_constraints_filter_common_fp_shapes() {
+    let ws = python_ws(
+        r#"
+def printf(fmt, value=None):
+    pass
+
+def open(path, mode="r"):
+    pass
+
+class Location:
+    def replace(self, value):
+        pass
+
+class Text:
+    def replace(self, value):
+        pass
+
+def handler(user_input):
+    printf("%s", user_input)
+    printf(user_input)
+    open("static.txt")
+    obj.open(user_input)
+    location.replace(user_input)
+    text.replace(user_input)
+"#,
+    );
+
+    let mut fmt = call_name_rule("python.test.dynamic_format", "printf");
+    fmt.constraints = RuleConstraint(vec![ConstraintKind::FormatArgIndex { format_arg_index: 0 }]);
+
+    let mut top_level_open = call_name_rule("python.test.top_level_open", "open");
+    top_level_open.constraints = RuleConstraint(vec![ConstraintKind::TopLevel { top_level: true }]);
+
+    let mut location_replace = call_name_rule("python.test.location_replace", "replace");
+    location_replace.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
+        receiver_name_in: vec!["location".to_string()],
+    }]);
+
+    let mut pipe_open = call_name_rule("python.test.pipe_open", "open");
+    pipe_open.constraints = RuleConstraint(vec![ConstraintKind::ArgMatchesRegex {
+        arg_matches_regex: ArgRegexSpec {
+            index: 0,
+            regex: r#"^\s*["']\|"#.to_string(),
+        },
+    }]);
+
+    let rules = [fmt, top_level_open, location_replace, pipe_open];
+    let refs: Vec<&Rule> = rules.iter().collect();
+    let hits = match_rules_against_facts(&ws, &refs);
+
+    assert_eq!(
+        hits.iter()
+            .filter(|m| m.rule_id == "python.test.dynamic_format")
+            .count(),
+        1,
+        "format_arg_index must skip static format strings"
+    );
+    assert_eq!(
+        hits.iter()
+            .filter(|m| m.rule_id == "python.test.top_level_open")
+            .count(),
+        1,
+        "top_level must skip receiver calls like obj.open(...)"
+    );
+    assert_eq!(
+        hits.iter()
+            .filter(|m| m.rule_id == "python.test.location_replace")
+            .count(),
+        1,
+        "receiver_name_in must only keep the location receiver"
+    );
+    assert_eq!(
+        hits.iter()
+            .filter(|m| m.rule_id == "python.test.pipe_open")
+            .count(),
+        0,
+        "arg_matches_regex must not match ordinary file open"
+    );
+}
+
+fn base_rule(id: &str, kind: RuleKind, match_kind: MatchKind) -> Rule {
+    Rule {
+        id: id.to_string(),
+        aliases: Vec::new(),
+        enabled: true,
+        disabled_reason: None,
+        title: None,
+        tag: Some("test".to_string()),
+        severity: Some(Severity::High),
+        trust: None,
+        category: None,
+        cwe: vec![],
+        owasp: vec![],
+        frameworks: vec![],
+        packages: vec![],
+        imports: vec![],
+        modules: vec![],
+        manifests: vec![],
+        lockfiles: vec![],
+        payload_types: vec![],
+        match_spec: MatchSpec {
+            kind: match_kind,
+            callee: None,
+            target: None,
+            search_depth: 0,
+        },
+        taint_semantics: None,
+        constraints: RuleConstraint::default(),
+        match_examples: Vec::new(),
+        description: "test rule".to_string(),
+        kind,
+        language: "python".to_string(),
+        source_path: "synthetic.yml".to_string(),
+    }
+}
+
+fn call_attr_rule(id: &str, attr: &[&str]) -> Rule {
+    let mut rule = base_rule(id, RuleKind::Sink, MatchKind::Call);
+    rule.match_spec.callee = Some(RuleTarget {
+        attribute: Some(attr.iter().map(|s| (*s).to_string()).collect()),
+        ..Default::default()
+    });
+    rule
+}
+
+fn call_attr_rule_for_language(id: &str, language: &str, attr: &[&str]) -> Rule {
+    let mut rule = call_attr_rule(id, attr);
+    rule.language = language.to_string();
+    rule
+}
+
+fn call_name_rule(id: &str, name: &str) -> Rule {
+    let mut rule = base_rule(id, RuleKind::Sink, MatchKind::Call);
+    rule.match_spec.callee = Some(RuleTarget {
+        name: Some(name.to_string()),
+        ..Default::default()
+    });
+    rule
+}
+
+fn target_name_rule(id: &str, kind: MatchKind, name: &str) -> Rule {
+    let mut rule = base_rule(id, RuleKind::Source, kind);
+    rule.match_spec.target = Some(RuleTarget {
+        name: Some(name.to_string()),
+        ..Default::default()
+    });
+    rule
+}
+
+fn target_attr_rule(id: &str, kind: MatchKind, attr: &[&str]) -> Rule {
+    let mut rule = base_rule(id, RuleKind::Source, kind);
+    rule.match_spec.target = Some(RuleTarget {
+        attribute: Some(attr.iter().map(|s| (*s).to_string()).collect()),
+        ..Default::default()
+    });
+    rule
+}
+
+fn signature(rows: &[bonsai_security::RuleMatch]) -> BTreeSet<(String, String, u32, String, Option<String>)> {
+    rows.iter()
+        .map(|m| {
+            (
+                m.rule_id.clone(),
+                m.file.clone(),
+                m.line,
+                m.match_text.clone(),
+                m.enclosing_fn.clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn java_declared_receiver_types_match_instance_and_factory_chains() {
+    let ws = java_ws(
+        r"
+import org.apache.logging.log4j.core.net.JndiManager;
+
+class App {
+    private JndiManager fieldManager;
+
+    void handle(JndiManager paramManager, String key) {
+        paramManager.lookup(key);
+        JndiManager localManager = JndiManager.getDefaultManager();
+        localManager.lookup(key);
+        this.fieldManager.lookup(key);
+        JndiManager.getDefaultManager().lookup(key);
+    }
+}
+",
+    );
+    let rule = call_attr_rule_for_language(
+        "java.test.jndi_manager_lookup",
+        "java",
+        &["JndiManager", "lookup"],
+    );
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    let matched: BTreeSet<String> = hits.iter().map(|hit| hit.match_text.clone()).collect();
+
+    for expected in [
+        "paramManager.lookup",
+        "localManager.lookup",
+        "this.fieldManager.lookup",
+        "JndiManager.getDefaultManager().lookup",
+    ] {
+        assert!(
+            matched.contains(expected),
+            "expected Java receiver-type match for {expected}; got {matched:?}"
+        );
+    }
+}
+
+#[test]
+fn lax_tail_does_not_cross_explicit_type_receivers() {
+    let ws = csharp_ws(
+        r"
+using System.Security.Cryptography;
+
+class App {
+    void Handle(byte[] data, dynamic encoder) {
+        MD5.HashData(data);
+        SHA1.HashData(data);
+        encoder.HashData(data);
+    }
+}
+",
+    );
+    let rule = call_attr_rule_for_language("csharp.test.md5_hashdata", "csharp", &["MD5", "HashData"]);
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    let matched: BTreeSet<String> = hits.iter().map(|hit| hit.match_text.clone()).collect();
+
+    assert!(
+        matched.contains("MD5.HashData"),
+        "exact type receiver should match; got {matched:?}"
+    );
+    assert!(
+        matched.contains("encoder.HashData"),
+        "unknown instance receiver should keep lax-tail behavior; got {matched:?}"
+    );
+    assert!(
+        !matched.contains("SHA1.HashData"),
+        "explicit different type receiver must not match lax-tail rule; got {matched:?}"
+    );
+}
+
+#[test]
+fn batched_matcher_matches_single_rule_semantics_for_all_fact_kinds() {
+    let ws = python_ws(
+        r#"
+from os import system as run
+
+def dangerous(first, second):
+    pass
+
+def handler(request, user_input):
+    value = request.args
+    verify_mode = "CERT_NONE"
+    run(user_input)
+    dangerous(second=user_input, first=0)
+"#,
+    );
+
+    let mut keyword = call_name_rule("python.test.keyword_dangerous", "dangerous");
+    keyword.constraints = RuleConstraint(vec![ConstraintKind::KeywordArgEquals {
+        keyword_arg_equals: KeywordArgEqualsSpec {
+            name: "second".to_string(),
+            value: "user_input".to_string(),
+        },
+    }]);
+
+    let mut alias_system_constrained =
+        call_attr_rule("python.test.alias_system_constrained", &["os", "system"]);
+    alias_system_constrained.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
+        receiver_name_in: vec!["os".to_string()],
+    }]);
+
+    let rules = [
+        call_attr_rule("python.test.alias_system", &["os", "system"]),
+        alias_system_constrained,
+        keyword,
+        target_attr_rule("python.test.request_args", MatchKind::Read, &["request", "args"]),
+        target_name_rule("python.test.verify_mode", MatchKind::Write, "verify_mode"),
+        target_name_rule("python.test.param_user_input", MatchKind::Param, "user_input"),
+    ];
+    let rule_refs: Vec<&Rule> = rules.iter().collect();
+
+    let single: Vec<_> = rule_refs
+        .iter()
+        .flat_map(|rule| match_rule_against_facts(&ws, rule))
+        .collect();
+    let batched = match_rules_against_facts(&ws, &rule_refs);
+
+    assert_eq!(
+        signature(&single),
+        signature(&batched),
+        "batched matcher must preserve single-rule semantics"
+    );
+    for id in [
+        "python.test.alias_system",
+        "python.test.alias_system_constrained",
+        "python.test.keyword_dangerous",
+        "python.test.request_args",
+        "python.test.verify_mode",
+        "python.test.param_user_input",
+    ] {
+        assert!(
+            batched.iter().any(|m| m.rule_id == id),
+            "expected batched match for {id}; got {batched:?}"
+        );
+    }
+}
+
+#[test]
+fn attribute_match_accepts_php_arrow_callees() {
+    let ws = php_ws(
+        r#"<?php
+function handler($mysqli) {
+    $mysqli->query("SELECT 1");
+}
+"#,
+    );
+    let mut rule = call_attr_rule_for_language("php.test.mysqli_query", "php", &["mysqli", "query"]);
+    rule.constraints = RuleConstraint(vec![ConstraintKind::ArgMatchesRegex {
+        arg_matches_regex: ArgRegexSpec {
+            index: 0,
+            regex: "SELECT".to_string(),
+        },
+    }]);
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "$mysqli->query"),
+        "expected php arrow callee to satisfy attribute rule, got {matches:?}"
+    );
+}
+
+#[test]
+fn arg_regex_constraints_follow_simple_assignment_indirection() {
+    let ws = python_ws(
+        r#"
+def execute(sql):
+    pass
+
+def handler(user_input):
+    sql = "SELECT * FROM users WHERE name = '" + user_input + "'"
+    execute(sql)
+"#,
+    );
+    let mut rule = call_name_rule("python.test.execute_select", "execute");
+    rule.constraints = RuleConstraint(vec![ConstraintKind::ArgMatchesRegex {
+        arg_matches_regex: ArgRegexSpec {
+            index: 0,
+            regex: "SELECT\\s+\\*\\s+FROM".to_string(),
+        },
+    }]);
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "execute"),
+        "arg_matches_regex should inspect the same-function assignment feeding execute(sql), got {matches:?}"
+    );
+}
+
+#[test]
+fn receiver_name_in_matches_receiver_chain_segments() {
+    let ws = python_ws(
+        r#"
+class Headers:
+    def set(self, name, value):
+        pass
+
+def handler(response, request, user_input):
+    response.headers.set("Location", user_input)
+    request.headers.set("Location", user_input)
+"#,
+    );
+    let mut rule = call_name_rule("python.test.response_headers_set", "set");
+    rule.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
+        receiver_name_in: vec!["response".to_string()],
+    }]);
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        matches
+            .iter()
+            .filter(|m| m.rule_id == "python.test.response_headers_set")
+            .count(),
+        1,
+        "receiver_name_in should match response.headers.set but not request.headers.set: {matches:?}"
+    );
+    assert!(
+        matches.iter().any(|m| m.match_text == "response.headers.set"),
+        "expected response.headers.set match, got {matches:?}"
+    );
+}
+
+#[test]
+fn write_rules_match_attribute_write_refs_with_constraints() {
+    let ws = ruby_ws(
+        r"
+def handler(response)
+  response.headers['Transfer-Encoding'] = 'chunked'
+end
+",
+    );
+    let mut rule = target_attr_rule(
+        "ruby.test.response_headers",
+        MatchKind::Write,
+        &["response", "headers"],
+    );
+    rule.language = "ruby".to_string();
+    rule.constraints = RuleConstraint(vec![ConstraintKind::AnyArgMatchesRegex {
+        any_arg_matches_regex: "Transfer-Encoding".to_string(),
+    }]);
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "response.headers"),
+        "expected write-ref match for response.headers assignment, got {matches:?}"
+    );
+}
+
+#[test]
+fn top_level_false_accepts_lua_colon_receivers() {
+    let ws = lua_ws(
+        r#"
+function handler(self)
+  self:render("view")
+end
+"#,
+    );
+    let mut rule = call_name_rule("lua.test.receiver_render", "render");
+    rule.language = "lua".to_string();
+    rule.constraints = RuleConstraint(vec![ConstraintKind::TopLevel { top_level: false }]);
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "self:render"),
+        "expected Lua colon receiver to satisfy top_level:false, got {matches:?}"
+    );
+}
+
+#[test]
+fn batched_matcher_keeps_constraints_per_rule_without_cross_rule_leakage() {
+    let ws = python_ws(
+        r#"
+def dangerous(first, second):
+    pass
+
+def handler(user_input):
+    dangerous(second=user_input, first=0)
+    dangerous(second="clean", first=user_input)
+"#,
+    );
+
+    let mut tainted_second = call_name_rule("python.test.second_user_input", "dangerous");
+    tainted_second.constraints = RuleConstraint(vec![ConstraintKind::KeywordArgEquals {
+        keyword_arg_equals: KeywordArgEqualsSpec {
+            name: "second".to_string(),
+            value: "user_input".to_string(),
+        },
+    }]);
+    let mut clean_second = call_name_rule("python.test.second_clean", "dangerous");
+    clean_second.constraints = RuleConstraint(vec![ConstraintKind::KeywordArgEquals {
+        keyword_arg_equals: KeywordArgEqualsSpec {
+            name: "second".to_string(),
+            value: "\"clean\"".to_string(),
+        },
+    }]);
+    let rules = [tainted_second, clean_second];
+    let rule_refs: Vec<&Rule> = rules.iter().collect();
+
+    let batched = match_rules_against_facts(&ws, &rule_refs);
+    let tainted_count = batched
+        .iter()
+        .filter(|m| m.rule_id == "python.test.second_user_input")
+        .count();
+    let clean_count = batched
+        .iter()
+        .filter(|m| m.rule_id == "python.test.second_clean")
+        .count();
+
+    assert_eq!(
+        tainted_count, 1,
+        "keyword constraint must match exactly one tainted call"
+    );
+    assert_eq!(
+        clean_count, 1,
+        "keyword constraint must match exactly one clean call"
+    );
+    assert_eq!(
+        signature(&batched),
+        signature(
+            &rule_refs
+                .iter()
+                .flat_map(|rule| match_rule_against_facts(&ws, rule))
+                .collect::<Vec<_>>()
+        )
+    );
+}

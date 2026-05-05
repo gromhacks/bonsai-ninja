@@ -1,0 +1,103 @@
+# Swift XSS sinks (WKWebView / UIWebView).
+- id: swift.xss.wkwebview_loadhtmlstring
+  enabled: true
+  language: swift
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: loadHTMLString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { loadHTMLString(input) }
+  - name: literal html string negative
+    code: |
+      func test() { loadHTMLString("<p>safe</p>") }
+    expect_no_match: true
+  description: "WKWebView.loadHTMLString / UIWebView.loadHTMLString with tainted HTML."
+
+- id: swift.xss.wkwebview_evaluate_javascript
+  enabled: true
+  language: swift
+  tag: xss
+  severity: high
+  packages: [WebKit]
+  cwe: [CWE-79, CWE-94]
+  match:
+    kind: call
+    callee:
+      name: evaluateJavaScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swift wkwebview evaluate javascript
+    code: |
+      import WebKit
+      func test(input: String) { evaluateJavaScript(input) }
+    expect_match_text: [evaluateJavaScript]
+  - name: literal evaluate javascript negative
+    code: |
+      import WebKit
+      func test() { evaluateJavaScript("document.title") }
+    expect_no_match: true
+  description: "WKWebView.evaluateJavaScript with tainted JavaScript — executes attacker-controlled script in the webview."
+
+- id: swift.xss.wkusercontentcontroller_add_user_script
+  enabled: true
+  language: swift
+  tag: xss
+  severity: high
+  packages: [WebKit]
+  cwe: [CWE-79, CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [userContentController, add]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swift wk user content controller add script
+    code: |
+      import WebKit
+      func test(input: WKUserScript) { userContentController.add(input) }
+    expect_match_text: [userContentController.add]
+  - name: literal user script negative
+    code: |
+      import WebKit
+      func test() { userContentController.add("safe-script") }
+    expect_no_match: true
+  description: "WKUserContentController.add(WKUserScript) — untrusted user scripts can inject DOM code into every matching page."
+- id: swift.xss.webview_load_data
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: load
+  description: "Disabled — WKWebView.load(_: URLRequest); bare `.load()` is ubiquitous (Image/URL/Codable/etc.) without receiver narrowing."
+- id: swift.xss.html_string_from
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: xss
+  severity: medium
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      regex: "^loadHTML.*String$"
+  description: "Disabled — superseded by exact-match loadHTMLString rule; kept for reference."

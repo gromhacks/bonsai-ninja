@@ -1,0 +1,227 @@
+# C++ format-string sinks — tainted format argument.
+# (iostreams are safe by default; these are C-style APIs still used from C++.)
+- id: cpp.format.printf_tainted
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: printf
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(const char *input) {
+        const char *fmt = input;
+        printf(fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example() {
+        printf("%s", "safe");
+      }
+    expect_no_match: true
+  description: "printf(fmt, ...) with tainted fmt — arbitrary read/write via %n / %s."
+
+- id: cpp.format.fprintf_tainted
+  aliases:
+    - cpp.info_disclosure.fprintf_stderr_secret
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: high
+  cwe: [CWE-134, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: fprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(void *stream, const char *input) {
+        const char *fmt = input;
+        fprintf(stream, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(void *stream) {
+        fprintf(stream, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "fprintf(stream, fmt, ...) with tainted fmt. Also covers merged aliases: cpp.info_disclosure.fprintf_stderr_secret."
+
+- id: cpp.format.sprintf_tainted
+  aliases:
+    - cpp.memory.sprintf
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: critical
+  cwe: [CWE-134, CWE-120]
+  match:
+    kind: call
+    callee:
+      name: sprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *buf, const char *input) {
+        const char *fmt = input;
+        sprintf(buf, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(char *buf) {
+        sprintf(buf, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "sprintf(buf, fmt, ...) with tainted fmt — format injection + overflow. Also covers merged aliases: cpp.memory.sprintf."
+
+- id: cpp.format.snprintf_tainted
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: snprintf
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *buf, const char *input) {
+        const char *fmt = input;
+        snprintf(buf, 128, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(char *buf) {
+        snprintf(buf, 128, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "snprintf(buf, n, fmt, ...) with tainted fmt — format injection (length is bounded)."
+
+- id: cpp.format.vprintf_tainted
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: vprintf
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(const char *input) {
+        const char *fmt = input;
+        vprintf(fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example() {
+        vprintf("%s");
+      }
+    expect_no_match: true
+  description: "vprintf(fmt, va) with tainted fmt."
+
+- id: cpp.format.syslog_tainted
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: syslog
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(int priority, const char *input) {
+        const char *fmt = input;
+        syslog(priority, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(int priority) {
+        syslog(priority, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "syslog(priority, fmt, ...) with tainted fmt."
+
+- id: cpp.format.std_format_tainted
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [std, format]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(const char *input) {
+        std::format(input);
+      }
+  - name: literal format negative
+    code: |
+      void example() {
+        std::format("{}");
+      }
+    expect_no_match: true
+  description: "std::format(fmt, args...) with non-literal/tainted fmt — C++20 format consteval is bypassed when the template is a runtime string (use std::vformat at your own risk)."
+
+- id: cpp.format.std_vformat_tainted
+  enabled: true
+  language: cpp
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [std, vformat]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(const char *input) {
+        std::vformat(input);
+      }
+  - name: literal format negative
+    code: |
+      void example() {
+        std::vformat("{}");
+      }
+    expect_no_match: true
+  description: "std::vformat(fmt, args) with tainted fmt — runtime template string, no consteval check."

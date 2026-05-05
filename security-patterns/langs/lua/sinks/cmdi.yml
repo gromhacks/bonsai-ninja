@@ -1,0 +1,206 @@
+# Lua command-injection + destructive-path sinks.
+- id: lua.cmdi.os_execute
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [os, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.os_execute example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.execute(input)
+      end
+  - name: literal command negative
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.execute("safe")
+      end
+    expect_no_match: true
+  description: "os.execute(cmd) — runs cmd via /bin/sh -c; tainted string yields shell injection."
+
+- id: lua.cmdi.io_popen
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [io, popen]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.io_popen example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        io.popen(input)
+      end
+  - name: literal command negative
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        io.popen("uptime")
+      end
+    expect_no_match: true
+  description: "io.popen(cmd) — opens a pipe to a shell subprocess; tainted cmd is injectable."
+
+- id: lua.cmdi.posix_spawn
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  packages: [luaposix]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [posix, spawn]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.posix_spawn example
+    code: |
+      local _luaposix = require("luaposix")
+      function example(input, url, id, payload, request, params, user)
+        posix.spawn(input)
+      end
+  - name: literal program negative
+    code: |
+      local _luaposix = require("luaposix")
+      function example(input, url, id, payload, request, params, user)
+        posix.spawn("/bin/true")
+      end
+    expect_no_match: true
+  description: "luaposix posix.spawn — forks and execs; tainted argv/path becomes arbitrary process."
+
+- id: lua.cmdi.posix_exec
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  packages: [luaposix]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [posix, exec]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.posix_exec example
+    code: |
+      local _luaposix = require("luaposix")
+      function example(input, url, id, payload, request, params, user)
+        posix.exec(input)
+      end
+  - name: literal program negative
+    code: |
+      local _luaposix = require("luaposix")
+      function example(input, url, id, payload, request, params, user)
+        posix.exec("/bin/true")
+      end
+    expect_no_match: true
+  description: "luaposix posix.exec — replaces current process image with tainted program/argv."
+
+- id: lua.cmdi.posix_execp
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  packages: [luaposix]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [posix, execp]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.posix_execp example
+    code: |
+      local _luaposix = require("luaposix")
+      function example(input, url, id, payload, request, params, user)
+        posix.execp(input)
+      end
+  - name: literal program negative
+    code: |
+      local _luaposix = require("luaposix")
+      function example(input, url, id, payload, request, params, user)
+        posix.execp("true")
+      end
+    expect_no_match: true
+  description: "luaposix posix.execp — PATH-resolved exec; tainted program/argv is RCE."
+
+- id: lua.cmdi.luv_spawn
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  packages: [luv, luvit]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [uv, spawn]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.luv_spawn example
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.spawn(input)
+      end
+  - name: literal program negative
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.spawn("true")
+      end
+    expect_no_match: true
+  description: "libuv uv.spawn (lua-luv / luvit) — tainted file/args spawns arbitrary process."
+
+- id: lua.cmdi.luvit_process_spawn
+  enabled: true
+  language: lua
+  tag: command-injection
+  severity: critical
+  packages: [luvit]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [process, spawn]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.cmdi.luvit_process_spawn example
+    code: |
+      local _luvit = require("luvit")
+      function example(input, url, id, payload, request, params, user)
+        process.spawn(input)
+      end
+  - name: literal program negative
+    code: |
+      local _luvit = require("luvit")
+      function example(input, url, id, payload, request, params, user)
+        process.spawn("true")
+      end
+    expect_no_match: true
+  description: "luvit process.spawn — wrapper around uv.spawn; tainted argv is RCE."

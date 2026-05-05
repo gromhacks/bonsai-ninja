@@ -1,0 +1,105 @@
+# Kotlin file-upload sinks (Spring + Ktor). Source-surface file-name reads
+# (MultipartFile.getOriginalFilename, PartData.originalFileName) live in
+# sources/remote.yml.
+- id: kotlin.upload.spring_multipart_transferto
+  enabled: true
+  language: kotlin
+  tag: file-upload
+  severity: high
+  packages: [org.springframework.web]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [MultipartFile, transferTo]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(input: String) {
+          MultipartFile.transferTo(input)
+        }
+      }
+    expect_match_text: [MultipartFile.transferTo]
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.*
+      class App {
+      fun handle(input: String) {
+        MultipartFile.transferTo("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring MultipartFile.transferTo — dest path can be client-controlled filename."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.upload.apache_fileitem_write
+  enabled: true
+  language: kotlin
+  tag: file-upload
+  severity: high
+  packages: [org.apache.commons.fileupload]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FileItem, write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.fileupload.*
+      // uses org.apache.commons.fileupload
+      class App {
+        fun handle(input: String) {
+          FileItem.write(input)
+        }
+      }
+    expect_match_text: [FileItem.write]
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.fileupload.*
+      // uses org.apache.commons.fileupload
+      class App {
+      fun handle(input: String) {
+        FileItem.write("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Apache Commons FileUpload FileItem.write — uploaded content is written to a destination that can be filename/path influenced."
+
+  imports:
+  - org.apache.commons.fileupload
+- id: kotlin.upload.nio_files_copy
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: file-upload
+  severity: high
+  packages: [java.nio.file]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Files, copy]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.nio.file.*
+      class App {
+        fun handle(input: String) {
+          Files.copy(input)
+        }
+      }
+    expect_match_text: [Files.copy]
+  description: "Disabled duplicate — same matcher as canonical kotlin.path.files_copy; enable a project-local file-upload rule when multipart-specific receiver facts are available."
+  imports:
+  - java

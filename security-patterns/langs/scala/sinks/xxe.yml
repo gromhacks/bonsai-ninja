@@ -1,0 +1,291 @@
+# Scala XXE sinks (scala.xml + JVM javax.xml parsers).
+- id: scala.xxe.xml_load
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XML, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XML.load(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XML.load("safe.xml")
+        }
+      }
+    expect_no_match: true
+  description: "scala.xml.XML.load — uses JDK parser with default (unsafe) settings."
+
+- id: scala.xxe.xml_loadstring
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XML, loadString]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XML.loadString(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XML.loadString("<safe/>")
+        }
+      }
+    expect_no_match: true
+  description: "scala.xml.XML.loadString — XXE via default JDK parser."
+
+- id: scala.xxe.xml_loadfile
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XML, loadFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XML.loadFile(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XML.loadFile("safe.xml")
+        }
+      }
+    expect_no_match: true
+  description: "scala.xml.XML.loadFile — reads local file via default JDK parser; resolves external entities by default (XXE + SSRF + file read)."
+
+- id: scala.xxe.document_builder_parse
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: high
+  packages: [javax.xml.parsers]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [DocumentBuilder, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.xml.parsers._
+      // uses javax.xml.parsers
+      object App {
+        def handle(input: String): Unit = {
+          DocumentBuilder.parse(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.parsers._
+      // uses javax.xml.parsers
+      object App {
+        def handle(input: String): Unit = {
+          DocumentBuilder.parse("safe.xml")
+        }
+      }
+    expect_no_match: true
+  description: "javax.xml.parsers.DocumentBuilder.parse — unsafe unless FEATURE_SECURE_PROCESSING is set."
+
+- id: scala.xxe.sax_parser_parse
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: high
+  packages: [javax.xml.parsers]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [SAXParser, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.xml.parsers._
+      // uses javax.xml.parsers
+      object App {
+        def handle(input: String): Unit = {
+          SAXParser.parse(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.parsers._
+      // uses javax.xml.parsers
+      object App {
+        def handle(input: String): Unit = {
+          SAXParser.parse("safe.xml")
+        }
+      }
+    expect_no_match: true
+  description: "javax.xml.parsers.SAXParser.parse — XXE risk with defaults."
+
+- id: scala.xxe.xmlinputfactory_create
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: medium
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XMLInputFactory, createXMLStreamReader]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XMLInputFactory.createXMLStreamReader(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          XMLInputFactory.createXMLStreamReader("safe.xml")
+        }
+      }
+    expect_no_match: true
+  description: "XMLInputFactory.createXMLStreamReader — XXE if IS_SUPPORTING_EXTERNAL_ENTITIES not disabled."
+
+- id: scala.xxe.transformer_factory_new
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: medium
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [TransformerFactory, newInstance]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          TransformerFactory.newInstance(input)
+        }
+      }
+  description: "TransformerFactory.newInstance — XSLT + XXE risk."
+
+- id: scala.xxe.jaxb_unmarshaller_unmarshal
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: high
+  packages: ["javax.xml.bind", "jakarta.xml.bind"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Unmarshaller, unmarshal]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jaxb unmarshaller unmarshal
+    code: |
+      import javax.xml.bind._
+      // uses javax.xml.bind
+      object App {
+        def handle(input: Any): Unit = {
+          Unmarshaller.unmarshal(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.bind._
+      // uses javax.xml.bind
+      object App {
+        def handle(input: Any): Unit = {
+          Unmarshaller.unmarshal("safe.xml")
+        }
+      }
+    expect_no_match: true
+  description: "JAXB Unmarshaller.unmarshal — wraps SAX parser; same XXE rules apply."
+
+- id: scala.xxe.apache_poi_xssfworkbook_inputstream
+  enabled: true
+  language: scala
+  tag: xxe
+  severity: high
+  packages: ["org.apache.poi"]
+  cwe: [CWE-611]
+  match:
+    kind: new
+    callee:
+      name: XSSFWorkbook
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: apache poi xssf workbook input stream
+    code: |
+      import org.apache.poi._
+      object App {
+        def handle(stream: InputStream): Any = {
+          new XSSFWorkbook(stream)
+        }
+      }
+      class InputStream
+      class XSSFWorkbook(args: Any*)
+    expect_match_text: [XSSFWorkbook]
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.poi._
+      object App {
+        def handle(stream: InputStream): Any = {
+          new XSSFWorkbook("safe.xlsx")
+        }
+      }
+      class InputStream
+      class XSSFWorkbook(args: Any*)
+    expect_no_match: true
+  description: "Apache POI XSSFWorkbook(InputStream) — parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."

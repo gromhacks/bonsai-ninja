@@ -1,0 +1,297 @@
+# Rust NoSQL injection.
+- id: rust.nosql.mongodb_collection_find
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Collection, find]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongodb find filter
+    code: |
+      use mongodb::dummy;
+      fn example(target: Document) {
+          Collection::find(target);
+      }
+  - name: safe mongodb find filter negative
+    code: |
+      use mongodb::dummy;
+      fn example() {
+          Collection::find(doc! {"status": "active"});
+      }
+    expect_no_match: true
+  description: "mongodb Collection::find — tainted Document filter enables NoSQL operator-injection ($where, $expr, $regex)."
+- id: rust.nosql.mongodb_collection_find_one
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Collection, find_one]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongodb find_one filter
+    code: |
+      use mongodb::dummy;
+      fn example(target: Document) {
+          Collection::find_one(target);
+      }
+  - name: safe mongodb find_one filter negative
+    code: |
+      use mongodb::dummy;
+      fn example() {
+          Collection::find_one(doc! {"status": "active"});
+      }
+    expect_no_match: true
+  description: "mongodb Collection::find_one — tainted Document filter enables auth-bypass via operator-injection ($ne, $gt)."
+
+- id: rust.nosql.mongodb_collection_aggregate
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Collection, aggregate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongodb aggregate pipeline
+    code: |
+      use mongodb::dummy;
+      fn example(target: Vec<Document>) {
+          Collection::aggregate(target);
+      }
+  - name: safe mongodb aggregate pipeline negative
+    code: |
+      use mongodb::dummy;
+      fn example() {
+          Collection::aggregate(vec![doc! {"$match": {"status": "active"}}]);
+      }
+    expect_no_match: true
+  description: "mongodb Collection::aggregate — tainted pipeline stages enable $lookup/$out data exfiltration and server-side script abuse."
+
+- id: rust.nosql.mongodb_database_run_command
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Database, run_command]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongodb run_command document
+    code: |
+      use mongodb::dummy;
+      fn example(target: Document) {
+          Database::run_command(target);
+      }
+  - name: safe mongodb run_command document negative
+    code: |
+      use mongodb::dummy;
+      fn example() {
+          Database::run_command(doc! {"ping": 1});
+      }
+    expect_no_match: true
+  description: "mongodb Database::run_command — executes raw bson::Document; tainted fields bypass typed query builders."
+- id: rust.nosql.mongodb_collection_update_many
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Collection, update_many]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongodb update_many filter
+    code: |
+      use mongodb::dummy;
+      fn example(target: Document, update: Document) {
+          Collection::update_many(target, update);
+      }
+  - name: safe mongodb update_many filter negative
+    code: |
+      use mongodb::dummy;
+      fn example(update: Document) {
+          Collection::update_many(doc! {"status": "active"}, update);
+      }
+    expect_no_match: true
+  description: "mongodb Collection::update_many — tainted filter/update doc enables operator-injection ($where, $expr)."
+- id: rust.nosql.mongodb_collection_update_many_update
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Collection, update_many]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted mongodb update_many update doc
+    code: |
+      use mongodb::dummy;
+      fn example(target: Document) {
+          Collection::update_many(doc! {"status": "active"}, target);
+      }
+  - name: safe mongodb update_many update doc negative
+    code: |
+      use mongodb::dummy;
+      fn example() {
+          Collection::update_many(doc! {"status": "active"}, doc! {"$set": {"flag": true}});
+      }
+    expect_no_match: true
+  description: "mongodb Collection::update_many(filter, update) — tainted update documents can inject operators or alter unintended fields."
+- id: rust.nosql.mongodb_collection_delete_many
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Collection, delete_many]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongodb delete_many filter
+    code: |
+      use mongodb::dummy;
+      fn example(target: Document) {
+          Collection::delete_many(target);
+      }
+  - name: safe mongodb delete_many filter negative
+    code: |
+      use mongodb::dummy;
+      fn example() {
+          Collection::delete_many(doc! {"status": "expired"});
+      }
+    expect_no_match: true
+  description: "mongodb Collection::delete_many — tainted filter can match unintended docs."
+
+- id: rust.nosql.redis_cmd_eval
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [redis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [redis, cmd]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      use redis::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          redis::cmd("EVAL");
+      }
+  - name: generated direct match
+    code: |
+      use redis::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          redis::cmd("EVALSHA");
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          redis::cmd("safe");
+      }
+    expect_no_match: true
+  description: "redis::cmd(\"EVAL\"/\"EVALSHA\") with a tainted script body or attacker-chosen SHA1 executes Lua on the Redis server."
+
+- id: rust.nosql.scylla_session_query
+  enabled: true
+  language: rust
+  tag: cql-injection
+  severity: high
+  packages: [scylla, cdrs_tokio]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Session, query]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted scylla query string
+    code: |
+      use scylla::dummy;
+      fn example(target: &str) {
+          Session::query(target);
+      }
+  - name: literal scylla query string negative
+    code: |
+      use scylla::dummy;
+      fn example() {
+          Session::query("select * from users where id = ?");
+      }
+    expect_no_match: true
+  description: "scylla / cdrs-tokio Session::query — tainted CQL string = CQL injection (use prepared statements with bind values)."
+
+- id: rust.nosql.elasticsearch_search
+  enabled: true
+  language: rust
+  tag: nosql-injection
+  severity: high
+  packages: [elasticsearch]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Elasticsearch, search]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use elasticsearch::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Elasticsearch::search("$where");
+      }
+  description: "elasticsearch crate Elasticsearch::search — tainted DSL JSON enables query-injection (script fields, _search_shards abuse)."

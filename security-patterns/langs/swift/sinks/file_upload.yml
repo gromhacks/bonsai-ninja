@@ -1,0 +1,92 @@
+# Swift file-upload sinks (Vapor + raw URLSession).
+- id: swift.upload.vapor_fileio_writefile
+  enabled: true
+  language: swift
+  tag: file-upload
+  severity: medium
+  packages: [vapor]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: writeFile
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test() { let input = "x"; let amount = 1; writeFile(input) }
+  - name: literal arg 1 negative
+    code: |
+      func test() { writeFile("safe", "safe") }
+    expect_no_match: true
+  description: "Vapor Request.fileio.writeFile(_:at:) — flag if filename/path tainted."
+
+- id: swift.upload.vapor_fileio_collectfile
+  enabled: true
+  language: swift
+  tag: file-upload
+  severity: low
+  packages: [vapor]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: collectFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test() { let input = "x"; let amount = 1; collectFile(input) }
+  - name: literal arg 0 negative
+    code: |
+      func test() { collectFile("safe") }
+    expect_no_match: true
+  description: "Vapor Request.fileio.collectFile(at:) — reads file; flag if path tainted."
+
+- id: swift.upload.urlsession_uploadtask
+  enabled: true
+  language: swift
+  tag: file-upload
+  severity: medium
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: uploadTask
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; uploadTask(input) }
+  - name: literal arg 0 negative
+    code: |
+      func test() { uploadTask("safe") }
+    expect_no_match: true
+  description: "URLSession.uploadTask — flag if URL/path tainted."
+
+- id: swift.upload.multipart_file_write
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: file-upload
+  severity: medium
+  packages: [vapor]
+  cwe: [CWE-434]
+  match:
+    kind: read
+    target:
+      name: filename
+  description: "Disabled — Multipart File.filename read is ubiquitous; enable with taint flow to path sink."

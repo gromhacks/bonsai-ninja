@@ -1,0 +1,159 @@
+# Go CLI / config local-trust sources.
+- id: go.os.getenv
+  enabled: true
+  language: go
+  trust: local
+  tag: local-input
+  category: local-input
+  payload_types: [text]
+  packages: [os]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Getenv]
+  match_examples:
+  - name: os getenv
+    code: |
+      package main
+      import "os"
+      func example() {
+        _ = os.Getenv("CONFIG_PATH")
+      }
+    expect_match_text: [os.Getenv]
+  description: "os.Getenv — environment variable; attacker-controlled in multi-tenant / container contexts."
+
+- id: go.cli.argv
+  enabled: true
+  language: go
+  trust: local
+  tag: local-input
+  category: local-input
+  payload_types: [text]
+  packages: [os]
+  match:
+    kind: read
+    target:
+      regex: "^os\\.Args$"
+  match_examples:
+  - name: os args
+    code: |
+      package main
+      import "os"
+      func example() {
+        _ = os.Args
+      }
+    expect_match_text: [os.Args]
+  description: "os.Args — CLI argv; narrowed to the stdlib global rather than any `.Args` field."
+
+- id: go.flag.string
+  enabled: true
+  language: go
+  trust: local
+  tag: local-input
+  category: local-input
+  payload_types: [text]
+  packages: [flag]
+  match:
+    kind: call
+    callee:
+      attribute: [flag, String]
+  match_examples:
+  - name: flag string
+    code: |
+      package main
+      import "flag"
+      func example() {
+        _ = flag.String("config", "", "path")
+      }
+    expect_match_text: [flag.String]
+  description: "flag.String — CLI flag value."
+
+- id: go.flag.arg
+  enabled: true
+  language: go
+  trust: local
+  tag: local-input
+  category: local-input
+  payload_types: [text]
+  packages: [flag]
+  match:
+    kind: call
+    callee:
+      attribute: [flag, Arg]
+  constraints:
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: flag arg
+    code: |
+      package main
+      import "flag"
+      func example() {
+        _ = flag.Arg(0)
+      }
+    expect_match_text: [flag.Arg]
+  description: "flag.Arg(i) — positional CLI argument supplied by the local command invoker."
+
+- id: go.flag.args
+  enabled: true
+  language: go
+  trust: local
+  tag: local-input
+  category: local-input
+  payload_types: [text]
+  packages: [flag]
+  match:
+    kind: call
+    callee:
+      attribute: [flag, Args]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: flag args
+    code: |
+      package main
+      import "flag"
+      func example() {
+        _ = flag.Args()
+      }
+    expect_match_text: [flag.Args]
+  description: "flag.Args() — remaining positional CLI arguments supplied by the local command invoker."
+
+- id: go.viper.get_string
+  enabled: true
+  language: go
+  trust: config
+  tag: local-input
+  category: local-input
+  payload_types: [text]
+  packages: ["github.com/spf13/viper"]
+  match:
+    kind: call
+    callee:
+      attribute: [viper, GetString]
+  match_examples:
+  - name: viper get string
+    code: |
+      package main
+      import "github.com/spf13/viper"
+      func example() {
+        _ = viper.GetString("service.url")
+      }
+    expect_match_text: [viper.GetString]
+  description: "viper.GetString(key) — config / env-driven value; tainted if config source is untrusted."
+
+- id: go.cobra.flag_getstring
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: local
+  tag: local-input
+  category: local-input
+  payload_types: [text]
+  packages: ["github.com/spf13/cobra", "github.com/spf13/pflag"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.GetString$"
+  description: "Disabled — bare `.GetString$` double-fires with go.viper.get_string on `viper.GetString(...)`. Enable per-project if cobra is the only source of GetString usage."

@@ -1,0 +1,1673 @@
+# Go HTTP / RPC sources. Engine matches method-call
+# callees as "<receiver>.<Method>"; we use common short receiver names
+# (r, req, c, ctx, cli, msg) so real code matches.
+
+# --- net/http stdlib --------------------------------------------------
+- id: go.nethttp.request_param
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, json, form, path, header, cookie]
+  frameworks: [nethttp, gin, echo, fiber, chi, gorilla]
+  packages: ["net/http", "github.com/gin-gonic/gin", "github.com/labstack/echo", "github.com/gofiber/fiber", "github.com/go-chi/chi", "github.com/gorilla/mux"]
+  manifests: [go.mod]
+  lockfiles: [go.sum]
+  match:
+    kind: param
+    target:
+      name: r
+  description: "Disabled — bare `r` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
+- id: go.nethttp.request_named
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["net/http"]
+  match:
+    kind: param
+    target:
+      name: req
+  description: "Disabled — bare `req` parameter matches non-request helpers; needs type-aware `*http.Request` parameter matching."
+- id: go.nethttp.form_value
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [nethttp, echo, fiber]
+  packages: ["net/http", "github.com/labstack/echo", "github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.FormValue$"
+  match_examples:
+  - name: net/http form value
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        _ = r.FormValue("name")
+      }
+    expect_match_text: [r.FormValue]
+  - name: fiber form value
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(c *fiber.Ctx) {
+        _ = c.FormValue("name")
+      }
+    expect_match_text: [c.FormValue]
+  description: "FormValue(key) — attacker-controlled form/query value. Covers net/http, echo, and fiber FormValue helpers (same call shape)."
+- id: go.nethttp.postform_value
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.PostFormValue$"
+  match_examples:
+  - name: net/http post form value
+    code: |
+      package main
+      import "net/http"
+      func handler(req *http.Request) {
+        _ = req.PostFormValue("name")
+      }
+    expect_match_text: [req.PostFormValue]
+  description: "r.PostFormValue(key) — attacker-controlled POST form value."
+- id: go.nethttp.url_query
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: go.nethttp.query_value_get
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      attribute: [URL, Query]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "net/http"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        URL.Query(target)
+      }
+  description: "Disabled — duplicate of go.nethttp.query_value_get for chained Query().Get examples under the current matcher."
+  imports:
+  - net
+- id: go.nethttp.query_value_get
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.URL\\.Query\\(\\)\\.Get$|\\.Query\\(\\)\\.Get$"
+  match_examples:
+  - name: net/http query get
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        _ = r.URL.Query().Get("next")
+      }
+    expect_match_text: [r.URL.Query().Get]
+  description: "r.URL.Query().Get(key) — attacker-controlled query parameter value."
+- id: go.nethttp.header_get
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Header\\.Get$"
+  constraints:
+  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  match_examples:
+  - name: net/http request header get
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        _ = r.Header.Get("X-Forwarded-Host")
+      }
+    expect_match_text: [r.Header.Get]
+  description: "r.Header.Get(name) — attacker-controlled request header."
+- id: go.nethttp.cookie
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Cookie$"
+  constraints:
+  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  match_examples:
+  - name: net/http request cookie
+    code: |
+      package main
+      import "net/http"
+      func handler(req *http.Request) {
+        _, _ = req.Cookie("session")
+      }
+    expect_match_text: [req.Cookie]
+  description: "r.Cookie(name) — attacker-controlled cookie value; narrowed to common net/http request receiver names so framework cookie helpers own their own rules."
+- id: go.nethttp.request_pathvalue
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.PathValue$"
+  constraints:
+  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - min_args: 1
+  match_examples:
+  - name: net/http serve mux path value
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        _ = r.PathValue("id")
+      }
+    expect_match_text: [r.PathValue]
+  - name: path value requires a key
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        _ = r.PathValue()
+      }
+    expect_no_match: true
+  description: "r.PathValue(name) — net/http ServeMux path wildcard value supplied by the remote HTTP client."
+- id: go.nethttp.request_header_methods
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(UserAgent|Referer)$"
+  constraints:
+  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - max_args: 0
+  match_examples:
+  - name: net/http user agent
+    code: |
+      package main
+      import "net/http"
+      func handler(req *http.Request) {
+        _ = req.UserAgent()
+      }
+    expect_match_text: [req.UserAgent]
+  - name: net/http referer
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        _ = r.Referer()
+      }
+    expect_match_text: [r.Referer]
+  description: "r.UserAgent() / r.Referer() — convenience accessors for attacker-controlled request header values."
+- id: go.nethttp.request_basicauth
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header, text]
+  packages: ["net/http"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.BasicAuth$"
+  constraints:
+  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - max_args: 0
+  match_examples:
+  - name: net/http basic auth
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        user, pass, _ := r.BasicAuth()
+        _, _ = user, pass
+      }
+    expect_match_text: [r.BasicAuth]
+  description: "r.BasicAuth() — username and password parsed from the attacker-controlled Authorization request header."
+- id: go.nethttp.multipart_form_file
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file, form]
+  packages: ["net/http", "mime/multipart"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.FormFile$|\\.MultipartReader$|\\.ParseMultipartForm$"
+  constraints:
+  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  match_examples:
+  - name: net/http uploaded file
+    code: |
+      package main
+      import "net/http"
+      func upload(r *http.Request) {
+        _, _, _ = r.FormFile("file")
+      }
+    expect_match_text: [r.FormFile]
+  - name: net/http multipart reader
+    code: |
+      package main
+      import "net/http"
+      func upload(req *http.Request) {
+        _, _ = req.MultipartReader()
+      }
+    expect_match_text: [req.MultipartReader]
+  description: "net/http multipart upload APIs — file parts, headers, and FileHeader.Filename are client-controlled."
+- id: go.multipart.fileheader_filename
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file, path]
+  packages: ["mime/multipart"]
+  match:
+    kind: read
+    target:
+      name: Filename
+  match_examples:
+  - name: multipart filename read
+    code: |
+      package main
+      import "mime/multipart"
+      func upload(fh *multipart.FileHeader) string {
+        return fh.Filename
+      }
+    expect_match_text: [Filename]
+  description: "multipart.FileHeader.Filename — client-supplied upload filename; treat as tainted path/name input."
+- id: go.nethttp.body_read
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  packages: ["net/http"]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Body$"
+  match_examples:
+  - name: net/http request body read
+    code: |
+      package main
+      import "net/http"
+      func handler(r *http.Request) {
+        _ = r.Body
+      }
+    expect_match_text: [r.Body]
+  - name: net/http alternate request body read
+    code: |
+      package main
+      import "net/http"
+      func handler(req *http.Request) {
+        _ = req.Body
+      }
+    expect_match_text: [req.Body]
+  description: "Disabled — duplicate read-site shape with go.nethttp.io_readall_request_body under the current matcher."
+- id: go.nethttp.io_readall_request_body
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [nethttp, echo]
+  packages: ["net/http", "io", "github.com/labstack/echo"]
+  match:
+    kind: call
+    callee:
+      attribute: [io, ReadAll]
+  constraints:
+  - min_args: 1
+  - arg_matches_regex:
+      index: 0
+      regex: "^(r|req|request)\\.Body$|\\.Request\\(\\)\\.Body$"
+  match_examples:
+  - name: net/http body readall
+    code: |
+      package main
+      import (
+        "io"
+        "net/http"
+      )
+      func handler(r *http.Request) {
+        _, _ = io.ReadAll(r.Body)
+      }
+    expect_match_text: [io.ReadAll]
+  - name: echo request body readall
+    code: |
+      package main
+      import (
+        "io"
+        "github.com/labstack/echo"
+      )
+      func handler(c echo.Context) {
+        _, _ = io.ReadAll(c.Request().Body)
+      }
+    expect_match_text: [io.ReadAll]
+  - name: chi request body readall
+    code: |
+      package main
+      import (
+        "io"
+        "net/http"
+      )
+      func handler(w http.ResponseWriter, r *http.Request) {
+        _, _ = io.ReadAll(r.Body)
+      }
+    expect_match_text: [io.ReadAll]
+  - name: net/http body readall negative constraint boundary
+    code: "package main\nimport (\n  \"io\"\n  \"net/http\"\n)\nfunc handler(r *http.Request) {\n  _, _ = io.ReadAll()\n}\n"
+    expect_no_match: true
+  description: "io.ReadAll over request Body — returned bytes are attacker-controlled request body content."
+
+# --- mux / chi --------------------------------------------------------
+- id: go.gorilla.mux_vars
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["github.com/gorilla/mux"]
+  match:
+    kind: call
+    callee:
+      attribute: [mux, Vars]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: gorilla mux vars
+    code: |
+      package main
+      import (
+        "net/http"
+        "github.com/gorilla/mux"
+      )
+      func handler(r *http.Request) {
+        _ = mux.Vars(r)
+      }
+    expect_match_text: [mux.Vars]
+  description: "mux.Vars(r) — map of attacker-controlled path parameters."
+- id: go.chi.urlparam
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["github.com/go-chi/chi"]
+  match:
+    kind: call
+    callee:
+      attribute: [chi, URLParam]
+  match_examples:
+  - name: chi url param
+    code: |
+      import "github.com/go-chi/chi"
+      package main
+      import (
+        "net/http"
+        "github.com/go-chi/chi/v5"
+      )
+      func handler(r *http.Request) {
+        _ = chi.URLParam(r, "id")
+      }
+    expect_match_text: [chi.URLParam]
+  description: "chi.URLParam(r, key) — attacker-controlled path parameter."
+- id: go.chi.urlparam_from_context
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["github.com/go-chi/chi"]
+  match:
+    kind: call
+    callee:
+      attribute: [chi, URLParamFromCtx]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: chi url param from context
+    code: |
+      package main
+      import (
+        "context"
+        "github.com/go-chi/chi/v5"
+      )
+      func handler(ctx context.Context) {
+        _ = chi.URLParamFromCtx(ctx, "id")
+      }
+    expect_match_text: [chi.URLParamFromCtx]
+  description: "chi.URLParamFromCtx(ctx, key) — attacker-controlled route parameter read from request context."
+
+# --- gin --------------------------------------------------------------
+- id: go.gin.context_query
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [gin, fiber]
+  packages: ["github.com/gin-gonic/gin", "github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Query$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin query
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _ = c.Query("next")
+      }
+    expect_match_text: [c.Query]
+  description: "c.Query(key) — attacker-controlled query string. Covers gin and fiber (same call shape)."
+- id: go.gin.context_postform
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [gin, echo, buffalo]
+  packages: ["github.com/gin-gonic/gin", "github.com/labstack/echo", "github.com/gobuffalo/buffalo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.PostForm$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin post form
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _ = c.PostForm("name")
+      }
+    expect_match_text: [c.PostForm]
+  description: "gin c.PostForm(key) — attacker-controlled form value."
+- id: go.gin.context_param
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  frameworks: [gin, echo, iris, buffalo]
+  packages: ["github.com/gin-gonic/gin", "github.com/labstack/echo", "github.com/kataras/iris/v12", "github.com/gobuffalo/buffalo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Param$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin path param
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _ = c.Param("id")
+      }
+    expect_match_text: [c.Param]
+  - name: echo path param
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(ctx echo.Context) {
+        _ = ctx.Param("id")
+      }
+    expect_match_text: [ctx.Param]
+  - name: iris path param
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        _ = ctx.Param("id")
+      }
+    expect_match_text: [ctx.Param]
+  - name: buffalo path param
+    code: |
+      package main
+      import "github.com/gobuffalo/buffalo"
+      func handler(c buffalo.Context) {
+        _ = c.Param("id")
+      }
+    expect_match_text: [c.Param]
+  description: "c.Param/ctx.Param(key) — attacker-controlled path parameter. Covers gin, echo, iris, and buffalo context shapes."
+- id: go.gin.context_getheader
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [gin, iris]
+  packages: ["github.com/gin-gonic/gin", "github.com/kataras/iris/v12"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.GetHeader$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin request header
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _ = c.GetHeader("X-Forwarded-Host")
+      }
+    expect_match_text: [c.GetHeader]
+  - name: iris request header
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        _ = ctx.GetHeader("X-Forwarded-Host")
+      }
+    expect_match_text: [ctx.GetHeader]
+  description: "gin/iris context GetHeader(name) — attacker-controlled request header."
+- id: go.gin.context_cookie
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [gin, echo, fiber]
+  packages: ["github.com/gin-gonic/gin", "github.com/labstack/echo", "github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(Cookie|Cookies)$"
+  constraints:
+  - receiver_name_in: [c, ctx, context, echoContext]
+  match_examples:
+  - name: gin cookie
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _, _ = c.Cookie("session")
+      }
+    expect_match_text: [c.Cookie]
+  - name: echo cookie
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) {
+        _, _ = c.Cookie("session")
+      }
+    expect_match_text: [c.Cookie]
+  - name: echo cookies
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(ctx echo.Context) {
+        _ = ctx.Cookies()
+      }
+    expect_match_text: [ctx.Cookies]
+  - name: fiber cookies
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(ctx *fiber.Ctx) {
+        _ = ctx.Cookies("session")
+      }
+    expect_match_text: [ctx.Cookies]
+  description: "framework cookie helpers — attacker-controlled Cookie header values for gin, echo, and fiber contexts."
+- id: go.gin.context_bind
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json, form, xml, text]
+  frameworks: [gin]
+  packages: ["github.com/gin-gonic/gin"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(Bind|BindHeader|BindQuery|BindUri|ShouldBind|ShouldBindBodyWith|ShouldBindHeader|ShouldBindQuery|ShouldBindUri|ShouldBindXML|ShouldBindYAML|ShouldBindWith)$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin generic body bind
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context, dst any) {
+        _ = c.ShouldBind(dst)
+      }
+    expect_match_text: [c.ShouldBind]
+  - name: gin query bind
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(ctx *gin.Context, dst any) {
+        _ = ctx.ShouldBindQuery(dst)
+      }
+    expect_match_text: [ctx.ShouldBindQuery]
+  - name: gin uri bind
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context, dst any) {
+        _ = c.ShouldBindUri(dst)
+      }
+    expect_match_text: [c.ShouldBindUri]
+  - name: gin body bind with
+    code: |
+      package main
+      import (
+        "github.com/gin-gonic/gin"
+        "github.com/gin-gonic/gin/binding"
+      )
+      func handler(ctx *gin.Context, dst any) {
+        _ = ctx.ShouldBindBodyWith(dst, binding.JSON)
+      }
+    expect_match_text: [ctx.ShouldBindBodyWith]
+  - name: echo bind
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context, dst any) {
+        _ = c.Bind(dst)
+      }
+    expect_match_text: [c.Bind]
+  - name: buffalo bind
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+      import "github.com/gobuffalo/buffalo"
+      func handler(c buffalo.Context, dst any) {
+        _ = c.Bind(dst)
+      }
+    expect_match_text: [c.Bind]
+  description: "framework context bind helpers — populate structs from attacker-controlled request body, query, form, XML, or YAML payloads."
+- id: go.gin.context_query_collection
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, form]
+  frameworks: [gin]
+  packages: ["github.com/gin-gonic/gin"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(DefaultPostForm|DefaultQuery|QueryArray|QueryMap|GetQuery|GetQueryArray|GetQueryMap|PostFormArray|PostFormMap|GetPostForm|GetPostFormArray|GetPostFormMap)$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin query map
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _ = c.QueryMap("filters")
+      }
+    expect_match_text: [c.QueryMap]
+  - name: gin post form array
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(ctx *gin.Context) {
+        _ = ctx.PostFormArray("tag")
+      }
+    expect_match_text: [ctx.PostFormArray]
+  - name: gin default query
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _ = c.DefaultQuery("next", "/")
+      }
+    expect_match_text: [c.DefaultQuery]
+  description: "gin query/form collection helpers — attacker controls returned values."
+- id: go.gin.context_bindjson
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [gin]
+  packages: ["github.com/gin-gonic/gin"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.BindJSON$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin bind json
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context, dst any) {
+        _ = c.BindJSON(dst)
+      }
+    expect_match_text: [c.BindJSON]
+  description: "gin c.BindJSON(&v) — binds attacker-controlled JSON into v."
+- id: go.gin.context_shouldbindjson
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [gin]
+  packages: ["github.com/gin-gonic/gin"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.ShouldBindJSON$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin should bind json
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(ctx *gin.Context, dst any) {
+        _ = ctx.ShouldBindJSON(dst)
+      }
+    expect_match_text: [ctx.ShouldBindJSON]
+  description: "gin c.ShouldBindJSON(&v) — binds attacker-controlled JSON request body into application data."
+- id: go.gin.context_getrawdata
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [gin]
+  packages: ["github.com/gin-gonic/gin"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.GetRawData$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: gin raw request body
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _, _ = c.GetRawData()
+      }
+    expect_match_text: [c.GetRawData]
+  description: "gin c.GetRawData() — raw request body."
+
+# --- echo -------------------------------------------------------------
+- id: go.echo.context_queryparam
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [echo]
+  packages: ["github.com/labstack/echo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.QueryParam$"
+  match_examples:
+  - name: echo query param
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) {
+        _ = c.QueryParam("next")
+      }
+    expect_match_text: [c.QueryParam]
+  description: "echo c.QueryParam(key) — attacker-controlled query parameter value."
+- id: go.echo.context_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  frameworks: [echo]
+  packages: ["github.com/labstack/echo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Param$"
+  description: "Disabled — merged into go.gin.context_param (same `.Param$` regex; frameworks list now covers echo)."
+- id: go.echo.context_formvalue
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [echo]
+  packages: ["github.com/labstack/echo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.FormValue$"
+  description: "Disabled — merged into go.nethttp.form_value (same `.FormValue$` regex; frameworks list now covers echo)."
+- id: go.echo.context_bind
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [echo, buffalo]
+  packages: ["github.com/labstack/echo", "github.com/gobuffalo/buffalo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Bind$"
+  constraints:
+  - receiver_name_in: [c, ctx, context, echoContext]
+  match_examples:
+  - name: echo bind
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context, dst any) {
+        _ = c.Bind(dst)
+      }
+    expect_match_text: [c.Bind]
+  - name: buffalo bind
+    code: |
+      package main
+      import "github.com/gobuffalo/buffalo"
+      func handler(c buffalo.Context, dst any) {
+        _ = c.Bind(dst)
+      }
+    expect_match_text: [c.Bind]
+  description: "Disabled — duplicate `.Bind` call shape merged into go.gin.context_bind, whose framework list and examples now cover echo and buffalo."
+- id: go.echo.context_cookie
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [echo]
+  packages: ["github.com/labstack/echo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Cookie$|\\.Cookies$"
+  constraints:
+  - receiver_name_in: [c, ctx, context, echoContext]
+  match_examples:
+  - name: echo cookie
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) {
+        _, _ = c.Cookie("session")
+      }
+    expect_match_text: [c.Cookie]
+  - name: echo cookies
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(ctx echo.Context) {
+        _ = ctx.Cookies()
+      }
+    expect_match_text: [ctx.Cookies]
+  description: "Disabled — duplicate `.Cookie` / `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover echo."
+- id: go.echo.context_cookie_value
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: go.gin.context_cookie
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [echo]
+  packages: ["github.com/labstack/echo"]
+  match:
+    kind: read
+    target:
+      regex: "^(c|ctx|context|echoContext)\\.Cookie\\([^)]*\\)\\.Value$"
+  match_examples:
+  - name: echo cookie value read
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) string {
+        cookie, _ := c.Cookie("session")
+        return c.Cookie("session").Value + cookie.Value
+      }
+    expect_match_text: ["c.Cookie(\"session\").Value"]
+  description: "Disabled — duplicate of the framework cookie source. The owning call source taints the returned *http.Cookie; modeling the chained `.Value` read separately double-counts every `c.Cookie(...).Value` expression."
+- id: go.echo.context_request_surface
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, form, header, text]
+  frameworks: [echo]
+  packages: ["github.com/labstack/echo"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(QueryParams|FormParams)$"
+  constraints:
+  - receiver_name_in: [c, ctx, context, echoContext]
+  match_examples:
+  - name: echo query params
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) {
+        _ = c.QueryParams()
+      }
+    expect_match_text: [c.QueryParams]
+  description: "echo query/form surface getters — expose attacker-controlled query and form values. Raw request/body access is owned by the dedicated request-body rules."
+
+- id: go.framework.request_header_get
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [gin, echo, iris]
+  packages: ["github.com/gin-gonic/gin", "github.com/labstack/echo", "github.com/kataras/iris/v12"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Request\\(\\)\\.Header\\.Get$|\\.Request\\.Header\\.Get$"
+  constraints:
+  - receiver_name_in: [c, ctx, context]
+  - min_args: 1
+  match_examples:
+  - name: echo wrapped request header get
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) {
+        _ = c.Request().Header.Get("X-Forwarded-Host")
+      }
+    expect_match_text: ["c.Request().Header.Get"]
+  - name: gin wrapped request header get
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(ctx *gin.Context) {
+        _ = ctx.Request.Header.Get("X-Forwarded-Host")
+      }
+    expect_match_text: ["ctx.Request.Header.Get"]
+  description: "Framework context request header accessors — client-controlled request headers reached through wrapped net/http requests."
+- id: go.echo.context_request_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [echo, iris]
+  packages: ["github.com/labstack/echo", "github.com/kataras/iris/v12"]
+  match:
+    kind: read
+    target:
+      regex: "^(c|ctx|context|echoContext)\\.Request\\(\\)\\.Body$"
+  match_examples:
+  - name: echo request body read
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) {
+        _ = c.Request().Body
+      }
+    expect_match_text: ["c.Request().Body"]
+  - name: iris request body read
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        _ = ctx.Request().Body
+      }
+    expect_match_text: ["ctx.Request().Body"]
+  description: "Disabled — duplicate read-site shape with go.nethttp.io_readall_request_body under the current matcher."
+
+# --- iris -------------------------------------------------------------
+- id: go.iris.context_urlparam
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [iris]
+  packages: ["github.com/kataras/iris/v12"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.URLParam[A-Za-z]*$"
+  constraints:
+  - receiver_name_in: [c, ctx, context]
+  match_examples:
+  - name: iris url param
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        _ = ctx.URLParam("next")
+      }
+    expect_match_text: [ctx.URLParam]
+  - name: iris url param default
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        _ = ctx.URLParamDefault("next", "/")
+      }
+    expect_match_text: [ctx.URLParamDefault]
+  description: "iris ctx.URLParam* helpers — attacker-controlled query parameter values and typed query wrappers."
+
+- id: go.iris.context_body_readers
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text, json, xml, form]
+  frameworks: [iris]
+  packages: ["github.com/kataras/iris/v12"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(GetBody|GetBodyString|ReadBody|ReadJSON|ReadXML|ReadForm)$"
+  constraints:
+  - receiver_name_in: [c, ctx, context]
+  match_examples:
+  - name: iris get body string
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        _ = ctx.GetBodyString()
+      }
+    expect_match_text: [ctx.GetBodyString]
+  - name: iris read json
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context, dst any) {
+        _ = ctx.ReadJSON(dst)
+      }
+    expect_match_text: [ctx.ReadJSON]
+  description: "iris request body readers — raw or decoded body content supplied by the HTTP caller."
+
+- id: go.iris.context_form_values
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [iris]
+  packages: ["github.com/kataras/iris/v12"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(PostValue|PostValueDefault|FormValues)$"
+  constraints:
+  - receiver_name_in: [c, ctx, context]
+  match_examples:
+  - name: iris post value
+    code: |
+      package main
+      import "github.com/kataras/iris/v12"
+      func handler(ctx iris.Context) {
+        _ = ctx.PostValue("name")
+      }
+    expect_match_text: [ctx.PostValue]
+  description: "iris form value helpers — attacker-controlled form fields."
+
+# --- beego ------------------------------------------------------------
+- id: go.beego.controller_getstring
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, form]
+  frameworks: [beego]
+  packages: ["github.com/beego/beego/v2/server/web", "github.com/astaxie/beego"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.GetString$"
+  constraints:
+  - receiver_name_in: [c, ctx, controller]
+  match_examples:
+  - name: beego get string
+    code: |
+      import "github.com/beego/beego/v2/server/web"
+      package main
+      type Controller struct{}
+      func (c *Controller) GetString(name string) string { return "" }
+      func handler(c *Controller) {
+        _ = c.GetString("name")
+      }
+    expect_match_text: [c.GetString]
+  description: "beego Controller.GetString(key) — attacker-controlled query or form value."
+
+- id: go.beego.controller_getfile
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file, form]
+  frameworks: [beego]
+  packages: ["github.com/beego/beego/v2/server/web", "github.com/astaxie/beego"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.GetFile$"
+  constraints:
+  - receiver_name_in: [c, ctx, controller]
+  match_examples:
+  - name: beego get file
+    code: |
+      import "github.com/beego/beego/v2/server/web"
+      package main
+      type Controller struct{}
+      func (c *Controller) GetFile(name string) (any, any, error) { return nil, nil, nil }
+      func handler(c *Controller) {
+        _, _, _ = c.GetFile("upload")
+      }
+    expect_match_text: [c.GetFile]
+  description: "beego Controller.GetFile(field) — attacker-controlled uploaded file and client-supplied file metadata."
+
+- id: go.beego.ctx_input_body
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text, json, xml]
+  frameworks: [beego]
+  packages: ["github.com/beego/beego/v2/server/web/context", "github.com/astaxie/beego/context"]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Ctx\\.Input\\.Body$"
+  match_examples:
+  - name: beego ctx input body
+    code: |
+      import "github.com/beego/beego/v2/server/web/context"
+      package main
+      type Controller struct{ Ctx *Ctx }
+      type Ctx struct{ Input *Input }
+      type Input struct{ Body []byte }
+      func handler(c *Controller) []byte {
+        return c.Ctx.Input.Body
+      }
+    expect_match_text: [c.Ctx.Input.Body]
+  description: "beego c.Ctx.Input.Body — raw attacker-controlled request body bytes."
+
+# --- fiber ------------------------------------------------------------
+- id: go.fiber.context_query
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Query$"
+  description: "Disabled — merged into go.gin.context_query (same `.Query$` regex; frameworks list now covers fiber)."
+- id: go.fiber.context_params
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Params$"
+  match_examples:
+  - name: fiber path params
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(c *fiber.Ctx) {
+        _ = c.Params("id")
+      }
+    expect_match_text: [c.Params]
+  description: "fiber c.Params(key) — attacker-controlled route path parameter."
+- id: go.fiber.context_body
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Body$"
+  match_examples:
+  - name: fiber body
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(c *fiber.Ctx) {
+        _ = c.Body()
+      }
+    expect_match_text: [c.Body]
+  description: "fiber c.Body() — raw attacker-controlled request body bytes."
+- id: go.fiber.context_bodyparser
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.BodyParser$"
+  match_examples:
+  - name: fiber body parser
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(c *fiber.Ctx, dst any) {
+        _ = c.BodyParser(dst)
+      }
+    expect_match_text: [c.BodyParser]
+  description: "fiber c.BodyParser(&v) — parses attacker-controlled request body into application data."
+- id: go.fiber.context_cookies
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Cookies$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/gofiber/fiber"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.Cookies(target)
+      }
+  description: "Disabled — duplicate `.Cookies` call shape merged into go.gin.context_cookie, whose framework list and examples now cover fiber."
+  imports:
+  - github
+  - github.com
+- id: go.fiber.context_header_get
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(Get|GetReqHeaders)$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: fiber header get
+    code: |
+      import "github.com/gofiber/fiber"
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(c *fiber.Ctx) {
+        _ = c.Get("X-Forwarded-Host")
+      }
+    expect_match_text: [c.Get]
+  - name: fiber request headers map
+    code: |
+      import "github.com/gofiber/fiber"
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(ctx *fiber.Ctx) {
+        _ = ctx.GetReqHeaders()
+      }
+    expect_match_text: [ctx.GetReqHeaders]
+  description: "fiber request-header helpers — attacker controls header values."
+- id: go.fiber.context_form
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form, file]
+  frameworks: [fiber]
+  packages: ["github.com/gofiber/fiber"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.(FormFile|MultipartForm|QueryParser)$"
+  constraints:
+  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  match_examples:
+  - name: fiber multipart form
+    code: |
+      import "github.com/gofiber/fiber"
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(ctx *fiber.Ctx) {
+        _, _ = ctx.MultipartForm()
+      }
+    expect_match_text: [ctx.MultipartForm]
+  description: "fiber form-file, query parser, and upload helpers — attacker-controlled body/form/file data. FormValue is owned by the shared go.nethttp.form_value call-shape rule."
+
+# --- fasthttp ---------------------------------------------------------
+- id: go.fasthttp.queryargs
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["github.com/valyala/fasthttp"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.QueryArgs$"
+  match_examples:
+  - name: fasthttp query args
+    code: |
+      package main
+      import "github.com/valyala/fasthttp"
+      func handler(ctx *fasthttp.RequestCtx) {
+        _ = ctx.QueryArgs()
+      }
+    expect_match_text: [ctx.QueryArgs]
+  description: "fasthttp RequestCtx.QueryArgs() — attacker-controlled query."
+- id: go.fasthttp.postargs
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  packages: ["github.com/valyala/fasthttp"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.PostArgs$"
+  match_examples:
+  - name: fasthttp post args
+    code: |
+      package main
+      import "github.com/valyala/fasthttp"
+      func handler(ctx *fasthttp.RequestCtx) {
+        _ = ctx.PostArgs()
+      }
+    expect_match_text: [ctx.PostArgs]
+  description: "fasthttp RequestCtx.PostArgs() — attacker-controlled POST form values."
+
+- id: go.websocket.conn_readmessage
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text]
+  packages: ["github.com/gorilla/websocket", "nhooyr.io/websocket"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.ReadMessage$"
+  match_examples:
+  - name: gorilla websocket read message
+    code: |
+      package main
+      import "github.com/gorilla/websocket"
+      func read(conn *websocket.Conn) {
+        _, _, _ = conn.ReadMessage()
+      }
+    expect_match_text: [conn.ReadMessage]
+  description: "WebSocket Conn.ReadMessage() — attacker-controlled client frame."
+- id: go.websocket.conn_nextreader
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text, binary]
+  packages: ["github.com/gorilla/websocket"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.NextReader$"
+  constraints:
+  - receiver_name_in: [conn, c, ws]
+  match_examples:
+  - name: gorilla websocket next reader
+    code: |
+      package main
+      import "github.com/gorilla/websocket"
+      func read(conn *websocket.Conn) {
+        _, _, _ = conn.NextReader()
+      }
+    expect_match_text: [conn.NextReader]
+  description: "gorilla/websocket Conn.NextReader() — returns a reader for an attacker-controlled frame."
+- id: go.websocket.nhooyr_read
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [text, binary, json]
+  packages: ["nhooyr.io/websocket", "nhooyr.io/websocket/wsjson"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Read$"
+  constraints:
+  - receiver_name_in: [c, conn, ws]
+  - min_args: 1
+  match_examples:
+  - name: nhooyr conn read
+    code: |
+      package main
+      import "nhooyr.io/websocket"
+      func read(c *websocket.Conn, ctx context.Context) {
+        _, _, _ = c.Read(ctx)
+      }
+    expect_match_text: [c.Read]
+  description: "nhooyr websocket Conn.Read(ctx) — attacker-controlled frame bytes."
+- id: go.websocket.nhooyr_wsjson_read
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["nhooyr.io/websocket/wsjson"]
+  match:
+    kind: call
+    callee:
+      attribute: [wsjson, Read]
+  constraints:
+  - min_args: 3
+  match_examples:
+  - name: nhooyr wsjson read
+    code: |
+      package main
+      import "nhooyr.io/websocket/wsjson"
+      func read(ctx context.Context, c any, out any) {
+        _ = wsjson.Read(ctx, c, out)
+      }
+    expect_match_text: [wsjson.Read]
+  description: "wsjson.Read(ctx, conn, &out) — decodes attacker-controlled websocket JSON into application data."
+
+# --- GraphQL ----------------------------------------------------------
+- id: go.graphql.resolveparams_args
+  enabled: true
+  language: go
+  trust: remote
+  tag: graphql-input
+  payload_types: [json, graphql]
+  packages: ["github.com/graphql-go/graphql", "github.com/graph-gophers/graphql-go", "github.com/99designs/gqlgen/graphql"]
+  match:
+    kind: read
+    target:
+      regex: "^(p|params|resolveParams)\\.Args$"
+  match_examples:
+  - name: graphql resolve params args
+    code: |
+      package main
+      import "github.com/graphql-go/graphql"
+      func resolve(p graphql.ResolveParams) any {
+        return p.Args["id"]
+      }
+    expect_match_text: [p.Args]
+  description: "graphql ResolveParams.Args — resolver arguments supplied by the client query."
+
+- id: go.graphql.gqlgen_fieldcontext_args
+  enabled: true
+  language: go
+  trust: remote
+  tag: graphql-input
+  payload_types: [json, graphql]
+  frameworks: [gqlgen]
+  packages: ["github.com/99designs/gqlgen/graphql"]
+  match:
+    kind: read
+    target:
+      regex: "^(fc|fieldContext|graphql\\.GetFieldContext\\([^)]*\\))\\.Args$"
+  match_examples:
+  - name: gqlgen field context args
+    code: |
+      package main
+      import (
+        "context"
+        "github.com/99designs/gqlgen/graphql"
+      )
+      func resolve(ctx context.Context) any {
+        fc := graphql.GetFieldContext(ctx)
+        return fc.Args["id"]
+      }
+    expect_match_text: [fc.Args]
+  description: "gqlgen graphql.FieldContext.Args — resolver argument map supplied by the client query. Direct generated resolver method parameters are not type-constrained enough for a safe global param rule."

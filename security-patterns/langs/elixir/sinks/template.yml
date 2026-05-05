@@ -1,0 +1,163 @@
+# Elixir SSTI / template-injection sinks. EEx compiles the <% %>
+# expressions to Elixir AST and evaluates them — a tainted template
+# body is arbitrary code execution.
+- id: elixir.ssti.eex_eval_string
+  enabled: true
+  language: elixir
+  tag: ssti
+  severity: critical
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [EEx, eval_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.eval_string(input)
+        end
+      end
+  - name: literal eex eval string negative
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.eval_string("hello <%= @name %>")
+        end
+      end
+    expect_no_match: true
+  description: "EEx.eval_string/3 — tainted template body runs <% %> expressions; equivalent to Code.eval_string on the attacker's payload."
+
+- id: elixir.ssti.eex_compile_string
+  enabled: true
+  language: elixir
+  tag: ssti
+  severity: critical
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [EEx, compile_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.compile_string(input)
+        end
+      end
+  - name: literal eex compile string negative
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.compile_string("hello <%= @name %>")
+        end
+      end
+    expect_no_match: true
+  description: "EEx.compile_string/2 — compiles a template string; emitting the compiled quoted form executes the tainted code."
+
+- id: elixir.ssti.eex_eval_file
+  enabled: true
+  language: elixir
+  tag: ssti
+  severity: high
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [EEx, eval_file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.eval_file(input)
+        end
+      end
+  - name: literal eex eval file negative
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.eval_file("lib/app_web/templates/page.html.eex")
+        end
+      end
+    expect_no_match: true
+  description: "EEx.eval_file/3 — reads template from disk, same code-execution risk if the path is attacker-controlled."
+
+- id: elixir.ssti.eex_compile_file
+  enabled: true
+  language: elixir
+  tag: ssti
+  severity: high
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [EEx, compile_file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.compile_file(input)
+        end
+      end
+  - name: literal eex compile file negative
+    code: |
+      defmodule App do
+        def test(input) do
+          EEx.compile_file("lib/app_web/templates/page.html.eex")
+        end
+      end
+    expect_no_match: true
+  description: "EEx.compile_file/2 — compiles template at a tainted path; combines path-traversal + SSTI."
+
+- id: elixir.ssti.solid_render
+  enabled: true
+  language: elixir
+  tag: ssti
+  severity: medium
+  packages: [solid]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Solid, render]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Solid
+      # uses solid
+      defmodule App do
+        def test(input) do
+          Solid.render(input)
+        end
+      end
+  - name: literal solid render negative
+    code: |
+      alias Solid
+      defmodule App do
+        def test(input) do
+          Solid.render("Hello {{ name }}")
+        end
+      end
+    expect_no_match: true
+  description: "Solid.render/2 — Elixir Liquid engine; tainted template source exposes template logic even if sandboxed."
+  imports:
+  - Solid

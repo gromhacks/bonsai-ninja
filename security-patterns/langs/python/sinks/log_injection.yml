@@ -1,0 +1,124 @@
+- id: python.log_injection.format_arg_user
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-134
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - info
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: log injection format arg user
+    code: |
+      import structlog
+      def example(user_input):
+          return logger.info(user_input, '%sd0-9')
+  - name: format arg user literal negative
+    code: |
+      import structlog
+
+      def example(user_input):
+          return logger.info('safe', '%sd0-9')
+    expect_no_match: true
+  description: "logger.info(user_msg) where user_msg contains `%s` / `{0}` markers — log message becomes a format-string attack. Merged aliases: python.log_injection.logger_info_concat."
+  aliases:
+  - python.log_injection.logger_info_concat
+  - python.log_injection.structlog_info_concat
+  packages:
+  - structlog
+  imports:
+  - structlog
+- id: python.log_injection.logger_debug_concat
+  enabled: true
+  language: python
+  tag: log-injection
+  severity: low
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - debug
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: log injection logger debug concat
+    code: "def example(user_input):\n    return logger.debug(user_input, '`f\"f\\'format')\n"
+  - name: logger debug concat literal negative
+    code: |
+      def example(user_input):
+          return logger.debug('safe', '`f"f\'format')
+    expect_no_match: true
+  description: "logger.debug — log-injection via concat / f-string / .format()."
+- id: python.log_injection.logger_warning_concat
+  enabled: true
+  language: python
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - warning
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: log injection logger warning concat
+    code: |
+      import structlog
+      def example(user_input):
+          return logger.warning(user_input, '`f"f\'format')
+  - name: logger warning concat literal negative
+    code: |
+      import structlog
+
+      def example(user_input):
+          return logger.warning('safe', '`f"f\'format')
+    expect_no_match: true
+  description: "logger.warning — log-injection via concat / f-string / .format(). Merged collision aliases: python.log_injection.structlog_warning_concat."
+  aliases:
+  - python.log_injection.structlog_warning_concat
+  packages:
+  - structlog
+  imports:
+  - structlog
+- id: python.log_injection.logger_critical_concat
+  enabled: true
+  language: python
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - critical
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: log injection logger critical concat
+    code: "def example(user_input):\n    return logger.critical(user_input, '`f\"f\\'format')\n"
+  - name: logger critical concat literal negative
+    code: |
+      def example(user_input):
+          return logger.critical('safe', '`f"f\'format')
+    expect_no_match: true
+  description: "logger.critical — log-injection via concat / f-string / .format()."

@@ -1,0 +1,193 @@
+# Lua insecure-deserialization sinks.
+- id: lua.deser.lua_marshal_load
+  enabled: true
+  language: lua
+  tag: insecure-deserialization
+  severity: high
+  packages: [lua-marshal]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [marshal, decode]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.deser.lua_marshal_load example
+    code: |
+      local _lua_marshal = require("lua-marshal")
+      function example(input, url, id, payload, request, params, user)
+        marshal.decode(input)
+      end
+  - name: literal blob negative
+    code: |
+      local _lua_marshal = require("lua-marshal")
+      function example(input, url, id, payload, request, params, user)
+        marshal.decode("cached-state")
+      end
+    expect_no_match: true
+  description: "lua-marshal marshal.decode — deserialises arbitrary Lua values including functions/upvalues; tainted blob = RCE."
+
+- id: lua.deser.lua_marshal_load_alt
+  enabled: true
+  language: lua
+  tag: insecure-deserialization
+  severity: high
+  packages: [lua-marshal]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [marshal, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.deser.lua_marshal_load_alt example
+    code: |
+      local _lua_marshal = require("lua-marshal")
+      function example(input, url, id, payload, request, params, user)
+        marshal.load(input)
+      end
+  - name: literal blob negative
+    code: |
+      local _lua_marshal = require("lua-marshal")
+      function example(input, url, id, payload, request, params, user)
+        marshal.load("cached-state")
+      end
+    expect_no_match: true
+  description: "lua-marshal marshal.load — legacy alias for marshal.decode."
+
+- id: lua.deser.pickle_unpickle
+  enabled: true
+  language: lua
+  tag: insecure-deserialization
+  severity: critical
+  packages: [luapickle]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [pickle, unpickle]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.deser.pickle_unpickle example
+    code: |
+      local _luapickle = require("luapickle")
+      function example(input, url, id, payload, request, params, user)
+        pickle.unpickle(input)
+      end
+  - name: literal pickle negative
+    code: |
+      local _luapickle = require("luapickle")
+      function example(input, url, id, payload, request, params, user)
+        pickle.unpickle("safe")
+      end
+    expect_no_match: true
+  description: "luapickle pickle.unpickle — deserialises Lua objects by eval()ing them; tainted input is RCE."
+
+- id: lua.deser.persistence_load
+  enabled: true
+  language: lua
+  tag: insecure-deserialization
+  severity: critical
+  packages: [persistence]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [persistence, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.deser.persistence_load example
+    code: |
+      local _u = require("persistence")
+      function example(input, url, id, payload, request, params, user)
+        persistence.load(input)
+      end
+  - name: literal path negative
+    code: |
+      local _u = require("persistence")
+      function example(input, url, id, payload, request, params, user)
+        persistence.load("state.lua")
+      end
+    expect_no_match: true
+  description: "persistence.lua persistence.load — loadfile/load of the persisted chunk; tainted file is RCE."
+
+- id: lua.deser.serpent_load
+  enabled: true
+  language: lua
+  tag: insecure-deserialization
+  severity: high
+  packages: [serpent]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [serpent, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.deser.serpent_load example
+    code: |
+      local _u = require("serpent")
+      function example(input, url, id, payload, request, params, user)
+        serpent.load(input)
+      end
+  - name: literal source negative
+    code: |
+      local _u = require("serpent")
+      function example(input, url, id, payload, request, params, user)
+        serpent.load("{answer = 42}")
+      end
+    expect_no_match: true
+  description: "serpent.load(src, {safe=false}) — evaluates serialised tables via load(); unsafe mode is RCE."
+
+- id: lua.deser.loadstring
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-94, CWE-502]
+  match:
+    kind: call
+    callee:
+      name: loadstring
+  description: "Disabled — canonical rule is lua.eval.loadstring; tracked in eval.yml as code-injection."
+
+- id: lua.deser.load_bytecode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-94, CWE-502]
+  match:
+    kind: call
+    callee:
+      name: load
+  description: "Disabled — canonical rule is lua.eval.load; tracked in eval.yml as code-injection."
+
+- id: lua.deser.cjson_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: insecure-deserialization
+  severity: low
+  packages: [cjson]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [cjson, decode]
+  description: "Disabled — cjson.decode emits typed Lua tables/primitives only; not a deserialisation gadget surface."

@@ -1,0 +1,79 @@
+- id: typescript.queue.aws_send_message_command
+  enabled: true
+  language: typescript
+  tag: queue-injection
+  severity: high
+  packages: ["@aws-sdk/client-sqs"]
+  cwe: [CWE-20]
+  match:
+    kind: new
+    callee:
+      name: SendMessageCommand
+  match_examples:
+  - name: aws send message command
+    code: |
+      const _u = require("@aws-sdk/client-sqs");
+      function demo(input, req, obj) {
+        return new SendMessageCommand(input);
+      }
+  description: "new SendMessageCommand({QueueUrl, MessageBody}) — tainted queue target/body injects arbitrary SQS messages."
+
+- id: typescript.queue.aws_publish_command
+  enabled: true
+  language: typescript
+  tag: queue-injection
+  severity: high
+  packages: ["@aws-sdk/client-sns"]
+  cwe: [CWE-20]
+  match:
+    kind: new
+    callee:
+      name: PublishCommand
+  match_examples:
+  - name: aws publish command
+    code: |
+      const _u = require("@aws-sdk/client-sns");
+      function demo(input, req, obj) {
+        return new PublishCommand(input);
+      }
+  description: "new PublishCommand({TopicArn, Message}) — tainted topic/message injects arbitrary SNS fanout."
+
+- id: typescript.queue.azure_servicebus_send_messages
+  enabled: true
+  language: typescript
+  tag: queue-injection
+  severity: high
+  packages: ["@azure/service-bus"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "\\.sendMessages$"
+  match_examples:
+  - name: azure servicebus send messages
+    code: |
+      const _u = require("@azure/service-bus");
+      function demo(input, req, obj) {
+        return sender.sendMessages(input);
+      }
+  description: "ServiceBusSender.sendMessages — tainted queue payload or entity path injects arbitrary Service Bus messages."
+
+- id: typescript.queue.gcp_pubsub_publish_message
+  enabled: true
+  language: typescript
+  tag: queue-injection
+  severity: high
+  packages: ["@google-cloud/pubsub"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "\\.publishMessage$"
+  match_examples:
+  - name: gcp pubsub publish message
+    code: |
+      const _u = require("@google-cloud/pubsub");
+      function demo(input, req, obj) {
+        return topic.publishMessage(input);
+      }
+  description: "Pub/Sub topic.publishMessage — tainted topic payload injects arbitrary Pub/Sub messages."

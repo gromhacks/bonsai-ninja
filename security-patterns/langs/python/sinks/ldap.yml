@@ -1,0 +1,355 @@
+# Python LDAP-injection (ldap3 / python-ldap / Django LDAP).
+- id: python.ldap.ldap3_search
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  imports: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, search]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ldap3 connection search filter
+    code: |
+      import ldap3
+      def example(user_input):
+          filt = "(uid=" + user_input + ")"
+          return Connection.search("dc=example,dc=com", filt)
+    expect_match_text: [Connection.search]
+  - name: ldap3 search literal negative
+    code: |
+      import ldap3
+
+      def example(user_input):
+          filt = '(uid=' + user_input + ')'
+          return Connection.search('dc=example,dc=com', 'safe')
+    expect_no_match: true
+  description: "ldap3 Connection.search(search_base, search_filter) — the second argument is an LDAP filter; string interpolation is injectable."
+
+- id: python.ldap.ldap3_connection_search_method
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  imports: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [conn, search]
+  description: "Disabled — subsumed by python.ldap.ldap3_search (`[Connection, search]`) under OnlyWhenPackaged lax-tail policy. When a file imports `ldap3`, the canonical PascalCase rule lax-matches `conn.search(...)` directly."
+
+- id: python.ldap.ldap3_modify
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, modify]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldap ldap3 modify
+    code: |
+      import ldap3
+      def example(user_input):
+          return Connection.modify(user_input)
+  - name: ldap3 modify literal negative
+    code: |
+      import ldap3
+
+      def example(user_input):
+          return Connection.modify('safe')
+    expect_no_match: true
+  description: "ldap3 Connection.modify."
+
+- id: python.ldap.ldap3_modify_dn
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, modify_dn]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldap ldap3 modify dn
+    code: |
+      import ldap3
+      def example(user_input):
+          return Connection.modify_dn(user_input)
+  - name: ldap3 modify dn literal negative
+    code: |
+      import ldap3
+
+      def example(user_input):
+          return Connection.modify_dn('safe')
+    expect_no_match: true
+  description: "ldap3 Connection.modify_dn — flag tainted DN."
+
+- id: python.ldap.ldap3_add
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, add]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldap ldap3 add
+    code: |
+      import ldap3
+      def example(user_input):
+          return Connection.add(user_input)
+  - name: ldap3 add literal negative
+    code: |
+      import ldap3
+
+      def example(user_input):
+          return Connection.add('safe')
+    expect_no_match: true
+  description: "ldap3 Connection.add."
+
+- id: python.ldap.ldap3_delete
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: critical
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, delete]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldap ldap3 delete
+    code: |
+      import ldap3
+      def example(user_input):
+          return Connection.delete(user_input)
+  - name: ldap3 delete literal negative
+    code: |
+      import ldap3
+
+      def example(user_input):
+          return Connection.delete('safe')
+    expect_no_match: true
+  description: "ldap3 Connection.delete."
+
+- id: python.ldap.ldap3_bind
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: ldap-injection
+  severity: medium
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, bind]
+  description: "Disabled — bind is auth, not injection; flag DN-injection only with constraint."
+
+- id: python.ldap.python_ldap_search_s
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap]
+  imports: [ldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [conn, search_s]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: python ldap search s filter
+    code: |
+      import ldap
+      def example(user_input):
+          filt = "(uid=" + user_input + ")"
+          return conn.search_s("dc=example,dc=com", SCOPE_SUBTREE, filt)
+    expect_match_text: [conn.search_s]
+  - name: python ldap search s literal negative
+    code: |
+      import ldap
+
+      def example(user_input):
+          filt = '(uid=' + user_input + ')'
+          return conn.search_s('dc=example,dc=com', SCOPE_SUBTREE, 'safe')
+    expect_no_match: true
+  description: "python-ldap search_s(base, scope, filterstr) — the filter string is injectable when string-built."
+
+- id: python.ldap.python_ldap_search_ext_s
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [conn, search_ext_s]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: python ldap search ext s filter
+    code: |
+      import pythonldap
+      def example(user_input):
+          filt = "(mail=" + user_input + ")"
+          return conn.search_ext_s("dc=example,dc=com", SCOPE_SUBTREE, filt)
+    expect_match_text: [conn.search_ext_s]
+  - name: python ldap search ext s literal negative
+    code: |
+      import pythonldap
+
+      def example(user_input):
+          filt = '(mail=' + user_input + ')'
+          return conn.search_ext_s('dc=example,dc=com', SCOPE_SUBTREE, 'safe')
+    expect_no_match: true
+  description: "python-ldap search_ext_s(base, scope, filterstr) — the filter string is injectable when string-built."
+
+  imports:
+  - pythonldap
+- id: python.ldap.python_ldap_modify_s
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [conn, modify_s]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldap python ldap modify s
+    code: |
+      import pythonldap
+      def example(user_input):
+          return conn.modify_s(user_input)
+  - name: python ldap modify s literal negative
+    code: |
+      import pythonldap
+
+      def example(user_input):
+          return conn.modify_s('safe')
+    expect_no_match: true
+  description: "python-ldap modify_s."
+
+  imports:
+  - pythonldap
+- id: python.ldap.python_ldap_add_s
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: high
+  packages: [ldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [conn, add_s]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldap python ldap add s
+    code: |
+      import pythonldap
+      def example(user_input):
+          return conn.add_s(user_input)
+  - name: python ldap add s literal negative
+    code: |
+      import pythonldap
+
+      def example(user_input):
+          return conn.add_s('safe')
+    expect_no_match: true
+  description: "python-ldap add_s."
+
+  imports:
+  - pythonldap
+- id: python.ldap.python_ldap_delete_s
+  enabled: true
+  language: python
+  tag: ldap-injection
+  severity: critical
+  packages: [ldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [conn, delete_s]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldap python ldap delete s
+    code: |
+      import pythonldap
+      def example(user_input):
+          return conn.delete_s(user_input)
+  - name: python ldap delete s literal negative
+    code: |
+      import pythonldap
+
+      def example(user_input):
+          return conn.delete_s('safe')
+    expect_no_match: true
+  description: "python-ldap delete_s."
+
+  imports:
+  - pythonldap
+- id: python.ldap.django_auth_ldap_filter
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: ldap-injection
+  severity: medium
+  packages: [django_auth_ldap]
+  cwe: [CWE-90]
+  match:
+    kind: write
+    target:
+      name: AUTH_LDAP_USER_SEARCH
+  description: "Disabled — config-only check; flag if filter built from user input."

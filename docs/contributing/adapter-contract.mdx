@@ -1,0 +1,153 @@
+---
+title: "Adapter Contract"
+description: "The contract between bonsai_lang_api and each language adapter."
+---
+
+# Adapter contract
+
+The contract between `bonsai_lang_api::kit` and the per-language `lang_*`
+adapters. New adapters and language-specific patches should follow it;
+deviations should be documented here.
+
+## What the kit guarantees
+
+`kit::walk_flow_events(file, tree, src, handler)` walks a parsed
+tree-sitter tree and emits a `Vec<FlowEvent>` per declaration. The walk
+is driven by a supplied `GrammarHandler` — a declarative configuration
+struct that names node kinds for each construct.
+
+`kit::decl_index_with_handler(pack_name, file, ctx, handler)` is the full
+adapter pipeline (decls + refs + per-function flow events) in a single
+call. Most adapters delegate fully to this helper and add language-
+specific patches in their own `decl_index` implementation.
+
+## Where language-specific code belongs
+
+In the adapter, not in `kit`. A useful test: if the rule applies to
+exactly one language, it lives in that language's adapter.
+
+Examples that follow this rule:
+
+- Python FastAPI binder annotation merging — `lang_python`.
+- Python `getattr(obj, "literal")` reflection rewriting —
+  `lang_python::rewrite_python_constant_reflection`.
+- Python `__all__` public-surface narrowing — `lang_python`.
+- Python `gen.send(value)` coroutine resume forwarding —
+  `lang_python::rewrite_python_generator_send`.
+- Perl `\&foo` coderef invocation lowering — `lang_perl`.
+- Erlang record pattern destructuring — `lang_erlang`.
+- Ruby `class Child < Parent` header fallback — `lang_ruby`.
+- Ruby `module_function` scope flip — `lang_ruby`.
+- Rust tuple struct base extraction — `lang_rust`.
+- Rust `tokio::spawn` body isolation —
+  `lang_rust::isolate_rust_spawn_bodies`.
+- Java / Kotlin / C# typed-exception extraction —
+  `populate_*_exception_types` in each adapter.
+- Java `Class.forName(...).getMethod(...).invoke(...)` chain rewriting —
+  `lang_java::rewrite_java_reflection_chain`.
+- Lua `local M = {}; ...; return M` module-export narrowing — `lang_lua`.
+
+Examples that legitimately stay in `kit` because they describe
+language-agnostic shapes:
+
+- `repair_branch_events_by_else_keyword` — applies to any C-like grammar
+  that drops the else arm. Keying on the literal `else` keyword is a
+  generic recovery, not a language fact.
+- `extract_return_value_text/name` — handles the `return EXPR;` shape
+  that appears in every supported language.
+- `split_foreach_header` — handles `for x in xs`, `for (await x of xs)`,
+  `foreach my $x (@xs)` via uniform header parsing.
+- `split_match_arms_in_branch_events` — applies to any match/switch
+  grammar that emits a single flat Branch with arms concatenated.
+  Adapters supply per-arm body spans; the helper rewrites for arm-
+  disjoint precision. Used by Scala / Swift / Rust.
+
+## Standard adapter pipeline
+
+```rust
+fn decl_index(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
+    let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+    // Per-language post-processing.
+    apply_per_language_visibility(&mut idx, ...);
+    apply_per_language_type_aliases(&mut idx, ...);
+    apply_per_language_bases(&mut idx, ...);
+    apply_per_language_synthetic_events(&mut idx, ...);
+    bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
+    idx
+}
+```
+
+Post-processing patches must be **idempotent** and **non-overlapping**:
+two adapters running back-to-back over the same `DeclIndex` (e.g. C/C++
+header reuse) must converge to the same final state.
+
+## Hook surface
+
+When the kit needs language-specific behaviour in its core walker, the
+right move is a hook field on `GrammarHandler`, not an
+`if language == "X"` branch.
+
+Existing hooks:
+
+- `pseudo_call_event_hook(node, file, src) -> Option<FlowEvent>` —
+  adapters lower non-call-shaped invocations to the `Call` model.
+- `unwrap_def_node` — Elixir uses this to disambiguate `call` nodes
+  (runtime call vs `def`/`defp` macro).
+
+Helpers that aren't hooks:
+
+- `apply_file_stem_semantic_identity` /
+  `apply_module_path_semantic_identity` — standalone because they need
+  the adapter context.
+
+New hooks should:
+
+1. Take only data the adapter could know (no `Db` handle).
+2. Return `Option<...>` or a small enum — not `bool` flags that
+   accumulate over time.
+3. Carry a docstring naming the language(s) that use it and why the kit
+   can't do it generically.
+
+## Branch arm contract
+
+`FlowEvent::Branch { then_events, else_events, .. }` requires both arms
+to be present when the source has both arms. If a grammar can only
+distinguish them in one shape, the adapter normalises before walking —
+or falls back to `kit::repair_branch_events_by_else_keyword` for span-
+based partitioning around the outer `else` keyword.
+
+Adapters must not emit both arms under `then_events` and trust the
+repair to fix it. The repair is a last resort, not a primary strategy.
+Same caveat for the missing first-else assignment synthesis.
+
+## Forbidden patterns
+
+- **No regex against full file contents.** The tree-sitter tree is the
+  source of truth; if a fact is not in the tree, the adapter walks back
+  to the source bytes for the relevant span. Whole-file regex defeats
+  per-file caching.
+- **No depending on file extensions inside extraction logic.** Workspace
+  ingest already filtered to this adapter's files; the adapter is owned
+  by exactly one language.
+- **No emitting both qualified and bare `Call` events at the same
+  span.** Browse layer dedup expects exactly one; emitting both forces
+  browse to choose, which encodes adapter conventions where they don't
+  belong.
+- **No populating `source_bearing_functions` or any `InterTaintConfig`
+  fact table from an adapter.** Adapters report facts through `Decl`
+  and `FlowEvent`; the security layer is the only crate that translates
+  rule matches into engine-config facts.
+
+## Testing contract
+
+Each adapter ships fixtures in its `tests/` directory and at minimum:
+
+- A smoke test (parse + `decl_index` per file, asserts non-empty).
+- A traced test (`run_traced(fn_name)`) for at least one representative
+  function.
+- Per-construct fixtures for every `LanguageCapabilities` field the
+  adapter claims `Exact` or `Partial` for.
+
+The cross-language regression matrix
+(`crates/taint/tests/over_taint_matrix.rs`) adds invariants that must
+hold for every supported language; new adapters should appear there.

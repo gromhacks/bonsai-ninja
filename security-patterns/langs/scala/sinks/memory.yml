@@ -1,0 +1,101 @@
+# Scala memory-safety / lifecycle audit-pair sites.
+# Scala's `Using.resource { }` is RAII so explicit `.close()` outside
+# the block is the audit-interesting shape. These rules fire on the
+# *use-after-transition* call (read / get / etc.) and gate on the
+# adapter-emitted lifecycle state via the `requires_state` engine
+# constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: scala.memory.closeable_close
+  enabled: true
+  language: scala
+  tag: memory-safety
+  severity: medium
+  packages: [scala.io, java.io, java.nio]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - requires_state:
+      name: stream
+      expected: closed
+  match_examples:
+  - name: read after close
+    code: |
+      import java.io.InputStream
+      object App {
+        def handle(stream: InputStream): Unit = {
+          stream.close()
+          stream.read()
+        }
+      }
+    expect_match_text: [stream.read]
+  - name: read without preceding close
+    code: |
+      import java.io.InputStream
+      object App {
+        def handle(stream: InputStream): Unit = {
+          stream.read()
+        }
+      }
+    expect_no_match: true
+  description: "Use-after-close — `<Closeable>.read()` on a stream whose preceding `.close()` released the underlying resource. Subsequent reads throw IOException at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state, so explicit-close-then-reuse is flagged while RAII `Using.resource { }` blocks stay silent."
+- id: scala.memory.future_cancel
+  enabled: true
+  language: scala
+  tag: memory-safety
+  severity: medium
+  packages: [scala.concurrent]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      name: get
+  constraints:
+  - requires_state:
+      name: f
+      expected: cancelled
+  match_examples:
+  - name: get after cancel
+    code: |
+      import scala.concurrent.Future
+      object App {
+        def handle(f: java.util.concurrent.Future[Int]): Unit = {
+          f.cancel(true)
+          f.get()
+        }
+      }
+    expect_match_text: [f.get]
+  - name: get without preceding cancel
+    code: |
+      import scala.concurrent.Future
+      object App {
+        def handle(f: java.util.concurrent.Future[Int]): Unit = {
+          f.get()
+        }
+      }
+    expect_no_match: true
+  description: "Use-after-cancel — `Future.get()` on a future whose preceding `.cancel()` invalidated the result. The awaited value is stale and the call throws CancellationException (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+- id: scala.memory.lock_unlock
+  enabled: true
+  language: scala
+  tag: memory-safety
+  severity: medium
+  packages: [java.util.concurrent.locks]
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.unlock$
+  match_examples:
+  - name: lock unlock site
+    code: |
+      import java.util.concurrent.locks.Lock
+      object App {
+        def handle(lock: Lock): Unit = {
+          lock.unlock()
+        }
+      }
+    expect_match_text: [lock.unlock]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. <Lock>.unlock() — subsequent guarded-region reads/writes without re-locking are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

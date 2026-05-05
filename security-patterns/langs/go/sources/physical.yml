@@ -1,0 +1,150 @@
+# Go hardware / physical-input sources (GPIO, ADC, I2C register reads).
+- id: go.physical.digital_read
+  enabled: true
+  language: go
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: ["gobot.io/x/gobot", "github.com/stianeikeland/go-rpio"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.DigitalRead$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.DigitalRead(target)
+      }
+  description: "DigitalRead — physical GPIO pin state from attached hardware."
+
+- id: go.physical.analog_read
+  enabled: true
+  language: go
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: ["gobot.io/x/gobot"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.AnalogRead$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.AnalogRead(target)
+      }
+  description: "AnalogRead — ADC sample from a sensor or other physical input."
+
+- id: go.physical.read_byte_data
+  enabled: true
+  language: go
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: ["gobot.io/x/gobot", "periph.io/x/conn/v3/i2c"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.ReadByteData$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.ReadByteData(target)
+      }
+  description: "ReadByteData — device register read over I2C/SMBus."
+
+- id: go.physical.read_word_data
+  enabled: true
+  language: go
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: ["gobot.io/x/gobot", "periph.io/x/conn/v3/i2c"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.ReadWordData$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.ReadWordData(target)
+      }
+  description: "ReadWordData — 16-bit register read from a chip-to-chip bus."
+
+- id: go.physical.read_reg_u8
+  enabled: true
+  language: go
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: ["periph.io/x/conn/v3/i2c"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.ReadRegU8$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "periph.io/x/conn/v3/i2c"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.ReadRegU8(target)
+      }
+  description: "ReadRegU8 — reads an 8-bit device register from attached hardware."
+
+- id: go.physical.read_reg_u16be
+  enabled: true
+  language: go
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: ["periph.io/x/conn/v3/i2c"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.ReadRegU16BE$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "periph.io/x/conn/v3/i2c"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.ReadRegU16BE(target)
+      }
+  description: "ReadRegU16BE — big-endian 16-bit register read from an attached peripheral."

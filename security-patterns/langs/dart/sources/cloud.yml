@@ -1,0 +1,69 @@
+# Dart cloud / serverless handler sources (Firebase, AWS Lambda Dart runtime).
+- id: dart.cloud.firebase_functions_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: service
+  tag: cloud-input
+  frameworks: [firebase_functions]
+  packages: [firebase_functions_interop, cloud_functions]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — bare `param name: request` taints any function with that param name; no canonical exists. Re-enable when adapter supports class-scoped Firebase HttpsFunction param matching. Use the attribute-chain rule dart.cloud.firebase_oncall_data for callable functions."
+
+- id: dart.cloud.firebase_functions_data
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: dart
+  trust: service
+  tag: cloud-input
+  frameworks: [firebase_functions]
+  packages: [firebase_functions_interop, cloud_functions]
+  match:
+    kind: param
+    target:
+      name: data
+  description: "Disabled — FP-prone. Bare param name 'data' is ubiquitous. Re-enable with context constraint."
+
+- id: dart.cloud.lambda_event_param
+  enabled: true
+  language: dart
+  trust: service
+  tag: cloud-input
+  frameworks: [aws_lambda_dart_runtime]
+  packages: [aws_lambda_dart_runtime]
+  match:
+    kind: param
+    target:
+      name: event
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
+      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
+      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
+      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart';
+      import 'package:aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart'; // aws_lambda_dart_runtime
+      void handle(String event) { var seen = event; }
+  description: "AWS Lambda Dart runtime handler(context, event)."
+
+  imports:
+  - aws_lambda_dart_runtime/aws_lambda_dart_runtime.dart
+- id: dart.cloud.lambda_context_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: service
+  tag: cloud-input
+  frameworks: [aws_lambda_dart_runtime]
+  packages: [aws_lambda_dart_runtime]
+  match:
+    kind: param
+    target:
+      name: context
+  description: "Disabled — bare `param name: context` is FP-prone; no canonical exists. Lambda event payload is covered by dart.cloud.lambda_event_param. Re-enable when adapter supports class-scoped Lambda Context param matching."

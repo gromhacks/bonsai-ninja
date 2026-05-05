@@ -1,0 +1,30 @@
+- id: go.open_redirect.framework_redirect_status_url
+  enabled: true
+  language: go
+  tag: open-redirect
+  severity: medium
+  packages:
+  - github.com/gin-gonic/gin
+  - github.com/labstack/echo
+  - github.com/gofiber/fiber
+  - github.com/beego/beego
+  - net/http
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Redirect$
+  match_examples:
+  - name: gin context redirect status url
+    code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc redirect(c *gin.Context) {\n  target := \"/next\"\n  c.Redirect(302, target)\n}\n"
+    expect_match_text:
+    - c.Redirect
+  - name: echo redirect status url
+    code: "package main\nimport \"github.com/labstack/echo\"\nfunc redirect(ctx echo.Context) error {\n  target := ctx.QueryParam(\"next\")\n  return ctx.Redirect(302, target)\n}\n"
+    expect_match_text:
+    - ctx.Redirect
+  description: "gin/echo Context.Redirect(status, tainted URL) — review for external absolute URLs; relative-path redirects are usually safe. Merged collision aliases: go.open_redirect.framework_redirect, go.open_redirect.http_redirect."
+  aliases:
+  - go.open_redirect.framework_redirect
+  - go.open_redirect.http_redirect

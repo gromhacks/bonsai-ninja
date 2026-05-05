@@ -1,0 +1,320 @@
+- id: c.format.printf_tainted
+  aliases:
+    - c.info_disclosure.printf_secret
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: printf
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *input) {
+        char *fmt = input;
+        printf(fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(void) {
+        printf("%s", "safe");
+      }
+    expect_no_match: true
+  description: "printf — tainted format string. Also covers merged aliases: c.info_disclosure.printf_secret."
+- id: c.format.fprintf_tainted
+  aliases:
+    - c.info_disclosure.fprintf_stderr_secret
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: fprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(void *stream, char *input) {
+        char *fmt = input;
+        fprintf(stream, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(void *stream) {
+        fprintf(stream, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "fprintf(stream, tainted_fmt, ...) — attacker-controlled format string; %n writes arbitrary memory, %s reads it. Also covers merged aliases: c.info_disclosure.fprintf_stderr_secret."
+- id: c.format.sprintf_tainted
+  aliases:
+    - c.memory.sprintf
+  enabled: true
+  language: c
+  tag: format-string
+  severity: critical
+  cwe: [CWE-134, CWE-120]
+  match:
+    kind: call
+    callee:
+      name: sprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *buf, char *input) {
+        char *fmt = input;
+        sprintf(buf, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(char *buf) {
+        sprintf(buf, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "sprintf — format injection + buffer overflow. Also covers merged aliases: c.memory.sprintf."
+- id: c.format.snprintf_tainted
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: snprintf
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *buf, char *input) {
+        char *fmt = input;
+        snprintf(buf, 128, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(char *buf) {
+        snprintf(buf, 128, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "snprintf with tainted format."
+- id: c.format.vprintf_tainted
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: vprintf
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *input) {
+        char *fmt = input;
+        vprintf(fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(void) {
+        vprintf("%s");
+      }
+    expect_no_match: true
+  description: "vprintf(tainted_fmt, ap) — va_list variant of printf; tainted format = %n write / %s leak."
+- id: c.format.vfprintf_tainted
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: vfprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(void *stream, char *input) {
+        char *fmt = input;
+        vfprintf(stream, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(void *stream) {
+        vfprintf(stream, "%s");
+      }
+    expect_no_match: true
+  description: "vfprintf(stream, tainted_fmt, ap) — va_list fprintf variant; same format-string risk."
+- id: c.format.vsprintf_tainted
+  aliases:
+    - c.memory.vsprintf
+  enabled: true
+  language: c
+  tag: format-string
+  severity: critical
+  cwe: [CWE-134, CWE-120]
+  match:
+    kind: call
+    callee:
+      name: vsprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *buf, char *input) {
+        char *fmt = input;
+        vsprintf(buf, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(char *buf) {
+        vsprintf(buf, "%s");
+      }
+    expect_no_match: true
+  description: "vsprintf(dst, tainted_fmt, ap) — va_list sprintf variant; format-string + unbounded copy. Also covers merged aliases: c.memory.vsprintf."
+- id: c.format.vsnprintf_tainted
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: vsnprintf
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char *buf, char *input) {
+        char *fmt = input;
+        vsnprintf(buf, 128, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(char *buf) {
+        vsnprintf(buf, 128, "%s");
+      }
+    expect_no_match: true
+  description: "vsnprintf(dst, n, tainted_fmt, ap) — bounded write but format string is still attacker-controlled."
+- id: c.format.dprintf_tainted
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: dprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(int fd, char *input) {
+        char *fmt = input;
+        dprintf(fd, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(int fd) {
+        dprintf(fd, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "POSIX dprintf(fd, tainted_fmt, ...) — formatted write to fd; tainted format yields %n/%s exploit."
+- id: c.format.asprintf_tainted
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: asprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(char **out, char *input) {
+        char *fmt = input;
+        asprintf(out, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(char **out) {
+        asprintf(out, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "GNU asprintf(&dst, tainted_fmt, ...) — allocates and formats; tainted format string = format-string bug."
+- id: c.format.warn_tainted
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: format-string
+  severity: medium
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: warn
+  description: "Disabled — BSD warn(fmt, ...) format-string sink; common but high noise outside BSD codebases."
+- id: c.format.syslog_tainted
+  aliases:
+    - c.info_disclosure.syslog_secret
+  enabled: true
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: syslog
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted format string
+    code: |
+      void example(int priority, char *input) {
+        char *fmt = input;
+        syslog(priority, fmt);
+      }
+  - name: literal format negative
+    code: |
+      void example(int priority) {
+        syslog(priority, "%s", "safe");
+      }
+    expect_no_match: true
+  description: "syslog(priority, tainted_fmt, ...) — format-string bug in logging path; attacker-controlled %n/%s can crash or leak memory. Also covers merged aliases: c.info_disclosure.syslog_secret."

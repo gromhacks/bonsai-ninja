@@ -1,0 +1,87 @@
+# C# queue / broker sources. Service Bus, SQS, MassTransit, RabbitMQ, Kafka.
+- id: csharp.source.azure_servicebus_queue_trigger
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: queue-input
+  trust: service
+  packages: [Microsoft.Azure.WebJobs]
+  match:
+    kind: param
+    target:
+      name: QueueTrigger
+  description: "Disabled — matcher only sees parameter identifiers, not Azure [QueueTrigger] attributes."
+
+- id: csharp.source.azure_servicebus_trigger
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: queue-input
+  trust: service
+  packages: [Microsoft.Azure.ServiceBus]
+  match:
+    kind: param
+    target:
+      name: ServiceBusTrigger
+  description: "Disabled — matcher only sees parameter identifiers, not Azure [ServiceBusTrigger] attributes."
+
+- id: csharp.source.masstransit_consume
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: queue-input
+  trust: service
+  packages: [MassTransit]
+  match:
+    kind: param
+    target:
+      name: ConsumeContext
+  description: "Disabled — `ConsumeContext` is a type name; `kind: param` only matches parameter identifiers."
+
+- id: csharp.source.rabbitmq_received
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: queue-input
+  trust: service
+  packages: [RabbitMQ.Client]
+  match:
+    kind: param
+    target:
+      name: BasicDeliverEventArgs
+  description: "Disabled — `BasicDeliverEventArgs` is a type name; `kind: param` only matches parameter identifiers."
+
+- id: csharp.source.kafka_consume
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: csharp
+  tag: queue-input
+  trust: service
+  packages: [Confluent.Kafka]
+  match:
+    kind: call
+    callee:
+      attribute: [Consumer, Consume]
+  description: "Disabled — adapters index local receivers like `consumer.Consume`, not receiver types like `Consumer.Consume`."
+
+- id: csharp.source.sqs_receivemessage
+  enabled: true
+  language: csharp
+  tag: queue-input
+  trust: service
+  packages: [AWSSDK.SQS]
+  match:
+    kind: call
+    callee:
+      name: ReceiveMessageAsync
+  match_examples:
+  - name: declared shape
+    code: |
+      using AWSSDK.SQS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ReceiveMessageAsync(input); } }
+  description: "AmazonSQSClient.ReceiveMessageAsync — tail-match across local client variable names."

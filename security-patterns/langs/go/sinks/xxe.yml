@@ -1,0 +1,175 @@
+# Go XXE. encoding/xml does NOT resolve external entities by default, so
+# both rules are low-confidence — flag tainted inputs only.
+- id: go.xxe.xml_newdecoder
+  enabled: true
+  language: go
+  tag: xxe
+  severity: medium
+  packages: ["encoding/xml"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [xml, NewDecoder]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted xml reader
+    code: |
+      package main
+      import (
+        "encoding/xml"
+        "io"
+      )
+
+      func parse(r io.Reader) {
+        xml.NewDecoder(r)
+      }
+    expect_match_text: [xml.NewDecoder]
+  - name: literal xml reader negative
+    code: |
+      package main
+      import (
+        "encoding/xml"
+        "strings"
+      )
+
+      func parse() {
+        xml.NewDecoder(strings.NewReader("<root/>"))
+      }
+    expect_no_match: true
+  description: "encoding/xml.NewDecoder(tainted reader) — stdlib ignores DOCTYPE entities by default, but flag because many handlers then stream-decode untrusted XML."
+
+- id: go.xxe.xml_decoder_charsetreader
+  enabled: true
+  language: go
+  tag: xxe
+  severity: medium
+  packages: ["encoding/xml"]
+  cwe: [CWE-611]
+  match:
+    kind: write
+    target:
+      name: CharsetReader
+  match_examples:
+  - name: xml decoder charset reader assignment
+    code: |
+      package main
+      import (
+        "encoding/xml"
+        "io"
+      )
+      func parse(dec *xml.Decoder, reader func(string, io.Reader) (io.Reader, error)) {
+        dec.CharsetReader = reader
+      }
+    expect_match_text: [dec.CharsetReader]
+  description: "xml.Decoder.CharsetReader assignment — custom charset readers are XML parser extension points; audit implementations that fetch external resources or expand attacker-controlled encodings."
+
+- id: go.xxe.xml_decoder_strict_false
+  enabled: true
+  language: go
+  tag: xxe
+  severity: medium
+  packages: ["encoding/xml"]
+  cwe: [CWE-611]
+  match:
+    kind: write
+    target:
+      name: Strict
+  match_examples:
+  - name: xml decoder strict disabled
+    code: |
+      package main
+      import "encoding/xml"
+      func parse(dec *xml.Decoder) {
+        dec.Strict = false
+      }
+    expect_match_text: [dec.Strict]
+  description: "xml.Decoder.Strict = false — disables strict XML parsing; higher risk when paired with a custom CharsetReader or entity handling."
+
+- id: go.xxe.xml_decoder_entity_map
+  enabled: true
+  language: go
+  tag: xxe
+  severity: medium
+  packages: ["encoding/xml"]
+  cwe: [CWE-611]
+  match:
+    kind: write
+    target:
+      name: Entity
+  match_examples:
+  - name: xml decoder entity assignment
+    code: |
+      package main
+      import "encoding/xml"
+      func parse(dec *xml.Decoder, entities map[string]string) {
+        dec.Entity = entities
+      }
+    expect_match_text: [dec.Entity]
+  description: "xml.Decoder.Entity assignment — custom entity maps expand attacker-controlled XML entities; audit for unsafe entity expansion."
+- id: go.xxe.xml_unmarshal
+  enabled: true
+  language: go
+  tag: xxe
+  severity: low
+  packages: ["encoding/xml"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [xml, Unmarshal]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted xml bytes
+    code: |
+      package main
+      import "encoding/xml"
+
+      func parse(data []byte) {
+        var out any
+        xml.Unmarshal(data, &out)
+      }
+    expect_match_text: [xml.Unmarshal]
+  - name: literal xml bytes negative
+    code: |
+      package main
+      import "encoding/xml"
+
+      func parse() {
+        var out any
+        xml.Unmarshal([]byte("<root/>"), &out)
+      }
+    expect_no_match: true
+  description: "xml.Unmarshal(tainted) — stdlib is XXE-safe by default; flag for audit of non-stdlib or entity-expansion DoS."
+
+- id: go.xxe.xml_decoder_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: xxe
+  severity: low
+  packages: ["encoding/xml"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Decode$"
+  match_examples:
+  - name: xml decoder decode
+    code: |
+      import "encoding/xml"
+      package main
+      func example(dec Decoder, out any) {
+        dec.Decode(out)
+      }
+      type Decoder struct{}
+      func (d Decoder) Decode(v any) error { return nil }
+    expect_match_text: [dec.Decode]
+  description: "Disabled — bare `.Decode` cannot be type-disambiguated from gob.Decoder.Decode and stdlib XML decode is low-confidence for XXE by itself. Keep xml.NewDecoder plus CharsetReader/Entity/Strict rules for XML parser audit coverage."
+  imports:
+  - encoding

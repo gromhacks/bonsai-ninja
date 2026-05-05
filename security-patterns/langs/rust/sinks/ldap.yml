@@ -1,0 +1,210 @@
+# Rust LDAP-injection (ldap3).
+- id: rust.ldap.ldap3_search
+  enabled: true
+  language: rust
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConn, search]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted ldap search filter
+    code: |
+      use ldap3::dummy;
+      fn example(target: &str) {
+          LdapConn::search("ou=people,dc=example,dc=com", Scope::Subtree, target, vec!["cn"]);
+      }
+  - name: literal ldap search filter negative
+    code: |
+      use ldap3::dummy;
+      fn example() {
+          LdapConn::search("ou=people,dc=example,dc=com", Scope::Subtree, "(uid=safe)", vec!["cn"]);
+      }
+    expect_no_match: true
+  description: "ldap3 LdapConn::search — flag tainted filter."
+
+- id: rust.ldap.ldap3_streaming_search
+  enabled: true
+  language: rust
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConn, streaming_search]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted ldap streaming search filter
+    code: |
+      use ldap3::dummy;
+      fn example(target: &str) {
+          LdapConn::streaming_search("ou=people,dc=example,dc=com", Scope::Subtree, target, vec!["cn"]);
+      }
+  - name: literal ldap streaming search filter negative
+    code: |
+      use ldap3::dummy;
+      fn example() {
+          LdapConn::streaming_search("ou=people,dc=example,dc=com", Scope::Subtree, "(uid=safe)", vec!["cn"]);
+      }
+    expect_no_match: true
+  description: "ldap3 LdapConn::streaming_search — streaming variant of search; same filter-injection exposure."
+
+- id: rust.ldap.ldap3_modify
+  enabled: true
+  language: rust
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConn, modify]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      use ldap3::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          LdapConn::modify("(uid=user)");
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          LdapConn::modify("safe");
+      }
+    expect_no_match: true
+  description: "ldap3 LdapConn::modify — tainted DN / attribute values enable directory tampering."
+
+- id: rust.ldap.ldap3_modify_attrs
+  enabled: true
+  language: rust
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConn, modify]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      use ldap3::dummy;
+      fn example(input: &str) {
+          LdapConn::modify("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      fn example() {
+          LdapConn::modify("safe", "safe");
+      }
+    expect_no_match: true
+  description: "ldap3 LdapConn::modify(dn, mods) — tainted modifications can alter unintended directory attributes."
+
+- id: rust.ldap.ldap3_add
+  enabled: true
+  language: rust
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConn, add]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      use ldap3::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          LdapConn::add("(uid=user)");
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          LdapConn::add("safe");
+      }
+    expect_no_match: true
+  description: "ldap3 LdapConn::add — tainted DN / attributes enable unauthorized directory insert (create rogue user)."
+
+- id: rust.ldap.ldap3_add_attrs
+  enabled: true
+  language: rust
+  tag: ldap-injection
+  severity: high
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConn, add]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      use ldap3::dummy;
+      fn example(input: &str) {
+          LdapConn::add("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      fn example() {
+          LdapConn::add("safe", "safe");
+      }
+    expect_no_match: true
+  description: "ldap3 LdapConn::add(dn, attrs) — tainted attributes can create rogue directory entries."
+
+- id: rust.ldap.ldap3_delete
+  enabled: true
+  language: rust
+  tag: ldap-injection
+  severity: critical
+  packages: [ldap3]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConn, delete]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted ldap delete dn
+    code: |
+      use ldap3::dummy;
+      fn example(target: &str) {
+          LdapConn::delete(target);
+      }
+  - name: literal ldap delete dn negative
+    code: |
+      use ldap3::dummy;
+      fn example() {
+          LdapConn::delete("uid=safe,ou=people,dc=example,dc=com");
+      }
+    expect_no_match: true
+  description: "ldap3 LdapConn::delete — tainted DN enables arbitrary directory-object deletion (privileged operation)."

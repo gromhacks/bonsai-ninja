@@ -1,0 +1,231 @@
+- id: go.template.text_template_parse
+  enabled: true
+  language: go
+  tag: ssti
+  severity: high
+  packages:
+  - text/template
+  - github.com/aymerick/raymond
+  cwe:
+  - CWE-1336
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      regex: \.Parse$
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "text/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        tmpl.Parse(target)
+      }
+    expect_match_text:
+    - tmpl.Parse
+  description: "text/template Template.Parse(tainted) — SSTI; template with .Funcs gives RCE. Merged collision aliases: go.template.raymond_parse."
+  aliases:
+  - go.template.raymond_parse
+- id: go.template.text_template_parsefiles
+  enabled: true
+  language: go
+  tag: ssti
+  severity: critical
+  packages:
+  - text/template
+  cwe:
+  - CWE-94
+  - CWE-1336
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - ParseFiles
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "text/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        template.ParseFiles("{{ user }}")
+      }
+  description: "template.ParseFiles(tainted path) — loads attacker-picked template file; combines path-traversal + SSTI."
+- id: go.template.text_template_new_parse
+  enabled: true
+  language: go
+  tag: ssti
+  severity: high
+  packages:
+  - text/template
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - New
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "text/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        template.New("{{ user }}")
+      }
+  description: "text/template.New(tainted name) chained with .Parse(tainted) — tainted template source = SSTI."
+- id: go.template.html_template_parsefiles
+  enabled: true
+  language: go
+  tag: ssti
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-1336
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - htmltemplate
+      - ParseFiles
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        htmltemplate.ParseFiles("{{ user }}")
+      }
+  description: "html/template ParseFiles(tainted path) — tainted template source selection."
+- id: go.template.html_template_html
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - HTML
+  description: "Disabled duplicate — template.HTML trust-type conversion is classified in sinks/xss.yml as go.xss.html_template_html."
+- id: go.template.html_template_jsstr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - JSStr
+  description: "Disabled duplicate — template.JSStr trust-type conversion is classified in sinks/xss.yml as go.xss.template_jsstr."
+- id: go.template.html_template_url
+  enabled: true
+  language: go
+  tag: open-redirect
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-601
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - URL
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        template.URL("{{ user }}")
+      }
+  description: "html/template template.URL(tainted) — cast bypasses URL-context escaping; open-redirect / javascript: XSS."
+- id: go.template.pongo2_fromstring
+  enabled: true
+  language: go
+  tag: ssti
+  severity: critical
+  packages:
+  - github.com/flosch/pongo2
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pongo2
+      - FromString
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/flosch/pongo2"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        pongo2.FromString("{{ user }}")
+      }
+  description: "pongo2.FromString(tainted) — Jinja-like SSTI; RCE via template sandbox escapes."
+- id: go.template.text_template_used_for_html
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - text/template
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - text/template
+      - New
+  description: "text/template renders attacker input without HTML escaping. Use html/template for any web response. (High-FP — flag with care.)"

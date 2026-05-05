@@ -1,0 +1,269 @@
+---
+title: "SDK"
+description: "The bonsai_sdk facade for indexing, browsing, tracing, security analysis, and export."
+---
+
+# SDK
+
+`bonsai_sdk` is the ergonomic facade. One crate, one entry point, every
+analysis surface exposed.
+
+```toml
+[dependencies]
+bonsai_sdk = "0.1"
+```
+
+The SDK re-exports the types and facades CLI consumers need —
+no need to depend on lower crates directly.
+
+---
+
+## Quickstart
+
+```rust
+use bonsai_sdk::Bonsai;
+
+fn main() -> anyhow::Result<()> {
+    let project = Bonsai::new()
+        .with_rulepack("./security-patterns")?
+        .index("./my-app")?;
+
+    // Security taint analysis
+    let report = project.security().taint_analysis().run()?;
+    for finding in report.findings() {
+        println!("{}: {} → {} ({})",
+                 finding.finding_id,
+                 finding.source.rule_id,
+                 finding.sink.rule_id,
+                 finding.severity);
+    }
+
+    // Inspect chains to a target
+    let chains = project.inspect()
+        .target("os.system")?
+        .from("request.args")
+        .enumerate()?;
+    for chain in chains {
+        println!("{} hops: {:?}", chain.depth, chain.steps);
+    }
+
+    Ok(())
+}
+```
+
+---
+
+## API surface
+
+### `Bonsai` — configuration builder
+
+```rust
+let bonsai = Bonsai::new()
+    .with_registry(Arc::new(LanguageRegistry::all()))
+    .with_parse_timeout(Duration::from_secs(30))
+    .with_rulepack("/path/to/security-patterns")?;
+```
+
+| Method | Effect |
+|---|---|
+| `Bonsai::new()` | Default configuration with all 21 adapters bundled |
+| `.with_registry(registry)` | Custom adapter registry |
+| `.with_parse_timeout(d)` | Override per-file parse timeout |
+| `.with_rulepack(path)` | Load a rulepack from disk |
+| `.with_loaded_rulepack(path, pack)` | Inject a pre-loaded `Rulepack` (saves a re-parse) |
+| `.index(root)` | Parse, index, prewarm dataflow, save sidecar |
+| `.index_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
+| `.open_query(root)` | Load sidecar, compute misses lazily |
+| `.open_with_options(root, opts)` | Explicit sidecar / prewarm control |
+| `.open_with_options_and_progress(root, opts, cb)` | Same plus progress callbacks |
+| `.cache(root)` | Rootless cache handle (clear, stats, warm) |
+| `.security_pack()` | Direct rulepack access |
+
+### `Project` — analysis facade
+
+```rust
+let project = bonsai.index("./my-app")?;
+
+// All analyses are method calls on Project
+let security_report = project.security().taint_analysis().run()?;
+let chains = project.inspect().target("sink").enumerate()?;
+let trace = project.trace().from("main").run()?;
+let source_flows = project.source_analysis().run()?;
+let taint_result = project.taint_analysis().run()?;
+let exported = project.export().native_json();
+```
+
+### Workspace open events
+
+```rust
+use bonsai_sdk::WorkspaceOpenEvent;
+
+let project = Bonsai::new()
+    .with_rulepack("./patterns")?
+    .index_with_progress("./my-app", |event| match event {
+        WorkspaceOpenEvent::IngestStarted => println!("Walking filesystem…"),
+        WorkspaceOpenEvent::IngestFinished { files } => println!("{} files", files),
+        WorkspaceOpenEvent::ParseStarted { files } => println!("Parsing {} files…", files),
+        WorkspaceOpenEvent::ParseFileIndexed => print!("."),
+        WorkspaceOpenEvent::ParseFinished => println!("done"),
+        WorkspaceOpenEvent::DataflowPrewarmStarted { pending } => {
+            println!("Prewarming {} dataflow entries…", pending);
+        },
+        WorkspaceOpenEvent::DataflowEntryBuilt => print!("."),
+        WorkspaceOpenEvent::DataflowPrewarmFinished => println!("done"),
+    })?;
+```
+
+---
+
+## Analysis surfaces
+
+### Security
+
+```rust
+let pack = bonsai.security_pack()?;
+
+// Taint analysis (source → sink findings)
+let report = project.security().taint_analysis()
+    .severity_at_least("high")
+    .exclude_tests(true)
+    .inferred_sources(false)
+    .run()?;
+
+for finding in report.findings() {
+    // ...
+}
+
+// Render SARIF
+let sarif = bonsai_sdk::render_sarif_json(&report);
+
+// Source analysis (downstream flows from sources)
+let source_report = project.source_analysis()
+    .trust("remote")
+    .run()?;
+
+// Pack inventory / audit / validate
+let inventory = pack.inventory();
+let audit = pack.audit_against(project.workspace());
+let validation = pack.validate();
+```
+
+### Inspect
+
+```rust
+let chains = project.inspect()
+    .target("os.system")?
+    .from("request.args")
+    .to_kind("call")
+    .max_depth(20)
+    .max_paths(100)
+    .enumerate()?;
+```
+
+### Trace
+
+```rust
+let trace = project.trace()
+    .from("main")
+    .max_steps(10_000)
+    .max_call_depth(50)
+    .run()?;
+
+// Render
+let json = bonsai_sdk::render_trace_json(&trace);
+let text = bonsai_sdk::render_trace_text(&trace);
+let dot = bonsai_sdk::render_trace_dot(&trace);
+```
+
+### Browse
+
+```rust
+use bonsai_sdk::browse;
+
+let defs = browse::defs(project.workspace(), &filters);
+let calls = browse::calls(project.workspace(), &filters);
+let imports = browse::imports(project.workspace(), &filters);
+let refs = browse::refs(project.workspace(), &filters);
+let strings = browse::strings(project.workspace(), &filters);
+let classes = browse::classes(project.workspace(), &filters);
+```
+
+Each function takes a workspace + filter struct, returns a `Vec<*Out>` of
+stable-shaped browse results.
+
+### Dump (debugging / IR introspection)
+
+```rust
+let hir = browse::dump_hir(project.workspace(), func_id);
+let cfg = browse::dump_cfg(project.workspace(), func_id);
+let callgraph = browse::dump_callgraph(project.workspace(), &query);
+let ast = browse::dump_ast(project.workspace(), file_id, &filters);
+let resolve = browse::dump_resolve(project.workspace(), func_id);
+let edges = browse::dump_edges(project.workspace(), &filters);
+let taint = browse::dump_taint(project.workspace(), &filters);
+```
+
+### Export
+
+```rust
+// Complete workspace as JSON
+let json = project.export().native_json();
+
+// Graph projections
+let networkx = project.export().networkx_json();
+let graphml = project.export().graphml();
+let cypher = project.export().cypher();
+```
+
+---
+
+## Cache management
+
+```rust
+let cache = bonsai.cache("./my-app");
+cache.stats(); // sidecar size, prewarm count
+cache.clear()?;
+cache.warm()?; // prewarm dataflow without retaining the project
+```
+
+---
+
+## Direct workspace access
+
+For lower-level operations, `project.workspace()` returns a `&Workspace`:
+
+```rust
+let ws = project.workspace();
+let global = ws.db().global_index();
+let cfg = ws.db().cfg(func_id);
+let resolved = ws.resolved_call_graph();
+```
+
+---
+
+## Type re-exports
+
+The SDK re-exports the most commonly-needed types so consumers don't need
+multiple bonsai crates as dependencies:
+
+- From `bonsai_workspace`: `Workspace`, `WorkspaceOpenOptions`,
+  `WorkspaceStats`
+- From `bonsai_lang_api`: `LanguageRegistry`, `LanguageId`, `Decl`,
+  `DeclKind`, `FlowEvent`, `CallArg`, `CallKind`, `ImportSpec`, `RefKind`
+- From `bonsai_security`: `Rule`, `RuleKind`, `Rulepack`, `Finding`,
+  `FindingMatch`, `Severity`, `Precision`, `TaintAnalysisReport`,
+  `SourceAnalysisReport`
+- From `bonsai_inspect`: `ResolvedChain`, `InspectFilters`
+- From `bonsai_trace`: `TraceResult`, `TraceQuery`, `TraceStep`,
+  `TraceStepKind`
+- From `bonsai_browse`: every `*Out` type and the dump helpers
+
+---
+
+## Stability
+
+The SDK API is the public contract. Field names in `Finding`, `RuleMatch`,
+`TraceResult`, `DefOut`, `CallOut`, etc. are stable across minor versions.
+Breaking changes require a major-version bump and a migration note.
+
+The CLI is a thin renderer over this SDK; both surfaces evolve together.

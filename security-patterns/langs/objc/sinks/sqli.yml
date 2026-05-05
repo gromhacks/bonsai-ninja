@@ -1,0 +1,147 @@
+# Objective-C SQL-injection sinks (SQLite C API + FMDB wrapper).
+- id: objc.sqli.sqlite3_exec
+  enabled: true
+  language: objc
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_exec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(sqlite3 *db, const char *input) { id target = input; int amount = 1; sqlite3_exec(db, input, NULL, NULL, NULL); }
+  - name: literal sql negative
+    code: |
+      void test(sqlite3 *db) { sqlite3_exec(db, "SELECT 1", NULL, NULL, NULL); }
+    expect_no_match: true
+  description: "sqlite3_exec — runs concatenated SQL; no placeholders possible so tainted input is always injection."
+
+- id: objc.sqli.sqlite3_prepare_v2
+  enabled: true
+  language: objc
+  tag: sql-injection
+  severity: high
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^sqlite3_prepare(_v2|_v3)?$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(sqlite3 *db, const char *input) { id target = input; int amount = 1; sqlite3_prepare_v2(db, input, -1, NULL, NULL); }
+  - name: literal prepare sql negative
+    code: |
+      void test(sqlite3 *db) { sqlite3_prepare_v2(db, "SELECT 1", -1, NULL, NULL); }
+    expect_no_match: true
+  description: "sqlite3_prepare(_v2/_v3) — SQL text argument must not be built with stringWithFormat: / string concatenation."
+
+- id: objc.sqli.sqlite3_get_table
+  enabled: true
+  language: objc
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_get_table
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(sqlite3 *db, const char *input) { id target = input; int amount = 1; sqlite3_get_table(db, input, NULL, NULL, NULL, NULL); }
+  - name: literal get table sql negative
+    code: |
+      void test(sqlite3 *db) { sqlite3_get_table(db, "SELECT 1", NULL, NULL, NULL, NULL); }
+    expect_no_match: true
+  description: "sqlite3_get_table — executes concatenated SQL like sqlite3_exec; deprecated but still present."
+
+- id: objc.sqli.fmdb_executequery
+  enabled: true
+  language: objc
+  tag: sql-injection
+  severity: high
+  packages: [fmdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: executeQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(id input) { id target = input; int amount = 1; [FMDatabase executeQuery:input]; }
+  - name: literal fmdb query negative
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(void) { [FMDatabase executeQuery:@"SELECT 1"]; }
+    expect_no_match: true
+  description: "FMDB -executeQuery: with tainted SQL string. Safe form: -executeQuery:withArgumentsInArray:. Constrained to FMDB receivers to avoid overlap with unrelated `executeQuery` selectors."
+
+- id: objc.sqli.fmdb_executeupdate
+  enabled: true
+  language: objc
+  tag: sql-injection
+  severity: high
+  packages: [fmdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: executeUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(id input) { id target = input; int amount = 1; [FMDatabase executeUpdate:input]; }
+  - name: literal fmdb update negative
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(void) { [FMDatabase executeUpdate:@"UPDATE users SET seen = 1"]; }
+    expect_no_match: true
+  description: "FMDB -executeUpdate: with tainted SQL. Safe form uses -executeUpdate:withArgumentsInArray: (parameterized)."
+
+- id: objc.sqli.fmdb_executestatements
+  enabled: true
+  language: objc
+  tag: sql-injection
+  severity: critical
+  packages: [fmdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: executeStatements
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(id input) { id target = input; int amount = 1; [FMDatabase executeStatements:input]; }
+  - name: literal fmdb statements negative
+    code: |
+      #import <fmdb/fmdb.h>
+      void test(void) { [FMDatabase executeStatements:@"CREATE TABLE safe(id INTEGER)"]; }
+    expect_no_match: true
+  description: "FMDB -executeStatements: — runs multiple semicolon-separated statements; no parameter form exists, so tainted input is always injection."

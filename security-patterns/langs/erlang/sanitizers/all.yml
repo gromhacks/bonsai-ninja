@@ -1,0 +1,340 @@
+- id: erlang.sanitizer.uri_string_quote
+  enabled: true
+  language: erlang
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^uri_string:quote"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        uri_string:quote(Input).
+    expect_match_text: ["uri_string:quote"]
+  description: "uri_string:quote — modern OTP URL-escaper; reserved chars are percent-encoded. Defangs redirect/SSRF path-parts."
+- id: erlang.sanitizer.http_uri_encode
+  enabled: true
+  language: erlang
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^http_uri:encode$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        http_uri:encode(Input).
+    expect_match_text: ["http_uri:encode"]
+  description: "http_uri:encode — DEPRECATED in OTP 23+ (replaced by uri_string:quote); still encodes correctly when present in legacy code, so honor it as a sanitizer."
+- id: erlang.sanitizer.cow_qs_urlencode
+  enabled: true
+  language: erlang
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^cow_qs:urlencode$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cow_qs:urlencode(Input).
+    expect_match_text: ["cow_qs:urlencode"]
+  description: "cow_qs:urlencode (cowlib) — application/x-www-form-urlencoded escape; safe for query/body interpolation."
+- id: erlang.sanitizer.mochiweb_quote_plus
+  enabled: true
+  language: erlang
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^mochiweb_util:quote_plus$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mochiweb_util:quote_plus(Input).
+    expect_match_text: ["mochiweb_util:quote_plus"]
+  description: "mochiweb_util:quote_plus — form-encoding (space→+, reserved→%XX); blocks query/path injection."
+- id: erlang.sanitizer.mochiweb_html_escape
+  enabled: true
+  language: erlang
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      regex: "^mochiweb_html:escape$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mochiweb_html:escape(Input).
+    expect_match_text: ["mochiweb_html:escape"]
+  description: "mochiweb_html:escape — entity-escapes &, <, >, \", '; blocks reflected XSS in HTML body context."
+- id: erlang.sanitizer.xmerl_lib_export_text
+  enabled: true
+  language: erlang
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      regex: "^xmerl_lib:export_text"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        xmerl_lib:export_text(Input).
+    expect_match_text: ["xmerl_lib:export_text"]
+  description: "xmerl_lib:export_text — entity-escapes XML/HTML special chars (&, <, >, \"); blocks reflected XSS."
+- id: erlang.sanitizer.crypto_strong_rand_bytes
+  enabled: true
+  language: erlang
+  tag: validation
+  match:
+    kind: call
+    callee:
+      regex: "^crypto:strong_rand_bytes"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        crypto:strong_rand_bytes(Input).
+    expect_match_text: ["crypto:strong_rand_bytes"]
+  description: "crypto:strong_rand_bytes — CSPRNG replacement for random:uniform / rand:uniform."
+- id: erlang.sanitizer.epgsql_equery
+  enabled: true
+  language: erlang
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      regex: "^epgsql:equery"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        epgsql:equery(Input).
+    expect_match_text: ["epgsql:equery"]
+  description: "epgsql:equery uses $N bind parameters — server-side prepared statement, SQLi-safe."
+- id: erlang.sanitizer.binary_to_integer
+  enabled: true
+  language: erlang
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      regex: "^(binary|list)_to_(integer|float)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        binary_to_integer(Input).
+    expect_match_text: [binary_to_integer]
+  description: "Numeric coercion — non-digit input raises badarg; result is safe for path/SQL/cmdi interpolation."
+- id: erlang.sanitizer.list_to_existing_atom
+  enabled: true
+  language: erlang
+  tag: validation
+  match:
+    kind: call
+    callee:
+      regex: "^(list|binary)_to_existing_atom$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        list_to_existing_atom(Input).
+    expect_match_text: [list_to_existing_atom]
+  description: "list_to_existing_atom / binary_to_existing_atom — only resolves to atoms already in the table; defeats atom-exhaustion and constrains arbitrary-MFA shape."
+- id: erlang.sanitizer.public_key_verify
+  enabled: true
+  language: erlang
+  tag: signature-verify
+  match:
+    kind: call
+    callee:
+      regex: "^public_key:verify$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        public_key:verify(Input).
+    expect_match_text: ["public_key:verify"]
+  description: "public_key:verify — cryptographic signature check; payload is authenticated once verify returns true."
+- id: erlang.sanitizer.crypto_hash_equals
+  enabled: true
+  language: erlang
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      regex: "^crypto:hash_equals(_constant_time)?$"
+  match_examples:
+  - name: hash_equals shape
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(A, B) ->
+        crypto:hash_equals(A, B).
+    expect_match_text: ["crypto:hash_equals"]
+  - name: hash_equals_constant_time shape
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(A, B) ->
+        crypto:hash_equals_constant_time(A, B).
+    expect_match_text: ["crypto:hash_equals_constant_time"]
+  description: "Constant-time comparison — defeats MAC/token timing oracles."
+- id: erlang.sanitizer.binary_to_term_safe
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: erlang
+  tag: validation
+  match:
+    kind: call
+    callee:
+      regex: "^binary_to_term$"
+  description: "Disabled — same `^binary_to_term$` regex as erlang.deser.binary_to_term sink; without list-contains constraint support we cannot distinguish the safe arity-2 [{safe,true}] form from the unsafe form. Defaulting to the sink (flag everywhere) is safer than spuriously sanitizing."
+
+- id: erlang.sanitizer.lists_prefix_same_origin
+  enabled: true
+  language: erlang
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      regex: "^lists:prefix$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"/[^"]*"$'
+  match_examples:
+  - name: lists prefix local path
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        lists:prefix("/app/", Input).
+    expect_match_text: ["lists:prefix"]
+  - name: lists prefix local path negative constraint boundary
+    code: "-module(example).\n-export([test/1]).\ntest(Input) ->\n  lists:prefix().\n"
+    expect_no_match: true
+  description: "lists:prefix(\"/...\", Input) — same-origin redirect/path guard for slash-rooted local paths."
+
+- id: erlang.sanitizer.allowlist_lookup
+  enabled: true
+  language: erlang
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(sets:is_element|ordsets:is_element|maps:is_key|proplists:is_defined)$"
+  constraints:
+  - any_arg_matches_regex: "^(Allowed|Allowlist|Whitelist|SafeValues|SafePaths)$"
+  match_examples:
+  - name: sets allowlist lookup
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(Input, Allowed) ->
+        sets:is_element(Input, Allowed).
+    expect_match_text: ["sets:is_element"]
+  - name: sets allowlist lookup negative constraint boundary
+    code: "-module(example).\n-export([test/2]).\ntest(Input, Allowed) ->\n  sets:is_element().\n"
+    expect_no_match: true
+  description: "sets/ordsets/maps/proplists finite allowlist lookup — validates a tainted value against accepted values or keys."
+
+- id: erlang.sanitizer.re_run_full_match
+  enabled: true
+  language: erlang
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      regex: "^re:run$"
+  constraints:
+  - any_arg_matches_regex: "\\^.*\\$"
+  match_examples:
+  - name: anchored re run
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        re:run(Input, "^[a-z0-9_-]+$", [{capture, none}]).
+    expect_match_text: ["re:run"]
+  - name: anchored re run negative constraint boundary
+    code: "-module(example).\n-export([test/1]).\ntest(Input) ->\n  re:run().\n"
+    expect_no_match: true
+  description: "re:run with an anchored full-string allowlist pattern — validates UUID/slug/token shape."
+
+- id: erlang.sanitizer.re_replace_char_allowlist
+  enabled: true
+  language: erlang
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      regex: "^re:replace$"
+  constraints:
+  - any_arg_matches_regex: "\\[\\^[^\\]]+\\]"
+  - any_arg_matches_regex: '^""$'
+  match_examples:
+  - name: strip non slug chars
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        re:replace(Input, "[^A-Za-z0-9_-]", "", [global, {return, binary}]).
+    expect_match_text: ["re:replace"]
+  - name: strip non slug chars negative constraint boundary
+    code: "-module(example).\n-export([test/1]).\ntest(Input) ->\n  re:replace().\n"
+    expect_no_match: true
+  description: "re:replace(Input, \"[^safe]\", \"\", ...) — strips characters outside a safe allowlist."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: erlang.passthrough.uri_string_percent_decode
+  enabled: true
+  language: erlang
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [uri_string, percent_decode]
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        uri_string:percent_decode(Input).
+    expect_match_text: ["uri_string:percent_decode"]
+  description: ":uri_string:percent_decode(s) — Erlang stdlib URL decode; preserves taint."

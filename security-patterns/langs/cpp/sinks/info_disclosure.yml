@@ -1,0 +1,48 @@
+# C++ information-disclosure sinks (stdio, logging, HTTP error bodies).
+- id: cpp.info_disclosure.spdlog_error_secret
+  enabled: true
+  language: cpp
+  tag: information-disclosure
+  severity: medium
+  packages: [spdlog]
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [spdlog, error]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <spdlog/spdlog.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        spdlog::error("api_key={}", arg);
+      }
+    expect_match_text: [spdlog::error]
+  description: "spdlog::error with secret-shaped values persists sensitive data in application logs."
+
+- id: cpp.info_disclosure.fmt_print_secret
+  enabled: true
+  language: cpp
+  tag: information-disclosure
+  severity: medium
+  packages: [fmt]
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, print]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <fmt.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        fmt::print("secret={}", arg);
+      }
+    expect_match_text: [fmt::print]
+  description: "fmt::print of secret-shaped values can expose tokens on stdout or stderr."

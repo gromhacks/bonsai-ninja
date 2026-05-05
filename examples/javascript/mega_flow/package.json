@@ -1,0 +1,7 @@
+{
+  "name": "mega-flow",
+  "version": "0.0.1",
+  "dependencies": {
+    "readline": "*"
+  }
+}

@@ -1,0 +1,35 @@
+- id: swift.queue.send_message
+  enabled: true
+  language: swift
+  tag: queue-injection
+  severity: high
+  packages: [AWSClientRuntime]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: sendMessage
+  match_examples:
+  - name: declared shape
+    code: |
+      import AWSCore // aws-sdk-swift
+      import AWSCore // aws-sdk-swift
+      func test() { let input = "x"; let amount = 1; sendMessage(input) }
+  description: "AWS SDK for Swift sendMessage — tainted queue target/body injects arbitrary broker payloads."
+
+  imports:
+  - AWSCore
+- id: swift.queue.publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: queue-injection
+  severity: high
+  packages: [AWSClientRuntime]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: publish
+  description: "Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across Swift clients and app code."

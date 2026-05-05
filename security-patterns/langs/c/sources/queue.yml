@@ -1,0 +1,44 @@
+# C queue / service-bus sources.
+- id: c.input.kafka_consumer_poll
+  enabled: true
+  language: c
+  trust: service
+  tag: network-input
+  payload_types: [binary]
+  packages: [rdkafka]
+  match:
+    kind: call
+    callee:
+      name: rd_kafka_consumer_poll
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <rdkafka/rdkafka.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        rd_kafka_consumer_poll(arg);
+      }
+  description: "librdkafka rd_kafka_consumer_poll — message broker delivers producer-supplied payload; treat as untrusted service input."
+
+- id: c.input.zmq_recv
+  enabled: true
+  language: c
+  trust: service
+  tag: network-input
+  payload_types: [binary]
+  packages: [libzmq]
+  match:
+    kind: call
+    callee:
+      name: zmq_recv
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libzmq/zmq.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        zmq_recv(arg);
+      }
+  description: "libzmq zmq_recv — receives a frame from the socket; peer is another service but payload is still untrusted."

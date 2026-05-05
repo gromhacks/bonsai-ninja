@@ -1,0 +1,21 @@
+# csharp mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: csharp.mass_assign.tryupdatemodel
+  enabled: true
+  language: csharp
+  tag: mass-assignment
+  severity: medium
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      name: TryUpdateModel
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TryUpdateModel(input); } }
+  description: "ASP.NET Core TryUpdateModel(model) without a [Bind] include list — overpost vector."

@@ -1,0 +1,440 @@
+# Python eval / dynamic-code sinks. Builtins + import + ast hooks.
+#
+# Note: builtin_eval / builtin_exec use bare-name match (`eval` / `exec`).
+# This is intentional — both are real Python builtins and have no library
+# scope to attach a `packages:` constraint to. The same applies to
+# `compile`, `__import__`, and `execfile`. Negative fixtures live in
+# tests/fixtures/python/eval/.
+- id: python.eval.builtin_eval
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^eval$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval builtin eval
+    code: |
+      def example(user_input):
+          return eval(user_input)
+  - name: literal eval negative
+    code: |
+      def example():
+          return eval("1 + 1")
+    expect_no_match: true
+  description: "eval() — executes attacker-controlled Python."
+
+- id: python.eval.builtin_exec
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval builtin exec
+    code: |
+      def example(user_input):
+          return exec(user_input)
+  - name: arg tainted literal negative
+    code: "def example(user_input):\n    return exec(\"safe\")\n"
+    expect_no_match: true
+  description: "exec() — executes attacker-controlled Python."
+
+- id: python.eval.compile
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^compile$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval compile
+    code: |
+      def example(user_input):
+          return compile(user_input)
+  - name: compile literal negative
+    code: |
+      def example(user_input):
+          return compile('safe')
+    expect_no_match: true
+  description: "compile() — compiles tainted source to a code object."
+
+- id: python.eval.input_python2
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: input
+  description: "Disabled — Python 3 input() just returns a string; firing on every CLI `input()` call is pure FP. Only dangerous under Python 2. Enable with a py2-runtime gate."
+
+- id: python.eval.execfile
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: execfile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval execfile
+    code: |
+      def example(user_input):
+          return execfile(user_input)
+  - name: execfile literal negative
+    code: |
+      def example(user_input):
+          return execfile('safe')
+    expect_no_match: true
+  description: "Python-2 execfile() — runs tainted file path."
+
+- id: python.eval.importlib_import_module
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [importlib, import_module]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval importlib import module
+    code: |
+      def example(user_input):
+          return importlib.import_module(user_input)
+  - name: importlib import module literal negative
+    code: |
+      def example(user_input):
+          return importlib.import_module('safe')
+    expect_no_match: true
+  description: "importlib.import_module(tainted) — arbitrary module load."
+
+- id: python.eval.builtin_import
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: __import__
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval builtin import
+    code: |
+      def example(user_input):
+          return __import__(user_input)
+  - name: builtin import literal negative
+    code: |
+      def example(user_input):
+          return __import__('safe')
+    expect_no_match: true
+  description: "__import__(tainted) — arbitrary module load."
+
+- id: python.eval.ast_literal_eval
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: code-injection
+  severity: low
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ast, literal_eval]
+  description: "Disabled — ast.literal_eval is bounded to literals."
+
+- id: python.eval.code_interactconsole
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [code, interact]
+  description: "Disabled — code.interact() opens an interpreter, but its first argument is a banner, not code; needs an interactive-exposure source model."
+
+- id: python.eval.timeit_timer
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: new
+    callee:
+      attribute: [timeit, Timer]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: timeit timer tainted statement
+    code: |
+      import timeit
+      class Timer:
+          pass
+      def example(user_input):
+          return timeit.Timer(user_input)
+  - name: timeit timer literal negative
+    code: |
+      import timeit
+      class Timer:
+          pass
+      def example(user_input):
+          return timeit.Timer("x + 1")
+    expect_no_match: true
+  description: "timeit.Timer(stmt) — compiles and executes a tainted benchmark statement."
+
+- id: python.eval.pdb_run
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [pdb, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval pdb run
+    code: |
+      def example(user_input):
+          return pdb.run(user_input)
+  - name: pdb run literal negative
+    code: |
+      def example(user_input):
+          return pdb.run('safe')
+    expect_no_match: true
+  description: "pdb.run(tainted) — eval+exec."
+
+- id: python.eval.flask_g_setattr
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: code-injection
+  severity: low
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: setattr
+  description: "Disabled — setattr is generic; flag only when name tainted."
+
+- id: python.eval.numexpr_evaluate
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: high
+  packages: [numexpr]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [numexpr, evaluate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval numexpr evaluate
+    code: |
+      import numexpr
+      def example(user_input):
+          return numexpr.evaluate(user_input)
+  - name: numexpr evaluate literal negative
+    code: |
+      import numexpr
+
+      def example(user_input):
+          return numexpr.evaluate('safe')
+    expect_no_match: true
+  description: "numexpr.evaluate(tainted) — limited eval but still risky."
+
+- id: python.eval.pandas_eval
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: high
+  packages: [pandas]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [pd, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval pandas eval
+    code: |
+      import pandas
+      def example(user_input):
+          return pd.eval(user_input)
+  - name: pandas eval literal negative
+    code: |
+      import pandas
+
+      def example(user_input):
+          return pd.eval('safe')
+    expect_no_match: true
+  description: "pd.eval(tainted) — pandas expression eval."
+
+- id: python.eval.dataframe_query
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: code-injection
+  severity: medium
+  packages: [pandas]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [DataFrame, query]
+  description: "Disabled — DataFrame.query allows expressions; flag with tainted source."
+
+- id: python.eval.simpleeval_simple_eval
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: high
+  packages: [simpleeval]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: simple_eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval simpleeval simple eval
+    code: |
+      import simpleeval
+      def example(user_input):
+          return simple_eval(user_input)
+  - name: simpleeval simple eval literal negative
+    code: |
+      import simpleeval
+
+      def example(user_input):
+          return simple_eval('safe')
+    expect_no_match: true
+  description: "simpleeval.simple_eval — marketed as 'safe', but a tainted expression with custom names/functions can call attacker-supplied callables and reach arbitrary code in many configurations."
+
+- id: python.eval.asteval_call
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: high
+  packages: [asteval]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Interpreter, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval asteval call
+    code: |
+      import asteval
+      def example(user_input):
+          return Interpreter.eval(user_input)
+  - name: asteval call literal negative
+    code: |
+      import asteval
+
+      def example(user_input):
+          return Interpreter.eval('safe')
+    expect_no_match: true
+  description: "asteval.Interpreter.eval — sandboxed Python interpreter; bypasses are well-known, treat tainted input as RCE-prone."
+
+- id: python.eval.rexec_compile
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [rexec, RExec]
+  description: "Disabled (legacy) — Python 2 rexec module; ships removed in Python 3 but appears in legacy bases."
+
+# Reflection-based dynamic invocation (T406). Tag
+# code-injection so reviewer enumerates with `security sinks
+# --tag code-injection`. Treats reflection as eval-equivalent
+# when the dispatched name comes from attacker input.
+- id: python.eval.getattr_dynamic_chain
+  enabled: true
+  language: python
+  tag: code-injection
+  severity: high
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      name: getattr
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: eval getattr dynamic chain
+    code: |
+      def example(obj, user_input):
+          return getattr(obj, user_input)
+  - name: getattr dynamic chain literal negative
+    code: |
+      def example(obj, user_input):
+          return getattr(obj, 'safe')
+    expect_no_match: true
+  description: "getattr(obj, attacker_name) — attribute name from input. Reaching `__call__` after this is eval-equivalent."

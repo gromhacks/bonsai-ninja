@@ -1,0 +1,43 @@
+# Lua memory-safety / lifecycle audit-pair sites.
+# These rules fire on the *transition site* — the Lua method-call
+# receiver field isn't populated by the kit (Lua uses `:` rather than
+# `.`), so the lifecycle lattice cannot extract the binding from
+# `f:close()`. The `requires_state` engine constraint (P6) cannot gate
+# the use site until the kit populates `receiver` for Lua `:` calls.
+
+- id: lua.memory.io_close
+  enabled: true
+  language: lua
+  tag: memory-safety
+  severity: medium
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      attribute: [io, close]
+  match_examples:
+  - name: io close site
+    code: |
+      local function example(f)
+        io.close(f)
+      end
+    expect_match_text: [io.close]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. io.close(f) — subsequent f:read/f:write on the same handle errors with 'attempt to use a closed file' (use-after-close, CWE-416). Lua's `:` method-call receiver isn't surfaced to the lifecycle lattice today, so this rule remains a transition-site audit-pair until the adapter populates the `receiver` field."
+- id: lua.memory.coroutine_close
+  enabled: true
+  language: lua
+  tag: memory-safety
+  severity: medium
+  cwe: [CWE-672, CWE-416]
+  match:
+    kind: call
+    callee:
+      attribute: [coroutine, close]
+  match_examples:
+  - name: coroutine close site
+    code: |
+      local function example(co)
+        coroutine.close(co)
+      end
+    expect_match_text: [coroutine.close]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. coroutine.close(co) (Lua 5.4+) — subsequent coroutine.resume on the closed coroutine returns false with 'cannot resume dead coroutine' (use-after-close, CWE-672). Lua's `:` method-call receiver isn't surfaced to the lifecycle lattice today."

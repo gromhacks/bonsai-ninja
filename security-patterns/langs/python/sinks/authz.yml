@@ -1,0 +1,16 @@
+- id: python.authz.flask_login_user
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: weak-auth
+  severity: medium
+  cwe: [CWE-287, CWE-285]
+  owasp: [A07-2021]
+  frameworks: [flask-login]
+  packages: [flask_login]
+  match:
+    kind: call
+    callee:
+      name: login_user
+  description: "Disabled — login_user requires user-trust analysis to distinguish validated principals from attacker-selected users."

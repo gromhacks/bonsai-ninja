@@ -1,0 +1,615 @@
+- id: java.xss.response_writer_write
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - getWriter
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    getWriter.write(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          getWriter.write("safe");
+        }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.getWriter().write(tainted).
+- id: java.xss.response_writer_print
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - getWriter
+      - print
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    getWriter.print(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          getWriter.print("safe");
+        }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.getWriter().print(tainted).
+- id: java.xss.response_outputstream_print
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - getOutputStream
+      - print
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    getOutputStream.print(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          getOutputStream.print("safe");
+        }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.getOutputStream().print(tainted).
+- id: java.xss.response_outputstream_println
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - getOutputStream
+      - println
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    getOutputStream.println(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          getOutputStream.println("safe");
+        }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.getOutputStream().println(tainted).
+- id: java.xss.response_outputstream_write
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - getOutputStream
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    getOutputStream.write(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          getOutputStream.write("safe");
+        }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.getOutputStream().write(tainted).
+- id: java.xss.servletoutputstream_print
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServletOutputStream
+      - print
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    ServletOutputStream.print(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          ServletOutputStream.print("safe");
+        }
+      }
+    expect_no_match: true
+  description: ServletOutputStream.print(tainted).
+- id: java.xss.spring_responseentity_ok_html_concat
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.http
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: responseentity ok raw html
+    code: |
+      import org.springframework.http.*;
+      class App {
+        Object handle(String name) {
+          return ResponseEntity.ok("<p>" + name);
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.ok
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          ResponseEntity.ok("safe");
+        }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  imports:
+  - org.springframework.http
+- id: java.xss.spring_responseentity_body_html_concat
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.http
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - body
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: responseentity raw html body
+    code: |
+      import org.springframework.http.*;
+      class App {
+        Object handle(String name) {
+          return ResponseEntity.body("<p>" + name);
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.body
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          ResponseEntity.body("safe");
+        }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.body(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  imports:
+  - org.springframework.http
+- id: java.xss.webflux_serverresponse_bodyvalue_html_concat
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServerResponse
+      - bodyValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: serverresponse raw html body value
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        Object handle(String name) {
+          return ServerResponse.bodyValue("<p>" + name);
+        }
+      }
+    expect_match_text:
+    - ServerResponse.bodyValue
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        void handle(String input) throws Exception {
+          ServerResponse.bodyValue("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: java.xss.jaxrs_response_ok_text_html
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - javax.ws.rs
+  - jakarta.ws.rs
+  - io.quarkus
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jaxrs html response body
+    code: |
+      import javax.ws.rs.*;
+      class App {
+        Object handle(String name) {
+          return Response.ok("<h1>" + name, MediaType.TEXT_HTML);
+        }
+      }
+    expect_match_text:
+    - Response.ok
+  - name: arg tainted literal negative
+    code: |
+      import javax.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          Response.ok("safe");
+        }
+      }
+    expect_no_match: true
+  description: "JAX-RS Response.ok(body, TEXT_HTML) — raw HTML response body built from attacker-controlled text. Merged aliases: java.xss.jaxrs_response_ok_html_concat."
+  aliases:
+  - java.xss.jaxrs_response_ok_html_concat
+- id: java.xss.play_results_ok_html_concat
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - com.typesafe.play
+  - play.mvc
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Results
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: play ok raw html
+    code: |
+      import com.typesafe.play.*;
+      class App {
+        Object handle(String name) {
+          return Results.ok("<p>" + name);
+        }
+      }
+    expect_match_text:
+    - Results.ok
+  - name: arg tainted literal negative
+    code: |
+      import com.typesafe.play.*;
+      class App {
+        void handle(String input) throws Exception {
+          Results.ok("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Play Results.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: java.xss.micronaut_httpresponse_ok_html_concat
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - io.micronaut.http
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: micronaut raw html response body
+    code: |
+      import io.micronaut.http.*;
+      class App {
+        Object handle(String name) {
+          return HttpResponse.ok("<p>" + name);
+        }
+      }
+    expect_match_text:
+    - HttpResponse.ok
+  - name: arg tainted literal negative
+    code: |
+      import io.micronaut.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpResponse.ok("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Micronaut HttpResponse.ok(raw HTML concat) — reflected HTML response body built from attacker-controlled text."
+- id: java.xss.vertx_response_end_html_concat
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - io.vertx
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: end
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vertx response end raw html
+    code: |
+      import io.vertx.*;
+      class App {
+        void handle(HttpServerResponse response, String name) {
+          response.end("<p>" + name);
+        }
+      }
+      class HttpServerResponse {
+        void end(Object... args) {}
+      }
+    expect_match_text:
+    - response.end
+  - name: arg tainted literal negative
+    code: |
+      import io.vertx.*;
+      class App {
+        void handle(String input) throws Exception {
+          end("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Vert.x HttpServerResponse.end(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: java.xss.wicket_label_escape_disabled
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - org.apache.wicket
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Label
+      - setEscapeModelStrings
+  match_examples:
+  - name: wicket label escaping disabled
+    code: |
+      import org.apache.wicket.*;
+      class App {
+        void render(Label label) {
+          label.setEscapeModelStrings(false);
+        }
+      }
+      class Label {
+        void setEscapeModelStrings(Object... args) {}
+      }
+    expect_match_text:
+    - label.setEscapeModelStrings
+  description: "Wicket Label.setEscapeModelStrings(false) — disables HTML escaping for label model text."
+- id: java.xss.printwriter_write
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrintWriter
+      - write
+  description: "Disabled — only matches static qualified form; ServletResponse covers web flow via getWriter().write."
+- id: java.xss.printwriter_println
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrintWriter
+      - println
+  description: "Disabled — see printwriter_write; use response_writer_println."
+- id: java.xss.printwriter_print
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrintWriter
+      - print
+  description: "Disabled — see printwriter_write; use response_writer_print."
+- id: java.xss.jsp_out_println
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - out
+      - println
+  description: "Disabled — `out.println` matches every logger or PrintStream variable named `out`; too broad."
+- id: java.xss.spring_modelandview_addobject
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: xss
+  severity: medium
+  packages:
+  - org.springframework.web.servlet
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ModelAndView
+      - addObject
+  description: "Disabled — Spring ModelAndView values are escaped by default templates; flag with template-engine analysis."
+- id: java.xss.thymeleaf_unescaped
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - thymeleaf
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: th:utext
+  description: "Disabled — th:utext attr write; surface via template scanner, not call-match."
+- id: java.xss.struts_textparser
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: xss
+  severity: medium
+  packages:
+  - struts2
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TextParseUtil
+      - translateVariables
+  description: "Disabled — Struts2 TextParseUtil; flag with OGNL scope."
+- id: java.xss.gwt_html_settext
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: xss
+  severity: medium
+  packages:
+  - com.google.gwt
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTML
+      - setHTML
+  description: "Disabled — GWT HTML.setHTML; flag with constraint on tainted arg."

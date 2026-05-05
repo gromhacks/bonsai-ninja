@@ -1,0 +1,100 @@
+# Python CLI / local sources. argv, stdin, built-in input(),
+# argparse/click/typer parsed args.
+
+- id: python.cli.sys_argv
+  enabled: true
+  language: python
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  imports: [sys]
+  match:
+    kind: read
+    target:
+      attribute: [sys, argv]
+  match_examples:
+  - name: cli sys argv
+    code: |
+      import sys
+      def example():
+          value = sys.argv
+          return value
+  description: sys.argv — process command-line arguments.
+
+- id: python.cli.sys_stdin_read
+  enabled: true
+  language: python
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  imports: [sys]
+  match:
+    kind: call
+    callee:
+      attribute: [sys, stdin, read]
+  match_examples:
+  - name: cli sys stdin read
+    code: |
+      import sys
+      def example(user_input):
+          return sys.stdin.read(user_input)
+  description: sys.stdin.read — reads the entire stdin stream.
+
+- id: python.cli.sys_stdin_readline
+  enabled: true
+  language: python
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  imports: [sys]
+  match:
+    kind: call
+    callee:
+      attribute: [sys, stdin, readline]
+  match_examples:
+  - name: cli sys stdin readline
+    code: |
+      import sys
+      def example(user_input):
+          return sys.stdin.readline(user_input)
+  description: sys.stdin.readline — reads a single line from stdin.
+
+- id: python.cli.builtin_input
+  enabled: true
+  language: python
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: "^input$"
+  match_examples:
+  - name: cli builtin input
+    code: |
+      def example(user_input):
+          return input(user_input)
+  description: input() — interactive prompt; returns a user-supplied string (Python 3; Python 2 input() is code-exec and covered by the eval sink).
+
+- id: python.cli.argparse_parse_args
+  enabled: true
+  language: python
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  imports: [argparse]
+  match:
+    kind: call
+    callee:
+      name: parse_args
+  match_examples:
+  - name: cli argparse parse args
+    code: |
+      import argparse
+      def example(user_input):
+          return parse_args(user_input)
+  description: "argparse parse_args() — tail-match across local parser variable names."
+
+# click/typer source rule removed — needs decorator-scoped parameter
+# matching in the adapter to fire only on @click.command-decorated
+# functions. Until then, a bare-regex placeholder is a footgun.

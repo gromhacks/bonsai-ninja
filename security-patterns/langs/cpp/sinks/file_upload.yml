@@ -1,0 +1,135 @@
+# C++ file-upload sinks — client-controlled filenames reaching the filesystem.
+- id: cpp.upload.cpphttplib_multipart
+  enabled: true
+  language: cpp
+  tag: file-upload
+  severity: medium
+  packages: [cpp-httplib]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Request, get_file_value]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        Request::get_file_value(arg);
+      }
+  description: "cpp-httplib Request::get_file_value — returns MultipartFormData with client-controlled filename. Signature is `get_file_value(const std::string &name)` — exactly 1 arg; bounds reject same-name decoys."
+
+  imports:
+  - httplib.h
+  - httplib
+- id: cpp.upload.drogon_uploaded_file
+  enabled: true
+  language: cpp
+  tag: file-upload
+  severity: medium
+  packages: [drogon]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpFile, getFileName]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpFile::getFileName(arg);
+      }
+  description: "Drogon HttpFile::getFileName — client-controlled; sanitize before use on disk."
+
+- id: cpp.upload.drogon_save
+  enabled: true
+  language: cpp
+  tag: file-upload
+  severity: high
+  packages: [drogon]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpFile, save]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpFile::save(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpFile::save("safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpFile::save / saveAs — writes uploaded bytes to disk; flag when filename is unsanitised."
+
+- id: cpp.upload.drogon_save_as
+  enabled: true
+  language: cpp
+  tag: file-upload
+  severity: high
+  packages: [drogon]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpFile, saveAs]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpFile::saveAs(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpFile::saveAs("safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpFile::saveAs(path) — tainted path writes arbitrary file."
+
+- id: cpp.upload.poco_partstore
+  enabled: true
+  language: cpp
+  tag: file-upload
+  severity: medium
+  packages: [Poco]
+  cwe: [CWE-434]
+  match:
+    kind: new
+    callee:
+      name: PartHandler
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Poco/URI.h>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new PartHandler(arg);
+      }
+  description: "Poco::Net::PartHandler subclass — handles uploaded parts; flag when filename is used on disk."

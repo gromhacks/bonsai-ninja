@@ -1,0 +1,18 @@
+[package]
+name = "bonsai_vfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Virtual filesystem, overlays, and incremental edits."
+
+[dependencies]
+bonsai_common = { workspace = true }
+ahash = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

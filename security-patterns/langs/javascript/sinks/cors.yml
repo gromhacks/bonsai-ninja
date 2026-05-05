@@ -1,0 +1,82 @@
+- id: javascript.cors.cors_wildcard_with_credentials
+  enabled: true
+  language: javascript
+  tag: cors
+  severity: medium
+  packages:
+  - cors
+  cwe:
+  - CWE-942
+  match:
+    kind: call
+    callee:
+      name: cors
+  match_examples:
+  - name: cors wildcard with credentials
+    code: |
+      const _u = require("cors");
+      function demo(input, req, obj) {
+        return cors(input, { origin: "*", credentials: true });
+      }
+  description: "cors() called with wildcard origin and credentials true — Express CORS allow-all-with-credentials. Reflect-origin attack via misconfigured ACAO. Merged aliases: javascript.cors.cors_origin_true, javascript.cors.express_cors_origin_star."
+  aliases:
+  - javascript.cors.cors_origin_true
+  - javascript.cors.express_cors_origin_star
+- id: javascript.cors.nest_enablecors_default
+  enabled: true
+  language: javascript
+  tag: cors
+  severity: medium
+  packages:
+  - '@nestjs/core'
+  cwe:
+  - CWE-942
+  match:
+    kind: call
+    callee:
+      name: enableCors
+  match_examples:
+  - name: nest enablecors default
+    code: |
+      const _u = require("@nestjs/core");
+      function bootstrap(app) {
+        return app.enableCors();
+      }
+    expect_match_text:
+    - app.enableCors
+  description: 'NestJS app.enableCors() with no origin allowlist enables permissive CORS defaults. Merged aliases: javascript.cors.nest_enablecors_wildcard.'
+  aliases:
+  - javascript.cors.nest_enablecors_wildcard
+- id: javascript.cors.nestfactory_create_cors_any
+  enabled: true
+  language: javascript
+  tag: cors
+  severity: medium
+  packages:
+  - '@nestjs/core'
+  cwe:
+  - CWE-942
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NestFactory
+      - create
+  match_examples:
+  - name: nestfactory create cors true
+    code: |
+      const _u = require("@nestjs/core");
+      function bootstrap(AppModule) {
+        return NestFactory.create(AppModule, { cors: true });
+      }
+    expect_match_text:
+    - NestFactory.create
+  - name: nestfactory create cors wildcard
+    code: |
+      const _u = require("@nestjs/core");
+      function bootstrap(AppModule) {
+        return NestFactory.create(AppModule, { cors: { origin: "*" } });
+      }
+    expect_match_text:
+    - NestFactory.create
+  description: 'NestFactory.create(..., {cors: true/origin:''*''}) enables permissive CORS.'

@@ -1,0 +1,106 @@
+- id: kotlin.info_disclosure.println_secret
+  enabled: true
+  language: kotlin
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      attribute:
+      - System
+      - out
+      - println
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    System.out.println(\"password=$input\")\n  }\n}\n"
+    expect_match_text:
+    - System.out.println
+  - name: literal println secret negative
+    code: |
+      class App {
+        fun handle() {
+          System.out.println("password=redacted")
+        }
+      }
+    expect_no_match: true
+  description: 'TODO(only-when-packaged): java.lang.System is auto-imported in Kotlin/JVM — System.out.println of secret-shaped values can disclose credentials through stdout logs. Merged collision aliases: kotlin.info_disclosure.system_err_secret.'
+  aliases:
+  - kotlin.info_disclosure.system_err_secret
+- id: kotlin.info_disclosure.logger_error_secret
+  enabled: true
+  language: kotlin
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - error
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    logger.error(\"token=$input\")\n  }\n}\n"
+    expect_match_text:
+    - logger.error
+  - name: literal logger error secret negative
+    code: |
+      class App {
+        fun handle() {
+          logger.error("token=redacted")
+        }
+      }
+    expect_no_match: true
+  description: logger.error with secret-shaped values persists sensitive data in application logs.
+- id: kotlin.info_disclosure.ktor_respondtext_exception
+  enabled: true
+  language: kotlin
+  tag: information-disclosure
+  severity: high
+  packages:
+  - io.ktor.server
+  - io.ktor
+  cwe:
+  - CWE-209
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - call
+      - respondText
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          call.respondText("Exception stack trace: $input")
+        }
+      }
+    expect_match_text:
+    - call.respondText
+  - name: literal ktor respond text negative
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle() {
+          call.respondText("Exception stack trace: redacted")
+        }
+      }
+    expect_no_match: true
+  description: 'Ktor call.respondText with exception or stack details exposes implementation information to clients. Merged collision aliases: kotlin.xss.ktor_respond_text.'
+  aliases:
+  - kotlin.xss.ktor_respond_text

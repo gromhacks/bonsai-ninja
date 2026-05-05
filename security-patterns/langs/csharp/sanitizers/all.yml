@@ -1,0 +1,1210 @@
+# C# sanitizers — taint stops here.
+- id: csharp.sanitizer.htmlencoder_encode
+  enabled: true
+  language: csharp
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlEncoder, Encode]
+  constraints:
+  - receiver_name_in: [HtmlEncoder, htmlEncoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlEncoder.Encode(input); } }
+    expect_match_text: [HtmlEncoder.Encode]
+  description: "HtmlEncoder.Default.Encode."
+
+- id: csharp.sanitizer.webutility_htmlencode
+  enabled: true
+  language: csharp
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [WebUtility, HtmlEncode]
+  constraints:
+  - receiver_name_in: [WebUtility]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebUtility.HtmlEncode(input); } }
+    expect_match_text: [WebUtility.HtmlEncode]
+  description: "WebUtility.HtmlEncode."
+
+- id: csharp.sanitizer.httputility_htmlencode
+  enabled: true
+  language: csharp
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [HttpUtility, HtmlEncode]
+  constraints:
+  - receiver_name_in: [HttpUtility]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.HtmlEncode(input); } }
+    expect_match_text: [HttpUtility.HtmlEncode]
+  description: "HttpUtility.HtmlEncode."
+
+- id: csharp.sanitizer.httputility_urlencode
+  enabled: true
+  language: csharp
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [HttpUtility, UrlEncode]
+  constraints:
+  - receiver_name_in: [HttpUtility]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.UrlEncode(input); } }
+    expect_match_text: [HttpUtility.UrlEncode]
+  description: "HttpUtility.UrlEncode."
+
+- id: csharp.sanitizer.uri_escapedatastring
+  enabled: true
+  language: csharp
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, EscapeDataString]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.EscapeDataString(input); } }
+    expect_match_text: [Uri.EscapeDataString]
+  description: "Uri.EscapeDataString — RFC 3986 component encoding."
+
+- id: csharp.sanitizer.uri_escapeuristring
+  enabled: true
+  language: csharp
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, EscapeUriString]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.EscapeUriString(input); } }
+    expect_match_text: [Uri.EscapeUriString]
+  description: "Uri.EscapeUriString — deprecated but used widely."
+
+- id: csharp.sanitizer.antixss_encoder_html
+  enabled: true
+  language: csharp
+  tag: html-encode
+  packages: [AntiXSS]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, HtmlEncode]
+  constraints:
+  - receiver_name_in: [Encoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      using AntiXSS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Encoder.HtmlEncode(input); } }
+    expect_match_text: [Encoder.HtmlEncode]
+  description: "Microsoft AntiXSS Encoder.HtmlEncode."
+
+- id: csharp.sanitizer.antixss_encoder_url
+  enabled: true
+  language: csharp
+  tag: url-encode
+  packages: [AntiXSS]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, UrlEncode]
+  constraints:
+  - receiver_name_in: [Encoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      using AntiXSS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Encoder.UrlEncode(input); } }
+    expect_match_text: [Encoder.UrlEncode]
+  description: "AntiXSS Encoder.UrlEncode."
+
+- id: csharp.sanitizer.html_sanitizer
+  enabled: true
+  language: csharp
+  tag: html-sanitize
+  packages: [HtmlSanitizer]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlSanitizer, Sanitize]
+  match_examples:
+  - name: declared shape
+    code: |
+      using HtmlSanitizer;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlSanitizer.Sanitize(input); } }
+    expect_match_text: [HtmlSanitizer.Sanitize]
+  description: "Mganss.XSS.HtmlSanitizer."
+
+- id: csharp.sanitizer.parameter_add_value
+  enabled: true
+  language: csharp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: AddWithValue
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddWithValue(input); } }
+    expect_match_text: [AddWithValue]
+  description: "SqlCommand.Parameters.AddWithValue — parameterised SQL."
+
+- id: csharp.sanitizer.parameter_add
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: Add
+  description: "Disabled — bare Add matches every .Add() in the codebase; rely on AddWithValue/Parameters.Add via attribute chain."
+
+- id: csharp.sanitizer.parameters_add
+  enabled: true
+  language: csharp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      attribute: [Parameters, Add]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Parameters.Add(input); } }
+    expect_match_text: [Parameters.Add]
+  description: "command.Parameters.Add(...) — parameterised SQL binding."
+
+- id: csharp.sanitizer.ef_fromsqlinterpolated
+  enabled: true
+  language: csharp
+  tag: sql-parameter
+  packages: [Microsoft.EntityFrameworkCore]
+  match:
+    kind: call
+    callee:
+      name: FromSqlInterpolated
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; FromSqlInterpolated(input); } }
+    expect_match_text: [FromSqlInterpolated]
+  description: "EF Core FromSqlInterpolated — auto-parameterises interpolated SQL."
+
+- id: csharp.sanitizer.ef_executesqlinterpolated
+  enabled: true
+  language: csharp
+  tag: sql-parameter
+  packages: [Microsoft.EntityFrameworkCore]
+  match:
+    kind: call
+    callee:
+      name: ExecuteSqlInterpolated
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ExecuteSqlInterpolated(input); } }
+    expect_match_text: [ExecuteSqlInterpolated]
+  description: "EF Core ExecuteSqlInterpolated — auto-parameterises."
+
+- id: csharp.sanitizer.javascript_encoder
+  enabled: true
+  language: csharp
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [JavaScriptEncoder, Encode]
+  constraints:
+  - receiver_name_in: [JavaScriptEncoder, javascriptEncoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JavaScriptEncoder.Encode(input); } }
+    expect_match_text: [JavaScriptEncoder.Encode]
+  description: "JavaScriptEncoder.Default.Encode — JS string escaping."
+
+- id: csharp.sanitizer.url_encoder
+  enabled: true
+  language: csharp
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [UrlEncoder, Encode]
+  constraints:
+  - receiver_name_in: [UrlEncoder, urlEncoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; UrlEncoder.Encode(input); } }
+    expect_match_text: [UrlEncoder.Encode]
+  description: "UrlEncoder.Default.Encode."
+
+- id: csharp.sanitizer.httputility_js_encode
+  enabled: true
+  language: csharp
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [HttpUtility, JavaScriptStringEncode]
+  constraints:
+  - receiver_name_in: [HttpUtility]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.JavaScriptStringEncode(input); } }
+    expect_match_text: [HttpUtility.JavaScriptStringEncode]
+  description: "HttpUtility.JavaScriptStringEncode."
+
+- id: csharp.sanitizer.webutility_urlencode
+  enabled: true
+  language: csharp
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [WebUtility, UrlEncode]
+  constraints:
+  - receiver_name_in: [WebUtility]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebUtility.UrlEncode(input); } }
+    expect_match_text: [WebUtility.UrlEncode]
+  description: "WebUtility.UrlEncode."
+
+- id: csharp.sanitizer.long_tryparse
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Int64, TryParse]
+  constraints:
+  - receiver_name_in: [Int64, long]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Int64.TryParse(input); } }
+    expect_match_text: [Int64.TryParse]
+  description: "Int64.TryParse."
+
+- id: csharp.sanitizer.double_tryparse
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Double, TryParse]
+  constraints:
+  - receiver_name_in: [Double, double]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Double.TryParse(input); } }
+    expect_match_text: [Double.TryParse]
+  description: "Double.TryParse."
+
+- id: csharp.sanitizer.guid_tryparse
+  enabled: true
+  language: csharp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [Guid, TryParse]
+  constraints:
+  - receiver_name_in: [Guid]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Guid.TryParse(input); } }
+    expect_match_text: [Guid.TryParse]
+  description: "Guid.TryParse — validates GUID shape."
+
+- id: csharp.sanitizer.fixed_time_equals
+  enabled: true
+  language: csharp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      attribute: [CryptographicOperations, FixedTimeEquals]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; CryptographicOperations.FixedTimeEquals(input); } }
+    expect_match_text: [CryptographicOperations.FixedTimeEquals]
+  description: "CryptographicOperations.FixedTimeEquals — constant-time comparison."
+
+- id: csharp.sanitizer.path_getfilename
+  enabled: true
+  language: csharp
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, GetFileName]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Path.GetFileName(input); } }
+    expect_match_text: [Path.GetFileName]
+  description: "Path.GetFileName — strips directories."
+
+- id: csharp.sanitizer.path_getfullpath
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, GetFullPath]
+  description: "Disabled — Path.GetFullPath canonicalizes but does not by itself enforce trusted-root containment."
+
+- id: csharp.sanitizer.regex_escape
+  enabled: true
+  language: csharp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [Regex, Escape]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Regex.Escape(input); } }
+    expect_match_text: [Regex.Escape]
+  description: "Regex.Escape — escapes regex metacharacters (prevents regex-injection); canonical tag `validation`."
+
+- id: csharp.sanitizer.int_parse
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Int32, Parse]
+  constraints:
+  - receiver_name_in: [Int32, int]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Int32.Parse(input); } }
+    expect_match_text: [Int32.Parse]
+  description: "Int32.Parse — coerces to int."
+
+- id: csharp.sanitizer.int_tryparse
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Int32, TryParse]
+  constraints:
+  - receiver_name_in: [Int32, int]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Int32.TryParse(input); } }
+    expect_match_text: [Int32.TryParse]
+  description: "Int32.TryParse."
+
+- id: csharp.sanitizer.guid_parse
+  enabled: true
+  language: csharp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [Guid, Parse]
+  constraints:
+  - receiver_name_in: [Guid]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Guid.Parse(input); } }
+    expect_match_text: [Guid.Parse]
+  description: "Guid.Parse — validates GUID shape."
+
+- id: csharp.sanitizer.sqlparameter_ctor
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: sql-parameter
+  match:
+    kind: new
+    callee:
+      name: SqlParameter
+  match_examples:
+  - name: declared shape
+    code: |
+      class SqlParameter { public SqlParameter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new SqlParameter(input); } }
+    expect_match_text: [SqlParameter]
+  description: "Disabled duplicate — csharp.sanitizer.sqlparameter_constructor is the canonical constrained SqlParameter(name, value) binding rule."
+
+- id: csharp.sanitizer.npgsql_parameter_ctor
+  enabled: true
+  language: csharp
+  tag: sql-parameter
+  packages: [Npgsql]
+  match:
+    kind: new
+    callee:
+      name: NpgsqlParameter
+  match_examples:
+  - name: declared shape
+    code: |
+      using Npgsql;
+      class NpgsqlParameter { public NpgsqlParameter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new NpgsqlParameter(input); } }
+    expect_match_text: [NpgsqlParameter]
+  description: "new NpgsqlParameter — parameterised Postgres binding."
+
+- id: csharp.sanitizer.convert_toint32
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Convert, ToInt32]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Convert.ToInt32(input); } }
+    expect_match_text: [Convert.ToInt32]
+  description: "Convert.ToInt32 — coerces to int, throws on bad input."
+
+- id: csharp.sanitizer.convert_toint64
+  enabled: true
+  language: csharp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Convert, ToInt64]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Convert.ToInt64(input); } }
+    expect_match_text: [Convert.ToInt64]
+  description: "Convert.ToInt64 — coerces to long."
+
+- id: csharp.sanitizer.jwt_validate_strict
+  enabled: true
+  language: csharp
+  tag: jwt-verify
+  packages: [System.IdentityModel.Tokens.Jwt]
+  match:
+    kind: call
+    callee:
+      attribute: [TokenValidationParameters, Clone]
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.IdentityModel.Tokens.Jwt;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TokenValidationParameters.Clone(input); } }
+    expect_match_text: [TokenValidationParameters.Clone]
+  description: "TokenValidationParameters used with ValidateToken — full signature/issuer/audience verification; canonical jwt-verify anchor."
+
+- id: csharp.sanitizer.xmlresolver_null_assign
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: xxe-sanitizer
+  match:
+    kind: write
+    target:
+      name: XmlResolver
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlResolver = input; } }
+    expect_match_text: [XmlResolver]
+  description: "Disabled duplicate — csharp.sanitizer.xmlreadersettings_xmlresolver_null is the precise enabled XmlResolver=null rule for v1 matching."
+
+- id: csharp.sanitizer.dtd_processing_prohibit
+  enabled: true
+  language: csharp
+  tag: xxe-sanitizer
+  match:
+    kind: write
+    target:
+      name: DtdProcessing
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DtdProcessing = input; } }
+    expect_match_text: [DtdProcessing]
+  description: "XmlReaderSettings.DtdProcessing = Prohibit/Ignore — blocks DTD/XXE."
+
+- id: csharp.sanitizer.ldap_filter_encode
+  enabled: true
+  language: csharp
+  tag: ldap-escape
+  packages: [AntiXSS]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, LdapFilterEncode]
+  match_examples:
+  - name: declared shape
+    code: |
+      using AntiXSS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Encoder.LdapFilterEncode(input); } }
+    expect_match_text: [Encoder.LdapFilterEncode]
+  description: "AntiXSS Encoder.LdapFilterEncode — escapes LDAP filter metacharacters."
+
+- id: csharp.sanitizer.ldap_distinguishedname_encode
+  enabled: true
+  language: csharp
+  tag: ldap-escape
+  packages: [AntiXSS]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, LdapDistinguishedNameEncode]
+  match_examples:
+  - name: declared shape
+    code: |
+      using AntiXSS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Encoder.LdapDistinguishedNameEncode(input); } }
+    expect_match_text: [Encoder.LdapDistinguishedNameEncode]
+  description: "AntiXSS Encoder.LdapDistinguishedNameEncode — escapes LDAP DN metacharacters."
+
+- id: csharp.sanitizer.authorize_filter
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: auth-sanitizer
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: call
+    callee:
+      name: Authorize
+  description: "Disabled — bare Authorize() call matching is too broad for ASP.NET Core authorization evidence; prefer attribute/decorator or middleware-specific rules that prove a protected endpoint or policy guard."
+
+- id: csharp.sanitizer.bcrypt_verify
+  enabled: true
+  language: csharp
+  tag: password-verify
+  packages: [BCrypt.Net-Next, BCrypt.Net]
+  match:
+    kind: call
+    callee:
+      attribute: [BCrypt, Verify]
+  constraints:
+  - receiver_name_in: [BCrypt]
+  match_examples:
+  - name: declared shape
+    code: |
+      using BCrypt.Net;
+      using BCrypt.Net-Next;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BCrypt.Verify(input); } }
+    expect_match_text: [BCrypt.Verify]
+  description: "BCrypt.Net.BCrypt.Verify(password, hash) — constant-time bcrypt password check; treats taint as consumed."
+
+- id: csharp.sanitizer.argon2_verify
+  enabled: true
+  language: csharp
+  tag: password-verify
+  packages: [Konscious.Security.Cryptography.Argon2, Isopoh.Cryptography.Argon2]
+  match:
+    kind: call
+    callee:
+      attribute: [Argon2, Verify]
+  constraints:
+  - receiver_name_in: [Argon2]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Konscious.Security.Cryptography.Argon2;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Argon2.Verify(input); } }
+    expect_match_text: [Argon2.Verify]
+  description: "Argon2.Verify — constant-time argon2 password check."
+
+- id: csharp.sanitizer.antixss_encoder_class_html
+  enabled: true
+  language: csharp
+  tag: html-encode
+  packages: [AntiXSS, System.Web.Security.AntiXss]
+  match:
+    kind: call
+    callee:
+      attribute: [AntiXssEncoder, HtmlEncode]
+  constraints:
+  - receiver_name_in: [AntiXssEncoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      using AntiXSS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AntiXssEncoder.HtmlEncode(input); } }
+    expect_match_text: [AntiXssEncoder.HtmlEncode]
+  description: "AntiXssEncoder.HtmlEncode (System.Web.Security.AntiXss) — strict allow-list HTML encoding."
+
+- id: csharp.sanitizer.antixss_encoder_class_url
+  enabled: true
+  language: csharp
+  tag: url-encode
+  packages: [AntiXSS, System.Web.Security.AntiXss]
+  match:
+    kind: call
+    callee:
+      attribute: [AntiXssEncoder, UrlEncode]
+  constraints:
+  - receiver_name_in: [AntiXssEncoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      using AntiXSS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AntiXssEncoder.UrlEncode(input); } }
+    expect_match_text: [AntiXssEncoder.UrlEncode]
+  description: "AntiXssEncoder.UrlEncode."
+
+- id: csharp.sanitizer.antixss_encoder_class_js
+  enabled: true
+  language: csharp
+  tag: html-encode
+  packages: [AntiXSS, System.Web.Security.AntiXss]
+  match:
+    kind: call
+    callee:
+      attribute: [AntiXssEncoder, JavaScriptStringEncode]
+  constraints:
+  - receiver_name_in: [AntiXssEncoder]
+  match_examples:
+  - name: declared shape
+    code: |
+      using AntiXSS;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AntiXssEncoder.JavaScriptStringEncode(input); } }
+    expect_match_text: [AntiXssEncoder.JavaScriptStringEncode]
+  description: "AntiXssEncoder.JavaScriptStringEncode."
+
+- id: csharp.sanitizer.encoders_web_html
+  enabled: true
+  language: csharp
+  tag: html-encode
+  packages: [System.Text.Encodings.Web]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlEncoder, Default]
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.Text.Encodings.Web;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlEncoder.Default(input); } }
+    expect_match_text: [HtmlEncoder.Default]
+  description: "HtmlEncoder.Default — canonical reference to default HTML encoder used with .Encode."
+
+- id: csharp.sanitizer.htmlsanitizer_sanitizedocument
+  enabled: true
+  language: csharp
+  tag: html-sanitize
+  packages: [HtmlSanitizer]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlSanitizer, SanitizeDocument]
+  match_examples:
+  - name: declared shape
+    code: |
+      using HtmlSanitizer;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HtmlSanitizer.SanitizeDocument(input); } }
+    expect_match_text: [HtmlSanitizer.SanitizeDocument]
+  description: "Mganss.XSS.HtmlSanitizer.SanitizeDocument — full-document sanitisation."
+
+- id: csharp.sanitizer.cryptographic_operations_zero
+  enabled: true
+  language: csharp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      attribute: [CryptographicOperations, ZeroMemory]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; CryptographicOperations.ZeroMemory(input); } }
+    expect_match_text: [CryptographicOperations.ZeroMemory]
+  description: "CryptographicOperations.ZeroMemory — clears secret material; treated as taint consumer."
+
+- id: csharp.sanitizer.uri_trycreate
+  enabled: true
+  language: csharp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, TryCreate]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.TryCreate(input); } }
+    expect_match_text: [Uri.TryCreate]
+  description: "Uri.TryCreate — validates URL shape; pair with allow-list scheme check at the call site."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: csharp.passthrough.httputility_urldecode
+  enabled: true
+  language: csharp
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [HttpUtility, UrlDecode]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.UrlDecode(input); } }
+    expect_match_text: [HttpUtility.UrlDecode]
+  description: "System.Web.HttpUtility.UrlDecode(s) — preserves taint."
+- id: csharp.passthrough.uri_unescapedatastring
+  enabled: true
+  language: csharp
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, UnescapeDataString]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Uri.UnescapeDataString(input); } }
+    expect_match_text: [Uri.UnescapeDataString]
+  description: "System.Uri.UnescapeDataString(s) — preserves taint."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: csharp.csrf.aspnet_antiforgery
+  enabled: true
+  language: csharp
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: AddAntiforgery
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddAntiforgery(input); } }
+    expect_match_text: [AddAntiforgery]
+  description: "ASP.NET Core services.AddAntiforgery() — registers anti-forgery token services."
+- id: csharp.csrf.validate_antiforgery_token_attr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: csrf-protect
+  match:
+    kind: read
+    target:
+      name: ValidateAntiForgeryToken
+  description: "[ValidateAntiForgeryToken] attribute — controller/action-scoped CSRF check."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: csharp.cookie.cookie_options_httponly_secure
+  enabled: true
+  language: csharp
+  tag: cookie-secure
+  match:
+    kind: write
+    target:
+      regex: "(^|\\.)(HttpOnly|Secure)$"
+  constraints:
+  - any_arg_matches_regex: |-
+      HttpOnly\s*=\s*true|Secure\s*=\s*true
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; CookieOptions.HttpOnly = true; } }
+    expect_match_text: [CookieOptions.HttpOnly]
+  - name: declared shape negative constraint boundary
+    code: "class Example { void ExampleMethod() { CookieOptions.HttpOnly(); } }\n"
+    expect_no_match: true
+  description: "ASP.NET CookieOptions { HttpOnly = true, Secure = true }."
+
+# Rate-limit middleware presence sanitizers (round 2 fill).
+- id: csharp.ratelimit.aspnetcore_addratelimiter
+  enabled: true
+  language: csharp
+  tag: rate-limit
+  packages: [Microsoft.AspNetCore.RateLimiting]
+  match:
+    kind: call
+    callee:
+      name: AddRateLimiter
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.RateLimiting;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AddRateLimiter(input); } }
+    expect_match_text: [AddRateLimiter]
+  description: 'ASP.NET Core services.AddRateLimiter — built-in rate-limit middleware presence.'
+
+# False-positive audit fill: validators and parameter binding shapes.
+- id: csharp.sanitizer.same_origin_path_startswith_slash
+  enabled: true
+  language: csharp
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: StartsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"/"'
+  - same_receiver_call_count_at_least: 2
+  match_examples:
+  - name: paired same-origin path guard
+    code: |
+      class App { bool Allow(string next) { return next.StartsWith("/") && !next.StartsWith("//"); } }
+    expect_match_text: [next.StartsWith]
+  - name: paired same-origin path guard negative constraint boundary
+    code: "class App { bool Allow(string next) { return next.StartsWith() && !next.StartsWith(\"//\"); } }\n"
+    expect_no_match: true
+  description: "Same-origin redirect path guard paired with a second StartsWith call on the same receiver for the `!path.StartsWith(\"//\")` scheme-relative rejection shape."
+
+- id: csharp.sanitizer.same_origin_path_reject_scheme_relative
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: StartsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"//"'
+  match_examples:
+  - name: reject scheme-relative redirect target
+    code: |
+      class App { bool Allow(string next) { return next.StartsWith("/") && !next.StartsWith("//"); } }
+    expect_match_text: [next.StartsWith]
+  - name: reject scheme-relative redirect target negative constraint boundary
+    code: "class App { bool Allow(string next) { return next.StartsWith(\"/\") && !next.StartsWith(\"http://\"); } }\n"
+    expect_no_match: true
+  description: "Disabled — same-receiver StartsWith(\"/\") + StartsWith(\"//\") is modeled by csharp.sanitizer.same_origin_path_startswith_slash."
+
+- id: csharp.sanitizer.allowlist_contains
+  enabled: true
+  language: csharp
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: Contains
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 1
+  match_examples:
+  - name: hashset allowlist contains
+    code: |
+      class App { bool Allow(string role) { dynamic allowed = null; return allowed.Contains(role); } }
+    expect_match_text: [allowed.Contains]
+  description: "HashSet/List allowlist membership check on explicitly allowlist-named receivers."
+
+- id: csharp.sanitizer.dictionary_getvalueordefault_allowlist
+  enabled: true
+  language: csharp
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: GetValueOrDefault
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 2
+  match_examples:
+  - name: dictionary default allowlist
+    code: |
+      class App { string Allow(string key) { dynamic allowed = null; return allowed.GetValueOrDefault(key, "/"); } }
+    expect_match_text: [allowed.GetValueOrDefault]
+  description: "Dictionary.GetValueOrDefault on an allowlist-named mapping bounds attacker input to known values or a safe default."
+
+- id: csharp.sanitizer.enum_tryparse_allowlist
+  enabled: true
+  language: csharp
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      attribute: [Enum, TryParse]
+  constraints:
+  - receiver_name_in: [Enum]
+  - min_args: 2
+  match_examples:
+  - name: enum tryparse allowlist
+    code: |
+      enum AllowedRole { User, Admin }
+      class App { bool Allow(string role) { AllowedRole parsed; return Enum.TryParse(role, out parsed); } }
+    expect_match_text: [Enum.TryParse]
+  description: "Enum.TryParse rejects values outside the enum domain before downstream use."
+
+- id: csharp.sanitizer.regex_ismatch_safe_shape
+  enabled: true
+  language: csharp
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      attribute: [Regex, IsMatch]
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^["'']\^?(\[A-Za-z0-9_|\[A-Fa-f0-9)'
+  - min_args: 2
+  match_examples:
+  - name: slug shape validator
+    code: |
+      class App { bool Allow(string slug) { return Regex.IsMatch(slug, "^[A-Za-z0-9_-]{1,64}$"); } }
+    expect_match_text: [Regex.IsMatch]
+  - name: slug shape validator negative constraint boundary
+    code: "class App { bool Allow(string slug) { return Regex.IsMatch(); } }\n"
+    expect_no_match: true
+  description: "Regex.IsMatch with a bounded UUID/slug-style allowlist regex validates string shape."
+
+- id: csharp.sanitizer.regex_replace_char_allowlist_strip
+  enabled: true
+  language: csharp
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      attribute: [Regex, Replace]
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^["'']\[\^[-A-Za-z0-9_ /]+\]["'']$'
+  - arg_matches_regex:
+      index: 2
+      regex: '^["'']["'']$'
+  match_examples:
+  - name: strip to safe slug chars
+    code: |
+      class App { string Clean(string input) { return Regex.Replace(input, "[^A-Za-z0-9_-]", ""); } }
+    expect_match_text: [Regex.Replace]
+  - name: strip to safe slug chars negative constraint boundary
+    code: "class App { string Clean(string input) { return Regex.Replace(); } }\n"
+    expect_no_match: true
+  description: "Regex.Replace with a negated safe character class and empty replacement strips characters outside the allowlist."
+
+- id: csharp.sanitizer.uri_host_allowlist
+  enabled: true
+  language: csharp
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: Contains
+  constraints:
+  - receiver_name_in: [allowedHosts, safeHosts, permittedHosts]
+  - arg_matches_regex:
+      index: 0
+      regex: 'Host'
+  match_examples:
+  - name: uri host allowlist
+    code: |
+      class App { void Test() { dynamic uri = "x"; dynamic allowedHosts = "x"; allowedHosts.Contains(uri.Host); } }
+    expect_match_text: [allowedHosts.Contains]
+  - name: uri host allowlist negative constraint boundary
+    code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedHosts = \"x\"; allowedHosts.Contains(); } }\n"
+    expect_no_match: true
+  description: "URI host allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+
+- id: csharp.sanitizer.uri_scheme_allowlist
+  enabled: true
+  language: csharp
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: Contains
+  constraints:
+  - receiver_name_in: [allowedSchemes, safeSchemes, permittedSchemes]
+  - arg_matches_regex:
+      index: 0
+      regex: 'Scheme'
+  match_examples:
+  - name: uri scheme allowlist
+    code: |
+      class App { void Test() { dynamic uri = "x"; dynamic allowedSchemes = "x"; allowedSchemes.Contains(uri.Scheme); } }
+    expect_match_text: [allowedSchemes.Contains]
+  - name: uri scheme allowlist negative constraint boundary
+    code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedSchemes = \"x\"; allowedSchemes.Contains(); } }\n"
+    expect_no_match: true
+  description: "URI scheme allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
+
+- id: csharp.sanitizer.path_fullpath_startswith_root
+  enabled: true
+  language: csharp
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      name: StartsWith
+  constraints:
+  - receiver_name_in: [fullPath, normalized, normalizedPath, resolvedPath, safePath]
+  - arg_matches_regex:
+      index: 0
+      regex: 'root|base|allowed|uploadDir|safeDir'
+  match_examples:
+  - name: full path containment
+    code: |
+      class App { void Test() { dynamic fullPath = "x"; dynamic root = "x"; fullPath.StartsWith(root); } }
+    expect_match_text: [fullPath.StartsWith]
+  - name: full path containment negative constraint boundary
+    code: "class App { void Test() { dynamic fullPath = \"x\"; dynamic root = \"x\"; fullPath.StartsWith(); } }\n"
+    expect_no_match: true
+  description: "Full-path containment check — a normalized absolute path is accepted only if it remains under a trusted root."
+
+- id: csharp.sanitizer.urlhelper_islocalurl
+  enabled: true
+  language: csharp
+  tag: same-origin-path
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: call
+    callee:
+      attribute: [IUrlHelper, IsLocalUrl]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: aspnet local redirect guard
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IUrlHelper.IsLocalUrl(input); } }
+    expect_match_text: [IUrlHelper.IsLocalUrl]
+  description: "ASP.NET Core IUrlHelper.IsLocalUrl — accepts only local redirect URLs."
+
+- id: csharp.sanitizer.xmlreadersettings_xmlresolver_null
+  enabled: true
+  language: csharp
+  tag: xxe-sanitizer
+  match:
+    kind: write
+    target:
+      attribute: [XmlReaderSettings, XmlResolver]
+  match_examples:
+  - name: xml reader settings resolver null
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlReaderSettings.XmlResolver = null; } }
+    expect_match_text: [XmlReaderSettings.XmlResolver]
+  description: "XmlReaderSettings.XmlResolver = null — disables external entity resolution."
+
+- id: csharp.sanitizer.dapper_query_parameters
+  enabled: true
+  language: csharp
+  tag: db-bind-parameter
+  packages: [Dapper]
+  match:
+    kind: call
+    callee:
+      name: Query
+  constraints:
+  - receiver_name_in: [db, conn, connection]
+  - min_args: 2
+  match_examples:
+  - name: dapper query with anonymous parameter object
+    code: |
+      using Dapper;
+      class App { void Load(dynamic connection, string sql, string input) { connection.Query(sql, new { id = input }); } }
+    expect_match_text: [connection.Query]
+  description: "Dapper connection.Query(sql, paramObject) binds the object properties as SQL parameters."
+
+- id: csharp.sanitizer.dapper_execute_parameters
+  enabled: true
+  language: csharp
+  tag: db-bind-parameter
+  packages: [Dapper]
+  match:
+    kind: call
+    callee:
+      name: Execute
+  constraints:
+  - receiver_name_in: [db, conn, connection]
+  - min_args: 2
+  match_examples:
+  - name: dapper execute with anonymous parameter object
+    code: |
+      using Dapper;
+      class App { void Save(dynamic connection, string sql, string input) { connection.Execute(sql, new { id = input }); } }
+    expect_match_text: [connection.Execute]
+  description: "Dapper connection.Execute(sql, paramObject) binds the object properties as SQL parameters."
+
+- id: csharp.sanitizer.sqlparameter_constructor
+  enabled: true
+  language: csharp
+  tag: sql-parameter
+  match:
+    kind: new
+    callee:
+      name: SqlParameter
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: sql parameter constructor
+    code: |
+      class App { object Bind(string input) { return new SqlParameter("@id", input); } }
+    expect_match_text: [SqlParameter]
+  description: "new SqlParameter(name, value) creates a typed ADO.NET parameter instead of concatenating SQL text."
+
+- id: csharp.sanitizer.sqlcommand_create_parameter
+  enabled: true
+  language: csharp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      attribute: [SqlCommand, CreateParameter]
+  match_examples:
+  - name: sql command create parameter
+    code: |
+      class App { object Bind(dynamic command) { return command.CreateParameter(); } }
+    expect_match_text: [command.CreateParameter]
+  description: "SqlCommand.CreateParameter creates a command parameter object for bound values."

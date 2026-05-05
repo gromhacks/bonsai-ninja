@@ -1,0 +1,228 @@
+# C header injection (microhttpd / mongoose / civetweb).
+- id: c.header.mhd_add_response_header
+  aliases:
+  - c.open_redirect.mhd_redirect_header
+  enabled: true
+  language: c
+  tag: header-injection
+  severity: high
+  packages: [libmicrohttpd]
+  cwe: [CWE-113, CWE-601]
+  match:
+    kind: call
+    callee:
+      name: MHD_add_response_header
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmicrohttpd/microhttpd.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        MHD_add_response_header(arg, "X-User", arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        MHD_add_response_header("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "MHD_add_response_header(response, name, tainted). Also covers merged aliases: c.open_redirect.mhd_redirect_header."
+
+- id: c.header.mhd_add_response_header_name
+  enabled: true
+  language: c
+  tag: header-injection
+  severity: high
+  packages: [libmicrohttpd]
+  cwe: [CWE-113, CWE-601]
+  match:
+    kind: call
+    callee:
+      name: MHD_add_response_header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      #include <libmicrohttpd/microhttpd.h>
+      void example(char *input) {
+        MHD_add_response_header("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        MHD_add_response_header("safe", "safe");
+      }
+    expect_no_match: true
+  description: "MHD_add_response_header(response, name, value) — tainted header names can corrupt response headers."
+
+- id: c.header.mhd_add_response_footer
+  enabled: true
+  language: c
+  tag: header-injection
+  severity: high
+  packages: [libmicrohttpd]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: MHD_add_response_footer
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmicrohttpd/microhttpd.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        MHD_add_response_footer(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        MHD_add_response_footer("safe", "safe");
+      }
+    expect_no_match: true
+  description: "MHD_add_response_footer."
+
+- id: c.header.civetweb_response_header
+  enabled: true
+  language: c
+  tag: header-injection
+  severity: high
+  packages: [civetweb]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: mg_response_header_add
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <civetweb.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_response_header_add(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        mg_response_header_add("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "civetweb mg_response_header_add."
+
+- id: c.header.civetweb_response_header_name
+  enabled: true
+  language: c
+  tag: header-injection
+  severity: high
+  packages: [civetweb]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: mg_response_header_add
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      #include <civetweb.h>
+      void example(char *input) {
+        mg_response_header_add("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mg_response_header_add("safe", "safe");
+      }
+    expect_no_match: true
+  description: "mg_response_header_add(..., name, value) — tainted header names can corrupt response headers."
+
+- id: c.header.mongoose_send_header
+  enabled: true
+  language: c
+  tag: header-injection
+  severity: high
+  packages: [mongoose]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: mg_send_header
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongoose.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_send_header(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        mg_send_header("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "mongoose mg_send_header(name, tainted)."
+
+- id: c.header.mongoose_send_header_name
+  enabled: true
+  language: c
+  tag: header-injection
+  severity: high
+  packages: [mongoose]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: mg_send_header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      #include <mongoose.h>
+      void example(char *input) {
+        mg_send_header("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mg_send_header("safe", "safe");
+      }
+    expect_no_match: true
+  description: "mg_send_header(conn, name, value) — tainted header names can corrupt response headers."
+
+- id: c.header.mongoose_printf_header
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: header-injection
+  severity: medium
+  packages: [mongoose]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: mg_printf
+  description: "Disabled — generic mg_printf; flag when format string emits headers."

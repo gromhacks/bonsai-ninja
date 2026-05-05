@@ -1,0 +1,155 @@
+# C++ ReDoS / regex-engine sinks — std::regex / boost::regex with tainted pattern or input.
+- id: cpp.redos.std_regex_search
+  enabled: true
+  language: cpp
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [std, regex_search]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::regex_search(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        std::regex_search("safe", "safe");
+      }
+    expect_no_match: true
+  description: "std::regex_search(input, pattern) — catastrophic backtracking when pattern is attacker-controlled."
+
+- id: cpp.redos.std_regex_match
+  enabled: true
+  language: cpp
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [std, regex_match]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::regex_match(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        std::regex_match("safe", "safe");
+      }
+    expect_no_match: true
+  description: "std::regex_match(input, pattern) — catastrophic backtracking when pattern is attacker-controlled."
+
+- id: cpp.redos.std_regex_replace
+  enabled: true
+  language: cpp
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [std, regex_replace]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::regex_replace(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        std::regex_replace("safe", "safe");
+      }
+    expect_no_match: true
+  description: "std::regex_replace(input, pattern, repl) — pathological pattern can hang the thread."
+
+- id: cpp.redos.std_regex_ctor
+  enabled: true
+  language: cpp
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: new
+    callee:
+      name: regex
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new regex(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new regex("safe");
+      }
+    expect_no_match: true
+  description: "std::regex(tainted_pattern) — compiling an attacker-controlled regex pattern."
+
+- id: cpp.redos.boost_regex_search
+  enabled: true
+  language: cpp
+  tag: redos
+  severity: medium
+  packages: [boost.regex]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [boost, regex_search]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/regex.hpp>
+      #include <boost/regex.hpp>
+      #include <boost/regex.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        boost::regex_search(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        boost::regex_search("safe", "safe");
+      }
+    expect_no_match: true
+  description: "boost::regex_search — catastrophic backtracking with tainted pattern."
+  imports:
+  - boost
+  - boost/regex.hpp

@@ -1,0 +1,29 @@
+- id: ruby.redos.regexp_new
+  enabled: true
+  language: ruby
+  tag: redos
+  severity: medium
+  packages: [stdlib]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [Regexp, new]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.redos.regexp_new example
+    code: |
+      require "stdlib"
+      def example(input, url, id, payload, request, params)
+        Regexp.new(input)
+      end
+  - name: ruby.redos.regexp_new literal negative
+    code: |
+      require "stdlib"
+      def example(input, url, id, payload, request, params)
+        Regexp.new("^[a-z]+$")
+      end
+    expect_no_match: true
+  description: "Regexp.new(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."

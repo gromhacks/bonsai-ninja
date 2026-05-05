@@ -1,0 +1,150 @@
+# C# LDAP-injection sinks. System.DirectoryServices.
+- id: csharp.ldap.directorysearcher_ctor
+  enabled: true
+  language: csharp
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: new
+    callee:
+      name: DirectorySearcher
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted filter constructor
+    code: |
+      class DirectorySearcher { public DirectorySearcher(dynamic input) { } } class App { void Test(string input) { var result = new DirectorySearcher(input); } }
+  - name: literal filter constructor negative
+    code: |
+      class DirectorySearcher { public DirectorySearcher(dynamic input) { } } class App { void Test() { var result = new DirectorySearcher("(cn=safe)"); } }
+    expect_no_match: true
+  description: "new DirectorySearcher(tainted_filter) — LDAP filter injection."
+
+- id: csharp.ldap.directorysearcher_filter_assign
+  enabled: true
+  language: csharp
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: write
+    target:
+      name: Filter
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.Filter = input; } }
+  description: "DirectorySearcher.Filter = tainted."
+
+- id: csharp.ldap.directorysearcher_findall
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [DirectorySearcher, FindAll]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.FindAll("(cn=input)"); } }
+  description: "Disabled — DirectorySearcher.FindAll() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
+
+- id: csharp.ldap.directorysearcher_findone
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [DirectorySearcher, FindOne]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.FindOne("(cn=input)"); } }
+  description: "Disabled — DirectorySearcher.FindOne() executes the receiver Filter state; use constructor/Filter assignment sinks until receiver-state tracking exists."
+
+- id: csharp.ldap.directoryentry_ctor
+  enabled: true
+  language: csharp
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: new
+    callee:
+      name: DirectoryEntry
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class DirectoryEntry { public DirectoryEntry(string input) { } } class App { void Test(string input) { var result = new DirectoryEntry(input); } }
+  - name: literal ldap path negative
+    code: |
+      class DirectoryEntry { public DirectoryEntry(string input) { } } class App { void Test() { var result = new DirectoryEntry("LDAP://dc=example,dc=com"); } }
+    expect_no_match: true
+  description: "new DirectoryEntry(tainted path)."
+
+- id: csharp.ldap.s_ds_p_search_request
+  enabled: true
+  language: csharp
+  tag: ldap-injection
+  severity: high
+  packages: [System.DirectoryServices.Protocols]
+  cwe: [CWE-90]
+  match:
+    kind: new
+    callee:
+      name: SearchRequest
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.DirectoryServices.Protocols;
+      class SearchRequest { public SearchRequest(string dn, string filter) { } } class App { void Test(string input) { var result = new SearchRequest("dc=example,dc=com", input); } }
+  - name: literal filter negative
+    code: |
+      using System.DirectoryServices.Protocols;
+      class SearchRequest { public SearchRequest(string dn, string filter) { } } class App { void Test() { var result = new SearchRequest("dc=example,dc=com", "(cn=safe)"); } }
+    expect_no_match: true
+  description: "new SearchRequest(distinguishedName, filter, ...) — tainted filter."
+
+- id: csharp.ldap.novell_search
+  enabled: true
+  language: csharp
+  tag: ldap-injection
+  severity: high
+  packages: [Novell.Directory.Ldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapConnection, Search]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: declared shape
+    code: |
+      using Novell.Directory.Ldap;
+      class App { void Test(string input) { LdapConnection.Search("ou=users", 2, input); } }
+  - name: literal filter negative
+    code: |
+      using Novell.Directory.Ldap;
+      class App { void Test() { LdapConnection.Search("ou=users", 2, "(cn=safe)"); } }
+    expect_no_match: true
+  description: "Novell LdapConnection.Search."

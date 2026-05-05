@@ -1,0 +1,191 @@
+- id: typescript.llm.openai_chat_completions_create
+  enabled: true
+  language: typescript
+  tag: web-llm
+  severity: medium
+  packages: [openai]
+  imports: [openai]
+  cwe: [CWE-74, CWE-1427]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.chat\\.completions\\.create$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: openai chat completions create
+    code: |
+      const _u = require("openai");
+      function demo(input, req, obj) {
+        return openai.chat.completions.create(input);
+      }
+  - name: openai chat completions literal negative
+    code: |
+      const _u = require("openai");
+      function demo() {
+        return openai.chat.completions.create({ messages: [{ role: "user", content: "safe" }] });
+      }
+    expect_no_match: true
+  description: "openai.chat.completions.create — tainted prompt content reaches an LLM instruction / tool surface."
+
+- id: typescript.llm.openai_responses_create
+  enabled: true
+  language: typescript
+  tag: web-llm
+  severity: medium
+  packages: [openai]
+  imports: [openai]
+  cwe: [CWE-74, CWE-1427]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.responses\\.create$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: openai responses create
+    code: |
+      const _u = require("openai");
+      function demo(input, req, obj) {
+        return openai.responses.create(input);
+      }
+  - name: openai responses literal negative
+    code: |
+      const _u = require("openai");
+      function demo() {
+        return openai.responses.create({ input: "safe" });
+      }
+    expect_no_match: true
+  description: "openai.responses.create — tainted input can steer model output, tool calls, or data disclosure."
+
+- id: typescript.llm.anthropic_messages_create
+  enabled: true
+  language: typescript
+  tag: web-llm
+  severity: medium
+  packages: ["@anthropic-ai/sdk"]
+  imports: ["@anthropic-ai/sdk"]
+  cwe: [CWE-74, CWE-1427]
+  match:
+    kind: call
+    callee:
+      attribute: [anthropic, messages, create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: anthropic messages create
+    code: |
+      const _u = require("@anthropic-ai/sdk");
+      function demo(input, req, obj) {
+        return anthropic.messages.create(input);
+      }
+  - name: anthropic messages literal negative
+    code: |
+      const _u = require("@anthropic-ai/sdk");
+      function demo() {
+        return anthropic.messages.create({ messages: [{ role: "user", content: "safe" }] });
+      }
+    expect_no_match: true
+  description: "anthropic.messages.create — tainted prompt content reaches an LLM instruction / tool surface."
+
+- id: typescript.llm.langchain_chain_invoke
+  enabled: true
+  language: typescript
+  tag: web-llm
+  severity: medium
+  packages: [langchain, "@langchain/core"]
+  imports: [langchain]
+  cwe: [CWE-74, CWE-1427]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.invoke$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  - receiver_name_in: [chain, llmChain, agent, executor, runnable, llm]
+  match_examples:
+  - name: langchain chain.invoke tainted
+    code: |
+      const _u = require("langchain");
+      async function demo(chain: any, input: string) {
+        return chain.invoke(input);
+      }
+    expect_match_text: [chain.invoke]
+  - name: langchain chain.invoke literal negative
+    code: |
+      const _u = require("langchain");
+      async function demo(chain: any) {
+        return chain.invoke({ question: "What is 2+2?" });
+      }
+    expect_no_match: true
+  description: "LangChain chain.invoke(tainted) / runnable.invoke — attacker-controlled chain input drives the LLM, can hijack instructions or steer tool calls."
+
+- id: typescript.llm.langchain_agent_call
+  enabled: true
+  language: typescript
+  tag: web-llm
+  severity: high
+  packages: [langchain]
+  imports: [langchain]
+  cwe: [CWE-74, CWE-1427]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.call$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  - receiver_name_in: [agent, executor, agentExecutor, chain]
+  match_examples:
+  - name: langchain agent.call tainted
+    code: |
+      const _u = require("langchain");
+      async function demo(agent: any, input: string) {
+        return agent.call({ input });
+      }
+    expect_match_text: [agent.call]
+  - name: langchain agent.call literal negative
+    code: |
+      const _u = require("langchain");
+      async function demo(agent: any) {
+        return agent.call({ input: "What is 2+2?" });
+      }
+    expect_no_match: true
+  description: "LangChain agent.call(tainted) / executor.call — legacy agent invocation; attacker can steer tool calls, leak data, or override the system prompt."
+
+- id: typescript.llm.cohere_chat
+  enabled: true
+  language: typescript
+  tag: web-llm
+  severity: medium
+  packages: [cohere-ai]
+  imports: [cohere-ai]
+  cwe: [CWE-74, CWE-1427]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.chat$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  - receiver_name_in: [cohere, client, cohereClient]
+  match_examples:
+  - name: cohere client chat tainted
+    code: |
+      const _u = require("cohere-ai");
+      async function demo(client: any, input: string) {
+        return client.chat({ message: input });
+      }
+    expect_match_text: [client.chat]
+  - name: cohere client chat literal negative
+    code: |
+      const _u = require("cohere-ai");
+      async function demo(client: any) {
+        return client.chat({ message: "Hello" });
+      }
+    expect_no_match: true
+  description: "Cohere client.chat({message: tainted}) — attacker-controlled message hijacks Cohere chat instructions and can drive tool / connector calls."

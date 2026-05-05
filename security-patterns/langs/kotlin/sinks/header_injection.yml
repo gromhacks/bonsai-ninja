@@ -1,0 +1,331 @@
+- id: kotlin.header.servlet_response_setheader
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: high
+  packages:
+  - javax.servlet
+  - jakarta.servlet
+  cwe:
+  - CWE-113
+  - CWE-601
+  - CWE-444
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpServletResponse
+      - setHeader
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.servlet.*
+      class App {
+        fun handle(value: String) {
+          HttpServletResponse.setHeader("X-Name", value)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.servlet.*
+      class App {
+        fun handle(value: String) {
+          HttpServletResponse.setHeader("X-Name", "safe")
+        }
+      }
+    expect_no_match: true
+  description: 'HttpServletResponse.setHeader. Merged aliases: kotlin.header.servlet_response_content_disposition, kotlin.open_redirect.servlet_response_setheader_location.'
+  aliases:
+  - kotlin.header.servlet_response_content_disposition
+  - kotlin.open_redirect.servlet_response_setheader_location
+  - kotlin.smuggle.set_dual_cl_te_headers
+- id: kotlin.header.spring_httpheaders_add
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.web
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpHeaders
+      - add
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(value: String) {
+          HttpHeaders.add("X-Name", value)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(value: String) {
+          HttpHeaders.add("X-Name", "safe")
+        }
+      }
+    expect_no_match: true
+  description: Spring HttpHeaders.add.
+  imports:
+  - org.springframework.web
+- id: kotlin.header.ktor_call_response_header
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: high
+  packages:
+  - io.ktor
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - response
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(value: String) {
+          response.header("X-Name", value)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(value: String) {
+          response.header("X-Name", "safe")
+        }
+      }
+    expect_no_match: true
+  description: Ktor ApplicationCall.response.header(name, tainted).
+- id: kotlin.header.ktor_response_cookie
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: medium
+  packages:
+  - io.ktor
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - cookies
+      - append
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          cookies.append("session", input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import io.ktor.*
+      class App {
+      fun handle(input: String) {
+        cookies.append("session", "safe")
+      }
+      }
+    expect_no_match: true
+  description: "Ktor response.cookies.append(name, tainted_value)."
+- id: kotlin.header.ktor_response_headers_append
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: high
+  packages:
+  - io.ktor
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - headers
+      - append
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(value: String) {
+          headers.append("X-Name", value)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(value: String) {
+          headers.append("X-Name", "safe")
+        }
+      }
+    expect_no_match: true
+  description: Ktor call.response.headers.append(name, tainted).
+- id: kotlin.header.spring_responseentity_header
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.web
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: responseentity header
+    code: |
+      import org.springframework.web.*
+      // uses org.springframework.web
+      class App {
+        fun handle(value: String): Any {
+          return ResponseEntity.header("X-Name", value)
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.header
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.*
+      // uses org.springframework.web
+      class App {
+      fun handle(value: String): Any {
+        return ResponseEntity.header("X-Name", "safe")
+      }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.header(name, tainted) — CRLF response header injection. Merged aliases: kotlin.header.spring_responseentity_content_disposition, kotlin.open_redirect.spring_responseentity_header_location."
+  aliases:
+  - kotlin.header.spring_responseentity_content_disposition
+  - kotlin.open_redirect.spring_responseentity_header_location
+  imports:
+  - org.springframework.web
+- id: kotlin.header.webflux_serverresponse_header
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServerResponse
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: webflux server response header
+    code: |
+      import org.springframework.web.reactive.*
+      // uses org.springframework.web.reactive
+      class App {
+        fun handle(value: String): Any {
+          return ServerResponse.header("X-Name", value)
+        }
+      }
+    expect_match_text:
+    - ServerResponse.header
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.reactive.*
+      // uses org.springframework.web.reactive
+      class App {
+      fun handle(value: String): Any {
+        return ServerResponse.header("X-Name", "safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.header(name, tainted) — CRLF response header injection. Merged aliases: kotlin.open_redirect.webflux_serverresponse_header_location."
+  aliases:
+  - kotlin.open_redirect.webflux_serverresponse_header_location
+- id: kotlin.header.vertx_response_putheader
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: high
+  packages:
+  - io.vertx
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: putHeader
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: vertx response put header
+    code: |
+      import io.vertx.*
+      class App {
+        fun handle(response: HttpServerResponse, value: String) {
+          response.putHeader("X-Name", value)
+        }
+      }
+      class HttpServerResponse {
+        fun putHeader(vararg args: Any?) {}
+      }
+    expect_match_text:
+    - response.putHeader
+  - name: arg tainted literal negative
+    code: |
+      import io.vertx.*
+      class App {
+      fun handle(response: HttpServerResponse, value: String) {
+        response.putHeader("X-Name", "safe")
+      }
+      }
+      class HttpServerResponse {
+      fun putHeader(vararg args: Any?) {}
+      }
+    expect_no_match: true
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) — CRLF response header injection. Merged aliases: kotlin.open_redirect.vertx_response_putheader_location."
+  aliases:
+  - kotlin.open_redirect.vertx_response_putheader_location

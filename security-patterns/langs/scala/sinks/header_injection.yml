@@ -1,0 +1,285 @@
+- id: scala.header.play_with_headers
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: high
+  packages:
+  - play
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^Result\.withHeaders$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          Result.withHeaders(input)
+        }
+      }
+  - name: literal header negative
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          Result.withHeaders("X-Name" -> "safe")
+        }
+      }
+    expect_no_match: true
+  description: "Play Result.withHeaders(name -> tainted) — CRLF-injectable header value."
+- id: scala.header.play_add_cookies
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: medium
+  packages:
+  - play
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Result
+      - withCookies
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          Result.withCookies(input)
+        }
+      }
+  - name: literal cookie negative
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          Result.withCookies("safe")
+        }
+      }
+    expect_no_match: true
+  description: Play Result.withCookies(Cookie(name, tainted)).
+- id: scala.header.akka_http_response_headers
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: high
+  packages:
+  - akka.http.scaladsl
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^HttpResponse\.withHeaders$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import akka.http.scaladsl._
+      object App {
+        def handle(input: String): Unit = {
+          HttpResponse.withHeaders(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import akka.http.scaladsl._
+      object App {
+        def handle(input: String): Unit = {
+          HttpResponse.withHeaders("safe")
+        }
+      }
+    expect_no_match: true
+  description: Akka HTTP HttpResponse.withHeaders(tainted RawHeader).
+  imports:
+  - akka.http.scaladsl
+- id: scala.header.akka_http_raw_header
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: high
+  packages:
+  - akka.http.scaladsl
+  cwe:
+  - CWE-113
+  match:
+    kind: new
+    callee:
+      name: RawHeader
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import akka.http.scaladsl._
+      object App {
+        def handle(input: String): Unit = {
+          new RawHeader("X-Name", input)
+        }
+      }
+      class RawHeader(args: Any*)
+  - name: arg tainted literal negative
+    code: |
+      import akka.http.scaladsl._
+      object App {
+        def handle(input: String): Unit = {
+          new RawHeader(input, "safe")
+        }
+      }
+      class RawHeader(args: Any*)
+    expect_no_match: true
+  description: "akka-http new RawHeader(name, tainted) — unvalidated header; pair with respondWithHeaders."
+  imports:
+  - akka.http.scaladsl
+- id: scala.header.spring_responseentity_header
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.web
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: responseentity header
+    code: |
+      import org.springframework.web._
+      // uses org.springframework.web
+      object App {
+        def handle(value: String): Any = {
+          ResponseEntity.header("X-Name", value)
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.header
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web._
+      // uses org.springframework.web
+      object App {
+        def handle(value: String): Any = {
+          ResponseEntity.header(value, "safe")
+        }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.header(name, tainted) — CRLF response header injection. Merged aliases: scala.header.spring_responseentity_content_disposition, scala.open_redirect.spring_responseentity_header_location."
+  aliases:
+  - scala.header.spring_responseentity_content_disposition
+  - scala.open_redirect.spring_responseentity_header_location
+  imports:
+  - org.springframework.web
+- id: scala.header.webflux_serverresponse_header
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServerResponse
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: webflux server response header
+    code: |
+      import org.springframework.web.reactive._
+      // uses org.springframework.web.reactive
+      object App {
+        def handle(value: String): Any = {
+          ServerResponse.header("X-Name", value)
+        }
+      }
+    expect_match_text:
+    - ServerResponse.header
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.reactive._
+      // uses org.springframework.web.reactive
+      object App {
+        def handle(value: String): Any = {
+          ServerResponse.header(value, "safe")
+        }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.header(name, tainted) — CRLF response header injection. Merged aliases: scala.open_redirect.webflux_serverresponse_header_location."
+  aliases:
+  - scala.open_redirect.webflux_serverresponse_header_location
+- id: scala.header.vertx_response_putheader
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: high
+  packages:
+  - io.vertx
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: putHeader
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: vertx response put header
+    code: |
+      import io.vertx._
+      object App {
+        def handle(response: HttpServerResponse, value: String): Unit = {
+          response.putHeader("X-Name", value)
+        }
+      }
+      class HttpServerResponse {
+        def putHeader(args: Any*): Unit = {}
+      }
+    expect_match_text:
+    - response.putHeader
+  - name: arg tainted literal negative
+    code: |
+      import io.vertx._
+      object App {
+        def handle(response: HttpServerResponse, value: String): Unit = {
+          response.putHeader(value, "safe")
+        }
+      }
+      class HttpServerResponse {
+        def putHeader(args: Any*): Unit = {}
+      }
+    expect_no_match: true
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) — CRLF response header injection. Merged aliases: scala.open_redirect.vertx_response_putheader_location."
+  aliases:
+  - scala.open_redirect.vertx_response_putheader_location

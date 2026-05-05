@@ -1,0 +1,154 @@
+- id: ruby.graphql.schema_execute
+  enabled: true
+  language: ruby
+  tag: graphql-injection
+  severity: high
+  packages: [graphql]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: schema execute
+    code: |
+      require "graphql"
+      def example(schema, query, context)
+        schema.execute(query, context: context)
+      end
+    expect_match_text: [schema.execute]
+  - name: ruby.graphql.schema_execute literal negative
+    code: |
+      require "graphql"
+      def example(schema, query, context)
+        schema.execute("{ viewer { id } }", context: context)
+      end
+    expect_no_match: true
+  description: "schema.execute(query, context:) — tainted GraphQL document or context reaches resolver execution."
+
+- id: ruby.graphql.query_new
+  enabled: true
+  language: ruby
+  tag: graphql-injection
+  severity: high
+  packages: [graphql]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [GraphQL, Query, new]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: graphql query new
+    code: |
+      require "graphql"
+      def example(schema, query)
+        GraphQL::Query.new(schema, query)
+      end
+    expect_match_text: ["GraphQL::Query.new"]
+  - name: ruby.graphql.query_new literal negative
+    code: |
+      require "graphql"
+      def example(schema, query)
+        GraphQL::Query.new(schema, "{ viewer { id } }")
+      end
+    expect_no_match: true
+  description: "GraphQL::Query.new(schema, tainted_query) — dynamic documents enter GraphQL parsing and execution planning."
+
+- id: ruby.graphql.client_parse
+  enabled: true
+  language: ruby
+  tag: graphql-injection
+  severity: medium
+  packages: [graphql-client]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [GraphQL, Client, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: graphql client parse
+    code: |
+      require "graphql-client"
+      def example(query)
+        GraphQL::Client.parse(query)
+      end
+    expect_match_text: ["GraphQL::Client.parse"]
+  - name: ruby.graphql.client_parse literal negative
+    code: |
+      require "graphql-client"
+      def example(query)
+        GraphQL::Client.parse("{ viewer { id } }")
+      end
+    expect_no_match: true
+  description: "GraphQL::Client.parse(tainted_query) — dynamic client-side GraphQL documents can trigger injection-prone query construction."
+
+- id: ruby.graphql.client_query
+  enabled: true
+  language: ruby
+  tag: graphql-injection
+  severity: medium
+  packages: [graphql-client]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [GraphQL, Client, query]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: graphql client query tainted
+    code: |
+      require "graphql-client"
+      def example(query)
+        GraphQL::Client.query(query)
+      end
+    expect_match_text: ["GraphQL::Client.query"]
+  - name: graphql client query literal negative
+    code: |
+      require "graphql-client"
+      def example(query)
+        GraphQL::Client.query("{ viewer { id } }")
+      end
+    expect_no_match: true
+  description: "GraphQL::Client.query(tainted_query) — sends attacker-controlled GraphQL document to a remote endpoint."
+
+- id: ruby.graphql.schema_execute_async
+  enabled: true
+  language: ruby
+  tag: graphql-injection
+  severity: high
+  packages: [graphql]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.multiplex$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: schema multiplex tainted
+    code: |
+      require "graphql"
+      def example(schema, queries)
+        schema.multiplex(queries)
+      end
+    expect_match_text: [schema.multiplex]
+  - name: schema multiplex literal negative
+    code: |
+      require "graphql"
+      def example(schema)
+        schema.multiplex([{ query: "{ viewer { id } }" }])
+      end
+    expect_no_match: true
+  description: "schema.multiplex(tainted_queries) — graphql-ruby batched execution; attacker-controlled query bodies enter resolver chain."

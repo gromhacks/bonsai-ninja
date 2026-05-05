@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""Audit the bonsai-ninja security-patterns rulepack.
+
+Walks `security-patterns/langs/<lang>/{sources,sinks,sanitizers}/*.yml`,
+loads every rule, and emits a per-(lang, category) report covering:
+
+  - rule counts, enabled/disabled split
+  - rule-id family coverage vs the canonical 17 sink families
+  - match-shape distribution (call/new/read/write/...)
+  - matcher-precision distribution (attribute-chain / regex / bare name / ...)
+  - rules that look fragile (bare verb names, missing package/import scoping)
+  - missing canonical families per lang
+  - per-tag and per-severity rollups
+  - duplicate ids, duplicate enabled match shapes, and cross-family API
+    collisions (`--duplicates`)
+
+Usage:
+    python3 scripts/pack_audit.py [--lang LANG] [--category CAT] [--json]
+    python3 scripts/pack_audit.py --duplicates [--json] [--fail-on-family-file-mismatch]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+import yaml
+
+REPO = Path(__file__).resolve().parent.parent
+PACK = REPO / "security-patterns" / "langs"
+
+CATEGORIES = ("sources", "sinks", "sanitizers")
+
+# Canonical sink families tracked by `security pack --audit`. Each entry is the
+# canonical name plus any in-pack aliases used in rule ids.
+CANONICAL_SINK_FAMILIES: dict[str, tuple[str, ...]] = {
+    "cmdi": ("cmdi",),
+    "sqli": ("sqli",),
+    "nosql": ("nosql",),
+    "path": ("path",),
+    "ssrf": ("ssrf",),
+    "xss": ("xss",),
+    "eval": ("eval",),
+    "deserialization": ("deserialization", "deser"),
+    "xxe": ("xxe",),
+    "ldap": ("ldap",),
+    "jwt": ("jwt",),
+    "crypto": ("crypto",),
+    "tls": ("tls",),
+    "template": ("template", "ssti", "tmpl"),
+    "open_redirect": ("open_redirect", "oredr"),
+    "file_upload": ("file_upload", "upload", "upld"),
+    "header_injection": ("header_injection", "header", "hdr"),
+}
+
+FAMILY_FILE_ALIASES: dict[str, tuple[str, ...]] = {
+    "cache_poisoning": ("cache",),
+    "cors_csrf": ("cors",),
+    "delegatecall": ("code",),
+    "deserialization": ("deser",),
+    "downstream": ("sink",),
+    "file_upload": (
+        "upload",
+        "upld",
+        "upload_file_copy_client_filename",
+        "upload_file_copy_to_client_filename",
+        "upload_file_write_client_filename",
+        "upload_gcdwebserver_uploaded_file_path",
+        "upload_io_open_client_filename",
+    ),
+    "header_injection": ("header",),
+    "host_header": ("hostheader",),
+    "jwt": (
+        "jwt_jose_decode_unverified",
+        "jwt_jwt_decode_no_verify",
+    ),
+    "log_injection": ("log",),
+    "mass_assignment": ("mass_assign",),
+    "nosql": ("nosql_mongoc_aggregate",),
+    "open_redirect": ("oredr",),
+    "prototype_pollution": ("proto", "proto_pollution"),
+    "queue": ("celery",),
+    "request_smuggling": ("smuggle",),
+    "race": ("toctou",),
+    "regex_dos": ("redos",),
+    "info_disclosure": ("info", "info_disclosure"),
+    "smtp_inject": ("smtpinj",),
+    "template": (
+        "ssti",
+        "template_bbmustache_compile",
+        "template_mustache_render",
+    ),
+}
+
+# Rules whose match shape uses a single `name:` (not `attribute:` or `regex:`)
+# are considered "bare-name" risks unless they have a package/import constraint.
+BARE_NAME_VERBS = {
+    "open", "load", "exec", "execute", "query", "write", "read", "copy",
+    "create", "parse", "send", "run", "eval", "fetch", "get", "post",
+    "put", "delete", "patch", "call", "invoke", "spawn",
+}
+
+
+def load_yaml(path: Path) -> list[dict]:
+    try:
+        with path.open() as fh:
+            data = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        return [{"_parse_error": str(exc), "_path": str(path)}]
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        return [{"_shape_error": "top-level not a list", "_path": str(path)}]
+    return data
+
+
+def iter_rules() -> list[dict]:
+    rules: list[dict] = []
+    for path in sorted(PACK.glob("*/*/*.yml")):
+        rel = path.relative_to(REPO)
+        parts = path.relative_to(PACK).parts
+        if len(parts) < 3:
+            continue
+        lang, category, file_name = parts[0], parts[1], parts[-1]
+        for idx, rule in enumerate(load_yaml(path)):
+            if rule.get("_parse_error") or rule.get("_shape_error"):
+                rule["_path"] = str(rel)
+                rules.append(rule)
+                continue
+            rule = dict(rule)
+            rule["_lang"] = lang
+            rule["_category"] = category
+            rule["_family_file"] = Path(file_name).stem
+            rule["_path"] = str(rel)
+            rule["_index"] = idx
+            rules.append(rule)
+    return rules
+
+
+def rule_family_from_id(rule: dict) -> str:
+    rid = str(rule.get("id") or "")
+    parts = rid.split(".")
+    return parts[1] if len(parts) >= 2 else "<missing>"
+
+
+def normalise_for_signature(value):
+    if isinstance(value, dict):
+        return {
+            str(k): normalise_for_signature(v)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if not str(k).startswith("_")
+        }
+    if isinstance(value, list):
+        return [normalise_for_signature(v) for v in value]
+    return value
+
+
+def signature_json(value) -> str:
+    return json.dumps(normalise_for_signature(value), sort_keys=True, separators=(",", ":"))
+
+
+def match_signature(rule: dict) -> str:
+    return signature_json(
+        {
+            "match": rule.get("match"),
+            "constraints": rule.get("constraints"),
+        }
+    )
+
+
+def api_signature(rule: dict) -> str:
+    match = rule.get("match") if isinstance(rule.get("match"), dict) else {}
+    target = {}
+    for key in ("callee", "target", "name"):
+        if key in match:
+            target[key] = match.get(key)
+    return signature_json(
+        {
+            "kind": match.get("kind"),
+            "target": target,
+            "packages": rule.get("packages"),
+            "imports": rule.get("imports"),
+            "frameworks": rule.get("frameworks"),
+            "namespace": rule.get("namespace"),
+            "constraints": rule.get("constraints"),
+        }
+    )
+
+
+def location(rule: dict) -> dict:
+    return {
+        "id": rule.get("id"),
+        "path": rule.get("_path"),
+        "language": rule.get("_lang") or rule.get("language"),
+        "category": rule.get("_category"),
+        "family": rule_family_from_id(rule),
+        "enabled": rule.get("enabled", True),
+    }
+
+
+def duplicate_audit() -> dict:
+    rules = [
+        r
+        for r in iter_rules()
+        if not r.get("_parse_error") and not r.get("_shape_error")
+    ]
+
+    by_id: dict[str, list[dict]] = defaultdict(list)
+    for rule in rules:
+        rid = rule.get("id")
+        if rid:
+            by_id[str(rid)].append(rule)
+    duplicate_ids = [
+        {"id": rid, "rules": [location(rule) for rule in group]}
+        for rid, group in sorted(by_id.items())
+        if len(group) > 1
+    ]
+
+    enabled = [r for r in rules if r.get("enabled", True)]
+    by_shape: dict[tuple[str, str, str, str], list[dict]] = defaultdict(list)
+    for rule in enabled:
+        key = (
+            str(rule.get("_lang") or rule.get("language") or "<unknown>"),
+            str(rule.get("_category") or "<unknown>"),
+            rule_family_from_id(rule),
+            match_signature(rule),
+        )
+        by_shape[key].append(rule)
+    duplicate_enabled_match_shapes = [
+        {
+            "language": lang,
+            "category": category,
+            "family": family,
+            "match_signature": sig,
+            "rules": [location(rule) for rule in group],
+        }
+        for (lang, category, family, sig), group in sorted(by_shape.items())
+        if len(group) > 1
+    ]
+
+    by_api: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for rule in enabled:
+        sig = api_signature(rule)
+        if sig == "{}":
+            continue
+        key = (
+            str(rule.get("_lang") or rule.get("language") or "<unknown>"),
+            str(rule.get("_category") or "<unknown>"),
+            sig,
+        )
+        by_api[key].append(rule)
+    cross_family_api_collisions = []
+    for (lang, category, sig), group in sorted(by_api.items()):
+        families = sorted({rule_family_from_id(rule) for rule in group})
+        if len(families) <= 1:
+            continue
+        cross_family_api_collisions.append(
+            {
+                "language": lang,
+                "category": category,
+                "api_signature": sig,
+                "families": families,
+                "rules": [location(rule) for rule in group],
+            }
+        )
+
+    family_file_mismatches = []
+    for rule in rules:
+        if rule.get("_category") != "sinks":
+            continue
+        id_family = rule_family_from_id(rule)
+        file_family = str(rule.get("_family_file"))
+        allowed = {file_family, *FAMILY_FILE_ALIASES.get(file_family, ())}
+        if id_family in allowed or id_family == "<missing>":
+            continue
+        family_file_mismatches.append(
+            {
+                "id": rule.get("id"),
+                "path": rule.get("_path"),
+                "id_family": id_family,
+                "file_family": file_family,
+                "language": rule.get("_lang") or rule.get("language"),
+                "category": rule.get("_category"),
+                "enabled": rule.get("enabled", True),
+            }
+        )
+
+    return {
+        "duplicate_ids": duplicate_ids,
+        "duplicate_enabled_match_shapes": duplicate_enabled_match_shapes,
+        "cross_family_api_collisions": cross_family_api_collisions,
+        "family_file_mismatches": family_file_mismatches,
+    }
+
+
+def render_duplicate_text(report: dict) -> str:
+    out = ["Duplicate / collision audit"]
+    sections = [
+        ("Duplicate IDs", "duplicate_ids"),
+        ("Duplicate enabled match shapes", "duplicate_enabled_match_shapes"),
+        ("Cross-family API collisions", "cross_family_api_collisions"),
+        ("Family file mismatches", "family_file_mismatches"),
+    ]
+    for title, key in sections:
+        rows = report[key]
+        out.append("")
+        out.append(f"{title}: {len(rows)}")
+        for row in rows[:50]:
+            if key == "duplicate_ids":
+                out.append(f"  - {row['id']}")
+            elif key == "duplicate_enabled_match_shapes":
+                out.append(
+                    f"  - {row['language']}/{row['category']}/{row['family']}: "
+                    f"{len(row['rules'])} rules share one enabled match shape"
+                )
+            elif key == "cross_family_api_collisions":
+                out.append(
+                    f"  - {row['language']}/{row['category']}: families="
+                    f"{','.join(row['families'])}"
+                )
+            else:
+                out.append(
+                    f"  - {row['id']} in {row['path']} "
+                    f"(id family={row['id_family']}, file={row['file_family']})"
+                )
+            for rule in row.get("rules", [])[:6]:
+                out.append(f"      {rule['id']} ({rule['path']})")
+            if len(row.get("rules", [])) > 6:
+                out.append(f"      ... +{len(row['rules']) - 6} more")
+        if len(rows) > 50:
+            out.append(f"  ... +{len(rows) - 50} more")
+    return "\n".join(out)
+
+
+def classify_match_shape(rule: dict) -> str:
+    m = rule.get("match") or {}
+    if not isinstance(m, dict):
+        return "<no-match>"
+    return str(m.get("kind", "<no-kind>"))
+
+
+def classify_precision(rule: dict) -> str:
+    m = rule.get("match") or {}
+    if not isinstance(m, dict):
+        return "<no-match>"
+    target_keys = ("callee", "target", "name")
+    for key in target_keys:
+        spec = m.get(key)
+        if not isinstance(spec, dict):
+            continue
+        if "attribute" in spec:
+            return "attribute-chain"
+        if "regex" in spec:
+            return "regex"
+        if "name" in spec:
+            name = spec["name"]
+            if isinstance(name, list):
+                return "name-list"
+            return "bare-name"
+    return "other"
+
+
+def is_fragile(rule: dict) -> tuple[bool, str | None]:
+    """Identify rules that risk over-matching: bare verb name, no package scope."""
+    if rule.get("_parse_error") or rule.get("_shape_error"):
+        return False, None
+    if rule.get("enabled") is False:
+        return False, None
+    m = rule.get("match") or {}
+    if not isinstance(m, dict):
+        return False, None
+    bare = None
+    for key in ("callee", "target", "name"):
+        spec = m.get(key) if isinstance(m.get(key), dict) else None
+        if spec and "name" in spec and "attribute" not in spec and "regex" not in spec:
+            n = spec["name"]
+            if isinstance(n, str) and n.lower() in BARE_NAME_VERBS:
+                bare = n
+                break
+    if bare is None:
+        return False, None
+    has_scope = any(rule.get(k) for k in ("packages", "imports", "frameworks", "namespace"))
+    if has_scope:
+        return False, None
+    return True, f"bare-name '{bare}' without packages/imports/frameworks scope"
+
+
+def summarize_lang_category(lang: str, cat: str) -> dict:
+    base = PACK / lang / cat
+    files = sorted(base.glob("*.yml")) if base.exists() else []
+    rules: list[dict] = []
+    parse_errors: list[dict] = []
+    for f in files:
+        for r in load_yaml(f):
+            if r.get("_parse_error") or r.get("_shape_error"):
+                parse_errors.append(r)
+                continue
+            r["_file"] = f.name
+            rules.append(r)
+
+    enabled = [r for r in rules if r.get("enabled", True)]
+    disabled = [r for r in rules if r.get("enabled") is False]
+
+    # rule-id family from id like "<lang>.<family>.<name>"
+    families: Counter[str] = Counter()
+    for r in enabled:
+        rid = r.get("id", "") or ""
+        parts = rid.split(".")
+        if len(parts) >= 2:
+            families[parts[1]] += 1
+
+    shapes = Counter(classify_match_shape(r) for r in enabled)
+    precisions = Counter(classify_precision(r) for r in enabled)
+    severities = Counter((r.get("severity") or "<none>") for r in enabled)
+    tags_raw: Counter[str] = Counter()
+    for r in enabled:
+        t = r.get("tag")
+        if isinstance(t, str):
+            tags_raw[t] += 1
+        elif isinstance(t, list):
+            for tt in t:
+                tags_raw[str(tt)] += 1
+
+    fragile = []
+    for r in enabled:
+        bad, why = is_fragile(r)
+        if bad:
+            fragile.append({
+                "id": r.get("id"),
+                "file": r.get("_file"),
+                "issue": why,
+            })
+
+    missing_families = []
+    if cat == "sinks":
+        present = set(families)
+        for canonical, aliases in CANONICAL_SINK_FAMILIES.items():
+            if not any(a in present for a in aliases):
+                missing_families.append(canonical)
+
+    return {
+        "lang": lang,
+        "category": cat,
+        "files": [f.name for f in files],
+        "rule_total": len(rules),
+        "rule_enabled": len(enabled),
+        "rule_disabled": len(disabled),
+        "parse_errors": parse_errors,
+        "families": dict(families),
+        "match_shapes": dict(shapes),
+        "match_precision": dict(precisions),
+        "severities": dict(severities),
+        "tags": dict(tags_raw.most_common()),
+        "fragile": fragile,
+        "missing_canonical_families": missing_families,
+    }
+
+
+def render_text(report: list[dict]) -> str:
+    out = []
+    by_lang: dict[str, dict[str, dict]] = defaultdict(dict)
+    for r in report:
+        by_lang[r["lang"]][r["category"]] = r
+    for lang in sorted(by_lang):
+        out.append("=" * 72)
+        out.append(f"LANG: {lang}")
+        out.append("=" * 72)
+        for cat in CATEGORIES:
+            r = by_lang[lang].get(cat)
+            if not r:
+                continue
+            out.append(f"  [{cat}] files={len(r['files'])} rules={r['rule_total']} enabled={r['rule_enabled']} disabled={r['rule_disabled']}")
+            if r["parse_errors"]:
+                out.append(f"    PARSE ERRORS: {len(r['parse_errors'])}")
+            if r["families"]:
+                fams = ", ".join(f"{k}={v}" for k, v in sorted(r["families"].items(), key=lambda x: -x[1]))
+                out.append(f"    families: {fams}")
+            if r["match_shapes"]:
+                out.append(f"    shapes: {dict(r['match_shapes'])}")
+            if r["match_precision"]:
+                out.append(f"    precision: {dict(r['match_precision'])}")
+            if r["missing_canonical_families"]:
+                out.append(f"    MISSING canonical families: {', '.join(r['missing_canonical_families'])}")
+            if r["fragile"]:
+                out.append(f"    FRAGILE rules: {len(r['fragile'])}")
+                for fr in r["fragile"][:5]:
+                    out.append(f"      - {fr['id']} ({fr['file']}): {fr['issue']}")
+                if len(r["fragile"]) > 5:
+                    out.append(f"      ... +{len(r['fragile']) - 5} more")
+        out.append("")
+    return "\n".join(out)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--lang")
+    ap.add_argument("--category", choices=CATEGORIES)
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument(
+        "--duplicates",
+        action="store_true",
+        help="audit duplicate ids, duplicate enabled match shapes, and cross-family API collisions",
+    )
+    ap.add_argument(
+        "--fail-on-family-file-mismatch",
+        action="store_true",
+        help="exit non-zero if any sink id family disagrees with sink file name",
+    )
+    ap.add_argument(
+        "--allow-collisions",
+        action="store_true",
+        help="Report duplicate enabled match shapes and cross-family API collisions but exit 0.",
+    )
+    args = ap.parse_args()
+
+    if args.duplicates:
+        report = duplicate_audit()
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        else:
+            print(render_duplicate_text(report))
+        if args.fail_on_family_file_mismatch and report["family_file_mismatches"]:
+            print(
+                "pack_audit found sink family/file-name mismatches",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.allow_collisions and (
+            report["duplicate_enabled_match_shapes"] or report["cross_family_api_collisions"]
+        ):
+            print(
+                "pack_audit found duplicate enabled match shapes or cross-family API collisions",
+                file=sys.stderr,
+            )
+            return 2
+        return 0
+
+    langs = sorted([p.name for p in PACK.iterdir() if p.is_dir()])
+    if args.lang:
+        if args.lang not in langs:
+            print(f"unknown lang: {args.lang}", file=sys.stderr)
+            return 2
+        langs = [args.lang]
+    cats = (args.category,) if args.category else CATEGORIES
+
+    report = [summarize_lang_category(lang, cat) for lang in langs for cat in cats]
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    else:
+        print(render_text(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

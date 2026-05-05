@@ -1,0 +1,1541 @@
+# Python sanitizers. Tag values follow the spec-canonical names
+# (html-encode, html-sanitize, url-encode, shell-escape, sql-parameter,
+# constant-time, jwt-verify, path-sanitize, xxe-sanitizer, ldap-escape,
+# numeric-coerce, auth-sanitizer).
+
+# -- HTML ------------------------------------------------------------
+- id: python.sanitizer.html_escape
+  enabled: true
+  language: python
+  tag: html-encode
+  packages: [html]
+  imports: [html]
+  match:
+    kind: call
+    callee:
+      regex: "^html\\.escape$"
+  match_examples:
+  - name: sanitizer html escape
+    code: |
+      import html
+      def example(user_input):
+          return html.escape(user_input)
+    expect_match_text: [html.escape]
+  description: html.escape — HTML-encodes `<`, `>`, `&` (and optionally quotes); neutralises reflected XSS.
+
+- id: python.sanitizer.markupsafe_escape
+  enabled: true
+  language: python
+  tag: html-encode
+  packages: [markupsafe]
+  match:
+    kind: call
+    callee:
+      regex: "^markupsafe\\.escape$"
+  match_examples:
+  - name: sanitizer markupsafe escape
+    code: |
+      import markupsafe
+      def example(user_input):
+          return markupsafe.escape(user_input)
+    expect_match_text: [markupsafe.escape]
+  description: markupsafe.escape — HTML-encodes and returns a Markup-safe value.
+
+- id: python.sanitizer.flask_escape
+  enabled: true
+  language: python
+  tag: html-encode
+  packages: [flask, markupsafe]
+  match:
+    kind: call
+    callee:
+      regex: "^flask\\.escape$"
+  match_examples:
+  - name: sanitizer flask escape
+    code: |
+      import flask
+      def example(user_input):
+          return flask.escape(user_input)
+    expect_match_text: [flask.escape]
+  description: flask.escape — MarkupSafe-backed HTML escaping for Flask response/template contexts.
+
+- id: python.sanitizer.jinja2_escape
+  enabled: true
+  language: python
+  tag: html-encode
+  packages: [jinja2, markupsafe]
+  match:
+    kind: call
+    callee:
+      regex: "^jinja2\\.escape$"
+  match_examples:
+  - name: sanitizer jinja2 escape
+    code: |
+      import jinja2
+      def example(user_input):
+          return jinja2.escape(user_input)
+    expect_match_text: [jinja2.escape]
+  description: jinja2.escape — HTML-encodes a value using MarkupSafe semantics.
+
+- id: python.sanitizer.bleach_clean
+  enabled: true
+  language: python
+  tag: html-sanitize
+  packages: [bleach]
+  match:
+    kind: call
+    callee:
+      regex: "^bleach\\.clean$"
+  match_examples:
+  - name: sanitizer bleach clean
+    code: |
+      import bleach
+      def example(user_input):
+          return bleach.clean(user_input)
+    expect_match_text: [bleach.clean]
+  description: bleach.clean — strips or allow-lists tags / attributes; safe HTML fragment.
+
+- id: python.sanitizer.html_unescape_not_applicable
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: non-sanitizer
+  match:
+    kind: call
+    callee:
+      attribute: [html, unescape]
+  description: "Disabled — placeholder; html.unescape is the INVERSE of escape (it reintroduces taint). Kept only so tooling sees it explicitly marked as not-a-sanitizer."
+
+# -- URLs ------------------------------------------------------------
+- id: python.sanitizer.urllib_parse_quote
+  enabled: true
+  language: python
+  tag: url-encode
+  imports: [urllib]
+  match:
+    kind: call
+    callee:
+      regex: "^urllib\\.parse\\.quote$"
+  match_examples:
+  - name: sanitizer urllib parse quote
+    code: |
+      import urllib
+      def example(user_input):
+          return urllib.parse.quote(user_input)
+    expect_match_text: [urllib.parse.quote]
+  description: urllib.parse.quote — percent-encodes every reserved URL char.
+
+- id: python.sanitizer.urllib_parse_quote_plus
+  enabled: true
+  language: python
+  tag: url-encode
+  imports: [urllib]
+  match:
+    kind: call
+    callee:
+      regex: "^urllib\\.parse\\.quote_plus$"
+  match_examples:
+  - name: sanitizer urllib parse quote plus
+    code: |
+      import urllib
+      def example(user_input):
+          return urllib.parse.quote_plus(user_input)
+    expect_match_text: [urllib.parse.quote_plus]
+  description: urllib.parse.quote_plus — like quote but also encodes spaces as `+`.
+
+- id: python.sanitizer.urlencode
+  enabled: true
+  language: python
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^urllib\\.parse\\.urlencode$"
+  match_examples:
+  - name: sanitizer urlencode
+    code: |
+      def example(user_input):
+          return urllib.parse.urlencode(user_input)
+    expect_match_text: [urllib.parse.urlencode]
+  description: urllib.parse.urlencode — builds a safe application/x-www-form-urlencoded string.
+
+# -- Shell -----------------------------------------------------------
+- id: python.sanitizer.shlex_quote
+  enabled: true
+  language: python
+  tag: shell-escape
+  packages: [shlex]
+  imports: [shlex]
+  match:
+    kind: call
+    callee:
+      regex: "^shlex\\.quote$"
+  match_examples:
+  - name: sanitizer shlex quote
+    code: |
+      import shlex
+      def example(user_input):
+          return shlex.quote(user_input)
+    expect_match_text: [shlex.quote]
+  description: shlex.quote — POSIX-shell-quotes a single argument so it cannot break out.
+
+- id: python.sanitizer.shlex_split
+  enabled: true
+  language: python
+  tag: shell-escape
+  imports: [shlex]
+  match:
+    kind: call
+    callee:
+      regex: "^shlex\\.split$"
+  match_examples:
+  - name: sanitizer shlex split
+    code: |
+      import shlex
+      def example(user_input):
+          return shlex.split(user_input)
+    expect_match_text: [shlex.split]
+  description: shlex.split — produces an argv list suitable for subprocess.run([...], shell=False).
+
+# -- SQL -------------------------------------------------------------
+- id: python.sanitizer.sqlalchemy_bindparam
+  enabled: true
+  language: python
+  tag: sql-parameter
+  frameworks: [sqlalchemy]
+  packages: [sqlalchemy]
+  imports: [sqlalchemy]
+  match:
+    kind: call
+    callee:
+      name: bindparam
+  match_examples:
+  - name: sanitizer sqlalchemy bindparam
+    code: |
+      import sqlalchemy
+      def example(user_input):
+          return bindparam(user_input)
+    expect_match_text: [bindparam]
+  description: SQLAlchemy bindparam — forces a parameterised placeholder instead of string concat.
+
+- id: python.sanitizer.sqlalchemy_text_bindparams
+  enabled: true
+  language: python
+  tag: sql-parameter
+  frameworks: [sqlalchemy]
+  packages: [sqlalchemy]
+  match:
+    kind: call
+    callee:
+      attribute: [text, bindparams]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: sanitizer sqlalchemy text bindparams
+    code: |
+      import sqlalchemy
+      def by_id(stmt, user_id):
+          return text.bindparams(user_id)
+    expect_match_text: [text.bindparams]
+  description: SQLAlchemy TextClause.bindparams — binds values separately from the SQL text.
+
+# -- Path / file upload ---------------------------------------------
+- id: python.sanitizer.os_path_normpath
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [os, path, normpath]
+  description: "Disabled — os.path.normpath collapses .. and . segments but still requires a trusted-root containment check."
+
+- id: python.sanitizer.werkzeug_secure_filename
+  enabled: true
+  language: python
+  tag: path-sanitize
+  packages: [werkzeug]
+  match:
+    kind: call
+    callee:
+      attribute: [werkzeug, secure_filename]
+  match_examples:
+  - name: sanitizer werkzeug secure filename
+    code: |
+      import werkzeug
+      def example(user_input):
+          return werkzeug.secure_filename(user_input)
+    expect_match_text: [werkzeug.secure_filename]
+  description: werkzeug.utils.secure_filename — strips separators and unsafe chars from a client-supplied filename.
+
+- id: python.sanitizer.os_path_commonpath
+  enabled: true
+  language: python
+  tag: path-sanitize
+  packages: [os]
+  imports: [os]
+  match:
+    kind: call
+    callee:
+      attribute: [os, path, commonpath]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: sanitizer os path commonpath
+    code: |
+      import os
+      def example(root, candidate):
+          return os.path.commonpath([root, candidate])
+    expect_match_text: [os.path.commonpath]
+  description: os.path.commonpath — containment primitive used to verify a normalized candidate remains under a trusted root.
+
+- id: python.sanitizer.pathlib_relative_to
+  enabled: true
+  language: python
+  tag: path-sanitize
+  packages: [pathlib]
+  imports: [pathlib]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.relative_to$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: sanitizer pathlib relative to
+    code: |
+      import pathlib
+      def example(candidate, root):
+          return candidate.relative_to(root)
+    expect_match_text: [candidate.relative_to]
+  description: pathlib Path.relative_to(root) — raises unless candidate is contained by the trusted root path.
+
+- id: python.sanitizer.pathlib_is_relative_to
+  enabled: true
+  language: python
+  tag: path-sanitize
+  packages: [pathlib]
+  imports: [pathlib]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.is_relative_to$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: sanitizer pathlib is relative to
+    code: |
+      import pathlib
+      def example(candidate, root):
+          return candidate.is_relative_to(root)
+    expect_match_text: [candidate.is_relative_to]
+  description: pathlib Path.is_relative_to(root) — boolean containment check for path traversal defenses.
+
+# -- XML -------------------------------------------------------------
+- id: python.sanitizer.defusedxml_fromstring
+  enabled: true
+  language: python
+  tag: xxe-sanitizer
+  packages: [defusedxml]
+  imports: [defusedxml]
+  match:
+    kind: call
+    callee:
+      attribute: [defusedxml, fromstring]
+  match_examples:
+  - name: sanitizer defusedxml fromstring
+    code: |
+      import defusedxml
+      def example(user_input):
+          return defusedxml.fromstring(user_input)
+    expect_match_text: [defusedxml.fromstring]
+  description: defusedxml fromstring — blocks entity expansion and external DTD fetch.
+
+- id: python.sanitizer.defusedxml_parse
+  enabled: true
+  language: python
+  tag: xxe-sanitizer
+  packages: [defusedxml]
+  match:
+    kind: call
+    callee:
+      regex: "^defusedxml\\.parse$"
+  match_examples:
+  - name: sanitizer defusedxml parse
+    code: |
+      import defusedxml
+      def example(user_input):
+          return defusedxml.parse(user_input)
+    expect_match_text: [defusedxml.parse]
+  description: defusedxml parse — safe replacement for xml.etree.*.parse.
+
+- id: python.sanitizer.lxml_xmlparser_safe_flags
+  enabled: true
+  language: python
+  tag: xxe-sanitizer
+  packages: [lxml]
+  imports: [lxml]
+  match:
+    kind: call
+    callee:
+      attribute: [etree, XMLParser]
+  constraints:
+  - keyword_arg_equals:
+      name: resolve_entities
+      value: "False"
+  match_examples:
+  - name: sanitizer lxml xmlparser safe flags
+    code: |
+      import lxml
+      def example():
+          return etree.XMLParser(resolve_entities=False, no_network=True)
+    expect_match_text: [etree.XMLParser]
+  - name: sanitizer lxml xmlparser safe flags negative constraint boundary
+    code: "import lxml\ndef example():\n    return etree.XMLParser()\n"
+    expect_no_match: true
+  description: lxml.etree.XMLParser(resolve_entities=False, ...) — prevents external entity expansion in lxml parsing.
+
+# -- LDAP ------------------------------------------------------------
+- id: python.sanitizer.ldap3_escape_filter_chars
+  enabled: true
+  language: python
+  tag: ldap-escape
+  packages: [ldap3]
+  match:
+    kind: call
+    callee:
+      regex: "^ldap3\\.escape_filter_chars$"
+  match_examples:
+  - name: sanitizer ldap3 escape filter chars
+    code: |
+      import ldap3
+      def example(user_input):
+          return ldap3.escape_filter_chars(user_input)
+    expect_match_text: [ldap3.escape_filter_chars]
+  description: ldap3.utils.conv.escape_filter_chars — escapes `()*\\` per RFC 4515 for LDAP filters.
+
+- id: python.sanitizer.ldap3_utils_escape_filter_chars
+  enabled: true
+  language: python
+  tag: ldap-escape
+  packages: [ldap3]
+  match:
+    kind: call
+    callee:
+      regex: "^ldap3\\.utils\\.conv\\.escape_filter_chars$"
+  match_examples:
+  - name: sanitizer ldap3 utils escape filter chars
+    code: |
+      import ldap3
+      def example(user_input):
+          return ldap3.utils.conv.escape_filter_chars(user_input)
+    expect_match_text: [ldap3.utils.conv.escape_filter_chars]
+  description: ldap3.utils.conv.escape_filter_chars — fully qualified RFC-4515 LDAP filter escaping helper.
+
+- id: python.sanitizer.escape_filter_chars_bare
+  enabled: true
+  language: python
+  tag: ldap-escape
+  packages: [ldap3, ldap]
+  match:
+    kind: call
+    callee:
+      regex: "^escape_filter_chars$"
+  match_examples:
+  - name: sanitizer bare escape filter chars
+    code: |
+      import ldap3
+      def example(user_input):
+          return escape_filter_chars(user_input)
+    expect_match_text: [escape_filter_chars]
+  description: escape_filter_chars(value) imported from ldap3.utils.conv or ldap.filter — escapes LDAP filter metacharacters.
+
+- id: python.sanitizer.python_ldap_escape_filter_chars
+  enabled: true
+  language: python
+  tag: ldap-escape
+  packages: [ldap]
+  imports: [ldap]
+  match:
+    kind: call
+    callee:
+      regex: "^ldap\\.filter\\.escape_filter_chars$"
+  match_examples:
+  - name: sanitizer python ldap escape filter chars
+    code: |
+      import ldap
+      def example(user_input):
+          return ldap.filter.escape_filter_chars(user_input)
+    expect_match_text: [ldap.filter.escape_filter_chars]
+  description: python-ldap ldap.filter.escape_filter_chars — RFC-4515 filter escape.
+
+# -- Numeric coerce --------------------------------------------------
+- id: python.sanitizer.int_coerce
+  enabled: true
+  language: python
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: int
+  match_examples:
+  - name: sanitizer int coerce
+    code: |
+      def example(user_input):
+          return int(user_input)
+    expect_match_text: [int]
+  description: int() — raises on non-numeric input, neutralising SQL / XSS / cmdi taint in numeric contexts.
+
+- id: python.sanitizer.float_coerce
+  enabled: true
+  language: python
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: float
+  match_examples:
+  - name: sanitizer float coerce
+    code: |
+      def example(user_input):
+          return float(user_input)
+    expect_match_text: [float]
+  description: float() — coerces to float; raises on non-numeric input.
+
+- id: python.sanitizer.uuid_parse
+  enabled: true
+  language: python
+  tag: numeric-coerce
+  imports: [uuid]
+  match:
+    kind: call
+    callee:
+      attribute: [uuid, UUID]
+  match_examples:
+  - name: sanitizer uuid parse
+    code: |
+      import uuid
+      def example(user_input):
+          return uuid.UUID(user_input)
+    expect_match_text: [uuid.UUID]
+  description: uuid.UUID() — strict parse; raises on invalid input and yields a fixed-format value.
+
+# -- Constant-time compare ------------------------------------------
+- id: python.sanitizer.hmac_compare_digest
+  enabled: true
+  language: python
+  tag: constant-time
+  packages: [hmac]
+  imports: [hmac]
+  match:
+    kind: call
+    callee:
+      regex: "^hmac\\.compare_digest$"
+  match_examples:
+  - name: sanitizer hmac compare digest
+    code: |
+      import hmac
+      def example(user_input):
+          return hmac.compare_digest(user_input)
+    expect_match_text: [hmac.compare_digest]
+  description: hmac.compare_digest — constant-time comparison; neutralises timing side-channels.
+
+- id: python.sanitizer.secrets_compare_digest
+  enabled: true
+  language: python
+  tag: constant-time
+  packages: [secrets]
+  imports: [secrets]
+  match:
+    kind: call
+    callee:
+      regex: "^secrets\\.compare_digest$"
+  match_examples:
+  - name: sanitizer secrets compare digest
+    code: |
+      import secrets
+      def example(user_input):
+          return secrets.compare_digest(user_input)
+    expect_match_text: [secrets.compare_digest]
+  description: secrets.compare_digest — constant-time compare (alias of hmac.compare_digest).
+
+# -- JWT verify ------------------------------------------------------
+- id: python.sanitizer.pyjwt_decode_verified
+  enabled: true
+  language: python
+  tag: jwt-verify
+  packages: [pyjwt]
+  imports: [jwt]
+  match:
+    kind: call
+    callee:
+      regex: "^jwt\\.decode$"
+  constraints:
+  - keyword_arg_equals:
+      name: verify
+      value: "True"
+  match_examples:
+  - name: sanitizer pyjwt decode verified
+    code: |
+      import pyjwt
+      def example(user_input):
+          return jwt.decode(user_input, verify=True)
+    expect_match_text: [jwt.decode]
+  - name: sanitizer pyjwt decode verified negative constraint boundary
+    code: "import pyjwt\ndef example(user_input):\n    return jwt.decode()\n"
+    expect_no_match: true
+  description: jwt.decode(..., verify=True) — strict verify form; pair with an `algorithms=[...]` allow-list upstream.
+
+- id: python.sanitizer.pyjwt_decode_algorithms_allowlist
+  enabled: true
+  language: python
+  tag: jwt-verify
+  packages: [pyjwt]
+  imports: [jwt]
+  match:
+    kind: call
+    callee:
+      regex: "^jwt\\.decode$"
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: "^\\[\\s*['\"](?:RS|ES|PS|HS)[0-9A-Za-z_-]+['\"]"
+  - arg_not_matches_regex:
+      index: 0
+      regex: "verify\\s*=\\s*False|verify_signature['\"]\\s*:\\s*False|['\"]none['\"]"
+  match_examples:
+  - name: sanitizer pyjwt decode algorithms allowlist
+    code: |
+      import pyjwt
+      def example(user_input, key):
+          return jwt.decode(user_input, key, algorithms=["RS256"])
+    expect_match_text: [jwt.decode]
+  - name: sanitizer pyjwt decode algorithms allowlist negative constraint boundary
+    code: "import pyjwt\ndef example(user_input, key):\n    return jwt.decode()\n"
+    expect_no_match: true
+  description: jwt.decode(..., algorithms=[...]) without disabled signature verification — verifies token signatures with an explicit algorithm allowlist.
+
+# -- Auth hashing ----------------------------------------------------
+- id: python.sanitizer.werkzeug_check_password_hash
+  enabled: true
+  language: python
+  tag: auth-sanitizer
+  packages: [werkzeug]
+  match:
+    kind: call
+    callee:
+      attribute: [werkzeug, security, check_password_hash]
+  match_examples:
+  - name: sanitizer werkzeug check password hash
+    code: |
+      import werkzeug
+      def example(user_input):
+          return werkzeug.security.check_password_hash(user_input)
+    expect_match_text: [werkzeug.security.check_password_hash]
+  description: werkzeug.security.check_password_hash — constant-time-ish PBKDF2/scrypt password check.
+
+- id: python.sanitizer.argon2_verify
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: auth-sanitizer
+  packages: ["argon2"]
+  match:
+    kind: call
+    callee:
+      attribute: [PasswordHasher, verify]
+  description: "Disabled — PasswordHasher.verify is usually called through an instance, and v1 matching would treat every .verify call as this sanitizer."
+
+- id: python.sanitizer.bcrypt_checkpw
+  enabled: true
+  language: python
+  tag: auth-sanitizer
+  packages: [bcrypt]
+  match:
+    kind: call
+    callee:
+      attribute: [bcrypt, checkpw]
+  match_examples:
+  - name: sanitizer bcrypt checkpw
+    code: |
+      import bcrypt
+      def example(user_input):
+          return bcrypt.checkpw(user_input)
+    expect_match_text: [bcrypt.checkpw]
+  description: "bcrypt.checkpw — verifies a password against a bcrypt hash using bcrypt's password-check primitive."
+
+# -- Pydantic / msgspec validation gates -----------------------------
+- id: python.sanitizer.pydantic_model_validate
+  enabled: true
+  language: python
+  tag: validation
+  packages: [pydantic]
+  match:
+    kind: call
+    callee:
+      attribute: [BaseModel, model_validate]
+  match_examples:
+  - name: sanitizer pydantic model validate
+    code: |
+      import pydantic
+      def example(user_input):
+          return BaseModel.model_validate(user_input)
+    expect_match_text: [BaseModel.model_validate]
+  description: "pydantic v2 Model.model_validate — coerces and validates input against a declared schema; downstream value is shape-constrained."
+
+- id: python.sanitizer.pydantic_model_validate_json
+  enabled: true
+  language: python
+  tag: validation
+  packages: [pydantic]
+  match:
+    kind: call
+    callee:
+      attribute: [BaseModel, model_validate_json]
+  match_examples:
+  - name: sanitizer pydantic model validate json
+    code: |
+      import pydantic
+      def example(user_input):
+          return BaseModel.model_validate_json(user_input)
+    expect_match_text: [BaseModel.model_validate_json]
+  description: "pydantic v2 Model.model_validate_json — parses and validates request JSON against a declared schema."
+
+- id: python.sanitizer.pydantic_parse_obj
+  enabled: true
+  language: python
+  tag: validation
+  packages: [pydantic]
+  match:
+    kind: call
+    callee:
+      attribute: [BaseModel, parse_obj]
+  match_examples:
+  - name: sanitizer pydantic parse obj
+    code: |
+      import pydantic
+      def example(user_input):
+          return BaseModel.parse_obj(user_input)
+    expect_match_text: [BaseModel.parse_obj]
+  description: "pydantic v1 Model.parse_obj — coerces and validates against schema."
+
+- id: python.sanitizer.pydantic_parse_raw
+  enabled: true
+  language: python
+  tag: validation
+  packages: [pydantic]
+  match:
+    kind: call
+    callee:
+      attribute: [BaseModel, parse_raw]
+  match_examples:
+  - name: sanitizer pydantic parse raw
+    code: |
+      import pydantic
+      def example(user_input):
+          return BaseModel.parse_raw(user_input)
+    expect_match_text: [BaseModel.parse_raw]
+  description: "pydantic v1 Model.parse_raw — parses and validates request JSON/string input against a schema."
+
+- id: python.sanitizer.pydantic_type_adapter_validate
+  enabled: true
+  language: python
+  tag: validation
+  packages: [pydantic]
+  match:
+    kind: call
+    callee:
+      attribute: [TypeAdapter, validate_python]
+  match_examples:
+  - name: sanitizer pydantic type adapter validate
+    code: |
+      import pydantic
+      def example(user_input):
+          return TypeAdapter.validate_python(user_input)
+    expect_match_text: [TypeAdapter.validate_python]
+  description: "pydantic TypeAdapter.validate_python — type-only validation."
+
+- id: python.sanitizer.msgspec_convert
+  enabled: true
+  language: python
+  tag: validation
+  packages: [msgspec]
+  match:
+    kind: call
+    callee:
+      attribute: [msgspec, convert]
+  match_examples:
+  - name: sanitizer msgspec convert
+    code: |
+      import msgspec
+      def example(user_input):
+          return msgspec.convert(user_input)
+    expect_match_text: [msgspec.convert]
+  description: "msgspec.convert — strict struct-typed validation."
+
+- id: python.sanitizer.jsonschema_validate
+  enabled: true
+  language: python
+  tag: schema-validate
+  packages: [jsonschema]
+  match:
+    kind: call
+    callee:
+      attribute: [jsonschema, validate]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: sanitizer jsonschema validate
+    code: |
+      import jsonschema
+      def example(user_input, schema):
+          return jsonschema.validate(user_input, schema)
+    expect_match_text: [jsonschema.validate]
+  description: "jsonschema.validate(instance, schema) — validates JSON-like data against an explicit schema."
+
+- id: python.sanitizer.jsonschema_validator_validate
+  enabled: true
+  language: python
+  tag: schema-validate
+  packages: [jsonschema]
+  match:
+    kind: call
+    callee:
+      regex: "^Draft[0-9A-Za-z_]*Validator\\.validate$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: sanitizer jsonschema draft validator validate
+    code: |
+      import jsonschema
+      def example(user_input):
+          return Draft7Validator.validate(user_input)
+    expect_match_text: [Draft7Validator.validate]
+  description: "jsonschema Draft*Validator.validate(instance) — schema-backed validation gate."
+
+- id: python.sanitizer.marshmallow_schema_load
+  enabled: true
+  language: python
+  tag: schema-validate
+  packages: [marshmallow]
+  match:
+    kind: call
+    callee:
+      attribute: [Schema, load]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: sanitizer marshmallow schema load
+    code: |
+      import marshmallow
+      def example(user_input):
+          return Schema.load(user_input)
+    expect_match_text: [Schema.load]
+  description: "marshmallow Schema.load(data) — validates and deserializes request data through a declared schema."
+
+# -- Path containment ------------------------------------------------
+- id: python.sanitizer.werkzeug_safe_join
+  enabled: true
+  language: python
+  tag: path-sanitize
+  packages: [werkzeug]
+  match:
+    kind: call
+    callee:
+      attribute: [werkzeug, security, safe_join]
+  match_examples:
+  - name: sanitizer werkzeug safe join
+    code: |
+      import werkzeug
+      def example(user_input):
+          return werkzeug.security.safe_join(user_input)
+    expect_match_text: [werkzeug.security.safe_join]
+  description: "werkzeug.security.safe_join — joins path components and rejects traversal attempts; safe for serving from a fixed root."
+
+- id: python.sanitizer.markupsafe_markup_constructor
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: html-encode
+  packages: [markupsafe]
+  match:
+    kind: call
+    callee:
+      name: Markup
+  description: "Disabled - markupsafe.Markup() marks a value as ALREADY safe; that is the OPPOSITE of sanitization. Kept off so it's not credited as cleansing."
+
+# -- Open-redirect mitigations (CTFd-driven gap fix) -----------------
+- id: python.sanitizer.flask_validators_is_safe_url
+  enabled: true
+  language: python
+  tag: open-redirect-sanitize
+  match:
+    kind: call
+    callee:
+      regex: "^(validators\\.)?is_safe_url$"
+  match_examples:
+  - name: sanitizer flask validators is safe url
+    code: |
+      def example(user_input):
+          return validators.is_safe_url(user_input)
+    expect_match_text: [validators.is_safe_url]
+  description: "validators.is_safe_url(url) / is_safe_url(url) - boolean redirect-target check (Flask/Flask-Login canonical mitigation); pair with a host allowlist. CTFd uses the bare `is_safe_url` form; Flask-Login exposes it as `flask_login.utils.is_safe_url`."
+
+- id: python.sanitizer.django_url_has_allowed_host_and_scheme
+  enabled: true
+  language: python
+  tag: open-redirect-sanitize
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      regex: "^(http\\.)?url_has_allowed_host_and_scheme$"
+  match_examples:
+  - name: sanitizer django url has allowed host and scheme
+    code: |
+      import django
+      def example(user_input):
+          return http.url_has_allowed_host_and_scheme(user_input)
+    expect_match_text: [http.url_has_allowed_host_and_scheme]
+  description: "Django http.url_has_allowed_host_and_scheme - validates redirect target against allowed-hosts list."
+
+- id: python.sanitizer.django_is_safe_url_legacy
+  enabled: true
+  language: python
+  tag: open-redirect-sanitize
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      regex: "^(http\\.)?is_safe_url$"
+  match_examples:
+  - name: sanitizer django is safe url legacy
+    code: |
+      import django
+      def example(user_input):
+          return http.is_safe_url(user_input)
+    expect_match_text: [http.is_safe_url]
+  description: "Django legacy http.is_safe_url (renamed to url_has_allowed_host_and_scheme in Django 3.0+); same semantics."
+
+- id: python.sanitizer.named_url_allowlist_check
+  enabled: true
+  language: python
+  tag: ssrf-sanitize
+  match:
+    kind: call
+    callee:
+      regex: "^(is_allowed_url|is_allowed_host|is_trusted_host|validate_outbound_url|validate_callback_url)$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: named url allowlist check
+    code: |
+      def example(user_input):
+          return is_allowed_url(user_input)
+    expect_match_text: [is_allowed_url]
+  description: "Project-local URL/host allowlist validator by conventional name; credits explicit allowlist checks before SSRF-sensitive outbound requests."
+
+- id: python.sanitizer.werkzeug_url_join
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: open-redirect-sanitize
+  packages: [werkzeug]
+  match:
+    kind: call
+    callee:
+      attribute: [werkzeug, urls, url_join]
+  description: "Disabled - url_join only normalizes; does not validate target host. Enable only when paired with a downstream allowlist check."
+
+- id: python.sanitizer.same_origin_path_startswith
+  enabled: true
+  language: python
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      regex: "^(path|pathname|next|return_to|redirect|redirect_to|redirect_url|url)\\.startswith$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]\\/['\"]$"
+  match_examples:
+  - name: same-origin redirect path guard
+    code: |
+      def safe_redirect(next):
+          if next.startswith("/") and not next.startswith("//"):
+              return next
+          return "/"
+    expect_match_text: [next.startswith]
+  - name: same-origin redirect path guard negative constraint boundary
+    code: "def safe_redirect(next):\n    if next.startswith() and not next.startswith(\"//\"):\n        return next\n    return \"/\"\n"
+    expect_no_match: true
+  description: "str.startswith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with a sibling `not startswith(\"//\")` network-path guard."
+
+# -- Focused allowlist / regex / SQL binding validators -----------------------
+- id: python.sanitizer.allowlist_dict_get
+  enabled: true
+  language: python
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(allowed|allowlist|allowed_map|allowed_routes|allowed_targets)\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: named dict allowlist get
+    code: |
+      allowed_routes = {"home": "/home", "profile": "/profile"}
+      def pick(name):
+          return allowed_routes.get(name, "/")
+    expect_match_text: [allowed_routes.get]
+  description: "dict.get on allowlist-named finite maps - selects only mapped trusted values or an explicit default."
+
+- id: python.sanitizer.enum_members_get
+  enabled: true
+  language: python
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.__members__\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: enum members get allowlist
+    code: |
+      def parse_status(Status, user_input):
+          return Status.__members__.get(user_input)
+    expect_match_text: [Status.__members__.get]
+  description: "Enum.__members__.get(value) — finite enum member lookup that only returns declared values."
+
+- id: python.sanitizer.literal_allowed_values_get
+  enabled: true
+  language: python
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(allowed_values|allowed_names|allowed_keys|choices|valid_choices)\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: allowed values get
+    code: |
+      allowed_values = {"asc": "ASC", "desc": "DESC"}
+      def parse_order(user_input):
+          return allowed_values.get(user_input, "ASC")
+    expect_match_text: [allowed_values.get]
+  description: "dict.get on choices/allowed-values maps — finite allowlist selection from trusted mapped values."
+
+- id: python.sanitizer.re_fullmatch_allowlist
+  enabled: true
+  language: python
+  tag: regex-validate
+  packages: [re]
+  imports: [re]
+  match:
+    kind: call
+    callee:
+      regex: "^re\\.fullmatch$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^r?['\"]\\^?\\[[A-Za-z0-9_\\\\\\- ]+\\]"
+  match_examples:
+  - name: re fullmatch character allowlist
+    code: |
+      import re
+      def ok(slug):
+          return re.fullmatch(r"^[A-Za-z0-9_-]+$", slug)
+    expect_match_text: [re.fullmatch]
+  - name: re fullmatch character allowlist negative constraint boundary
+    code: "import re\ndef ok(slug):\n    return re.fullmatch()\n"
+    expect_no_match: true
+  description: "re.fullmatch with a literal anchored character allowlist pattern."
+
+- id: python.sanitizer.re_match_allowlist
+  enabled: true
+  language: python
+  tag: regex-validate
+  packages: [re]
+  imports: [re]
+  match:
+    kind: call
+    callee:
+      regex: "^re\\.match$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^r?['\"]\\^\\[[A-Za-z0-9_\\\\\\- ]+\\]"
+  match_examples:
+  - name: re match anchored character allowlist
+    code: |
+      import re
+      def ok(slug):
+          return re.match(r"^[A-Za-z0-9_-]+$", slug)
+    expect_match_text: [re.match]
+  - name: re match anchored character allowlist negative constraint boundary
+    code: "import re\ndef ok(slug):\n    return re.match()\n"
+    expect_no_match: true
+  description: "re.match with an anchored literal character allowlist pattern."
+
+- id: python.sanitizer.named_regex_fullmatch
+  enabled: true
+  language: python
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(uuid_re|slug_re|id_re|safe_re|allowed_re)\\.fullmatch$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: named regex fullmatch
+    code: |
+      def ok(slug_re, slug):
+          return slug_re.fullmatch(slug)
+    expect_match_text: [slug_re.fullmatch]
+  description: "Named compiled regex fullmatch validators, constrained to UUID/slug/id/safe/allowed receiver names."
+
+- id: python.sanitizer.named_regex_match
+  enabled: true
+  language: python
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(uuid_re|slug_re|id_re|safe_re|allowed_re)\\.match$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: named regex match
+    code: |
+      def ok(slug_re, slug):
+          return slug_re.match(slug)
+    expect_match_text: [slug_re.match]
+  description: "Named compiled regex match validators, constrained to UUID/slug/id/safe/allowed receiver names."
+
+- id: python.sanitizer.dbapi_execute_params
+  enabled: true
+  language: python
+  tag: sql-parameter
+  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^(['\"])[^'\"]*(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|VALUES)[^'\"]*(\\?|%s|:[A-Za-z_][A-Za-z0-9_]*|\\$[0-9]+)"
+  - arg_not_matches_regex:
+      index: 0
+      regex: "f['\"]|\\+|\\.format\\("
+  match_examples:
+  - name: dbapi execute with params
+    code: |
+      import sqlite3
+      def by_id(cursor, user_id):
+          return cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+    expect_match_text: [cursor.execute]
+  - name: dbapi execute with params negative constraint boundary
+    code: "import sqlite3\ndef by_id(cursor, user_id):\n    return cursor.execute()\n"
+    expect_no_match: true
+  description: "Python DB-API execute(sql, params) with a literal placeholder SQL string and separate parameter argument. Receiver-agnostic; OnlyWhenPackaged gate on canonical DB-API drivers prevents over-matching."
+
+- id: python.sanitizer.dbapi_executemany_params
+  enabled: true
+  language: python
+  tag: sql-parameter
+  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.executemany$"
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^(['\"])[^'\"]*(INSERT|UPDATE|DELETE|VALUES)[^'\"]*(\\?|%s|:[A-Za-z_][A-Za-z0-9_]*|\\$[0-9]+)"
+  - arg_not_matches_regex:
+      index: 0
+      regex: "f['\"]|\\+|\\.format\\("
+  match_examples:
+  - name: dbapi executemany with params
+    code: |
+      import sqlite3
+      def insert_many(cursor, rows):
+          return cursor.executemany("INSERT INTO users(name) VALUES (%s)", rows)
+    expect_match_text: [cursor.executemany]
+  - name: dbapi executemany with params negative constraint boundary
+    code: "import sqlite3\ndef insert_many(cursor, rows):\n    return cursor.executemany()\n"
+    expect_no_match: true
+  description: "Python DB-API executemany(sql, seq_of_params) with a literal placeholder SQL string and separate parameter rows. Receiver-agnostic; OnlyWhenPackaged gate on canonical DB-API drivers prevents over-matching."
+
+- id: python.sanitizer.asyncpg_execute_params
+  enabled: true
+  language: python
+  tag: sql-parameter
+  packages: [asyncpg]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.(execute|fetch|fetchrow|fetchval)$"
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^(['\"])[^'\"]*\\$[0-9]+"
+  - arg_not_matches_regex:
+      index: 0
+      regex: "f['\"]|\\+|\\.format\\("
+  match_examples:
+  - name: asyncpg execute with params
+    code: |
+      import asyncpg
+      async def by_id(conn, user_id):
+          return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    expect_match_text: [conn.fetchrow]
+  - name: asyncpg execute with params negative constraint boundary
+    code: "import asyncpg\nasync def by_id(conn, user_id):\n    return await conn.fetchrow()\n"
+    expect_no_match: true
+  description: "asyncpg execute/fetch with $1 placeholders and separate arguments — parameterized query shape."
+
+- id: python.sanitizer.char_allowlist_re_sub_strip
+  enabled: true
+  language: python
+  tag: char-allowlist
+  packages: [re]
+  imports: [re]
+  match:
+    kind: call
+    callee:
+      regex: "^re\\.sub$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^r?['\"]\\[\\^[A-Za-z0-9_\\\\\\- .:@\\/]+\\]"
+  - arg_matches_regex:
+      index: 1
+      regex: "^['\"]['\"]$"
+  match_examples:
+  - name: re sub character allowlist strip
+    code: |
+      import re
+      def clean_name(value):
+          return re.sub(r"[^A-Za-z0-9_-]", "", value)
+    expect_match_text: [re.sub]
+  - name: re sub character allowlist strip negative constraint boundary
+    code: "import re\ndef clean_name(value):\n    return re.sub()\n"
+    expect_no_match: true
+  description: "re.sub(r\"[^allowlist]\", \"\", value) - strips every character outside a small explicit allowlist."
+
+# -- SAML / SSO assertion verifiers (auth sanitization) -------------
+- id: python.sanitizer.python3_saml_is_valid
+  enabled: true
+  language: python
+  tag: jwt-verify
+  packages: [onelogin.saml2]
+  match:
+    kind: call
+    callee:
+      attribute: [OneLogin_Saml2_Auth, is_authenticated]
+  match_examples:
+  - name: sanitizer python3 saml is valid
+    code: |
+      import python3saml
+      def example(user_input):
+          return OneLogin_Saml2_Auth.is_authenticated(user_input)
+    expect_match_text: [OneLogin_Saml2_Auth.is_authenticated]
+  description: "python3-saml is_authenticated - confirms SAMLResponse signature + assertions; safe gate before trusting SAML attributes."
+
+# -- itsdangerous signed-token verifiers ----------------------------
+  imports:
+  - python3saml
+- id: python.sanitizer.itsdangerous_unsign
+  enabled: true
+  language: python
+  tag: signed-token-verify
+  packages: [itsdangerous]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.unsign$"
+  match_examples:
+  - name: sanitizer itsdangerous unsign
+    code: |
+      import itsdangerous
+      def example(user_input):
+          return signer.unsign(user_input)
+    expect_match_text: [signer.unsign]
+  description: "itsdangerous Signer/TimestampSigner.unsign - raises BadSignature on tampering; downstream value is signed-by-this-key."
+
+- id: python.sanitizer.itsdangerous_loads
+  enabled: true
+  language: python
+  tag: signed-token-verify
+  packages: [itsdangerous]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.loads$"
+  match_examples:
+  - name: sanitizer itsdangerous loads
+    code: |
+      import itsdangerous
+      def example(user_input):
+          return signer.loads(user_input)
+    expect_match_text: [signer.loads]
+  description: "itsdangerous Serializer/URLSafeSerializer/TimedSerializer.loads - signature-verifying deserialization (NOT pickle - safe by default)."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: python.passthrough.urllib_unquote
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [parse, unquote]
+  match_examples:
+  - name: passthrough urllib unquote
+    code: |
+      def example(user_input):
+          return parse.unquote(user_input)
+    expect_match_text: [parse.unquote]
+  description: "urllib.parse.unquote(s) — decodes percent-encoded bytes; preserves taint."
+- id: python.passthrough.urllib_unquote_plus
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [parse, unquote_plus]
+  match_examples:
+  - name: passthrough urllib unquote plus
+    code: |
+      def example(user_input):
+          return parse.unquote_plus(user_input)
+    expect_match_text: [parse.unquote_plus]
+  description: "urllib.parse.unquote_plus(s) — decode + replaces '+' with space; preserves taint."
+- id: python.passthrough.urllib_unquote_to_bytes
+  enabled: true
+  language: python
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [parse, unquote_to_bytes]
+  match_examples:
+  - name: passthrough urllib unquote to bytes
+    code: |
+      def example(user_input):
+          return parse.unquote_to_bytes(user_input)
+    expect_match_text: [parse.unquote_to_bytes]
+  description: "urllib.parse.unquote_to_bytes(s) — bytes variant; preserves taint."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: python.csrf.flask_wtf_csrf_protect
+  enabled: true
+  language: python
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: CSRFProtect
+  match_examples:
+  - name: csrf flask wtf csrf protect
+    code: |
+      def example(user_input):
+          return CSRFProtect(user_input)
+    expect_match_text: [CSRFProtect]
+  description: "Flask-WTF CSRFProtect(app) — installs CSRF token validation across all POST routes."
+- id: python.csrf.django_csrf_middleware
+  enabled: true
+  language: python
+  tag: csrf-protect
+  match:
+    kind: write
+    target:
+      name: MIDDLEWARE
+  constraints:
+  - any_arg_matches_regex: |-
+      CsrfViewMiddleware
+  match_examples:
+  - name: csrf django csrf middleware
+    code: |
+      def example():
+          MIDDLEWARE = ["django.middleware.csrf.CsrfViewMiddleware"]
+          return MIDDLEWARE
+    expect_match_text: [MIDDLEWARE]
+  - name: csrf django csrf middleware negative constraint boundary
+    code: "def example():\n    MIDDLEWARE()\n"
+    expect_no_match: true
+  description: "Django MIDDLEWARE entry for CsrfViewMiddleware — global CSRF enforcement."
+- id: python.csrf.django_csrf_protect_decorator
+  enabled: true
+  language: python
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: csrf_protect
+  match_examples:
+  - name: csrf django csrf protect decorator
+    code: |
+      @csrf_protect()
+      def view(request):
+          return request
+    expect_match_text: [csrf_protect]
+  description: "@csrf_protect decorator — view-scoped CSRF enforcement."
+- id: python.csrf.fastapi_csrf
+  enabled: true
+  language: python
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: CsrfProtect
+  match_examples:
+  - name: csrf fastapi csrf
+    code: |
+      def example(user_input):
+          return CsrfProtect(user_input)
+    expect_match_text: [CsrfProtect]
+  description: "fastapi-csrf-protect CsrfProtect()."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: python.lock.threading_lock_acquire
+  enabled: true
+  language: python
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [Lock, acquire]
+  match_examples:
+  - name: lock threading lock acquire
+    code: |
+      def example(user_input):
+          return Lock.acquire(user_input)
+    expect_match_text: [Lock.acquire]
+  description: "threading.Lock.acquire() — guards subsequent shared-state access."
+- id: python.lock.threading_rlock_acquire
+  enabled: true
+  language: python
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [RLock, acquire]
+  match_examples:
+  - name: lock threading rlock acquire
+    code: |
+      def example(user_input):
+          return RLock.acquire(user_input)
+    expect_match_text: [RLock.acquire]
+  description: "threading.RLock.acquire() — re-entrant lock acquire."
+- id: python.lock.with_lock_context
+  enabled: true
+  language: python
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [Lock, __enter__]
+  match_examples:
+  - name: lock with lock context
+    code: |
+      def example(user_input):
+          return Lock.__enter__(user_input)
+    expect_match_text: [Lock.__enter__]
+  description: "`with lock:` enters the guarded block."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: python.cookie.set_cookie_with_httponly
+  enabled: true
+  language: python
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [response, set_cookie]
+  constraints:
+  - any_arg_matches_regex: |-
+      httponly.*True|secure.*True
+  match_examples:
+  - name: cookie set cookie with httponly
+    code: |
+      def example(user_input):
+          return response.set_cookie(user_input, "httponly=True")
+    expect_match_text: [response.set_cookie]
+  - name: cookie set cookie with httponly negative constraint boundary
+    code: "def example(user_input):\n    return response.set_cookie()\n"
+    expect_no_match: true
+  description: "response.set_cookie(name, val, httponly=True, secure=True) — Django/Flask."
+
+# Rate-limit middleware presence sanitizers (architectural).
+- id: python.ratelimit.flask_limiter
+  enabled: true
+  language: python
+  tag: rate-limit
+  packages: [flask_limiter]
+  match:
+    kind: call
+    callee:
+      attribute: [Limiter, limit]
+  match_examples:
+  - name: ratelimit flask limiter
+    code: |
+      import flasklimiter
+      def example(user_input):
+          return Limiter.limit(user_input)
+    expect_match_text: [Limiter.limit]
+  description: "Flask-Limiter @limiter.limit decorator — presence signals throttling."
+  imports:
+  - flasklimiter
+- id: python.ratelimit.django_ratelimit_decorator
+  enabled: true
+  language: python
+  tag: rate-limit
+  packages: [django_ratelimit]
+  match:
+    kind: call
+    callee:
+      name: ratelimit
+  match_examples:
+  - name: ratelimit django ratelimit decorator
+    code: |
+      import djangoratelimit
+      def example(user_input):
+          return ratelimit(user_input)
+    expect_match_text: [ratelimit]
+  description: "django-ratelimit @ratelimit decorator."
+  imports:
+  - djangoratelimit

@@ -1,0 +1,25 @@
+[package]
+name = "bonsai_conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reusable conformance test macros for language adapters."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_workspace = { workspace = true }
+bonsai_testkit = { workspace = true }
+
+[dev-dependencies]
+bonsai_adapters = { workspace = true }
+serde_yaml = "0.9"
+tree-sitter = { workspace = true }
+
+[lints]
+workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["bonsai_common"]

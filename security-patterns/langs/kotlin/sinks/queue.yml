@@ -1,0 +1,188 @@
+- id: kotlin.queue.aws_sqs_send_message
+  enabled: true
+  language: kotlin
+  tag: queue-injection
+  severity: high
+  packages: ["software.amazon.awssdk:sqs"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "^SqsClient\\.sendMessage$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import software.amazon.awssdk.sqs.*
+      class App {
+        fun handle(input: String) {
+          SqsClient.sendMessage(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import software.amazon.awssdk.sqs.*
+      class App {
+      fun handle(input: String) {
+        SqsClient.sendMessage("safe")
+      }
+      }
+    expect_no_match: true
+  description: "SqsClient.sendMessage — tainted queue target/body injects arbitrary SQS messages."
+
+  imports:
+  - software.amazon.awssdk.sqs
+  - software
+- id: kotlin.queue.aws_sns_publish
+  enabled: true
+  language: kotlin
+  tag: queue-injection
+  severity: high
+  packages: ["software.amazon.awssdk:sns"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      attribute: [SnsClient, publish]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import software.amazon.awssdk.sns.*
+      // uses software.amazon.awssdk:sns
+      class App {
+        fun handle(input: String) {
+          SnsClient.publish(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import software.amazon.awssdk.sns.*
+      // uses software.amazon.awssdk:sns
+      class App {
+      fun handle(input: String) {
+        SnsClient.publish("safe")
+      }
+      }
+    expect_no_match: true
+  description: "SnsClient.publish — tainted topic/message injects arbitrary SNS fanout."
+
+  imports:
+  - software
+  - software.amazon.awssdk.sns
+- id: kotlin.queue.azure_servicebus_send_message
+  enabled: true
+  language: kotlin
+  tag: queue-injection
+  severity: high
+  packages: ["com.azure:azure-messaging-servicebus"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "^ServiceBusSenderClient\\.sendMessage$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.azure.azuremessagingservicebus.*
+      class App {
+        fun handle(input: String) {
+          ServiceBusSenderClient.sendMessage(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.azure.azuremessagingservicebus.*
+      class App {
+      fun handle(input: String) {
+        ServiceBusSenderClient.sendMessage("safe")
+      }
+      }
+    expect_no_match: true
+  description: "ServiceBusSenderClient.sendMessage — tainted entity path/payload injects arbitrary Service Bus messages."
+
+  imports:
+  - com.azure.azuremessagingservicebus
+  - com
+- id: kotlin.queue.azure_eventhub_send
+  enabled: true
+  language: kotlin
+  tag: queue-injection
+  severity: high
+  packages: ["com.azure:azure-messaging-eventhubs"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      attribute: [EventHubProducerClient, send]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.azure.azuremessagingeventhubs.*
+      class App {
+        fun handle(input: String) {
+          EventHubProducerClient.send(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.azure.azuremessagingeventhubs.*
+      class App {
+      fun handle(input: String) {
+        EventHubProducerClient.send("safe")
+      }
+      }
+    expect_no_match: true
+  description: "EventHubProducerClient.send — tainted event batch injects arbitrary Event Hub payloads."
+
+  imports:
+  - com.azure.azuremessagingeventhubs
+  - com
+- id: kotlin.queue.gcp_pubsub_publish
+  enabled: true
+  language: kotlin
+  tag: queue-injection
+  severity: high
+  packages: ["com.google.cloud:google-cloud-pubsub"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      attribute: [Publisher, publish]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.google.cloud.googlecloudpubsub.*
+      // uses com.google.cloud:google-cloud-pubsub
+      class App {
+        fun handle(input: String) {
+          Publisher.publish(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.google.cloud.googlecloudpubsub.*
+      // uses com.google.cloud:google-cloud-pubsub
+      class App {
+      fun handle(input: String) {
+        Publisher.publish("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Publisher.publish — tainted topic message injects arbitrary Pub/Sub payloads."
+  imports:
+  - com
+  - com.google.cloud.googlecloudpubsub

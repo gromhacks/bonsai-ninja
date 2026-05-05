@@ -1,0 +1,79 @@
+- id: java.smtpinj.mime_message_set_subject
+  enabled: true
+  language: java
+  tag: smtp-injection
+  severity: medium
+  packages: ["javax.mail", "jakarta.mail"]
+  imports: ["javax.mail", "jakarta.mail"]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [MimeMessage, setSubject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mime message setSubject tainted
+    code: |
+      import javax.mail.internet.MimeMessage;
+      import javax.mail.Session;
+      class App {
+        void handle(String input, Session session) throws Exception {
+          MimeMessage msg = new MimeMessage(session);
+          msg.setSubject(input);
+        }
+      }
+    expect_match_text: [msg.setSubject]
+  - name: literal subject negative
+    code: |
+      import javax.mail.internet.MimeMessage;
+      import javax.mail.Session;
+      class App {
+        void handle(Session session) throws Exception {
+          MimeMessage msg = new MimeMessage(session);
+          msg.setSubject("fixed subject");
+        }
+      }
+    expect_no_match: true
+  description: "MimeMessage.setSubject — CR/LF in subject injects additional MIME headers."
+
+- id: java.smtpinj.mime_message_add_header
+  enabled: true
+  language: java
+  tag: smtp-injection
+  severity: medium
+  packages: ["javax.mail", "jakarta.mail"]
+  imports: ["javax.mail", "jakarta.mail"]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [MimeMessage, addHeader]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mime message addHeader tainted value
+    code: |
+      import javax.mail.internet.MimeMessage;
+      import javax.mail.Session;
+      class App {
+        void handle(String input, Session session) throws Exception {
+          MimeMessage msg = new MimeMessage(session);
+          msg.addHeader("X-Trace", input);
+        }
+      }
+    expect_match_text: [msg.addHeader]
+  - name: literal header value negative
+    code: |
+      import javax.mail.internet.MimeMessage;
+      import javax.mail.Session;
+      class App {
+        void handle(Session session) throws Exception {
+          MimeMessage msg = new MimeMessage(session);
+          msg.addHeader("X-Trace", "static-value");
+        }
+      }
+    expect_no_match: true
+  description: "MimeMessage.addHeader(name, value) — CR/LF in `value` injects additional headers."

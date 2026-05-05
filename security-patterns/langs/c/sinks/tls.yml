@@ -1,0 +1,79 @@
+# C TLS misconfig (OpenSSL + libcurl + GnuTLS).
+- id: c.tls.openssl_set_verify_none
+  enabled: true
+  language: c
+  tag: weak-tls
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: SSL_CTX_set_verify
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        SSL_CTX_set_verify(arg, SSL_VERIFY_NONE);
+      }
+  description: "SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL) — disables peer cert validation."
+- id: c.tls.ssl_set_verify_none
+  enabled: true
+  language: c
+  tag: weak-tls
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: SSL_set_verify
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        SSL_set_verify(arg, SSL_VERIFY_NONE);
+      }
+  description: "SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL) — per-connection verification disabled."
+- id: c.tls.openssl_min_proto_tls10
+  aliases:
+  - c.tls.openssl_min_proto_ssl3
+  enabled: true
+  language: c
+  tag: weak-tls
+  severity: medium
+  packages: [openssl]
+  cwe: [CWE-326]
+  match:
+    kind: call
+    callee:
+      name: SSL_CTX_set_min_proto_version
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        SSL_CTX_set_min_proto_version(arg, TLS1_VERSION);
+      }
+  description: "SSL_CTX_set_min_proto_version(ctx, TLS1_VERSION) — allows TLS 1.0. Also covers merged aliases: c.tls.openssl_min_proto_ssl3."
+- id: c.tls.gnutls_certificate_set_verify_function
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  tag: weak-tls
+  severity: medium
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: gnutls_certificate_set_verify_function
+  description: "Disabled — flag only when callback returns 0 unconditionally."

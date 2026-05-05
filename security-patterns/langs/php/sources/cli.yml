@@ -1,0 +1,154 @@
+- id: php.source.argv
+  enabled: true
+  language: php
+  tag: cli-input
+  trust: local
+  match:
+    kind: read
+    target:
+      name: argv
+  match_examples:
+  - name: php.source.argv example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $argv;;\n}\n"
+  description: $argv — CLI arguments.
+- id: php.source.argc_read
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: cli-input
+  trust: local
+  match:
+    kind: read
+    target:
+      name: argc
+  description: Disabled — argc is a count, not a string source.
+- id: php.source.stdin_fopen
+  enabled: true
+  language: php
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      name: fopen
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"php://stdin"'
+  match_examples:
+  - name: php.source.stdin_fopen example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen(\"php://stdin\");\n}\n"
+  - name: php.source.stdin_fopen example negative constraint boundary
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen();\n}\n"
+    expect_no_match: true
+  description: fopen('php://stdin', 'r') — reads CLI stdin.
+- id: php.source.stdin_file_get_contents
+  enabled: true
+  language: php
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      name: file_get_contents
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"php://stdin"'
+  match_examples:
+  - name: php.source.stdin_file_get_contents example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents(\"php://stdin\");\n}\n"
+  - name: php.source.stdin_file_get_contents example negative constraint boundary
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents();\n}\n"
+    expect_no_match: true
+  description: file_get_contents('php://stdin').
+- id: php.source.getenv
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: env-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      name: getenv
+  description: Disabled — env vars only matter when crossing trust boundary.
+- id: php.source.env_super
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: env-input
+  trust: local
+  match:
+    kind: read
+    target:
+      name: _ENV
+  description: Disabled — $_ENV is local trust.
+- id: php.source.readline
+  enabled: true
+  language: php
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      name: readline
+  match_examples:
+  - name: php.source.readline example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  readline($input);\n}\n"
+  description: readline() — interactive CLI input.
+- id: php.source.symfony_console_input_get_argument
+  enabled: true
+  language: php
+  tag: cli-input
+  trust: local
+  packages:
+  - symfony/console
+  match:
+    kind: call
+    callee:
+      attribute:
+      - input
+      - getArgument
+  match_examples:
+  - name: php.source.symfony_console_input_get_argument example
+    code: |
+      <?php
+      use symfony\console;
+      use symfony\console;
+      function example($input, $url, $id, $payload, $request) {
+        $input->getArgument($input);
+      }
+  description: Symfony Console $input->getArgument — CLI-supplied argument.
+  imports:
+  - symfony\console
+  - symfony
+- id: php.source.symfony_console_input_get_option
+  enabled: true
+  language: php
+  tag: cli-input
+  trust: local
+  packages:
+  - symfony/console
+  match:
+    kind: call
+    callee:
+      attribute:
+      - input
+      - getOption
+  match_examples:
+  - name: php.source.symfony_console_input_get_option example
+    code: |
+      <?php
+      use symfony\console;
+      use symfony\console;
+      function example($input, $url, $id, $payload, $request) {
+        $input->getOption($input);
+      }
+  description: Symfony Console $input->getOption.
+  imports:
+  - symfony\console
+  - symfony

@@ -1,0 +1,110 @@
+- id: c.ssrf.curl_easy_setopt
+  aliases:
+  - c.ssrf.curl_easy_setopt_postfields
+  - c.tls.curl_ssl_verifypeer_off
+  - c.tls.curl_ssl_verifyhost_off
+  enabled: true
+  language: c
+  tag: ssrf
+  severity: high
+  packages: [libcurl]
+  cwe: [CWE-918, CWE-295]
+  match:
+    kind: call
+    callee:
+      name: curl_easy_setopt
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <curl/curl.h>
+      #include <curl/curl.h>
+      #include <curl/curl.h> /* libcurl */
+      #include <curl/curl.h> /* libcurl */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        curl_easy_setopt(arg, CURLOPT_URL);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        curl_easy_setopt("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "curl_easy_setopt(handle, CURLOPT_URL, tainted) — attacker-chosen URL. Also covers merged aliases: c.ssrf.curl_easy_setopt_postfields, c.tls.curl_ssl_verifypeer_off, c.tls.curl_ssl_verifyhost_off."
+  imports:
+  - curl/curl.h
+  - curl
+- id: c.ssrf.getaddrinfo
+  enabled: true
+  language: c
+  tag: ssrf
+  severity: medium
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: getaddrinfo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        getaddrinfo(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        getaddrinfo("safe");
+      }
+    expect_no_match: true
+  description: "getaddrinfo with tainted host — DNS lookup for attacker-chosen target."
+- id: c.ssrf.curl_easy_perform
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: ssrf
+  severity: medium
+  packages: [libcurl]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: curl_easy_perform
+  description: "Disabled — flag if URL is tainted."
+- id: c.ssrf.gethostbyname
+  enabled: true
+  language: c
+  tag: ssrf
+  severity: medium
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: gethostbyname
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        gethostbyname(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        gethostbyname("safe");
+      }
+    expect_no_match: true
+  description: "gethostbyname with tainted host."

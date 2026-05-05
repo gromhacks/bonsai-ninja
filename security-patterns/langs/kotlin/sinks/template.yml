@@ -1,0 +1,393 @@
+- id: kotlin.template.thymeleaf_processstring
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - org.thymeleaf
+  - freemarker
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TemplateEngine
+      - process
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.thymeleaf.*\n// uses org.thymeleaf\nclass App {\n  fun handle(input:\
+      \ String) {\n    TemplateEngine.process(\"{{\" + input)\n  }\n}\n"
+  - name: thymeleaf fragment expression concat
+    code: "import org.thymeleaf.*\n// uses org.thymeleaf\nclass App {\n  fun handle(fragment:\
+      \ String, ctx: Any): Any? {\n    return TemplateEngine.process(\"layout :: \"\
+      \ + fragment, ctx)\n  }\n}\n"
+    expect_match_text:
+    - TemplateEngine.process
+  - name: arg tainted literal negative
+    code: "import org.thymeleaf.*\n// uses org.thymeleaf\nclass App {\nfun handle(input:\
+      \ String) {\n  TemplateEngine.process(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: 'Thymeleaf TemplateEngine.process with tainted template. Merged collision
+    aliases: kotlin.template.freemarker_process, kotlin.template.freemarker_template_process_local.'
+  aliases:
+  - kotlin.template.freemarker_process
+  - kotlin.template.freemarker_template_process_local
+- id: kotlin.template.thymeleaf_fragment_concat
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - org.thymeleaf
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TemplateEngine
+      - process
+  description: "Disabled duplicate \u2014 folded into kotlin.template.thymeleaf_processstring\
+    \ with fragment-expression examples."
+- id: kotlin.template.thymeleaf_string_resolver
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: critical
+  packages:
+  - org.thymeleaf
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: StringTemplateResolver
+  match_examples:
+  - name: generated shape example
+    code: "import org.thymeleaf.*\nclass App {\n  fun handle(input: String) {\n  \
+      \  StringTemplateResolver(input)\n  }\n}\nclass StringTemplateResolver(vararg\
+      \ args: Any?)\n"
+  description: "new StringTemplateResolver \u2014 flag template source as tainted."
+- id: kotlin.template.freemarker_template_ctor
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: critical
+  packages:
+  - freemarker
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: Template
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: "import freemarker.*\nclass App {\n  fun handle(template: String, cfg: Any)\
+      \ {\n    Template(\"name\", template, cfg)\n  }\n}\nclass Template(vararg args:\
+      \ Any?)\n"
+  - name: arg tainted literal negative
+    code: "import freemarker.*\nclass App {\n  fun handle(template: String, cfg: Any)\
+      \ {\n    Template(\"name\", \"safe\", cfg)\n  }\n}\nclass Template(vararg args:\
+      \ Any?)\n"
+    expect_no_match: true
+  description: "new freemarker.template.Template(\"name\", tainted) \u2014 source\
+    \ string is template."
+- id: kotlin.template.velocity_evaluate
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: critical
+  packages:
+  - org.apache.velocity
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Velocity
+      - evaluate
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated shape example
+    code: "import org.apache.velocity.*\n// uses org.apache.velocity\nclass App {\n\
+      \  fun handle(context: Any, writer: Any, template: String) {\n    Velocity.evaluate(context,\
+      \ writer, \"log\", template)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.apache.velocity.*\n// uses org.apache.velocity\nclass App {\n\
+      \  fun handle(context: Any, writer: Any, template: String) {\n    Velocity.evaluate(context,\
+      \ writer, \"log\", \"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: Velocity Velocity.evaluate(tainted).
+  imports:
+  - org.apache.velocity
+- id: kotlin.template.velocity_engine_evaluate
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: critical
+  packages:
+  - org.apache.velocity
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - VelocityEngine
+      - evaluate
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated shape example
+    code: "import org.apache.velocity.*\n// uses org.apache.velocity\nclass App {\n\
+      \  fun handle(context: Any, writer: Any, template: String) {\n    VelocityEngine.evaluate(context,\
+      \ writer, \"log\", template)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.apache.velocity.*\n// uses org.apache.velocity\nclass App {\n\
+      \  fun handle(context: Any, writer: Any, template: String) {\n    VelocityEngine.evaluate(context,\
+      \ writer, \"log\", \"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: VelocityEngine.evaluate(tainted).
+  imports:
+  - org.apache.velocity
+- id: kotlin.template.velocity_merge
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - org.apache.velocity
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Template
+      - merge
+  match_examples:
+  - name: generated shape example
+    code: "import org.apache.velocity.*\n// uses org.apache.velocity\nclass App {\n\
+      \  fun handle(input: String) {\n    Template.merge(\"{{\" + input)\n  }\n}\n"
+  description: "Disabled — Template.merge(...) executes template source held in receiver state; Velocity.evaluate/template constructors carry tainted template arguments."
+  imports:
+  - org.apache.velocity
+- id: kotlin.template.spel_parseexpression
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: critical
+  packages:
+  - org.springframework.expression
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      name: parseExpression
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spel parser class parse expression
+    code: "import org.springframework.expression.*\nclass App {\n  fun render(template: String):\
+      \ Any? {\n    return SpelExpressionParser.parseExpression(template)\n  }\n}\n"
+    expect_match_text:
+    - SpelExpressionParser.parseExpression
+  - name: arg tainted literal negative
+    code: "import org.springframework.expression.*\nclass App {\nfun render(template: String): Any?\
+      \ {\n  return SpelExpressionParser.parseExpression(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Spring SpEL parseExpression(template) \u2014 server-side template\
+    \ expression parsing from attacker-controlled text."
+  imports:
+  - org.springframework.expression
+- id: kotlin.template.pebble_compile
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - pebble
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PebbleEngine
+      - getLiteralTemplate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import pebble.*\nclass App {\n  fun handle(input: String) {\n    PebbleEngine.getLiteralTemplate(\"\
+      {{\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import pebble.*\nclass App {\nfun handle(input: String) {\n  PebbleEngine.getLiteralTemplate(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Pebble PebbleEngine.getLiteralTemplate.
+- id: kotlin.template.jinjava_render
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: critical
+  packages:
+  - jinjava
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jinjava
+      - render
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import jinjava.*\n// uses jinjava\nclass App {\n  fun handle(input: String)\
+      \ {\n    Jinjava.render(\"{{\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import jinjava.*\n// uses jinjava\nclass App {\nfun handle(input: String)\
+      \ {\n  Jinjava.render(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Jinjava Jinjava.render(tainted).
+- id: kotlin.template.handlebars_compile_inline
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - jknack
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Handlebars
+      - compileInline
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import jknack.*\nclass App {\n  fun handle(input: String) {\n    Handlebars.compileInline(\"\
+      {{\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import jknack.*\nclass App {\nfun handle(input: String) {\n  Handlebars.compileInline(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Handlebars (jknack) Handlebars.compileInline.
+- id: kotlin.template.handlebars_compile
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - jknack
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Handlebars
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import jknack.*\n// uses jknack\nclass App {\n  fun handle(input: String)\
+      \ {\n    Handlebars.compile(\"{{\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import jknack.*\n// uses jknack\nclass App {\nfun handle(input: String)\
+      \ {\n  Handlebars.compile(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Handlebars (jknack) Handlebars.compile(tainted).
+- id: kotlin.template.jtwig_render
+  enabled: false
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - jtwig
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JtwigTemplate
+      - render
+  match_examples:
+  - name: generated shape example
+    code: "import jtwig.*\n// uses jtwig\nclass App {\n  fun handle(input: String)\
+      \ {\n    JtwigTemplate.render(\"{{\" + input)\n  }\n}\n"
+  description: Jtwig JtwigTemplate.render(tainted model).
+  disabled_reason:
+    code: over-broad
+- id: kotlin.template.mustache_compile
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: ssti
+  severity: medium
+  packages:
+  - mustache.java
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DefaultMustacheFactory
+      - compile
+  description: "Disabled \u2014 Mustache is logic-less."
+- id: kotlin.template.freemarker_autoesc_off
+  enabled: true
+  language: kotlin
+  tag: ssti
+  severity: high
+  packages:
+  - freemarker
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Configuration
+      - setAutoEscapingPolicy
+  match_examples:
+  - name: generated shape example
+    code: "import freemarker.*\nclass App {\n  fun handle(input: String) {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\n\
+      \  }\n}\n"
+  description: "FreeMarker (via Java interop) \u2014 autoescape disabled at config."

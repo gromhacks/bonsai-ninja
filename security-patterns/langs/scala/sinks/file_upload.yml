@@ -1,0 +1,172 @@
+# Scala file-upload sinks (Play + Akka HTTP + http4s).
+- id: scala.upload.play_filepart_filename
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: file-upload
+  severity: medium
+  packages: [play]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FilePart, filename]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play._
+      // uses play
+      object App {
+        def handle(input: String): Unit = {
+          FilePart.filename(input)
+        }
+      }
+  description: "Disabled — FilePart.filename returns client-controlled state; report the later file-write/move sink until return-state tracking exists."
+
+- id: scala.upload.play_ref_movetofile
+  enabled: true
+  language: scala
+  tag: file-upload
+  severity: high
+  packages: [play]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [TemporaryFile, moveTo]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          TemporaryFile.moveTo(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          TemporaryFile.moveTo("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "Play TemporaryFile.moveTo(dest) — tainted dest => arbitrary file write."
+
+- id: scala.upload.play_ref_atomicmoveto
+  enabled: true
+  language: scala
+  tag: file-upload
+  severity: high
+  packages: [play]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [TemporaryFile, atomicMoveWithFallback]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          TemporaryFile.atomicMoveWithFallback(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          TemporaryFile.atomicMoveWithFallback("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "Play TemporaryFile.atomicMoveWithFallback — same risk as moveTo."
+
+- id: scala.upload.akka_http_multipart
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: file-upload
+  severity: medium
+  packages: [akka.http.scaladsl]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [BodyPart, filename]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import akka.http.scaladsl._
+      // uses akka.http.scaladsl
+      object App {
+        def handle(input: String): Unit = {
+          BodyPart.filename(input)
+        }
+      }
+  description: "Disabled — BodyPart.filename returns client-controlled state; report the later file-write sink until return-state tracking exists."
+
+  imports:
+  - akka.http.scaladsl
+- id: scala.upload.akka_http_storeuploadedfile
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: file-upload
+  severity: high
+  packages: [akka.http.scaladsl]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: storeUploadedFile
+  match_examples:
+  - name: generated shape example
+    code: |
+      import akka.http.scaladsl._
+      object App {
+        def handle(input: String): Unit = {
+          storeUploadedFile(input)
+        }
+      }
+  description: "Disabled — storeUploadedFile writes to a temp path chosen by the directive; unsafe caller-controlled filename/path needs state beyond the directive call."
+
+  imports:
+  - akka.http.scaladsl
+- id: scala.upload.akka_http_filefield
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: file-upload
+  severity: medium
+  packages: [akka.http.scaladsl]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: fileUpload
+  match_examples:
+  - name: generated shape example
+    code: |
+      import akka.http.scaladsl._
+      object App {
+        def handle(input: String): Unit = {
+          fileUpload(input)
+        }
+      }
+  description: "Disabled — fileUpload extracts a multipart part and does not itself write to an attacker-controlled path."
+  imports:
+  - akka.http.scaladsl

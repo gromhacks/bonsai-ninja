@@ -1,0 +1,51 @@
+# Lua CLI / env sources — trust: local.
+- id: lua.source.cli_arg
+  enabled: true
+  language: lua
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      name: arg
+  match_examples:
+    - name: lua.source.cli_arg example
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          local value = arg
+        end
+  description: "Lua arg table — local CLI argv input."
+
+- id: lua.source.os_getenv
+  enabled: true
+  language: lua
+  trust: local
+  tag: env-input
+  match:
+    kind: call
+    callee:
+      attribute: [os, getenv]
+  match_examples:
+    - name: lua.source.os_getenv example
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          os.getenv(input)
+        end
+  description: "os.getenv — local environment variable input."
+
+- id: lua.source.io_read
+  enabled: true
+  language: lua
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      attribute: [io, read]
+  match_examples:
+    - name: lua.source.io_read example
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          io.read(input)
+        end
+  description: "io.read — local stdin input."

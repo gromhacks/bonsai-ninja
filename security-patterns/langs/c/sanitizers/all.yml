@@ -1,0 +1,726 @@
+- id: c.sanitizer.strncpy_bounded
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: strncpy
+  description: "Disabled — strncpy does NOT NUL-terminate; it is a sink, not a sanitizer."
+- id: c.sanitizer.snprintf_bounded
+  enabled: true
+  language: c
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: snprintf
+  taint_semantics:
+    clean_output_overwrite:
+      output_arg_index: 0
+      value_start_arg_index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        snprintf(arg);
+      }
+    expect_match_text: [snprintf]
+  description: "snprintf — bounded format."
+- id: c.sanitizer.isalnum_char_allowlist
+  enabled: true
+  language: c
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: isalnum
+  match_examples:
+  - name: alnum allowlist predicate
+    code: |
+      #include <ctype.h>
+      void example(unsigned char input) {
+        isalnum(input);
+      }
+    expect_match_text: [isalnum]
+  description: "isalnum — character allowlist predicate used to copy only alphanumeric bytes into a sanitized buffer."
+- id: c.sanitizer.strlcpy
+  enabled: true
+  language: c
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: strlcpy
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        strlcpy(arg);
+      }
+    expect_match_text: [strlcpy]
+  description: "strlcpy (BSD) — bounded + NUL-terminates."
+- id: c.sanitizer.openssl_constant_time
+  enabled: true
+  language: c
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: CRYPTO_memcmp
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        CRYPTO_memcmp(arg);
+      }
+    expect_match_text: [CRYPTO_memcmp]
+  description: "OpenSSL CRYPTO_memcmp — constant-time memory compare prevents timing oracles on HMAC/token equality."
+- id: c.sanitizer.realpath
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      name: realpath
+  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component). Marking these as sanitizers produced false negatives on attacker-controlled paths."
+- id: c.sanitizer.strlcat
+  enabled: true
+  language: c
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: strlcat
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        strlcat(arg);
+      }
+    expect_match_text: [strlcat]
+  description: "strlcat (BSD) — bounded concat that always NUL-terminates."
+- id: c.sanitizer.strtol
+  enabled: true
+  language: c
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: strtol
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        strtol(arg);
+      }
+    expect_match_text: [strtol]
+  description: "strtol — coerces text to long (caller must check errno/endptr)."
+- id: c.sanitizer.strtoul
+  enabled: true
+  language: c
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: strtoul
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        strtoul(arg);
+      }
+    expect_match_text: [strtoul]
+  description: "strtoul — coerces text to unsigned long."
+- id: c.sanitizer.strtoll
+  enabled: true
+  language: c
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: strtoll
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        strtoll(arg);
+      }
+    expect_match_text: [strtoll]
+  description: "strtoll — coerces text to long long."
+- id: c.sanitizer.strtod
+  enabled: true
+  language: c
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: strtod
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        strtod(arg);
+      }
+    expect_match_text: [strtod]
+  description: "strtod — coerces text to double."
+- id: c.sanitizer.curl_easy_escape
+  enabled: true
+  language: c
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      name: curl_easy_escape
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        curl_easy_escape(arg);
+      }
+    expect_match_text: [curl_easy_escape]
+  description: "libcurl curl_easy_escape — URL-encodes a string."
+- id: c.sanitizer.sqlite3_bind_text
+  enabled: true
+  language: c
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: sqlite3_bind_text
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        sqlite3_bind_text(arg);
+      }
+    expect_match_text: [sqlite3_bind_text]
+  description: "sqlite3_bind_text — parameterised SQL binding."
+- id: c.sanitizer.sqlite3_bind_int
+  enabled: true
+  language: c
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: sqlite3_bind_int
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        sqlite3_bind_int(arg);
+      }
+    expect_match_text: [sqlite3_bind_int]
+  description: "sqlite3_bind_int — parameterised SQL binding."
+- id: c.sanitizer.sqlite3_bind_blob
+  enabled: true
+  language: c
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: sqlite3_bind_blob
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        sqlite3_bind_blob(arg);
+      }
+    expect_match_text: [sqlite3_bind_blob]
+  description: "sqlite3_bind_blob — parameterised SQL binding."
+- id: c.sanitizer.pq_exec_params
+  enabled: true
+  language: c
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: PQexecParams
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        PQexecParams(arg);
+      }
+    expect_match_text: [PQexecParams]
+  description: "libpq PQexecParams — parameterised query execution."
+- id: c.sanitizer.mysql_stmt_bind_param
+  enabled: true
+  language: c
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: mysql_stmt_bind_param
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mysql_stmt_bind_param(arg);
+      }
+    expect_match_text: [mysql_stmt_bind_param]
+  description: "mysql_stmt_bind_param — prepared statement parameter binding."
+- id: c.sanitizer.g_markup_escape_text
+  enabled: true
+  language: c
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      name: g_markup_escape_text
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        g_markup_escape_text(arg);
+      }
+    expect_match_text: [g_markup_escape_text]
+  description: "GLib g_markup_escape_text — escapes &<>'\" for safe inclusion in HTML/XML text nodes."
+- id: c.sanitizer.xml_encode_entities_reentrant
+  enabled: true
+  language: c
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      name: xmlEncodeEntitiesReentrant
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        xmlEncodeEntitiesReentrant(arg);
+      }
+    expect_match_text: [xmlEncodeEntitiesReentrant]
+  description: "libxml2 xmlEncodeEntitiesReentrant — escapes XML entities; safe for attribute / text content."
+- id: c.sanitizer.curl_easy_unescape
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      name: curl_easy_unescape
+  description: "Disabled — curl_easy_unescape is DECODE (attacker-controlled), not an encoder; listed for completeness."
+- id: c.sanitizer.consttime_memequal
+  enabled: true
+  language: c
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: consttime_memequal
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        consttime_memequal(arg);
+      }
+    expect_match_text: [consttime_memequal]
+  description: "NetBSD/portable consttime_memequal — constant-time buffer equality; protects HMAC/token comparison from timing oracles."
+- id: c.sanitizer.timingsafe_bcmp
+  enabled: true
+  language: c
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: timingsafe_bcmp
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        timingsafe_bcmp(arg);
+      }
+    expect_match_text: [timingsafe_bcmp]
+  description: "OpenBSD timingsafe_bcmp — constant-time bcmp replacement for secret comparison."
+- id: c.sanitizer.timingsafe_memcmp
+  enabled: true
+  language: c
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: timingsafe_memcmp
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        timingsafe_memcmp(arg);
+      }
+    expect_match_text: [timingsafe_memcmp]
+  description: "OpenBSD timingsafe_memcmp — constant-time memcmp replacement for secret comparison."
+- id: c.sanitizer.boringssl_constant_time_memcmp
+  enabled: true
+  language: c
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: CRYPTO_memcmp_constant_time
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        CRYPTO_memcmp_constant_time(arg);
+      }
+    expect_match_text: [CRYPTO_memcmp_constant_time]
+  description: "BoringSSL CRYPTO_memcmp_constant_time — constant-time helper used for MAC / signature equality."
+- id: c.sanitizer.mbedtls_safer_memcmp
+  enabled: true
+  language: c
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: mbedtls_ssl_safer_memcmp
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mbedtls_ssl_safer_memcmp(arg);
+      }
+    expect_match_text: [mbedtls_ssl_safer_memcmp]
+  description: "mbedTLS mbedtls_ssl_safer_memcmp — constant-time comparison used in TLS record verification."
+- id: c.sanitizer.sodium_memcmp
+  enabled: true
+  language: c
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: sodium_memcmp
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        sodium_memcmp(arg);
+      }
+    expect_match_text: [sodium_memcmp]
+  description: "libsodium sodium_memcmp — constant-time compare for authenticators / keys."
+- id: c.sanitizer.getauxval_at_secure
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: getauxval
+  description: "Disabled — getauxval(AT_SECURE) is a privilege-state probe, not a value sanitizer; still useful evidence for elevated-trust logic when paired with AT_SECURE constraint matching."
+- id: c.sanitizer.html_escape
+  enabled: true
+  language: c
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      name: html_escape
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        html_escape(arg);
+      }
+    expect_match_text: [html_escape]
+  description: "Generic html_escape helper (apache-portable-runtime, micro-frameworks) — escapes &<>'\" for HTML output."
+- id: c.sanitizer.apr_pescape_url
+  enabled: true
+  language: c
+  tag: url-encode
+  packages: [apr]
+  match:
+    kind: call
+    callee:
+      name: apr_pescape_url
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <apr.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        apr_pescape_url(arg);
+      }
+    expect_match_text: [apr_pescape_url]
+  description: "APR apr_pescape_url — percent-encodes a string for URL inclusion."
+- id: c.sanitizer.uri_escape_ex_a
+  enabled: true
+  language: c
+  tag: url-encode
+  packages: [uriparser]
+  match:
+    kind: call
+    callee:
+      name: uriEscapeExA
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <uriparser/Uri.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        uriEscapeExA(arg);
+      }
+    expect_match_text: [uriEscapeExA]
+  description: "uriparser uriEscapeExA — RFC 3986 percent-encoding."
+
+- id: c.sanitizer.sqlite3_bind_extended
+  enabled: true
+  language: c
+  tag: db-bind-parameter
+  match:
+    kind: call
+    callee:
+      regex: "^sqlite3_bind_(text16|int64|double|null|value|zeroblob|zeroblob64|pointer)$"
+  match_examples:
+  - name: sqlite extended bind
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        sqlite3_bind_text16(arg);
+      }
+    expect_match_text: [sqlite3_bind_text16]
+  description: "sqlite3_bind_text16 / int64 / double / null / value / zeroblob / pointer — prepared-statement parameter binding; bound values are not parsed as SQL."
+
+- id: c.sanitizer.path_prefix_strncmp
+  enabled: true
+  language: c
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      regex: "^(strncmp|memcmp)$"
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^"/[^"]*"$'
+  - min_args: 3
+  match_examples:
+  - name: relative redirect prefix check
+    code: |
+      void example(char *target) {
+        strncmp(target, "/app/", 5);
+      }
+    expect_match_text: [strncmp]
+  - name: relative redirect prefix check negative constraint boundary
+    code: "void example(char *target) {\n  strncmp();\n}\n"
+    expect_no_match: true
+  description: "strncmp/memcmp against a literal slash-prefixed path prefix — common C guard for same-origin redirects or chrooted path routing. Scoped to prefix literals and three-arg compare calls."
+
+- id: c.sanitizer.g_hash_table_contains_allowlist
+  enabled: true
+  language: c
+  tag: allowlist-validate
+  packages: [glib]
+  match:
+    kind: call
+    callee:
+      name: g_hash_table_contains
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(allowed|allowlist|whitelist|safe_keys|safe_paths)$"
+  match_examples:
+  - name: glib hash allowlist
+    code: |
+      #include <glib.h>
+      void example(void *input) {
+        g_hash_table_contains(allowed, input);
+      }
+    expect_match_text: [g_hash_table_contains]
+  - name: glib hash allowlist negative constraint boundary
+    code: "#include <glib.h>\nvoid example(void *input) {\n  g_hash_table_contains();\n}\n"
+    expect_no_match: true
+  description: "GLib g_hash_table_contains on an allowlist-named table — finite-set membership validation before routing, redirects, or dispatch."
+
+- id: c.sanitizer.g_regex_match_simple_full
+  enabled: true
+  language: c
+  tag: regex-validate
+  packages: [glib]
+  match:
+    kind: call
+    callee:
+      name: g_regex_match_simple
+  constraints:
+  - any_arg_matches_regex: "\\^.*\\$"
+  - min_args: 2
+  match_examples:
+  - name: anchored glib regex validator
+    code: |
+      #include <glib.h>
+      void example(char *input) {
+        g_regex_match_simple("^[A-Za-z0-9_-]+$", input, 0, 0);
+      }
+    expect_match_text: [g_regex_match_simple]
+  - name: anchored glib regex validator negative constraint boundary
+    code: "#include <glib.h>\nvoid example(char *input) {\n  g_regex_match_simple();\n}\n"
+    expect_no_match: true
+  description: "g_regex_match_simple with an anchored full-string allowlist pattern — validates UUID/slug/token shape instead of substring matching."
+
+- id: c.sanitizer.g_regex_replace_char_allowlist
+  enabled: true
+  language: c
+  tag: char-allowlist
+  packages: [glib]
+  match:
+    kind: call
+    callee:
+      regex: "^g_regex_replace(_literal)?$"
+  constraints:
+  - any_arg_matches_regex: "\\[\\^[^\\]]+\\]"
+  - any_arg_matches_regex: '^""$'
+  match_examples:
+  - name: strip non slug chars
+    code: |
+      #include <glib.h>
+      void example(char *input) {
+        g_regex_replace("[^A-Za-z0-9_-]", input, -1, 0, "", 0, 0);
+      }
+    expect_match_text: [g_regex_replace]
+  - name: strip non slug chars negative constraint boundary
+    code: "#include <glib.h>\nvoid example(char *input) {\n  g_regex_replace();\n}\n"
+    expect_no_match: true
+  description: "GLib regex replace that removes characters outside a safe allowlist by replacing `[^...]` with empty string."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: c.passthrough.curl_easy_unescape
+  enabled: true
+  language: c
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: curl_easy_unescape
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        curl_easy_unescape(arg);
+      }
+    expect_match_text: [curl_easy_unescape]
+  description: "libcurl curl_easy_unescape(curl, s, len, &outlen) — preserves taint."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: c.lock.pthread_mutex_lock
+  enabled: true
+  language: c
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      name: pthread_mutex_lock
+  constraints:
+  - top_level: true
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        pthread_mutex_lock(arg);
+      }
+    expect_match_text: [pthread_mutex_lock]
+  description: "pthread_mutex_lock(&m) — POSIX threads mutex acquire."
+- id: c.lock.pthread_rwlock_rdlock
+  enabled: true
+  language: c
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      name: pthread_rwlock_rdlock
+  constraints:
+  - top_level: true
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        pthread_rwlock_rdlock(arg);
+      }
+    expect_match_text: [pthread_rwlock_rdlock]
+  description: "pthread_rwlock_rdlock — read-side acquire."
+- id: c.lock.pthread_rwlock_wrlock
+  enabled: true
+  language: c
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      name: pthread_rwlock_wrlock
+  constraints:
+  - top_level: true
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        pthread_rwlock_wrlock(arg);
+      }
+    expect_match_text: [pthread_rwlock_wrlock]
+  description: "pthread_rwlock_wrlock — write-side acquire."

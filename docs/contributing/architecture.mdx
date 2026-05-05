@@ -1,0 +1,220 @@
+---
+title: "Architecture"
+description: "The crate layout, dependency boundaries, and major data paths in bonsai-ninja."
+---
+
+# Architecture
+
+bonsai-ninja is a 44-crate Rust workspace. The shape is concentric — each
+layer leans on the ones below and never reaches up. New contributors usually
+work in one or two layers at a time, so this doc is organised the same way.
+
+```
+┌────────────────── CLI / SDK ──────────────────┐
+│  bonsai_cli   bonsai_sdk   bonsai_adapters    │
+└──────────────────────▲────────────────────────┘
+        ┌──────────────┴──────────────┐
+        │  Query / browse / trace     │
+        │  bonsai_inspect  browse  trace
+        └──────────────▲──────────────┘
+        ┌──────────────┴──────────────┐
+        │  Security                   │
+        │  bonsai_security            │
+        └──────────────▲──────────────┘
+        ┌──────────────┴──────────────┐
+        │  Workspace facade           │
+        │  bonsai_workspace           │
+        └──────────────▲──────────────┘
+        ┌──────────────┴──────────────┐
+        │  Analysis core              │
+        │  bonsai_taint               │
+        │  bonsai_callgraph           │
+        │  bonsai_abstract_interp     │
+        │  bonsai_resolve  index  db  cfg
+        └──────────────▲──────────────┘
+        ┌──────────────┴──────────────┐
+        │  Parse + ingest             │
+        │  bonsai_parser  vfs  diagnostics
+        └──────────────▲──────────────┘
+        ┌──────────────┴──────────────┐
+        │  Adapter framework          │
+        │  bonsai_lang_api            │
+        │  bonsai_lang_*  (21 languages)
+        └──────────────▲──────────────┘
+        ┌──────────────┴──────────────┐
+        │  Foundation                 │
+        │  bonsai_common  bonsai_hash │
+        └─────────────────────────────┘
+```
+
+## Foundation
+
+**`crates/common`** carries the workspace's stable IDs (`FileId`, `FuncId`,
+`SymbolId`, `BasicBlockId`, `TypeId`, `ValueId`, `TraceStepId`, `PackageId`)
+and metadata primitives. Every fact crossing a layer boundary carries a
+`Precision` from the lattice `Exact < Narrowed < OverApproximate < Unknown`,
+so consumers always know the confidence of what they're looking at. Spans
+are half-open byte ranges, line/column lookups go through a thread-local
+LRU cache.
+
+**`crates/hash`** provides FNV-1a digests for every persisted ID. Sole API:
+`fnv1a_str_slice64`, `fnv1a_names64`, `fnv1a_bytes64`, `fnv1a_low32`. RFC
+vector verified.
+
+## Parse and ingest
+
+**`crates/vfs`** is the file registry — single-writer, multi-reader,
+versioned text snapshots, incremental edits. Case-insensitive filesystems
+get folded to lowercase keys.
+
+**`crates/diagnostics`** is intentionally tiny. Phases push
+`Diagnostic { span, severity, message, code, notes }` into a sink; rendering
+is the consumer's job.
+
+**`crates/parser`** is a concurrent tree-sitter parse cache keyed on
+`(FileId, version)`. It's careful about race windows when two threads parse
+the same file, walks for ERROR/MISSING nodes (cap 100), and enforces a
+per-file timeout (`BONSAI_PARSE_TIMEOUT_MS`, default 30 s).
+
+## Adapter framework
+
+**`crates/lang_api`** holds the trait every language adapter implements
+plus the kit that drives ~70% of every adapter.
+
+The `LanguageAdapter` trait is the contract: report a `LanguageId`,
+declare extensions and capabilities, parse declarations and imports.
+Adapters never see core internals — they get an `AdapterContext { vfs,
+diagnostics, workspace_root }` and that's it.
+
+The kit is split across several files:
+
+- `kit/mod.rs` — `GrammarHandler`, the generic walker, decl-index pipeline,
+  flow-event extraction, RHS-token scanning, branch repair entry point.
+- `kit/branch_repair.rs` — span-based then/else partition recovery for
+  grammars that lump both arms together.
+- `kit/foreach_header.rs` — for-of / for-in / for-each header parsing.
+- `kit/identifiers.rs` — identifier-shape predicates.
+- `kit/param_extraction.rs` — parameter names + annotations.
+- `kit/pseudo_call.rs` — JSX, Go channel sends, C++ delete, PHP echo,
+  Ruby backticks, Scala infix concat — all lowered to `FlowEvent::Call`.
+- `kit/qualified.rs` — canonicalises `obj['k']`, `obj.k`, and `obj->k`
+  to the same dotted form.
+- `kit/return_extraction.rs` — return / throw / catch value extraction.
+
+The kit keeps the cross-language behaviour in one place. Adapters layer
+language-specific decisions on top: visibility rules, type aliases, base
+classes, exception types, reflection rewrites, async-scope isolation.
+
+**`crates/lang_*`** — 21 adapters, one per supported language. Each is
+roughly 200–500 lines: declare the `GrammarHandler`, run
+`decl_index_with_handler`, post-process to fill in language-specific facts.
+The internal capability matrix tracks what each
+adapter handles precisely versus partially.
+
+## Analysis core
+
+**`crates/db`** is the in-memory facts database. Every other analysis crate
+reads from it and writes back through it.
+
+**`crates/index`** drives the parallel indexing pipeline: walk files,
+dispatch to adapters, populate the db, prewarm dataflow.
+
+**`crates/resolve`** turns names into symbols. Reads import maps,
+type aliases, base classes, module paths; emits `Ref { resolved: Some(...) }`
+edges.
+
+**`crates/cfg`** builds basic-block control-flow graphs from `flow_events`.
+Used by `taint` and by `dump-cfg`.
+
+**`crates/callgraph`** walks the resolved graph and surfaces
+`(caller, callee, precision)` edges, with virtual-dispatch expansion via
+the bases facts.
+
+**`crates/abstract_interp`** is a tiny abstract-interpretation runtime
+the engine uses for constant propagation and a few narrowing tricks.
+
+**`crates/taint`** is the engine. The single entry point is
+`interprocedural_taint_to_completion_with_caches`. It walks call graph
+strongly-connected components, builds per-function summaries
+(`source-arg-index → return-or-side-effect`), and propagates taint until
+fixpoint. Sub-modules:
+
+- `intra.rs` — single-function taint propagation over `flow_events`.
+- `inter/mod.rs` — interprocedural orchestration, typed-exception rules,
+  pattern-arm forking, async isolation.
+- `inter/summary.rs` / `summary_impl.rs` — function-summary construction.
+- `assignment.rs` — assignment effect calculation.
+- `reachable.rs` — reachability analysis used by the engine and by
+  source-analysis.
+- `text.rs` — text-level normalisation shared with adapters (the engine
+  side of the qualified-text canonicalisation).
+- `value_flow.rs` — value-flow graph used by `dump-edges` and the
+  precision-narrowing path.
+
+## Workspace facade
+
+**`crates/workspace`** is the one-stop API consumed by `cli`, `sdk`, and
+`security`. It hides the orchestration: index a directory, run analysis,
+return facts.
+
+## Security
+
+**`crates/security`** is the rulepack matcher and findings pipeline. It
+loads YAML rules from `security-patterns/`, compiles them into matcher
+state machines, and walks the engine's results emitting findings. The
+output formats (text / JSON / SARIF) live in `report.rs`. Sanitizer-credit
+calculation has its own module.
+
+## Query / browse / trace
+
+**`crates/inspect`** powers `inspect`: every call chain reaching a target,
+source-inlined with numbered annotations. Backed by a chain cache so
+repeated invocations stay fast.
+
+**`crates/browse`** powers the browse commands (`defs`, `calls`,
+`imports`, `refs`, `vars`, `strings`, `args`, `classes`, `comments`,
+`search`, `read-file`, `tree`). Most commands share the same plumbing:
+read facts from the db, paginate, format.
+
+**`crates/trace`** powers `trace`: walk a flow from source to sink as a
+call tree. Supports text, JSON, and DOT.
+
+## CLI / SDK
+
+**`crates/cli`** is the binary. Each subcommand lives in
+`src/commands/`. Cross-cutting concerns (paging, progress, theme, footer)
+sit alongside.
+
+**`crates/sdk`** is the Rust API. Same surface as the CLI, just exposed as
+a `Bonsai` builder. Tests under `crates/sdk/tests/` exercise the public
+shape.
+
+**`crates/adapters`** registers all 21 language adapters into a
+`LanguageRegistry`. Used by `cli`, `sdk`, and the conformance suite.
+
+## Tests / supporting crates
+
+**`crates/conformance`** is the architectural-invariant test suite:
+mega-flow, single-engine-path checks, drift gates against the snapshots
+under `docs/`.
+
+**`crates/testkit`** is shared test helpers — workspace fixtures,
+result assertions, finding-shape matchers.
+
+## Dataflow at a glance
+
+When the CLI runs `index`:
+
+1. `vfs` interns paths and stores text.
+2. `parser` parses each file (with cache).
+3. The right `lang_*` adapter walks the tree and emits `Decl` / `Ref` /
+   `ImportSpec`.
+4. `index` populates the db.
+5. `resolve` turns refs into resolved symbols.
+6. `callgraph` builds the call graph.
+7. `cfg` builds basic-block CFGs from flow_events.
+8. `taint` runs interprocedural fixpoint over the SCCs.
+9. The result is persisted to `.bonsai/sidecar`.
+
+Subsequent runs read the sidecar instead of repeating the work, with a
+content-hash check that invalidates stale facts.

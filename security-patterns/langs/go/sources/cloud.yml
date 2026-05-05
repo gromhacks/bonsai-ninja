@@ -1,0 +1,45 @@
+# Go cloud-event / serverless handler sources.
+- id: go.aws.lambda_event
+  enabled: true
+  language: go
+  trust: service
+  tag: event-input
+  category: event-input
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: ["github.com/aws/aws-lambda-go"]
+  match:
+    kind: param
+    target:
+      name: request
+  match_examples:
+  - name: aws lambda request param
+    code: |
+      package main
+      import "github.com/aws/aws-lambda-go/lambda"
+      func handler(request map[string]any) error {
+        _ = request
+        return nil
+      }
+      func main() {
+        lambda.Start(handler)
+      }
+    expect_match_text: [request]
+  description: "AWS Lambda handler — `request` / `event` param is the attacker-supplied event body."
+
+- id: go.aws.lambda_event_alt
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: service
+  tag: event-input
+  category: event-input
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: ["github.com/aws/aws-lambda-go"]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "Disabled — merged into go.aws.lambda_event (bare `event` collides with many other handler shapes)."

@@ -1,0 +1,606 @@
+- id: scala.sqli.slick_sql_interpolator
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - slick
+  - org.tpolecat.doobie
+  - scalikejdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^sql"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import slick._
+      object App {
+        def handle(input: String): Unit = {
+          sql"select"(input)
+        }
+      }
+  - name: literal slick sql interpolator negative
+    code: |
+      import slick._
+      object App {
+        def handle(): Unit = {
+          sql"select"("safe")
+        }
+      }
+    expect_no_match: true
+  description: "sql\"\" interpolator — covers Slick, doobie, scalikejdbc (same `^sql\"` regex). ${} binds but #${} / string-built fragments splice raw."
+- id: scala.sqli.slick_sqlu_interpolator
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - slick
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^sqlu"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import slick._
+      object App {
+        def handle(input: String): Unit = {
+          sqlu"delete"(input)
+        }
+      }
+  - name: literal slick sqlu interpolator negative
+    code: |
+      import slick._
+      object App {
+        def handle(): Unit = {
+          sqlu"delete"("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Slick sqlu\"\" update interpolator — same splice caveat."
+- id: scala.sqli.doobie_sql_interpolator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.tpolecat.doobie
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^sql"
+  description: "Disabled — merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
+- id: scala.sqli.doobie_fr_interpolator
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.tpolecat.doobie
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^fr"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.tpolecat.doobie._
+      object App {
+        def handle(input: String): Unit = {
+          fr"select"(input)
+        }
+      }
+  - name: literal doobie fragment negative
+    code: |
+      import org.tpolecat.doobie._
+      object App {
+        def handle(): Unit = {
+          fr"select"("safe")
+        }
+      }
+    expect_no_match: true
+  description: "doobie fr\"\" fragment interpolator — flag tainted strings inlined as Fragment.const."
+- id: scala.sqli.quill_infix
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - quill
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^infix"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import quill._
+      object App {
+        def handle(input: String): Unit = {
+          infix"query"(input)
+        }
+      }
+  - name: literal quill infix negative
+    code: |
+      import quill._
+      object App {
+        def handle(): Unit = {
+          infix"query"("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Quill infix\"\" — escape hatch bypassing Quill's compile-time safety."
+- id: scala.sqli.anorm_sql
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - com.typesafe.play.anorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: SQL
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.typesafe.play.anorm._
+      object App {
+        def handle(input: String): Unit = {
+          SQL(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.typesafe.play.anorm._
+      object App {
+        def handle(input: String): Unit = {
+          SQL("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Anorm SQL(tainted) — SQL.on(...) binds placeholders; flag dynamic SQL strings."
+- id: scala.sqli.jdbc_statement_execute
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages: [java.sql]
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.sql._
+      // uses java.sql
+      object App {
+        def handle(input: String): Unit = {
+          Statement.execute(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.sql._
+      // uses java.sql
+      object App {
+        def handle(input: String): Unit = {
+          Statement.execute("safe")
+        }
+      }
+    expect_no_match: true
+  description: "java.sql.Statement.execute(sql) — no parameter binding."
+- id: scala.sqli.jdbc_statement_execute_query
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeQuery(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeQuery(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.sql.Statement.executeQuery(sql) — no parameter binding."
+- id: scala.sqli.jdbc_statement_execute_update
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeUpdate(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Statement.executeUpdate(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.sql.Statement.executeUpdate(sql) — no parameter binding."
+- id: scala.sqli.scalikejdbc_sql_interpolator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - scalikejdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^sql"
+  description: "Disabled — merged into scala.sqli.slick_sql_interpolator (same `^sql\"` regex)."
+- id: scala.sqli.scalikejdbc_sqls
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - scalikejdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^sqls"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scalikejdbc._
+      object App {
+        def handle(input: String): Unit = {
+          sqls"select"(input)
+        }
+      }
+  - name: literal scalikejdbc sqls negative
+    code: |
+      import scalikejdbc._
+      object App {
+        def handle(): Unit = {
+          sqls"select"("safe")
+        }
+      }
+    expect_no_match: true
+  description: scalikejdbc sqls"" raw-SQL fragment interpolator.
+- id: scala.sqli.doobie_fragment_const
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.tpolecat.doobie
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Fragment
+      - const
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.tpolecat.doobie._
+      // uses org.tpolecat.doobie
+      object App {
+        def handle(input: String): Unit = {
+          Fragment.const(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.tpolecat.doobie._
+      // uses org.tpolecat.doobie
+      object App {
+        def handle(input: String): Unit = {
+          Fragment.const("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Doobie Fragment.const(tainted) — splices the string verbatim into SQL, bypassing parameter binding."
+- id: scala.sqli.doobie_fragment_const0
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.tpolecat.doobie
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Fragment
+      - const0
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.tpolecat.doobie._
+      object App {
+        def handle(input: String): Unit = {
+          Fragment.const0(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.tpolecat.doobie._
+      object App {
+        def handle(input: String): Unit = {
+          Fragment.const0("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Doobie Fragment.const0(tainted) — verbatim splice without trailing space; same SQLi risk as Fragment.const."
+- id: scala.sqli.spark_session_sql
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.apache.spark.sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SparkSession
+      - sql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.spark.sql._
+      object App {
+        def handle(input: String): Unit = {
+          SparkSession.sql(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.spark.sql._
+      object App {
+        def handle(input: String): Unit = {
+          SparkSession.sql("safe")
+        }
+      }
+    expect_no_match: true
+  description: "sparkSession.sql(tainted) — no binding; Spark SQL parses the raw string."
+  imports:
+  - org.apache.spark.sql
+- id: scala.sqli.spring_jdbctemplate_execute
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbc template execute raw sql
+    code: |
+      import org.springframework.jdbc._
+      // uses org.springframework.jdbc
+      object App {
+        def handle(sql: String): Unit = {
+          JdbcTemplate.execute(sql)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.jdbc._
+      // uses org.springframework.jdbc
+      object App {
+        def handle(sql: String): Unit = {
+          JdbcTemplate.execute("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Spring JdbcTemplate.execute(sql) — raw SQL string execution."
+- id: scala.sqli.jpa_create_native_query
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: critical
+  frameworks:
+  - jpa
+  - hibernate
+  packages:
+  - javax.persistence
+  - jakarta.persistence
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^EntityManager\.createNativeQuery$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jpa native query raw sql
+    code: |
+      import javax.persistence._
+      object App {
+        def handle(sql: String): Unit = {
+          EntityManager.createNativeQuery(sql)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.persistence._
+      object App {
+        def handle(sql: String): Unit = {
+          EntityManager.createNativeQuery("safe")
+        }
+      }
+    expect_no_match: true
+  description: "JPA EntityManager.createNativeQuery(sql) — raw native SQL execution."
+- id: scala.sqli.r2dbc_databaseclient_sql
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.r2dbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DatabaseClient
+      - sql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: r2dbc database client sql
+    code: |
+      import org.springframework.r2dbc._
+      object App {
+        def handle(sql: String): Unit = {
+          DatabaseClient.sql(sql)
+        }
+      }
+    expect_match_text:
+    - DatabaseClient.sql
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.r2dbc._
+      object App {
+        def handle(sql: String): Unit = {
+          DatabaseClient.sql("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Spring R2DBC DatabaseClient.sql(sql) — SQL text remains injectable when built from tainted input; bind values separately."
+- id: scala.sqli.jdbi_handle_createquery
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.jdbi
+  - org.hibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: createQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbi handle create query raw sql
+    code: |
+      import org.jdbi._
+      object App {
+        def handle(handle: Handle, sql: String): Any = {
+          handle.createQuery(sql)
+        }
+      }
+      class Handle {
+        def createQuery(args: Any*): Any = null
+      }
+    expect_match_text:
+    - handle.createQuery
+  - name: arg tainted literal negative
+    code: |
+      import org.jdbi._
+      object App {
+        def handle(handle: Handle, sql: String): Any = {
+          handle.createQuery("safe")
+        }
+      }
+      class Handle {
+        def createQuery(args: Any*): Any = null
+      }
+    expect_no_match: true
+  description: "JDBI Handle.createQuery(sql) — raw SQL text remains injectable when built from attacker-controlled input. Merged collision aliases: scala.sqli.hibernate_create_query."
+  aliases:
+  - scala.sqli.hibernate_create_query

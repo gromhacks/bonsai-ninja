@@ -1,0 +1,347 @@
+# Scala deserialization sinks (JVM interop + Scala-native).
+- id: scala.deser.object_input_stream
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^ObjectInputStream\\.readObject$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          ObjectInputStream.readObject(input)
+        }
+      }
+  description: "Disabled — ObjectInputStream.readObject() has no payload argument; needs receiver state showing the stream wraps untrusted bytes."
+
+- id: scala.deser.kryo_readobject
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: high
+  packages: ["com.esotericsoftware"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Kryo, readClassAndObject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.esotericsoftware._
+      object App {
+        def handle(input: String): Unit = {
+          Kryo.readClassAndObject(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.esotericsoftware._
+      object App {
+        def handle(input: String): Unit = {
+          Kryo.readClassAndObject("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Kryo readClassAndObject — class registration bypass risk."
+
+- id: scala.deser.kryo_readobject_typed
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: high
+  packages: ["com.esotericsoftware"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^Kryo\\.readObject$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.esotericsoftware._
+      object App {
+        def handle(input: String): Unit = {
+          Kryo.readObject(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.esotericsoftware._
+      object App {
+        def handle(input: String): Unit = {
+          Kryo.readObject("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Kryo.readObject with attacker-controlled input."
+
+- id: scala.deser.snake_yaml
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["org.yaml"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Yaml, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.yaml._
+      object App {
+        def handle(input: String): Unit = {
+          Yaml.load(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.yaml._
+      object App {
+        def handle(input: String): Unit = {
+          Yaml.load("safe")
+        }
+      }
+    expect_no_match: true
+  description: "SnakeYAML Yaml.load — instantiates arbitrary classes via YAML tags."
+
+- id: scala.deser.snake_yaml_load_all
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["org.yaml"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Yaml, loadAll]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.yaml._
+      object App {
+        def handle(input: String): Unit = {
+          Yaml.loadAll(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.yaml._
+      object App {
+        def handle(input: String): Unit = {
+          Yaml.loadAll("safe")
+        }
+      }
+    expect_no_match: true
+  description: "SnakeYAML Yaml.loadAll — same risk as load."
+
+- id: scala.deser.xstream_fromxml
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["com.thoughtworks.xstream"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [XStream, fromXML]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.thoughtworks.xstream._
+      object App {
+        def handle(input: String): Unit = {
+          XStream.fromXML(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.thoughtworks.xstream._
+      object App {
+        def handle(input: String): Unit = {
+          XStream.fromXML("safe")
+        }
+      }
+    expect_no_match: true
+  description: "XStream.fromXML — gadget chain RCE unless whitelist configured."
+
+- id: scala.deser.jackson_readvalue
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: high
+  packages: ["com.fasterxml.jackson"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectMapper, readValue]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.fasterxml.jackson._
+      object App {
+        def handle(input: String): Unit = {
+          ObjectMapper.readValue(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.fasterxml.jackson._
+      object App {
+        def handle(input: String): Unit = {
+          ObjectMapper.readValue("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Jackson ObjectMapper.readValue — dangerous with enableDefaultTyping / @JsonTypeInfo."
+
+- id: scala.deser.jackson_enable_default_typing
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: high
+  packages: ["com.fasterxml.jackson"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectMapper, enableDefaultTyping]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.fasterxml.jackson._
+      object App {
+        def handle(input: String): Unit = {
+          ObjectMapper.enableDefaultTyping(input)
+        }
+      }
+  description: "Jackson enableDefaultTyping — reopens polymorphic gadget RCE."
+
+- id: scala.deser.scala_pickling_unpickle
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: high
+  packages: ["scala.pickling"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unpickle
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scala.pickling._
+      object App {
+        def handle(input: String): Unit = {
+          unpickle(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import scala.pickling._
+      object App {
+        def handle(input: String): Unit = {
+          unpickle("safe")
+        }
+      }
+    expect_no_match: true
+  description: "scala-pickling .unpickle[T] — instantiates classes from attacker-supplied pickled bytes; gadget potential."
+
+- id: scala.deser.jackson_activate_default_typing
+  enabled: true
+  language: scala
+  tag: insecure-deserialization
+  severity: high
+  packages: ["com.fasterxml.jackson"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectMapper, activateDefaultTyping]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.fasterxml.jackson._
+      object App {
+        def handle(input: String): Unit = {
+          ObjectMapper.activateDefaultTyping(input)
+        }
+      }
+  description: "Jackson 2.10+ activateDefaultTyping(ptv) — same polymorphic gadget RCE class as the deprecated enableDefaultTyping."
+
+- id: scala.deser.spray_json_unmarshal_unsafe
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: insecure-deserialization
+  severity: low
+  packages: ["io.spray.spray-json"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [JsonReader, read]
+  description: "Disabled — spray-json is generally safe (static typeclass format); enable only with polymorphic discriminator."
+
+- id: scala.deser.poi_xssfworkbook_stream
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: scala
+  tag: insecure-deserialization
+  severity: high
+  packages: ["org.apache.poi"]
+  cwe: [CWE-502, CWE-611]
+  match:
+    kind: new
+    callee:
+      name: XSSFWorkbook
+  match_examples:
+  - name: xssf workbook input stream
+    code: |
+      import org.apache.poi._
+      object App {
+        def handle(stream: Any): Any = {
+          new XSSFWorkbook(stream)
+        }
+      }
+      class XSSFWorkbook(args: Any*)
+    expect_match_text: [XSSFWorkbook]
+  description: "Disabled — Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+  imports:
+  - org

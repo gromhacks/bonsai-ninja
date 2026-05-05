@@ -1,0 +1,205 @@
+- id: java.graphql.graphql_execute_async
+  enabled: true
+  language: java
+  tag: graphql-injection
+  severity: high
+  packages:
+  - graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - GraphQL
+      - executeAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          GraphQL.executeAsync(input);
+        }
+      }
+    expect_match_text:
+    - GraphQL.executeAsync
+  - name: arg tainted literal negative
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          GraphQL.executeAsync("safe");
+        }
+      }
+    expect_no_match: true
+  description: graphql-java GraphQL.executeAsync with a tainted document can drive unexpected resolver execution.
+  imports:
+  - graphql
+- id: java.graphql.executioninput_query
+  enabled: true
+  language: java
+  tag: graphql-injection
+  severity: high
+  packages:
+  - graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ExecutionInput
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          ExecutionInput.query(input);
+        }
+      }
+    expect_match_text:
+    - ExecutionInput.query
+  - name: arg tainted literal negative
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          ExecutionInput.query("safe");
+        }
+      }
+    expect_no_match: true
+  description: ExecutionInput.query(tainted) constructs a dynamic GraphQL document for later execution.
+  imports:
+  - graphql
+- id: java.graphql.schema_parser_parse
+  enabled: true
+  language: java
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SchemaParser
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          SchemaParser.parse(input);
+        }
+      }
+    expect_match_text:
+    - SchemaParser.parse
+  - name: arg tainted literal negative
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          SchemaParser.parse("safe");
+        }
+      }
+    expect_no_match: true
+  description: SchemaParser.parse of tainted SDL can produce a dynamic GraphQL schema controlled by untrusted input.
+  imports:
+  - graphql
+
+- id: java.graphql.executioninput_query_chain
+  enabled: true
+  language: java
+  tag: graphql-injection
+  severity: high
+  packages:
+  - graphql
+  imports:
+  - graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - newExecutionInput
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ExecutionInput.newExecutionInput().query(tainted)
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          ExecutionInput ei = ExecutionInput.newExecutionInput().query(input).build();
+        }
+      }
+    expect_match_text: ["ExecutionInput.newExecutionInput().query"]
+  - name: ExecutionInput.newExecutionInput().query literal negative
+    code: |
+      import graphql.*;
+      class App {
+        void handle(String input) throws Exception {
+          ExecutionInput ei = ExecutionInput.newExecutionInput().query("{ viewer { id } }").build();
+        }
+      }
+    expect_no_match: true
+  description: "ExecutionInput.newExecutionInput().query(tainted) — fluent GraphQL builder; attacker-controlled GraphQL document drives later GraphQL.executeAsync."
+
+- id: java.graphql.parser_parsedocument
+  enabled: true
+  language: java
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - graphql
+  imports:
+  - graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Parser
+      - parseDocument
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: Parser.parseDocument tainted
+    code: |
+      import graphql.parser.*;
+      class App {
+        void handle(String input) throws Exception {
+          Parser.parseDocument(input);
+        }
+      }
+    expect_match_text: [Parser.parseDocument]
+  - name: Parser.parseDocument literal negative
+    code: |
+      import graphql.parser.*;
+      class App {
+        void handle(String input) throws Exception {
+          Parser.parseDocument("{ viewer { id } }");
+        }
+      }
+    expect_no_match: true
+  description: "graphql.parser.Parser.parseDocument(tainted_source) — attacker-controlled GraphQL source becomes a Document AST consumed by downstream execution."

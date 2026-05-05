@@ -1,0 +1,42 @@
+# python mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: python.mass_assign.django_modelform_fields_all
+  enabled: true
+  language: python
+  tag: mass-assignment
+  severity: medium
+  cwe: [CWE-915]
+  match:
+    kind: write
+    target:
+      attribute: [Meta, fields]
+  match_examples:
+    - name: mass assign django modelform fields all
+      code: |
+        def example(value):
+            Meta.fields = "__all__"
+            return value
+      expect_match_text: [Meta.fields]
+  description: "Django ModelForm / DRF Serializer `class Meta: fields = '__all__'` — exposes every model field including admin / staff flags; explicitly list fields instead."
+- id: python.mass_assign.django_serializer_fields_all
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: mass-assignment
+  severity: medium
+  cwe: [CWE-915]
+  match:
+    kind: write
+    target:
+      attribute: [Meta, fields]
+  match_examples:
+    - name: mass assign django serializer fields all
+      code: |
+        def example(value):
+            Meta.fields = "__all__"
+            return value
+      expect_match_text: [Meta.fields]
+  description: "Disabled duplicate - same `Meta.fields = '__all__'` shape as python.mass_assign.django_modelform_fields_all; canonical rule covers Django ModelForm and DRF Serializer."

@@ -1,0 +1,298 @@
+---
+title: "Taint Engine Specification"
+description: "The standalone taint engine contract, propagation semantics, and core concepts."
+---
+
+# Taint engine specification
+
+The bonsai taint engine is a fully procedural, standalone analyzer that
+tracks untrusted data flow through:
+
+- intra-procedural CFG dataflow within a single function,
+- inter-procedural call propagation across functions, and
+- cross-file resolution via imports / exports / aliases.
+
+This doc covers the engine's contract, the ten concepts it implements, and
+the read/write rules that consumers should understand. It's the engineering
+reference. For the hands-on rule-authoring view, see [Pattern Guide](../pattern-guide.mdx).
+
+## Contract
+
+The engine is a pure function:
+
+```rust
+interprocedural_taint(
+    entry_func: FuncId,
+    entry_sources: TokenSet,
+    config: &InterTaintConfig,
+    db: &AnalyzerDb,
+) -> InterTaintResult
+```
+
+Given a non-empty `entry_sources`, it traces every reachable propagation.
+Given an empty `entry_sources`, it produces zero records — the engine
+never invents taint. CLI, SDK, security, and the inspect/trace/export
+consumers all drive it through
+`interprocedural_taint_to_completion_with_caches` (in
+`crates/taint/src/inter/mod.rs`), which shares an `InterTaintCaches` across
+calls and runs to fixpoint within `config.budget`.
+
+Only the security layer populates `config.source_bearing_functions` —
+the set of helpers whose matched source has been proven to reach a return.
+A function that reads untrusted data and returns only a status doesn't
+qualify. Other consumers drive the engine with their own seeds and an
+empty set.
+
+## Ten concepts
+
+Each concept is pinned by a test in
+`crates/taint/tests/ten_concept_alignment.rs`.
+
+### 1. Source model
+
+Caller-supplied seeds. `TokenSet` is `AHashSet<String>`. Identifiers can be
+bare (`req`) or qualified (`obj.field`). Qualified identifiers track
+per-field taint.
+
+```rust
+let seed: TokenSet = ["req".into()].into_iter().collect();
+let result = interprocedural_taint(entry, &seed, &config, &db);
+```
+
+### 2. Sink model
+
+The engine reports unresolved external calls in
+`InterTaintResult.tainted_calls`. The security layer decides what's
+actually a sink — the engine never filters by name. `TaintedCall.kind`
+identifies the record shape. Only `kind: Call` carries syntactic
+call-argument indices; `Write` and `Return` use diagnostic operand order.
+
+### 3. Sanitizer model
+
+`InterTaintConfig.sanitizers: TokenSet` is accepted but doesn't change
+propagation semantics. Sanitizer attribution is a security-layer concern;
+the engine over-approximates conservatively (false positives over false
+negatives).
+
+### 4. Call graph
+
+Function A → function B edges, resolved via
+`bonsai_resolve::resolve_callable_with_context`. Every edge carries a
+`Precision` and an `EdgeKind` (Direct / Virtual / Indirect / Unknown).
+Callable values pass through `bonsai_common::callable_reference_variants`
+so the various forms (`&fn/1`, `fun fn/1`, `\&fn`, string callables, Ruby
+method symbols, qualified tails) collapse to the same bare callable.
+
+Adapters lower callback invocation syntax to real `Call` events before
+this step. Perl `$cb->($value)` becomes a call named `$cb` with `$value`
+as arg 0, so a prior `run_cb(\&executor, t)` binding can dispatch to
+`executor(t)` without text fallbacks.
+
+Receiver-callback shorthands (`cb.call`, `cb.run`, `cb.apply`) only
+dispatch through local callable bindings when the binding resolves to a
+function or method value. Constructed objects with same-named methods go
+through receiver-type dispatch instead. Don't add results of
+constructor-shaped calls (`repo = Repository.wrap(raw)`) to the callable
+binding map.
+
+### 5. Data-flow graph
+
+Per-function `FlowEvent::Assign` events carry `target`, `source_name`,
+`source_call`, `source_call_args`, and `source_names` so taint flows
+through compound RHS without re-parsing. `source_names` preserves
+qualified RHS reads (`obj.field`, `obj['field']`, `obj->field`) as
+value-bearing operands, including grammars that split selectors into
+multiple nodes.
+
+Constructor / object-initializer assignments with named fields are
+field-sensitive. `env = Envelope({cmd: raw, kind: K})` seeds `env.cmd` from
+`raw` without tainting bare `env` or `env.kind`. Positional constructors
+fall back to descendant-container taint only when a type-like call
+actually receives tainted data.
+
+### 6. Module resolver
+
+`bonsai_resolve::alias_map_for_file` builds `{local_name → AliasTarget}`
+from `ImportSpec` entries. The engine consults the alias map at every call
+site to translate local names to global decls.
+
+### 7. Context sensitivity
+
+Same function, different seeds → distinct results. The engine memoises by
+`FunctionSeed { func, seed }` (sorted) so each `(func, seed)` pair has its
+own analysis. Recursion is bounded by this memoisation.
+
+### 8. Field sensitivity
+
+`obj.value = tainted` writes `obj.value` into state, not bare `obj`. Reads
+of `obj.other` don't match. The carrier-arg case (`process(obj)` with
+state `{obj.value}`) still propagates via
+`state_qualified_token_matches_text`. A bare tainted lifecycle carrier
+(`helper(obj)`) doesn't taint independent fields or locals derived only
+from those fields.
+
+### 9. Path sensitivity
+
+Branches don't dilute clean paths. `Branch` handling clones state per arm,
+walks both, and unions post-states. Clean reassignment in both branches
+clears prior taint at the merge.
+
+The adapter contract requires both arms to be present. The kit's
+`branch_repair` recovers the partition for grammars that lump both arms
+together. That repair runs before taint analysis, so inspect, trace,
+export, and security all see the same branch shape.
+
+**Pattern arms.** Languages where `match`/`switch` parses as a flat
+`Branch` with arms concatenated into `then_events` (Scala, Swift, Rust)
+get peeled by `split_match_arms_in_branch_events`. Each arm becomes its
+own nested `Branch::then_events`.
+
+**Typed catch arms.** `Try` events carry `catch_types` populated by
+adapter post-processes. The engine seeds the catch param only when at
+least one body throw is type-assignable:
+
+- Empty `catch_types` (catch-all) → conservative seed.
+- Catch type is a known absolute root (`Exception`, `Throwable`, `Error`,
+  `System.Exception`, `Object`) → conservative seed.
+- Otherwise → exact-name match between `Throw::thrown_type` and
+  `catch_types`. Compound throws fall back to conservative.
+- `RuntimeException` is intentionally NOT a root — it doesn't catch
+  checked exceptions.
+
+**Detached futures.** Rust `tokio::spawn` / `std::thread::spawn` bodies
+are wrapped in `FlowEvent::Defer` by the adapter. The engine's Defer
+handler observes the body's effects (so dangerous spawned sinks still
+surface) but doesn't propagate spawn taint into the caller's
+post-spawn continuation.
+
+### 10. Summary generation
+
+`FunctionSummary` records positional taint effects:
+
+- `returns_taint_of`: parameter indices whose value taint reaches the
+  return.
+- `returns_descendant_taint_of`: indices whose explicit descendant taint
+  reaches the return.
+- `returns_container_taint_of`: indices whose direct value gets embedded
+  into a returned container, so the caller's assignment target carries
+  descendant taint.
+- `taints_params_from`: parameter-to-parameter side effects (e.g.
+  `join(dst, ..., src)` writes `src` into `dst`).
+
+Caller's `apply_return_taint` consults the summary when processing
+`var = callee(args)`. Languages with implicit final-expression returns
+(Ruby, Rust tail) surface that terminal expression as a normal
+`FlowEvent::Return`.
+
+When an adapter emits `Assign.source_call` without `source_call_args` but
+also emits the sibling `FlowEvent::Call`, the inter walker borrows the
+call's arg list. That's semantic correlation between two adapter facts,
+not a text fallback — return-summary checks still use positional
+arguments.
+
+## Engine layers
+
+The taint crate is layered:
+
+- **Layer 1 — name reachability** (`reachable.rs`): pure structural
+  traversal grouped by `FactKind`. No data flow.
+- **Layer 2 — assign chain** (`assignment.rs`): monotonic identifier
+  propagation through `Assign` events. Used internally by summary
+  construction and as a fast-path scan.
+- **Layer 3 — intraprocedural** (`intra.rs`): forward dataflow over the
+  CFG with per-block in/out state. Worklist iterates to fixpoint with a
+  safety cap (CFG size × 8, min 16). Reports `saturated` on cap.
+- **Layer 4 — interprocedural** (`inter/mod.rs`): worklist-driven
+  fixpoint over `(func, seed, dyn_bindings)` items. Memoised by
+  `FunctionSeed`.
+
+`InterTaintConfig` covers the knobs:
+
+- `sanitizers: TokenSet` — informational only.
+- `budget: u32` — total `(func, seed)` pairs analysed (default 256).
+- `intra_worklist_cap: Option<u32>` — per-function safety cap.
+- `source_bearing_functions: AHashSet<FuncId>` — security-layer source
+  helpers.
+- `clean_output_overwrites: Vec<CleanOutputOverwrite>` — declarative
+  overwrite shapes from adapters/rules.
+- `callback_invocation_methods: AHashSet<String>` — method tails that
+  invoke callable receivers.
+- `collection_append_methods: AHashSet<String>` — mutator method tails
+  that move argument taint into receiver descendants.
+
+`InterTaintResult` returns:
+
+- `per_function: AHashMap<FunctionSeed, IntraTaintResult>` — per-pair
+  caches.
+- `call_records: Vec<CallPropagation>` — every cross-function flow.
+- `tainted_calls: Vec<TaintedCall>` — every call/write/return whose
+  operands carry tainted values.
+- `precision: Precision` — worst seen along any traversed edge.
+- `pairs_analyzed: u32`, `saturated: bool`, `continuation:
+  Option<InterTaintContinuation>` — for budget-truncated runs.
+
+## Read-side semantic checks
+
+The engine has two read-side functions with different strictness.
+
+**`arg_text_is_tainted(text, state) -> bool`** — the relaxed check used
+at call-arg / sink-arg sites:
+
+1. Empty trimmed text → false.
+2. Interpolation match (`$x` / `${x}` against state) — runs before the
+   quoted-literal short-circuit so `"... $x ..."` propagates.
+3. Whole-string quoted literal → false.
+4. Strip value-free operands (`sizeof(x)`, `alignof(T)`, `typeof(x)`,
+   `nameof(x)`).
+5. Direct match against state.
+6. Sigil-stripped match (`$x` ↔ `x`, `@arr` ↔ `arr`).
+7. Normalised qualified form (`obj['k']` ↔ `obj.k`).
+8. Qualified-text branch: exact qualified seed prefix-or-equal.
+9. Unqualified-text branch: bare read of any qualified seed sharing the
+   base.
+10. Identifier-tokens-outside-strings fallback (quote-aware), with
+    qualified-access bases filtered when the same token has no standalone
+    value occurrence.
+
+**`rhs_operand_is_tainted(text, state) -> bool`** — the strict check used
+at assignment-RHS source names. Same as the relaxed form minus steps 8
+and 9 (no bare-name promotion, no token-walk fallback). This is what
+keeps `out = data['other']` from inheriting `data.value`'s taint.
+
+Sigil interpolation is boundary-aware: a seed `$c` matches `$c` and
+`${c}` but not `$cap`. `$` interpolation is only recognised in
+string-like text; raw `$obj->field` is a member access.
+
+## Branch conditions and constant facts
+
+`FlowEvent::Branch` optionally carries a `condition` text. The engine
+recognises a small set of language-neutral patterns (literal booleans,
+`flag`, `!flag`, `flag == 0`) so guarded code doesn't generate spurious
+flows. The list grows conservatively — a constant fact must be
+language-neutral and trivially safe to reason about.
+
+## Append-style mutators and lifecycle calls
+
+Append-style container mutators (`push`, `append`, `add`, `addAll`, queue
+enqueue forms) propagate tainted arguments into the receiver's descendant
+state (`items.*`), not into the receiver scalar value. This models
+array/list contents without treating unrelated lifecycle fields as
+tainted.
+
+Carrier passing where a specific field is tainted (`client.argv`,
+`env.cmd`) gives the callee matching field state (`param.argv`,
+`param.cmd`). The carrier parameter itself isn't marked as a tainted
+scalar unless the caller had explicit value taint — so `free(client)`
+doesn't taint every field reachable below `client`.
+
+## Drift gates
+
+Engine semantics are pinned by snapshots under `.snapshots/`:
+
+- `COVERAGE_BASELINE.snapshot` — per-language capability matrix.
+- `ADAPTER_CAPABILITIES.snapshot` — adapter-claimed coverage.
+- `ADAPTER_FLOW_EVENT_COVERAGE.snapshot` — which `FlowEvent` variants
+  each adapter emits.
+
+CI rebuilds these and fails on drift unless the corresponding `.md` file
+is updated in the same PR. That keeps the docs honest with the code.

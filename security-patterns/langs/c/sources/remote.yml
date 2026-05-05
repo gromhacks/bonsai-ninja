@@ -1,0 +1,184 @@
+# C remote-input sources (network syscalls returning attacker-controlled bytes).
+- id: c.input.recv
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: recv
+  description: "Disabled — recv taints an output buffer, not its return value; needs pointer-out source modeling."
+- id: c.input.recvfrom
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: recvfrom
+  description: "Disabled — recvfrom taints an output buffer, not its return value; needs pointer-out source modeling."
+- id: c.input.recvmsg
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: recvmsg
+  description: "Disabled — recvmsg taints msg iov buffers; needs pointer-out source modeling."
+- id: c.input.ssl_read
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [openssl]
+  match:
+    kind: call
+    callee:
+      name: SSL_read
+  description: "Disabled — SSL_read taints an output buffer, not its return value; needs pointer-out source modeling."
+- id: c.input.mhd_lookup_connection_value
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [text]
+  packages: [libmicrohttpd]
+  match:
+    kind: call
+    callee:
+      name: MHD_lookup_connection_value
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmicrohttpd/microhttpd.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        MHD_lookup_connection_value(arg);
+      }
+  description: "libmicrohttpd MHD_lookup_connection_value — pulls query/form/cookie/header value straight from the HTTP client."
+- id: c.input.mg_get_http_var
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [text]
+  packages: [mongoose]
+  match:
+    kind: call
+    callee:
+      name: mg_get_http_var
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongoose.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_get_http_var(arg);
+      }
+  description: "mongoose mg_get_http_var — extracts a query-string parameter; attacker-controlled."
+
+- id: c.input.mg_http_get_var
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [text]
+  packages: [mongoose]
+  match:
+    kind: call
+    callee:
+      name: mg_http_get_var
+  match_examples:
+  - name: c.input.mg_http_get_var example
+    code: |
+      #include <mongoose.h>
+      void example(void) {
+        char *arg = "tainted";
+        mg_http_get_var(arg);
+      }
+  description: "Mongoose mg_http_get_var — extracts query/form variable value from an HTTP message."
+
+- id: c.input.mg_http_get_header
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [header]
+  packages: [mongoose]
+  match:
+    kind: call
+    callee:
+      name: mg_http_get_header
+  match_examples:
+  - name: c.input.mg_http_get_header example
+    code: |
+      #include <mongoose.h>
+      void example(void) {
+        char *arg = "tainted";
+        mg_http_get_header(arg);
+      }
+  description: "Mongoose mg_http_get_header — returns a client-supplied HTTP header value."
+
+# TLS / SSL record header fields parsed from a peer-controlled record.
+# The Heartbleed (CVE-2014-0160) shape: a 16-bit length pulled from
+# the heartbeat request reaches memcpy and reads server memory back.
+# Param-name regex covers the OpenSSL / GnuTLS / mbedTLS conventions.
+- id: c.input.tls_record_payload_len
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [openssl, libssl, gnutls, mbedtls]
+  match:
+    kind: param
+    target:
+      regex: "^(payload_length|payload_len|hbtype|hblen|record_length|frag_len)$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      int example(int argc, char **payload_length) {
+        return argc;
+      }
+  description: "TLS / DTLS record-header length / type fields parsed from a peer-controlled record (Heartbleed CVE-2014-0160 shape — `payload_length` flows from heartbeat request to memcpy). Scoped by openssl/libssl/gnutls/mbedtls package context."
+
+# Generic untrusted-input parameter for shell-handling / path-handling
+# C entry points. Names are deliberately narrow (the more aggressive
+# wider list — user/arg/cmd/name/path/host/url/query/body — caused
+# the c mega_flow fixture to report duplicate findings on construct-
+# coverage param names). Tightened to obviously-untrusted nouns:
+# `user_input`, `untrusted`, `attacker_input` plus the specific
+# `cshell` shape `user`-prefix patterns. Disabled by default; flip
+# in projects that want the broader audit hint.
+- id: c.input.untrusted_string_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  trust: remote
+  tag: cli-input
+  payload_types: [text]
+  match:
+    kind: param
+    target:
+      regex: "^(user_input|untrusted|attacker_input|tainted)$"
+  description: "Disabled by default — narrow audit hint for C entry-point fns whose param name explicitly states the value is attacker-controlled. The broader `user`/`cmd`/`path`/`host` variant collides with mega_flow construct-coverage param names; enable per-project."

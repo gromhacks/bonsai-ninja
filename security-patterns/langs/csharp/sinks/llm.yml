@@ -1,0 +1,162 @@
+# C# LLM sinks (OpenAI, Anthropic, Bedrock, Semantic Kernel).
+- id: csharp.llm.openai_chatclient_completechat
+  enabled: true
+  language: csharp
+  tag: web-llm
+  severity: medium
+  packages: [OpenAI]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [ChatClient, CompleteChat]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using OpenAI;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ChatClient.CompleteChat(input); } }
+    expect_match_text: [ChatClient.CompleteChat]
+  - name: literal chat prompt negative
+    code: |
+      using OpenAI;
+      class App { void Test() { ChatClient.CompleteChat("hello"); } }
+    expect_no_match: true
+  description: "OpenAI .NET ChatClient.CompleteChat - tainted prompt content reaches an LLM instruction and tool surface."
+
+- id: csharp.llm.azure_openai_getchatcompletionsasync
+  enabled: true
+  language: csharp
+  tag: web-llm
+  severity: medium
+  packages: [Azure.AI.OpenAI]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [OpenAIClient, GetChatCompletionsAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Azure.AI.OpenAI;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; OpenAIClient.GetChatCompletionsAsync(input); } }
+    expect_match_text: [OpenAIClient.GetChatCompletionsAsync]
+  - name: literal azure chat request negative
+    code: |
+      using Azure.AI.OpenAI;
+      class App { void Test() { OpenAIClient.GetChatCompletionsAsync("safe"); } }
+    expect_no_match: true
+  description: "Azure OpenAI GetChatCompletionsAsync - tainted chat content can steer model output, tool calls, or data disclosure."
+
+- id: csharp.llm.azure_openai_getchatcompletionsasync_options
+  enabled: true
+  language: csharp
+  tag: web-llm
+  severity: medium
+  packages: [Azure.AI.OpenAI]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [OpenAIClient, GetChatCompletionsAsync]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted chat options argument
+    code: |
+      using Azure.AI.OpenAI;
+      class App { void Test(string input) { OpenAIClient.GetChatCompletionsAsync("deployment", input); } }
+    expect_match_text: [OpenAIClient.GetChatCompletionsAsync]
+  - name: literal chat options negative
+    code: |
+      using Azure.AI.OpenAI;
+      class App { void Test() { OpenAIClient.GetChatCompletionsAsync("deployment", "safe"); } }
+    expect_no_match: true
+  description: "Azure OpenAI GetChatCompletionsAsync(deployment, tainted options) - tainted chat content can steer model output, tool calls, or data disclosure."
+
+- id: csharp.llm.anthropic_messages_createasync
+  enabled: true
+  language: csharp
+  tag: web-llm
+  severity: medium
+  packages: [Anthropic]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [AnthropicClient, CreateMessageAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Anthropic;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AnthropicClient.CreateMessageAsync(input); } }
+    expect_match_text: [AnthropicClient.CreateMessageAsync]
+  - name: literal anthropic message negative
+    code: |
+      using Anthropic;
+      class App { void Test() { AnthropicClient.CreateMessageAsync("safe"); } }
+    expect_no_match: true
+  description: "Anthropic CreateMessageAsync - tainted user content reaches a model instruction surface."
+
+- id: csharp.llm.bedrock_invokemodelasync
+  enabled: true
+  language: csharp
+  tag: web-llm
+  severity: medium
+  packages: [AWSSDK.BedrockRuntime]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [AmazonBedrockRuntimeClient, InvokeModelAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using AWSSDK.BedrockRuntime;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonBedrockRuntimeClient.InvokeModelAsync(input); } }
+    expect_match_text: [AmazonBedrockRuntimeClient.InvokeModelAsync]
+  - name: literal bedrock request negative
+    code: |
+      using AWSSDK.BedrockRuntime;
+      class App { void Test() { AmazonBedrockRuntimeClient.InvokeModelAsync("safe"); } }
+    expect_no_match: true
+  description: "Bedrock Runtime InvokeModelAsync - tainted request bodies steer foundation model output."
+
+- id: csharp.llm.semantic_kernel_getchatmessagecontentasync
+  enabled: true
+  language: csharp
+  tag: web-llm
+  severity: medium
+  packages: [Microsoft.SemanticKernel]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [IChatCompletionService, GetChatMessageContentAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.SemanticKernel;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IChatCompletionService.GetChatMessageContentAsync(input); } }
+    expect_match_text: [IChatCompletionService.GetChatMessageContentAsync]
+  - name: literal semantic kernel prompt negative
+    code: |
+      using Microsoft.SemanticKernel;
+      class App { void Test() { IChatCompletionService.GetChatMessageContentAsync("safe"); } }
+    expect_no_match: true
+  description: "Semantic Kernel chat completion - tainted chat history or prompt content reaches a model call."

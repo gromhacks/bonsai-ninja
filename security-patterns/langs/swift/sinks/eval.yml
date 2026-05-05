@@ -1,0 +1,87 @@
+# Swift code-injection sinks.
+- id: swift.eval.nspredicate_format
+  enabled: true
+  language: swift
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: NSPredicate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { NSPredicate(input) }
+  - name: literal nspredicate negative
+    code: |
+      func test() { NSPredicate("name == 'safe'") }
+    expect_no_match: true
+  description: "NSPredicate(format: tainted) — predicate injection. Note: also covered by nosql.nspredicate_init_format for NoSQL category; kept here for code-injection tag."
+- id: swift.eval.nsexpression_format
+  enabled: true
+  language: swift
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: NSExpression
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { NSExpression(input) }
+  - name: literal nsexpression negative
+    code: |
+      func test() { NSExpression("1 + 1") }
+    expect_no_match: true
+  description: "NSExpression(format: tainted) — expression injection."
+- id: swift.eval.evaluate_javascript
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: evaluateJavaScript
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; evaluateJavaScript(input) }
+  description: "Disabled duplicate — same bare `evaluateJavaScript` call fact as swift.xss.wkwebview_evaluate_javascript. Keep the WebKit/XSS rule enabled until receiver typing can distinguish a broader code-injection variant."
+- id: swift.eval.jscontext_evaluate
+  enabled: true
+  language: swift
+  tag: code-injection
+  severity: critical
+  packages: [JavaScriptCore]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: evaluateScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import JavaScriptCore // JavaScriptCore
+      func test(input: String) { evaluateScript(input) }
+  - name: literal evaluate script negative
+    code: |
+      import JavaScriptCore // JavaScriptCore
+      func test() { evaluateScript("1 + 1") }
+    expect_no_match: true
+  description: "JSContext.evaluateScript(tainted) — JavaScriptCore."

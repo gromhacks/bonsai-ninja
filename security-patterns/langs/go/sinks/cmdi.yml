@@ -1,0 +1,544 @@
+- id: go.cmdi.exec_command
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os/exec
+  - github.com/robertkrimen/otto
+  cwe:
+  - CWE-78
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - exec
+      - Command
+  constraints:
+  - arg_not_matches_regex:
+      index: 0
+      regex: '^"(/bin/)?(sh|bash)"$'
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted program name
+    code: "package main\nimport \"os/exec\"\nfunc run(name string) {\n  exec.Command(name, \"--version\")\n}\n"
+    expect_match_text:
+    - exec.Command
+  - name: literal program name negative
+    code: |
+      package main
+      import "os/exec"
+      func run() {
+        exec.Command("true", "--version")
+      }
+    expect_no_match: true
+  description: "exec.Command(name, args…) — tainted program names select arbitrary binaries."
+  aliases:
+  - go.cmdi.cmd_run
+  - go.cmdi.exec_command_chained_run
+  - go.cmdi.exec_command_chained_output
+  - go.cmdi.exec_command_chained_combined_output
+  - go.eval.otto_run
+- id: go.cmdi.exec_command_shell_wrapper
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os/exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - exec
+      - Command
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"(/bin/)?(sh|bash)"$'
+  - arg_equals:
+      index: 1
+      value: '"-c"'
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted shell command
+    code: |
+      package main
+      import "os/exec"
+      func run(cmd string) {
+        exec.Command("/bin/sh", "-c", cmd)
+      }
+    expect_match_text:
+    - exec.Command
+  - name: literal shell command negative
+    code: |
+      package main
+      import "os/exec"
+      func run() {
+        exec.Command("/bin/sh", "-c", "echo clean")
+      }
+    expect_no_match: true
+  description: "exec.Command(\"/bin/sh\", \"-c\", cmd) — shell-wrapper form executes tainted command text."
+- id: go.cmdi.exec_command_context
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os/exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - exec
+      - CommandContext
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted program name with context
+    code: |
+      package main
+      import (
+        "context"
+        "os/exec"
+      )
+
+      func run(name string) {
+        exec.CommandContext(context.Background(), name, "--version")
+      }
+    expect_match_text:
+    - exec.CommandContext
+  - name: literal program name with context negative
+    code: |
+      package main
+      import (
+        "context"
+        "os/exec"
+      )
+
+      func run() {
+        exec.CommandContext(context.Background(), "true", "--version")
+      }
+    expect_no_match: true
+  description: "exec.CommandContext(ctx, name, args…) — same exposure as exec.Command."
+- id: go.cmdi.syscall_exec
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - syscall
+  - go.starlark.net
+  - github.com/graph-gophers/graphql-go
+  - database/sql
+  cwe:
+  - CWE-78
+  - CWE-94
+  - CWE-943
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - syscall
+      - Exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted exec argv0
+    code: |
+      package main
+      import "syscall"
+
+      func run(argv0 string) {
+        syscall.Exec(argv0, []string{argv0}, nil)
+      }
+    expect_match_text:
+    - syscall.Exec
+  - name: literal exec argv0 negative
+    code: |
+      package main
+      import "syscall"
+
+      func run() {
+        syscall.Exec("/usr/bin/true", []string{"true"}, nil)
+      }
+    expect_no_match: true
+  description: "syscall.Exec(argv0, argv, env) — tainted argv0 replaces the process image. Merged collision aliases: go.eval.starlark_exec, go.graphql.schema_exec, go.sqli.db_exec."
+  aliases:
+  - go.eval.starlark_exec
+  - go.graphql.schema_exec
+  - go.sqli.db_exec
+- id: go.cmdi.syscall_exec_argv
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: high
+  packages:
+  - syscall
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - syscall
+      - Exec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted exec argv vector
+    code: |
+      package main
+      import "syscall"
+
+      func run(args []string) {
+        syscall.Exec("/usr/bin/git", args, nil)
+      }
+    expect_match_text:
+    - syscall.Exec
+  - name: literal exec argv vector negative
+    code: |
+      package main
+      import "syscall"
+
+      func run() {
+        syscall.Exec("/usr/bin/git", []string{"git", "status"}, nil)
+      }
+    expect_no_match: true
+  description: "syscall.Exec(argv0, argv, env) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+- id: go.cmdi.syscall_startprocess
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - syscall
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - syscall
+      - StartProcess
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted syscall startprocess name
+    code: |
+      package main
+      import "syscall"
+
+      func run(name string) {
+        syscall.StartProcess(name, []string{name}, nil)
+      }
+    expect_match_text:
+    - syscall.StartProcess
+  - name: literal syscall startprocess name negative
+    code: |
+      package main
+      import "syscall"
+
+      func run() {
+        syscall.StartProcess("/usr/bin/true", []string{"true"}, nil)
+      }
+    expect_no_match: true
+  description: "syscall.StartProcess(name, argv, attr) — tainted name = RCE."
+- id: go.cmdi.syscall_startprocess_argv
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: high
+  packages:
+  - syscall
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - syscall
+      - StartProcess
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted syscall startprocess argv
+    code: |
+      package main
+      import "syscall"
+
+      func run(args []string) {
+        syscall.StartProcess("/usr/bin/git", args, nil)
+      }
+    expect_match_text:
+    - syscall.StartProcess
+  - name: literal syscall startprocess argv negative
+    code: |
+      package main
+      import "syscall"
+
+      func run() {
+        syscall.StartProcess("/usr/bin/git", []string{"git", "status"}, nil)
+      }
+    expect_no_match: true
+  description: "syscall.StartProcess(name, argv, attr) — tainted argv controls flags or subcommands passed to the spawned process."
+- id: go.cmdi.os_startprocess
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - StartProcess
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os startprocess name
+    code: |
+      package main
+      import "os"
+
+      func run(name string) {
+        os.StartProcess(name, []string{name}, nil)
+      }
+    expect_match_text:
+    - os.StartProcess
+  - name: literal os startprocess name negative
+    code: |
+      package main
+      import "os"
+
+      func run() {
+        os.StartProcess("/usr/bin/true", []string{"true"}, nil)
+      }
+    expect_no_match: true
+  description: "os.StartProcess(name, argv, attr) — tainted name = RCE."
+- id: go.cmdi.os_startprocess_argv
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: high
+  packages:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - StartProcess
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted os startprocess argv
+    code: |
+      package main
+      import "os"
+
+      func run(args []string) {
+        os.StartProcess("/usr/bin/git", args, nil)
+      }
+    expect_match_text:
+    - os.StartProcess
+  - name: literal os startprocess argv negative
+    code: |
+      package main
+      import "os"
+
+      func run() {
+        os.StartProcess("/usr/bin/git", []string{"git", "status"}, nil)
+      }
+    expect_no_match: true
+  description: "os.StartProcess(name, argv, attr) — tainted argv controls flags or subcommands passed to the spawned process."
+- id: go.cmdi.cmd_start
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os/exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cmd
+      - Start
+  description: "Disabled — Cmd.Start() has no command argument; needs receiver state from exec.Command, Cmd.Path, or Cmd.Args taint."
+- id: go.cmdi.cmd_output
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os/exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cmd
+      - Output
+  description: "Disabled — Cmd.Output() executes receiver state and has no command argument; needs tainted Cmd state tracking."
+- id: go.cmdi.cmd_combined_output
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os/exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cmd
+      - CombinedOutput
+  description: "Disabled — Cmd.CombinedOutput() executes receiver state and has no command argument; needs tainted Cmd state tracking."
+- id: go.cmdi.syscall_forkexec
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - syscall
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - syscall
+      - ForkExec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted forkexec argv0
+    code: |
+      package main
+      import "syscall"
+
+      func run(argv0 string) {
+        syscall.ForkExec(argv0, []string{argv0}, nil)
+      }
+    expect_match_text:
+    - syscall.ForkExec
+  - name: literal forkexec argv0 negative
+    code: |
+      package main
+      import "syscall"
+
+      func run() {
+        syscall.ForkExec("/usr/bin/true", []string{"true"}, nil)
+      }
+    expect_no_match: true
+  description: "syscall.ForkExec(argv0, argv, attr) — low-level fork+exec; tainted argv0 runs an arbitrary binary."
+- id: go.cmdi.syscall_forkexec_argv
+  enabled: true
+  language: go
+  tag: command-injection
+  severity: high
+  packages:
+  - syscall
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - syscall
+      - ForkExec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted forkexec argv
+    code: |
+      package main
+      import "syscall"
+
+      func run(args []string) {
+        syscall.ForkExec("/usr/bin/git", args, nil)
+      }
+    expect_match_text:
+    - syscall.ForkExec
+  - name: literal forkexec argv negative
+    code: |
+      package main
+      import "syscall"
+
+      func run() {
+        syscall.ForkExec("/usr/bin/git", []string{"git", "status"}, nil)
+      }
+    expect_no_match: true
+  description: "syscall.ForkExec(argv0, argv, attr) — tainted argv controls flags or subcommands passed to the spawned process."
+- id: go.cmdi.exec_lookpath_tainted
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: command-injection
+  severity: medium
+  packages:
+  - os/exec
+  cwe:
+  - CWE-78
+  - CWE-427
+  match:
+    kind: call
+    callee:
+      attribute:
+      - exec
+      - LookPath
+  description: "Disabled — exec.LookPath(tainted) can resolve an attacker-planted binary on $PATH; enable with PATH-hardening analysis."
+- id: go.cmdi.cmd_path_tainted
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: command-injection
+  severity: critical
+  packages:
+  - os/exec
+  cwe:
+  - CWE-78
+  match:
+    kind: write
+    target:
+      attribute:
+      - cmd
+      - Path
+  description: "Disabled audit variant — cmd.Path = tainted assigns the executable path of an existing exec.Cmd; subsequent Run/Start/Output then runs an attacker-chosen binary."

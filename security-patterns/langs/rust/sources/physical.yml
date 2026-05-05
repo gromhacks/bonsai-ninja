@@ -1,0 +1,144 @@
+# Rust hardware / physical-input sources (GPIO, interrupts, I2C register reads).
+- id: rust.physical.input_pin_is_high
+  enabled: true
+  language: rust
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [embedded_hal, rppal]
+  match:
+    kind: call
+    callee:
+      regex: "\\.is_high$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use embedded_hal;
+      use embedded_hal;
+      use embedded_hal::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.is_high(target);
+      }
+  description: "InputPin::is_high — digital GPIO state from attached hardware."
+
+  imports:
+  - embedded_hal
+- id: rust.physical.input_pin_is_low
+  enabled: true
+  language: rust
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [embedded_hal, rppal]
+  match:
+    kind: call
+    callee:
+      regex: "\\.is_low$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use embedded_hal;
+      use embedded_hal;
+      use embedded_hal::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.is_low(target);
+      }
+  description: "InputPin::is_low — digital GPIO state from attached hardware."
+
+  imports:
+  - embedded_hal
+- id: rust.physical.poll_interrupt
+  enabled: true
+  language: rust
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [rppal]
+  match:
+    kind: call
+    callee:
+      regex: "\\.poll_interrupt$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use rppal::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.poll_interrupt(target);
+      }
+  description: "poll_interrupt — GPIO edge event from external hardware."
+
+- id: rust.physical.smbus_read_byte_data
+  enabled: true
+  language: rust
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [i2cdev, linux_embedded_hal]
+  match:
+    kind: call
+    callee:
+      regex: "\\.smbus_read_byte_data$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use i2cdev::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.smbus_read_byte_data(target);
+      }
+  description: "smbus_read_byte_data — device register read over I2C/SMBus."
+
+- id: rust.physical.smbus_read_word_data
+  enabled: true
+  language: rust
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [i2cdev, linux_embedded_hal]
+  match:
+    kind: call
+    callee:
+      regex: "\\.smbus_read_word_data$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use i2cdev::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.smbus_read_word_data(target);
+      }
+  description: "smbus_read_word_data — 16-bit register read from an attached peripheral."
+
+- id: rust.physical.transfer_in_place
+  enabled: true
+  language: rust
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [embedded_hal, linux_embedded_hal]
+  match:
+    kind: call
+    callee:
+      regex: "\\.transfer_in_place$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use embedded_hal;
+      use embedded_hal;
+      use embedded_hal::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.transfer_in_place(target);
+      }
+  description: "transfer_in_place — full-duplex SPI exchange reads peripheral response bytes."
+  imports:
+  - embedded_hal

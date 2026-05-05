@@ -1,0 +1,65 @@
+# Scala queue / broker event sources.
+- id: scala.queue.alpakka_kafka_record
+  enabled: true
+  language: scala
+  trust: service
+  tag: event-input
+  payload_types: [event]
+  frameworks: [alpakka-kafka]
+  packages: ["com.typesafe.akka.alpakka-kafka"]
+  match:
+    kind: param
+    target:
+      name: record
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.typesafe.akka.alpakkakafka._
+      object App {
+        def handle(record: String): Unit = {
+        }
+      }
+  description: "Alpakka Kafka ConsumerRecord — attacker-controlled message payload."
+
+  imports:
+  - com
+  - com.typesafe.akka.alpakkakafka
+- id: scala.queue.akka_amqp_message
+  enabled: true
+  language: scala
+  trust: service
+  tag: event-input
+  payload_types: [event]
+  frameworks: [akka-amqp]
+  match:
+    kind: param
+    target:
+      name: delivery
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(delivery: String): Unit = {
+        }
+      }
+  description: "Akka / RabbitMQ delivery message param."
+
+- id: scala.queue.aws_sqs_message
+  enabled: true
+  language: scala
+  trust: service
+  tag: event-input
+  payload_types: [event]
+  frameworks: [aws-sqs]
+  match:
+    kind: param
+    target:
+      name: sqsEvent
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(sqsEvent: String): Unit = {
+        }
+      }
+  description: "AWS Lambda SQSEvent trigger parameter."

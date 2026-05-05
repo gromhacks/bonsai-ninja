@@ -1,0 +1,506 @@
+# C NoSQL-injection sinks. libmongoc + hiredis + leveldb + lmdb +
+# memcached. BSON / command-string interpolation from tainted input
+# lets an attacker rewrite the query predicate or inject operators
+# (`$ne`, `$where`, `$regex`) that bypass filters.
+
+- id: c.nosql.mongoc_collection_find
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: high
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_collection_find_with_opts
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mongoc_collection_find_with_opts(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mongoc_collection_find_with_opts("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libmongoc mongoc_collection_find_with_opts(coll, tainted_filter, ...) — attacker-built BSON filter yields NoSQL-injection (e.g. {$ne: null})."
+
+- id: c.nosql.mongoc_collection_find_legacy
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: high
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_collection_find
+  constraints:
+  - arg_tainted:
+      index: 5
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mongoc_collection_find(arg);
+      }
+  - name: literal arg 5 negative
+    code: |
+      void example(void) {
+        mongoc_collection_find("safe", "safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "libmongoc mongoc_collection_find — deprecated; same filter-interpolation risk as the _with_opts variant."
+
+- id: c.nosql.mongoc_collection_count
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_collection_count_documents
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mongoc_collection_count_documents(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mongoc_collection_count_documents("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libmongoc mongoc_collection_count_documents — tainted filter lets the attacker influence the count query (information leak about indexed values)."
+
+- id: c.nosql.mongoc_collection_update
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: critical
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_collection_update_one
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mongoc_collection_update_one(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mongoc_collection_update_one("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libmongoc mongoc_collection_update_one — tainted filter or update document allows attacker-controlled writes (e.g. $set over arbitrary fields)."
+
+- id: c.nosql.mongoc_collection_update_doc
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: critical
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_collection_update_one
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted arg 2
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(char *input) {
+        mongoc_collection_update_one("safe", "safe", input);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        mongoc_collection_update_one("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "mongoc_collection_update_one(collection, filter, update, ...) — tainted update documents can inject operators or alter unintended fields."
+
+- id: c.nosql.mongoc_collection_delete
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: critical
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_collection_delete_many
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mongoc_collection_delete_many(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mongoc_collection_delete_many("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libmongoc mongoc_collection_delete_many — tainted filter can widen the delete to unintended documents (e.g. {$ne: null})."
+
+- id: c.nosql.mongoc_database_command
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: high
+  packages: [libmongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mongoc_database_command_simple
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmongoc/mongoc.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mongoc_database_command_simple(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mongoc_database_command_simple("safe", "safe");
+      }
+    expect_no_match: true
+  description: "mongoc_database_command_simple — runs an arbitrary BSON admin command; tainted input controls the operation and arguments."
+
+- id: c.nosql.hiredis_command_eval
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [hiredis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: redisCommand
+  description: "Disabled — redisCommand is a generic dispatch; use the format-string variant below which catches the injection-prone shape."
+
+- id: c.nosql.hiredis_command_format
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: high
+  packages: [hiredis]
+  cwe: [CWE-943, CWE-134]
+  match:
+    kind: call
+    callee:
+      name: redisvCommand
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <hiredis/hiredis.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        redisvCommand(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        redisvCommand("safe", "safe");
+      }
+    expect_no_match: true
+  description: "redisvCommand(ctx, fmt, ap) — format-string composed from tainted input allows arbitrary Redis commands (EVAL / FLUSHDB / CONFIG SET)."
+
+- id: c.nosql.hiredis_append
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: high
+  packages: [hiredis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: redisAppendCommand
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <hiredis/hiredis.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        redisAppendCommand(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        redisAppendCommand("safe", "safe");
+      }
+    expect_no_match: true
+  description: "redisAppendCommand — pipelined Redis command built with a format string; tainted arguments can inject additional commands into the pipeline."
+
+- id: c.nosql.leveldb_write
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [leveldb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: leveldb_put
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <leveldb.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        leveldb_put(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        leveldb_put("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "leveldb_put — tainted key allows writing to arbitrary keys outside the intended namespace (no ACL layer in leveldb itself)."
+
+- id: c.nosql.leveldb_write_value
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [leveldb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: leveldb_put
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: tainted arg 4
+    code: |
+      #include <leveldb.h>
+      void example(char *input) {
+        leveldb_put("safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 4 negative
+    code: |
+      void example(void) {
+        leveldb_put("safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "leveldb_put(..., key, value, ...) — tainted values can poison arbitrary key contents."
+
+- id: c.nosql.leveldb_delete
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: high
+  packages: [leveldb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: leveldb_delete
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <leveldb.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        leveldb_delete(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        leveldb_delete("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "leveldb_delete — tainted key allows deletion of arbitrary entries in the store."
+
+- id: c.nosql.lmdb_put
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [lmdb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mdb_put
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <lmdb.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mdb_put(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        mdb_put("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "mdb_put — LMDB write with tainted key lets the attacker overwrite arbitrary entries in the keyspace."
+
+- id: c.nosql.lmdb_put_value
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [lmdb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: mdb_put
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: tainted arg 3
+    code: |
+      #include <lmdb.h>
+      void example(char *input) {
+        mdb_put("safe", "safe", "safe", input);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        mdb_put("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "mdb_put(txn, dbi, key, data, flags) — tainted data can overwrite arbitrary key contents."
+
+- id: c.nosql.memcached_set
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [libmemcached]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: memcached_set
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmemcached/memcached.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        memcached_set(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        memcached_set("safe", "safe");
+      }
+    expect_no_match: true
+  description: "memcached_set — tainted key or value lets the attacker poison cache entries (session fixation, cache-poisoning fan-out)."
+- id: c.nosql.memcached_set_value
+  enabled: true
+  language: c
+  tag: nosql-injection
+  severity: medium
+  packages: [libmemcached]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: memcached_set
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: tainted arg 3
+    code: |
+      #include <libmemcached/memcached.h>
+      void example(char *input) {
+        memcached_set("safe", "safe", "safe", input);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        memcached_set("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "memcached_set(..., key, value, ...) — tainted values can poison cache entries."

@@ -1,0 +1,83 @@
+# Erlang file-upload (cowboy multipart). Client-supplied filename hits disk.
+- id: erlang.upload.cowboy_multipart_filename
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: erlang
+  tag: file-upload
+  severity: medium
+  packages: [cowboy]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "^cow_multipart:form_data"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("cowboy/include/cowboy.hrl").
+      -export([test/1]).
+      test(Input) ->
+        cow_multipart:form_data(Input).
+  description: "Disabled until state/return-value tracking exists — cow_multipart:form_data returns a client-supplied filename, but the sink is the later filesystem write using that returned name."
+
+- id: erlang.upload_file_write_client_filename
+  enabled: true
+  language: erlang
+  tag: file-upload
+  severity: medium
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "^file:write_file"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: erlang write upload to filename
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Filename) ->
+        file:write_file(Filename, <<"upload">>).
+    expect_match_text: ["file:write_file"]
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        file:write_file("uploads/avatar.png", <<"upload">>).
+    expect_no_match: true
+  description: "file:write_file with upload filename — writing multipart content to a client-controlled path enables traversal / overwrite."
+
+- id: erlang.upload_file_copy_client_filename
+  enabled: true
+  language: erlang
+  tag: file-upload
+  severity: medium
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "^file:copy"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: erlang copy upload to filename
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(Upload, Filename) ->
+        file:copy(Upload, Filename).
+    expect_match_text: ["file:copy"]
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Upload) ->
+        file:copy(Upload, "uploads/avatar.png").
+    expect_no_match: true
+  description: "file:copy(upload, filename) — copying multipart content to a client-named destination can overwrite arbitrary files."

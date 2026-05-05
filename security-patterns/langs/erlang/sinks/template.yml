@@ -1,0 +1,98 @@
+# Erlang server-side template injection.
+- id: erlang.template.erlydtl_compile
+  enabled: true
+  language: erlang
+  tag: ssti
+  severity: high
+  packages: [erlydtl]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      regex: "^erlydtl:(compile|compile_file|compile_template)"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("erlydtl/include/erlydtl.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlydtl:compile(Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("erlydtl/include/erlydtl.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        erlydtl:compile("Hello {{ name }}").
+    expect_no_match: true
+  description: "erlydtl:compile — Django-template port; compiling a tainted template string enables SSTI."
+
+- id: erlang.template_bbmustache_compile
+  enabled: true
+  language: erlang
+  tag: ssti
+  severity: high
+  packages: [bbmustache]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      regex: "^bbmustache:(compile|render)"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: erlang bbmustache render tainted template
+    code: |
+      -include_lib("bbmustache/include/bbmustache.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        bbmustache:render(Input).
+    expect_match_text: ["bbmustache:render"]
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("bbmustache/include/bbmustache.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        bbmustache:render("Hello {{name}}").
+    expect_no_match: true
+  description: "bbmustache:render / compile with a tainted template string — server-side template injection through dynamic templates."
+
+- id: erlang.template_mustache_render
+  enabled: true
+  language: erlang
+  tag: ssti
+  severity: high
+  packages: [mustache]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      regex: "^mustache:(render|compile)"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: erlang mustache render tainted template
+    code: |
+      -include_lib("mustache/include/mustache.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mustache:render(Input).
+    expect_match_text: ["mustache:render"]
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("mustache/include/mustache.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        mustache:render("Hello {{name}}").
+    expect_no_match: true
+  description: "mustache:render / compile with attacker-controlled template text — dynamic template execution can expose SSTI behavior."

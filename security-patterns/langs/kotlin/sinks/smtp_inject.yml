@@ -1,0 +1,35 @@
+- id: kotlin.smtpinj.mime_message_set_subject
+  enabled: true
+  language: kotlin
+  tag: smtp-injection
+  severity: medium
+  packages: ["javax.mail", "jakarta.mail"]
+  imports: ["javax.mail", "jakarta.mail"]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [MimeMessage, setSubject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mime message setSubject tainted
+    code: |
+      import javax.mail.internet.MimeMessage
+      import javax.mail.Session
+      fun handle(input: String, session: Session) {
+        val msg = MimeMessage(session)
+        msg.setSubject(input)
+      }
+    expect_match_text: [msg.setSubject]
+  - name: literal subject negative
+    code: |
+      import javax.mail.internet.MimeMessage
+      import javax.mail.Session
+      fun handle(session: Session) {
+        val msg = MimeMessage(session)
+        msg.setSubject("fixed")
+      }
+    expect_no_match: true
+  description: "MimeMessage.setSubject — CR/LF in subject injects MIME headers."

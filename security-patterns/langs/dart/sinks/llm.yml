@@ -1,0 +1,101 @@
+# Dart LLM sinks (OpenAI / Anthropic / Bedrock client wrappers).
+- id: dart.llm.dart_openai_chat_create
+  enabled: true
+  language: dart
+  tag: web-llm
+  severity: medium
+  packages: [dart_openai]
+  imports:
+  - dart_openai
+  - dart_openai/dart_openai.dart
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [OpenAI, instance, chat, create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dart openai chat create
+    code: |
+      import 'package:dart_openai/dart_openai.dart';
+      import 'package:dart_openai/dart_openai.dart';
+      import 'package:dart_openai/dart_openai.dart';
+      import 'package:dart_openai/dart_openai.dart';
+      import 'package:dart_openai/dart_openai.dart'; // dart_openai
+      void test(dynamic input) { OpenAI.instance.chat.create(input); }
+    expect_match_text: [OpenAI.instance.chat.create]
+  - name: literal dart openai chat create negative
+    code: |
+      import 'package:dart_openai/dart_openai.dart';
+      void test() { OpenAI.instance.chat.create("summarize safe text"); }
+    expect_no_match: true
+  description: "dart_openai OpenAI.instance.chat.create — tainted prompt content reaches an LLM instruction / tool surface."
+
+- id: dart.llm.openai_dart_create_chat_completion
+  enabled: true
+  language: dart
+  tag: web-llm
+  severity: medium
+  packages: [openai_dart]
+  imports:
+  - openai_dart
+  - openai_dart/openai_dart.dart
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: createChatCompletion
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dart openai create chat completion
+    code: |
+      import 'package:openai_dart/openai_dart.dart';
+      import 'package:openai_dart/openai_dart.dart';
+      import 'package:openai_dart/openai_dart.dart';
+      import 'package:openai_dart/openai_dart.dart';
+      import 'package:openai_dart/openai_dart.dart';
+      void test(dynamic input) { createChatCompletion(input); }
+    expect_match_text: [createChatCompletion]
+  - name: literal dart openai create chat completion negative
+    code: |
+      import 'package:openai_dart/openai_dart.dart';
+      void test() { createChatCompletion("summarize safe text"); }
+    expect_no_match: true
+  description: "openai_dart createChatCompletion — user-controlled content can steer model output and tool calls."
+
+- id: dart.llm.bedrock_invoke_model
+  enabled: true
+  language: dart
+  tag: web-llm
+  severity: medium
+  packages: [aws_bedrock_runtime_api]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: invokeModel
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dart bedrock invoke model
+    code: |
+      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
+      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
+      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
+      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
+      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
+      void test(dynamic input) { invokeModel(input); }
+    expect_match_text: [invokeModel]
+  - name: literal dart bedrock invoke model negative
+    code: |
+      import 'package:aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart';
+      void test() { invokeModel("safe prompt"); }
+    expect_no_match: true
+  description: "Bedrock Runtime invokeModel — tainted request body steers the underlying foundation model."
+  imports:
+  - aws_bedrock_runtime_api/aws_bedrock_runtime_api.dart

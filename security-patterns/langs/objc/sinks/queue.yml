@@ -1,0 +1,40 @@
+- id: objc.queue.send_message
+  enabled: true
+  language: objc
+  tag: queue-injection
+  severity: high
+  packages: [AWSSQS]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: sendMessage
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AWSSQS/AWSSQS.h>
+      void test(id input) { id target = input; int amount = 1; sendMessage(input); }
+  - name: literal sqs message negative
+    code: |
+      #import <AWSSQS/AWSSQS.h>
+      void test(void) { sendMessage(@"safe"); }
+    expect_no_match: true
+  description: "AWSSQS sendMessage — tainted queue target/body injects arbitrary broker payloads."
+
+- id: objc.queue.publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  tag: queue-injection
+  severity: high
+  packages: [AWSSNS]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: publish
+  description: "Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across Objective-C clients and app code."

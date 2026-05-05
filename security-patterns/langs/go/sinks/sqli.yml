@@ -1,0 +1,528 @@
+- id: go.sqli.db_query
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - database/sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^(db|tx|stmt|conn|database|d|t|client|sqlDB|sqlTx)\.Query$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted query string
+    code: |
+      package main
+      import "database/sql"
+
+      func example(db *sql.DB, target string) {
+        db.Query(target)
+      }
+    expect_match_text: [db.Query]
+  - name: literal query string negative
+    code: |
+      package main
+      import "database/sql"
+
+      func example(db *sql.DB, name string) {
+        db.Query("SELECT * FROM users WHERE name = ?", name)
+      }
+    expect_no_match: true
+  description: "database/sql DB.Query / Tx.Query / Stmt.Query — tainted SQL = injection; use ? / $1 placeholders."
+- id: go.sqli.db_queryrow
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - database/sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.QueryRow$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted queryrow string
+    code: |
+      package main
+      import "database/sql"
+
+      func example(db *sql.DB, target string) {
+        db.QueryRow(target)
+      }
+    expect_match_text: [db.QueryRow]
+  - name: literal queryrow string negative
+    code: |
+      package main
+      import "database/sql"
+
+      func example(db *sql.DB, name string) {
+        db.QueryRow("SELECT * FROM users WHERE name = ?", name)
+      }
+    expect_no_match: true
+  description: "database/sql DB.QueryRow / Tx.QueryRow — tainted SQL without placeholders."
+- id: go.sqli.db_query_context
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - database/sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.QueryContext$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted querycontext string
+    code: |
+      package main
+      import (
+        "context"
+        "database/sql"
+      )
+
+      func example(ctx context.Context, db *sql.DB, target string) {
+        db.QueryContext(ctx, target)
+      }
+    expect_match_text: [db.QueryContext]
+  - name: literal querycontext string negative
+    code: |
+      package main
+      import (
+        "context"
+        "database/sql"
+      )
+
+      func example(ctx context.Context, db *sql.DB, name string) {
+        db.QueryContext(ctx, "SELECT * FROM users WHERE name = ?", name)
+      }
+    expect_no_match: true
+  description: "database/sql DB.QueryContext / Tx.QueryContext — tainted SQL = injection."
+- id: go.sqli.db_queryrow_context
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - database/sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.QueryRowContext$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted queryrowcontext string
+    code: |
+      package main
+      import (
+        "context"
+        "database/sql"
+      )
+
+      func example(ctx context.Context, db *sql.DB, target string) {
+        db.QueryRowContext(ctx, target)
+      }
+    expect_match_text: [db.QueryRowContext]
+  - name: literal queryrowcontext string negative
+    code: |
+      package main
+      import (
+        "context"
+        "database/sql"
+      )
+
+      func example(ctx context.Context, db *sql.DB, name string) {
+        db.QueryRowContext(ctx, "SELECT * FROM users WHERE name = ?", name)
+      }
+    expect_no_match: true
+  description: database/sql DB.QueryRowContext / Tx.QueryRowContext.
+- id: go.sqli.db_exec_context
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - database/sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.ExecContext$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted execcontext string
+    code: |
+      package main
+      import (
+        "context"
+        "database/sql"
+      )
+
+      func example(ctx context.Context, db *sql.DB, target string) {
+        db.ExecContext(ctx, target)
+      }
+    expect_match_text: [db.ExecContext]
+  - name: literal execcontext string negative
+    code: |
+      package main
+      import (
+        "context"
+        "database/sql"
+      )
+
+      func example(ctx context.Context, db *sql.DB, name string) {
+        db.ExecContext(ctx, "UPDATE users SET name = ? WHERE id = 1", name)
+      }
+    expect_no_match: true
+  description: database/sql DB.ExecContext / Tx.ExecContext.
+- id: go.sqli.gorm_raw
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Raw$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm raw query string
+    code: "package main\nimport (\n  \"fmt\"\n  \"gorm.io/gorm\"\n)\nfunc byName(db *gorm.DB, name string) {\n  db.Raw(fmt.Sprintf(\"SELECT * FROM users WHERE name = '%s'\", name))\n}\n"
+    expect_match_text:
+    - db.Raw
+  - name: gorm raw literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc byName(db *gorm.DB, name string) {\n  db.Raw(\"SELECT * FROM users WHERE name = ?\", name)\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Raw(tainted) — raw SQL; use placeholders or First/Where struct form."
+- id: go.sqli.gorm_where_raw
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Where$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm where string concat
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc byName(db *gorm.DB, name string) {\n  db.Where(\"name = '\" + name + \"'\")\n}\n"
+    expect_match_text:
+    - db.Where
+  - name: gorm where literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc byName(db *gorm.DB, name string) {\n  db.Where(\"name = ?\", name)\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Where(tainted) — string-built Where clause is SQLi; use struct/map or ? placeholders."
+- id: go.sqli.gorm_exec
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Exec$
+  match_examples:
+  - name: gorm exec raw sql
+    code: "package main\nimport (\n  \"net/http\"\n  \"gorm.io/gorm\"\n)\nfunc update(db *gorm.DB, r *http.Request) {\n  role := \"admin\"\n  db.Exec(\"UPDATE users SET role = '\" + role + \"'\")\n}\n"
+    expect_match_text:
+    - db.Exec
+  description: "Disabled — duplicate call shape with go.sqli.db_exec for receiver `db.Exec`; without type-aware receiver matching the database/sql rule owns Exec sinks, including GORM-style raw SQL examples."
+- id: go.sqli.gorm_order
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Order$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm order user controlled
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, sort string) {\n  db.Order(sort)\n}\n"
+    expect_match_text:
+    - db.Order
+  - name: gorm order literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Order(\"name desc\")\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Order(tainted) — ORDER BY expression injection; use a column allowlist."
+- id: go.sqli.gorm_having
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Having$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm having raw predicate
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, threshold string) {\n  q := db.Table(\"users\")\n  q.Having(\"count(*) > \" + threshold)\n}\n"
+    expect_match_text:
+    - q.Having
+  - name: gorm having literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, threshold int) {\n  db.Table(\"users\").Having(\"count(*) > ?\", threshold)\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Having(tainted predicate) — raw HAVING clause injection; use placeholders."
+- id: go.sqli.gorm_joins
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Joins$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm joins raw clause
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, table string) {\n  db.Joins(\"JOIN \" + table + \" ON users.id = user_id\")\n}\n"
+    expect_match_text:
+    - db.Joins
+  - name: gorm joins literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Joins(\"JOIN emails ON emails.user_id = users.id\")\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Joins(tainted SQL fragment) — raw JOIN clause injection; use fixed join text."
+- id: go.sqli.gorm_group
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Group$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm group raw expression
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, group string) {\n  db.Group(group)\n}\n"
+    expect_match_text:
+    - db.Group
+  - name: gorm group literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Group(\"role\")\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Group(tainted) — GROUP BY expression injection; use a fixed column allowlist."
+- id: go.sqli.gorm_distinct
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Distinct$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm distinct raw column
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, column string) {\n  db.Distinct(column)\n}\n"
+    expect_match_text:
+    - db.Distinct
+  - name: gorm distinct literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Distinct(\"name\")\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Distinct(tainted) — raw SELECT DISTINCT expression injection; use a fixed column allowlist."
+- id: go.sqli.gorm_select
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Select$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm select raw projection
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, projection string) {\n  db.Select(projection)\n}\n"
+    expect_match_text:
+    - db.Select
+  - name: gorm select literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  db.Select(\"name,email\")\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Select(tainted) — raw projection injection; use fixed fields or safe struct selection."
+- id: go.sqli.gorm_pluck
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - gorm.io/gorm
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Pluck$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gorm pluck raw column
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB, column string) {\n  var values []string\n  db.Pluck(column, &values)\n}\n"
+    expect_match_text:
+    - db.Pluck
+  - name: gorm pluck literal negative
+    code: "package main\nimport \"gorm.io/gorm\"\nfunc list(db *gorm.DB) {\n  var values []string\n  db.Pluck(\"name\", &values)\n}\n"
+    expect_no_match: true
+  description: "GORM DB.Pluck(tainted column) — raw column expression injection; use a column allowlist."
+- id: go.sqli.sqlx_queryx
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - github.com/jmoiron/sqlx
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Queryx$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqlx queryx string
+    code: "package main\nimport \"github.com/jmoiron/sqlx\"\nfunc list(db *sqlx.DB, q string) {\n  _, _ = db.Queryx(\"SELECT * FROM users WHERE name = '\" + q + \"'\")\n}\n"
+    expect_match_text:
+    - db.Queryx
+  - name: sqlx queryx literal negative
+    code: "package main\nimport \"github.com/jmoiron/sqlx\"\nfunc list(db *sqlx.DB, q string) {\n  _, _ = db.Queryx(\"SELECT * FROM users WHERE name = ?\", q)\n}\n"
+    expect_no_match: true
+  - name: echo query param into sqlx queryx
+    code: "package main\nimport (\n  \"github.com/jmoiron/sqlx\"\n  \"github.com/labstack/echo\"\n)\nfunc list(c echo.Context, db *sqlx.DB) {\n  q := c.QueryParam(\"q\")\n  _, _ = db.Queryx(\"SELECT * FROM users WHERE name = '\" + q + \"'\")\n}\n"
+    expect_match_text:
+    - db.Queryx
+  description: sqlx DB.Queryx / Tx.Queryx with string-built SQL.
+- id: go.sqli.sqlx_mustexec
+  enabled: true
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - github.com/jmoiron/sqlx
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.MustExec$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted sqlx mustexec string
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+
+      func example(db *sqlx.DB, target string) {
+        db.MustExec(target)
+      }
+    expect_match_text: [db.MustExec]
+  - name: sqlx mustexec literal negative
+    code: |
+      package main
+      import "github.com/jmoiron/sqlx"
+
+      func example(db *sqlx.DB, name string) {
+        db.MustExec("UPDATE users SET name = ? WHERE id = 1", name)
+      }
+    expect_no_match: true
+  description: sqlx DB.MustExec with string-built SQL.
+- id: go.sqli.pgx_query
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: sql-injection
+  severity: high
+  packages:
+  - github.com/jackc/pgx
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pgx
+      - Conn
+      - Query
+  description: "Disabled — real pgx usage is `conn.Query(ctx, sql, args...)` on a local var, not the literal chain `pgx.Conn.Query`; the bare `.Query$` rule (go.sqli.db_query) already covers pgx call shape."

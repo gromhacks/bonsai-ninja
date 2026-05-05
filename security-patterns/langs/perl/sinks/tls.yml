@@ -1,0 +1,84 @@
+# Perl TLS misconfig.
+- id: perl.tls.lwp_ssl_verify_none
+  enabled: true
+  language: perl
+  tag: weak-tls
+  severity: high
+  packages: ["LWP::UserAgent"]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: ssl_opts
+  match_examples:
+  - name: perl.tls.lwp_ssl_verify_none example
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        ssl_opts($input)
+      }
+  description: "LWP::UserAgent $ua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0)."
+
+- id: perl.tls.mojo_useragent_insecure
+  enabled: true
+  language: perl
+  tag: weak-tls
+  severity: high
+  packages: ["Mojo::UserAgent"]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: insecure
+  match_examples:
+  - name: perl.tls.mojo_useragent_insecure example
+    code: |
+      use Mojo::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        insecure($input)
+      }
+  description: "Mojo::UserAgent $ua->insecure(1) or insecure => 1 in new."
+
+- id: perl.tls.io_socket_ssl_verify_none
+  enabled: true
+  language: perl
+  tag: weak-tls
+  severity: high
+  packages: ["IO::Socket::SSL"]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: ["IO::Socket::SSL", "new"]
+  match_examples:
+  - name: perl.tls.io_socket_ssl_verify_none example
+    code: |
+      use IO::Socket::SSL;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        IO::Socket::SSL->new($input, $input, SSL_verify_mode => 0)
+      }
+  description: "IO::Socket::SSL->new(SSL_verify_mode => 0) — disable cert verify."
+
+- id: perl.tls.http_tiny_verify_ssl_off
+  enabled: true
+  language: perl
+  tag: weak-tls
+  severity: high
+  packages: ["HTTP::Tiny"]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: ["HTTP::Tiny", "new"]
+  match_examples:
+  - name: perl.tls.http_tiny_verify_ssl_off example
+    code: |
+      use HTTP::Tiny;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        HTTP::Tiny->new($input, $input, verify_SSL => 0)
+      }
+  description: "HTTP::Tiny->new(verify_SSL => 0)."

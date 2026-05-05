@@ -1,0 +1,116 @@
+# Java CLI / environment / config local-trust sources.
+- id: java.source.main_args
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: local
+  tag: cli-input
+  match:
+    kind: param
+    target:
+      name: args
+  description: "Disabled — `String[] args` matches every function named with an `args` parameter; enable per-project or key off a scan-time heuristic (enclosing function == 'main')."
+
+- id: java.source.system_getenv
+  enabled: true
+  language: java
+  trust: config
+  tag: config-input
+  match:
+    kind: call
+    callee:
+      attribute: [System, getenv]
+  match_examples:
+    - name: generated shape example
+      code: |
+        class App {
+          void handle(String input) throws Exception {
+            System.getenv(input);
+          }
+        }
+  description: "System.getenv — environment variable (config trust)."
+
+- id: java.source.system_getproperty
+  enabled: true
+  language: java
+  trust: config
+  tag: config-input
+  match:
+    kind: call
+    callee:
+      attribute: [System, getProperty]
+  match_examples:
+    - name: generated shape example
+      code: |
+        class App {
+          void handle(String input) throws Exception {
+            System.getProperty(input);
+          }
+        }
+  description: "System.getProperty — JVM property (config trust)."
+
+- id: java.source.console_readline
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      attribute: [Console, readLine]
+  description: "Disabled — adapters index local receivers like `console.readLine`, not receiver types like `Console.readLine`."
+
+- id: java.source.console_readpassword
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      attribute: [Console, readPassword]
+  description: "Disabled — adapters index local receivers like `console.readPassword`, not receiver types like `Console.readPassword`."
+
+- id: java.source.scanner_nextline
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      attribute: [Scanner, nextLine]
+  description: "Disabled — adapters index local receivers like `scanner.nextLine`, not receiver types like `Scanner.nextLine`."
+
+- id: java.source.scanner_next
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      attribute: [Scanner, next]
+  description: "Disabled — adapters index local receivers like `scanner.next`, not receiver types like `Scanner.next`."
+
+- id: java.source.bufferedreader_readline
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      attribute: [BufferedReader, readLine]
+  description: "Disabled — BufferedReader.readLine is too generic; sources are better inferred from the wrapped stream (stdin vs file vs socket)."

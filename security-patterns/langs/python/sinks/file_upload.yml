@@ -1,0 +1,131 @@
+# Python file-upload sinks. Flask/Django/FastAPI/Tornado.
+- id: python.upload.werkzeug_save
+  enabled: true
+  language: python
+  tag: file-upload
+  severity: high
+  packages: [werkzeug, flask]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FileStorage, save]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: upload werkzeug save
+    code: |
+      import werkzeug
+      def example(user_input):
+          return FileStorage.save(user_input)
+  - name: werkzeug save literal negative
+    code: |
+      import werkzeug
+
+      def example(user_input):
+          return FileStorage.save('safe')
+    expect_no_match: true
+  description: "werkzeug FileStorage.save — flag if destination is tainted (filename)."
+
+- id: python.upload.django_default_storage_save
+  enabled: true
+  language: python
+  tag: file-upload
+  severity: high
+  packages: [django]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [default_storage, save]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: upload django default storage save
+    code: |
+      import django
+      def example(user_input):
+          return default_storage.save(user_input)
+  - name: django default storage save literal negative
+    code: |
+      import django
+
+      def example(user_input):
+          return default_storage.save('safe')
+    expect_no_match: true
+  description: "django.core.files.storage.default_storage.save."
+
+- id: python.upload.django_filesystemstorage_save
+  enabled: true
+  language: python
+  tag: file-upload
+  severity: high
+  packages: [django]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FileSystemStorage, save]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: upload django filesystemstorage save
+    code: |
+      import django
+      def example(user_input):
+          return FileSystemStorage.save(user_input)
+  - name: django filesystemstorage save literal negative
+    code: |
+      import django
+
+      def example(user_input):
+          return FileSystemStorage.save('safe')
+    expect_no_match: true
+  description: "Django FileSystemStorage.save."
+
+- id: python.upload.aiohttp_filefield_save
+  enabled: true
+  language: python
+  tag: file-upload
+  severity: high
+  packages: [aiohttp]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FileField, save]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: upload aiohttp filefield save
+    code: |
+      import aiohttp
+      def example(user_input):
+          return FileField.save(user_input)
+  - name: aiohttp filefield save literal negative
+    code: |
+      import aiohttp
+
+      def example(user_input):
+          return FileField.save('safe')
+    expect_no_match: true
+  description: "aiohttp multipart FileField.save — flag when destination path is derived from the client-supplied filename."
+
+- id: python.upload.shutil_copyfileobj_upload
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: file-upload
+  severity: medium
+  imports: [shutil]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [shutil, copyfileobj]
+  description: "Disabled — shutil.copyfileobj is generic; flag only when the destination path is tainted."

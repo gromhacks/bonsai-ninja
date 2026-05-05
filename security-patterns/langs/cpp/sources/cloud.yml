@@ -1,0 +1,37 @@
+# C++ cloud / serverless sources.
+- id: cpp.cloud.aws_lambda_request_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: [aws-lambda-cpp]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — bare `request` is too broad outside Lambda-only audits; use the more specific invocationRequest rule below when available."
+
+- id: cpp.cloud.aws_lambda_invocation_request
+  enabled: true
+  language: cpp
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: [aws-lambda-cpp]
+  match:
+    kind: param
+    target:
+      name: invocationRequest
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <aws-lambda-cpp.h>
+      void example(const char *invocationRequest) {
+        (void)invocationRequest;
+      }
+  description: "AWS Lambda C++ runtime invocation_request parameter."

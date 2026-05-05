@@ -1,0 +1,207 @@
+# Perl insecure-deserialization.
+- id: perl.deser.storable_retrieve
+  enabled: true
+  language: perl
+  tag: insecure-deserialization
+  severity: critical
+  packages: [Storable]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: retrieve
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.deser.storable_retrieve example
+    code: |
+      use Storable;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        retrieve($input)
+      }
+  - name: literal storable retrieve negative
+    code: |
+      use Storable;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        retrieve("cache/session.storable")
+      }
+    expect_no_match: true
+  description: "Storable::retrieve — deserialises blessed refs + CODE refs; crafted input = RCE. Use JSON for untrusted data."
+
+- id: perl.deser.storable_thaw
+  enabled: true
+  language: perl
+  tag: insecure-deserialization
+  severity: critical
+  packages: [Storable]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: thaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.deser.storable_thaw example
+    code: |
+      use Storable;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        thaw($input)
+      }
+  - name: literal storable thaw negative
+    code: |
+      use Storable;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        thaw("trusted serialized blob")
+      }
+    expect_no_match: true
+  description: "Storable::thaw — in-memory deserialisation; crafted binary triggers DESTROY / STORABLE_thaw gadget chains = RCE."
+
+- id: perl.deser.storable_fd_retrieve
+  enabled: true
+  language: perl
+  tag: insecure-deserialization
+  severity: critical
+  packages: [Storable]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: fd_retrieve
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.deser.storable_fd_retrieve example
+    code: |
+      use Storable;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        fd_retrieve($input)
+      }
+  - name: literal storable fd retrieve negative
+    code: |
+      use Storable;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        fd_retrieve("trusted-session-fh")
+      }
+    expect_no_match: true
+  description: "Storable::fd_retrieve — same gadget surface as retrieve(), reading from a file handle."
+
+- id: perl.deser.yaml_load
+  enabled: true
+  language: perl
+  tag: insecure-deserialization
+  severity: critical
+  packages: [YAML, "YAML::XS", "YAML::Syck"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: Load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.deser.yaml_load example
+    code: |
+      use YAML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Load($input)
+      }
+  - name: literal yaml load negative
+    code: |
+      use YAML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Load("---\nname: alice\n")
+      }
+    expect_no_match: true
+  description: "YAML::Load / YAML::XS::Load / YAML::Syck::Load — historically process `!perl/code` tags that eval Perl; RCE on untrusted YAML. `top_level: true` rejects `obj->Load(...)` method decoys; `min_args: 1` rejects unrelated 0-arg overloads."
+
+- id: perl.deser.yaml_loadfile
+  enabled: true
+  language: perl
+  tag: insecure-deserialization
+  severity: critical
+  packages: [YAML, "YAML::XS", "YAML::Syck"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: LoadFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.deser.yaml_loadfile example
+    code: |
+      use YAML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        LoadFile($input)
+      }
+  - name: literal yaml loadfile negative
+    code: |
+      use YAML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        LoadFile("config/settings.yml")
+      }
+    expect_no_match: true
+  description: "YAML::LoadFile / YAML::XS::LoadFile — same `!perl/code` gadget as Load; tainted path = read-and-execute."
+
+- id: perl.deser.sereal_decode
+  enabled: true
+  language: perl
+  tag: insecure-deserialization
+  severity: high
+  packages: ["Sereal::Decoder"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: decode_sereal
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.deser.sereal_decode example
+    code: |
+      use Sereal::Decoder;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        decode_sereal($input)
+      }
+  - name: literal sereal decode negative
+    code: |
+      use Sereal::Decoder;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        decode_sereal("trusted serialized blob")
+      }
+    expect_no_match: true
+  description: "Sereal::Decoder::decode_sereal — blessed objects + FREEZE/THAW hooks reinstantiate; with dangerous class allow-list = RCE."
+
+- id: perl.deser.data_dumper_eval
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: perl
+  tag: insecure-deserialization
+  severity: medium
+  packages: ["Data::Dumper"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: Dumper
+  description: "Disabled — Data::Dumper output alone is inert; only dangerous if the caller eval()s it back. The eval sink already catches that pattern."

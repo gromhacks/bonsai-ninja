@@ -1,0 +1,186 @@
+# Rust deserialization sinks.
+- id: rust.deser.serde_yaml_from_str
+  enabled: true
+  language: rust
+  tag: insecure-deserialization
+  severity: medium
+  packages: [serde_yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [serde_yaml, from_str]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaml string
+    code: |
+      use serde_yaml::dummy;
+      fn example(target: &str) {
+          serde_yaml::from_str(target);
+      }
+  - name: literal yaml string negative
+    code: |
+      use serde_yaml::dummy;
+      fn example() {
+          serde_yaml::from_str("name: safe");
+      }
+    expect_no_match: true
+  description: "serde_yaml::from_str — YAML supports tagged types (`!!tag:yaml.org,2002:...`) and billion-laughs-style alias expansion; DoS risk even with typed deserialize."
+
+- id: rust.deser.serde_yaml_from_slice
+  enabled: true
+  language: rust
+  tag: insecure-deserialization
+  severity: medium
+  packages: [serde_yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [serde_yaml, from_slice]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaml slice
+    code: |
+      use serde_yaml::dummy;
+      fn example(target: &[u8]) {
+          serde_yaml::from_slice(target);
+      }
+  - name: literal yaml slice negative
+    code: |
+      use serde_yaml::dummy;
+      fn example() {
+          serde_yaml::from_slice(b"name: safe");
+      }
+    expect_no_match: true
+  description: "serde_yaml::from_slice — same YAML alias / tag exposure as from_str."
+
+- id: rust.deser.serde_yaml_from_reader
+  enabled: true
+  language: rust
+  tag: insecure-deserialization
+  severity: medium
+  packages: [serde_yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [serde_yaml, from_reader]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaml reader
+    code: |
+      use serde_yaml::dummy;
+      fn example(target: std::io::Cursor<Vec<u8>>) {
+          serde_yaml::from_reader(target);
+      }
+  - name: safe yaml reader negative
+    code: |
+      use serde_yaml::dummy;
+      fn example() {
+          serde_yaml::from_reader(std::io::Cursor::new(b"name: safe".to_vec()));
+      }
+    expect_no_match: true
+  description: "serde_yaml::from_reader — same YAML alias / tag exposure; additionally allows unbounded input via Reader."
+
+- id: rust.deser.bincode_deserialize
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: insecure-deserialization
+  severity: low
+  packages: [bincode]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [bincode, deserialize]
+  description: "Disabled — bincode is type-bounded."
+
+- id: rust.deser.rmp_serde_from_slice
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: insecure-deserialization
+  severity: low
+  packages: [rmp_serde]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [rmp_serde, from_slice]
+  description: "Disabled — MessagePack is type-bounded."
+
+- id: rust.deser.serde_pickle_from_slice
+  enabled: true
+  language: rust
+  tag: insecure-deserialization
+  severity: critical
+  packages: [serde_pickle]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [serde_pickle, from_slice]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted pickle slice
+    code: |
+      use serde_pickle;
+      use serde_pickle;
+      use serde_pickle::dummy;
+      fn example(target: &[u8]) {
+          serde_pickle::from_slice(target);
+      }
+  - name: literal pickle slice negative
+    code: |
+      use serde_pickle;
+      use serde_pickle;
+      use serde_pickle::dummy;
+      fn example() {
+          serde_pickle::from_slice(b"safe");
+      }
+    expect_no_match: true
+  description: "serde_pickle::from_slice — parses Python pickle format; supports arbitrary class construction via REDUCE opcode = RCE."
+
+  imports:
+  - serde_pickle
+- id: rust.deser.ciborium_from_reader
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: insecure-deserialization
+  severity: low
+  packages: [ciborium]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ciborium, de, from_reader]
+  description: "Disabled — CBOR is type-bounded."
+
+- id: rust.deser.ron_from_str
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: insecure-deserialization
+  severity: low
+  packages: [ron]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ron, from_str]
+  description: "Disabled — RON has no type tags."

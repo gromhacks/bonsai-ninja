@@ -1,0 +1,545 @@
+# Dart sanitizers. CANONICAL tags only:
+#   url-encode, html-encode, html-sanitize, shell-escape, sql-parameter,
+#   constant-time, jwt-verify, path-sanitize, xxe-sanitizer, ldap-escape,
+#   numeric-coerce, validation.
+- id: dart.sanitizer.uri_encode_component
+  enabled: true
+  language: dart
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, encodeComponent]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; Uri.encodeComponent(input); }
+    expect_match_text: [Uri.encodeComponent]
+  description: "Uri.encodeComponent — percent-encodes reserved URL chars for a single path/query segment."
+
+- id: dart.sanitizer.uri_encode_full
+  enabled: true
+  language: dart
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, encodeFull]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; Uri.encodeFull(input); }
+    expect_match_text: [Uri.encodeFull]
+  description: "Uri.encodeFull — percent-encodes a full URL (preserves reserved chars)."
+
+- id: dart.sanitizer.uri_encode_query_component
+  enabled: true
+  language: dart
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, encodeQueryComponent]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; Uri.encodeQueryComponent(input); }
+    expect_match_text: [Uri.encodeQueryComponent]
+  description: "Uri.encodeQueryComponent — percent-encodes for query-string use (application/x-www-form-urlencoded)."
+
+- id: dart.sanitizer.htmlescape_convert
+  enabled: true
+  language: dart
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlEscape, convert]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; HtmlEscape.convert(input); }
+    expect_match_text: [HtmlEscape.convert]
+  description: "dart:convert HtmlEscape.convert — escapes <>&\"' for safe HTML text-node insertion."
+
+- id: dart.sanitizer.html_unescape_convert
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: html-encode
+  packages: [html_unescape]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlUnescape, convert]
+  description: "Disabled — HtmlUnescape is the INVERSE of encoding (reverses entities) and is NOT an XSS sanitizer."
+
+- id: dart.sanitizer.int_parse
+  enabled: true
+  language: dart
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      regex: "^int\\.parse$"
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; int.parse(input); }
+    expect_match_text: [int.parse]
+  description: "int.parse — throws FormatException on non-numeric input, removing injection payloads."
+
+- id: dart.sanitizer.int_try_parse
+  enabled: true
+  language: dart
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [int, tryParse]
+  constraints:
+  - receiver_name_in: [int]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; int.tryParse(input); }
+    expect_match_text: [int.tryParse]
+  description: "int.tryParse — returns null on non-numeric input; caller must null-check."
+
+- id: dart.sanitizer.double_try_parse
+  enabled: true
+  language: dart
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [double, tryParse]
+  constraints:
+  - receiver_name_in: [double]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; double.tryParse(input); }
+    expect_match_text: [double.tryParse]
+  description: "double.tryParse — numeric coercion; rejects non-numeric payloads."
+
+- id: dart.sanitizer.num_parse
+  enabled: true
+  language: dart
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      regex: "^num\\.parse$"
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; num.parse(input); }
+    expect_match_text: [num.parse]
+  description: "num.parse — numeric coercion; rejects non-numeric payloads."
+
+- id: dart.sanitizer.path_normalize
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: path-sanitize
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [path, normalize]
+  description: "Disabled — path.normalize collapses .. segments but must be paired with an explicit root-prefix check."
+
+- id: dart.sanitizer.path_canonicalize
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: dart
+  tag: path-sanitize
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [path, canonicalize]
+  description: "Disabled — path.canonicalize resolves symlinks/relative segments but still requires root containment checking."
+
+- id: dart.sanitizer.random_secure
+  enabled: true
+  language: dart
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [Random, secure]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; Random.secure(input); }
+    expect_match_text: [Random.secure]
+  description: "Random.secure() — cryptographically-secure PRNG. Treat as sanitizer for dart.crypto.random_default."
+
+- id: dart.sanitizer.uuid_parse
+  enabled: true
+  language: dart
+  tag: validation
+  packages: [uuid]
+  match:
+    kind: call
+    callee:
+      regex: "^Uuid\\.parse$"
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:uuid/uuid.dart';
+      import 'package:uuid/uuid.dart';
+      import 'package:uuid/uuid.dart';
+      import 'package:uuid/uuid.dart';
+      import 'package:uuid/uuid.dart';
+      void test() { var input = "x"; var amount = 1; Uuid.parse(input); }
+    expect_match_text: [Uuid.parse]
+  description: "Uuid.parse — validates UUID shape and rejects malformed input."
+
+  imports:
+  - uuid/uuid.dart
+- id: dart.sanitizer.num_try_parse
+  enabled: true
+  language: dart
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [num, tryParse]
+  constraints:
+  - receiver_name_in: [num]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; num.tryParse(input); }
+    expect_match_text: [num.tryParse]
+  description: "num.tryParse — numeric coercion; returns null on non-numeric input. Caller must null-check."
+
+- id: dart.sanitizer.htmlescape_sanitize
+  enabled: true
+  language: dart
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlEscape, sanitize]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; HtmlEscape.sanitize(input); }
+    expect_match_text: [HtmlEscape.sanitize]
+  description: "dart:convert HtmlEscape().sanitize — alias for convert; encodes unsafe HTML chars on text-mode escaping."
+
+- id: dart.sanitizer.htmlescape_new
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: html-encode
+  match:
+    kind: new
+    callee:
+      name: HtmlEscape
+  match_examples:
+  - name: declared shape
+    code: |
+      class HtmlEscape { HtmlEscape([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var input = "x"; var result = HtmlEscape(input); }
+    expect_match_text: [HtmlEscape]
+  description: "Disabled duplicate — construction only creates a converter; dart.sanitizer.htmlescape_convert and dart.sanitizer.htmlescape_sanitize are the actual sanitization calls."
+
+- id: dart.sanitizer.process_run_argv
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: dart
+  tag: shell-escape
+  match:
+    kind: call
+    callee:
+      attribute: [Process, run]
+  constraints:
+  - keyword_arg_equals:
+      name: runInShell
+      value: "false"
+  description: "Disabled audit-only — Process.run(argv, runInShell: false) is the SAFE positional/argv form. v1 matching cannot detect the implicit-default `runInShell: false` case (the default), so this rule only fires when the keyword is set explicitly. Treat as evidence, not a hard sanitizer."
+
+- id: dart.sanitizer.process_start_argv
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: dart
+  tag: shell-escape
+  match:
+    kind: call
+    callee:
+      attribute: [Process, start]
+  constraints:
+  - keyword_arg_equals:
+      name: runInShell
+      value: "false"
+  description: "Disabled audit-only — Process.start(argv, runInShell: false) is the SAFE argv form. Same v1 limitation as dart.sanitizer.process_run_argv."
+
+- id: dart.sanitizer.validators_is_email
+  enabled: true
+  language: dart
+  tag: validation
+  packages: [validators]
+  match:
+    kind: call
+    callee:
+      regex: "^isEmail$"
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart'; // validators
+      void test() { var input = "x"; var amount = 1; isEmail(input); }
+    expect_match_text: [isEmail]
+  description: "package:validators isEmail — schema-level validation of email shape; rejects payloads with control chars or non-email syntax."
+
+  imports:
+  - validators/validators.dart
+- id: dart.sanitizer.validators_is_url
+  enabled: true
+  language: dart
+  tag: validation
+  packages: [validators]
+  match:
+    kind: call
+    callee:
+      regex: "^isURL$"
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart'; // validators
+      void test() { var input = "x"; var amount = 1; isURL(input); }
+    expect_match_text: [isURL]
+  description: "package:validators isURL — validates URL shape (scheme/host); rejects malformed and non-URL payloads. Pair with allowlist for SSRF."
+
+  imports:
+  - validators/validators.dart
+- id: dart.sanitizer.validators_is_uuid
+  enabled: true
+  language: dart
+  tag: validation
+  packages: [validators]
+  match:
+    kind: call
+    callee:
+      regex: "^isUUID$"
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart'; // validators
+      void test() { var input = "x"; var amount = 1; isUUID(input); }
+    expect_match_text: [isUUID]
+  description: "package:validators isUUID — validates UUID shape."
+
+  imports:
+  - validators/validators.dart
+- id: dart.sanitizer.starts_with_same_origin
+  enabled: true
+  language: dart
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"/[^"]*"$'
+  match_examples:
+  - name: startsWith local path
+    code: |
+      void test(String target) { target.startsWith("/app/"); }
+    expect_match_text: [target.startsWith]
+  - name: startsWith local path negative constraint boundary
+    code: "void test(String target) { target.startsWith(); }\n"
+    expect_no_match: true
+  description: "String.startsWith('/...') — same-origin redirect/path guard for slash-rooted local paths."
+
+- id: dart.sanitizer.set_map_contains_allowlist
+  enabled: true
+  language: dart
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(allowed|allowlist|whitelist|safeValues|safePaths)\\.(contains|containsKey)$"
+  match_examples:
+  - name: set contains allowlist
+    code: |
+      void test(String input) { allowed.contains(input); }
+    expect_match_text: [allowed.contains]
+  description: "Allowlist-named Set/List/Map contains/containsKey membership check — validates a value against a finite set or map of accepted values."
+
+- id: dart.sanitizer.validators_matches_full
+  enabled: true
+  language: dart
+  tag: regex-validate
+  packages: [validators]
+  match:
+    kind: call
+    callee:
+      name: matches
+  constraints:
+  - any_arg_matches_regex: "\\^.*\\$"
+  match_examples:
+  - name: anchored validators matches
+    code: |
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart';
+      import 'package:validators/validators.dart'; // validators
+      void test(String input) { matches(input, r'^[a-z0-9_-]+$'); }
+    expect_match_text: [matches]
+  - name: anchored validators matches negative constraint boundary
+    code: "import 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\nimport 'package:validators/validators.dart'; // validators\nvoid test(String input) { matches(); }\n"
+    expect_no_match: true
+  description: "package:validators matches(input, anchoredPattern) — full-string UUID/slug-style regex validation."
+
+  imports:
+  - validators/validators.dart
+- id: dart.sanitizer.raw_query_bind_args
+  enabled: true
+  language: dart
+  tag: db-bind-parameter
+  packages: [sqflite]
+  match:
+    kind: call
+    callee:
+      regex: "(^|\\.)raw(Query|Insert|Update|Delete)$"
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: sqflite rawQuery bind args
+    code: |
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      import 'package:sqflite/sqflite.dart';
+      void test(db, String input) { db.rawQuery("select * from users where name = ?", [input]); }
+    expect_match_text: [db.rawQuery]
+  description: "sqflite rawQuery/rawInsert/rawUpdate/rawDelete with a second positional arguments list — binds placeholder values instead of SQL concatenation."
+
+  imports:
+  - sqflite/sqflite.dart
+- id: dart.sanitizer.replace_all_char_allowlist
+  enabled: true
+  language: dart
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: replaceAll
+  constraints:
+  - any_arg_matches_regex: "\\[\\^[^\\]]+\\]"
+  - any_arg_matches_regex: '^""$'
+  match_examples:
+  - name: strip non slug chars
+    code: |
+      void test(String input) { input.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), ""); }
+    expect_match_text: [input.replaceAll]
+  - name: strip non slug chars negative constraint boundary
+    code: "void test(String input) { input.replaceAll(); }\n"
+    expect_no_match: true
+  description: "String.replaceAll(RegExp(r'[^safe]'), '') — strips characters outside a safe allowlist."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: dart.passthrough.uri_decode_component
+  enabled: true
+  language: dart
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, decodeComponent]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; Uri.decodeComponent(input); }
+    expect_match_text: [Uri.decodeComponent]
+  description: "Uri.decodeComponent(s) — preserves taint."
+- id: dart.passthrough.uri_decode_full
+  enabled: true
+  language: dart
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, decodeFull]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; Uri.decodeFull(input); }
+    expect_match_text: [Uri.decodeFull]
+  description: "Uri.decodeFull(s) — preserves taint."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: dart.csrf.shelf_csrf
+  enabled: true
+  language: dart
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: csrfProtect
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; csrfProtect(input); }
+    expect_match_text: [csrfProtect]
+  description: "shelf_csrf csrfProtect middleware — Dart server-side CSRF enforcement."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: dart.cookie.cookie_httponly_secure
+  enabled: true
+  language: dart
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [Cookie, httpOnly]
+  constraints:
+  - any_arg_matches_regex: |-
+      true
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; Cookie.httpOnly(true); }
+    expect_match_text: [Cookie.httpOnly]
+  - name: declared shape negative constraint boundary
+    code: "void test() { var input = \"x\"; var amount = 1; Cookie.httpOnly(); }\n"
+    expect_no_match: true
+  description: "dart:io Cookie httpOnly = true; secure = true."

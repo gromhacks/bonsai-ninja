@@ -1,0 +1,80 @@
+# Rust file-upload sinks — attacker-chosen filename flowing into a
+# filesystem path without allowlist / basename stripping.
+- id: rust.upload.actix_multipart_filename
+  enabled: true
+  language: rust
+  tag: file-upload
+  severity: medium
+  packages: [actix_multipart]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [ContentDisposition, get_filename]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use actix_multipart;
+      use actix_multipart;
+      use actix_multipart::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ContentDisposition::get_filename(target);
+      }
+  description: "actix_multipart Field ContentDisposition::get_filename — attacker-supplied filename; combined with fs::File::create enables path traversal + arbitrary file write."
+
+  imports:
+  - actix_multipart
+- id: rust.upload.axum_multipart_filename
+  enabled: true
+  language: rust
+  tag: file-upload
+  severity: medium
+  packages: [axum]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Field, file_name]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use axum::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Field::file_name(target);
+      }
+  description: "axum Multipart Field::file_name — attacker-supplied filename; flag when used in fs::File::create / Path::join without basename stripping."
+
+- id: rust.upload.rocket_tempfile_persist_to
+  enabled: true
+  language: rust
+  tag: file-upload
+  severity: medium
+  packages: [rocket]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [TempFile, persist_to]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rocket tempfile persist path
+    code: |
+      use rocket::dummy;
+      fn example(target: &str) {
+          TempFile::persist_to(target);
+      }
+    expect_match_text: [TempFile::persist_to]
+  - name: literal rocket tempfile persist path negative
+    code: |
+      use rocket::dummy;
+      fn example() {
+          TempFile::persist_to("/var/app/uploads/file.bin");
+      }
+    expect_no_match: true
+  description: "rocket TempFile::persist_to(path) — persisting uploads to attacker-influenced paths can overwrite arbitrary files."

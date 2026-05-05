@@ -1,0 +1,42 @@
+- id: python.cors.flask_cors_wildcard_with_credentials
+  enabled: true
+  language: python
+  tag: cors
+  severity: medium
+  cwe: [CWE-942, CWE-346]
+  owasp: [A05-2021]
+  packages: [flask_cors]
+  imports: [flask_cors]
+  match:
+    kind: call
+    callee:
+      name: CORS
+  match_examples:
+  - name: cors flask cors wildcard with credentials
+    code: |
+      import flask_cors
+      def example(user_input):
+          return CORS(user_input, origins="*")
+  description: Flask-CORS(origins='*') — open CORS.
+
+- id: python.cors.starlette_cors_wildcard_origin
+  enabled: true
+  language: python
+  tag: cors
+  severity: medium
+  cwe: [CWE-942, CWE-346]
+  owasp: [A05-2021]
+  packages: [starlette, fastapi]
+  imports: [starlette.middleware.cors]
+  match:
+    kind: call
+    callee:
+      name: CORSMiddleware
+  match_examples:
+  - name: cors starlette wildcard origin
+    code: |
+      import starlette
+      def example(app):
+          return CORSMiddleware(app, allow_origins=["*"])
+    expect_match_text: [CORSMiddleware]
+  description: "Starlette/FastAPI CORSMiddleware(allow_origins=['*']) — open CORS policy."

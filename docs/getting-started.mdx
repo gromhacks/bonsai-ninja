@@ -1,0 +1,75 @@
+---
+title: "Getting Started"
+description: "Install bonsai-ninja, run a first security scan, and read the output."
+---
+
+# Getting Started
+
+<Steps>
+
+1. Install or build the CLI.
+2. Index the workspace so the dataflow sidecar is warm.
+3. Run `security taint-analysis` against a source tree.
+4. Re-run with JSON or SARIF when you need machine-readable output.
+5. Use `inspect --flow F:...` to drill into a specific flow.
+
+</Steps>
+
+## Install
+
+### Cargo install
+
+Use this when the crate is published or when you have a local checkout that you want Cargo to install into your toolchain.
+
+```bash
+cargo install --path crates/cli --locked
+bonsai-ninja --version
+```
+
+### Prebuilt binary
+
+Use a release artifact when you want the same binary in local runs and CI.
+
+```bash
+chmod +x ./bonsai-ninja
+./bonsai-ninja --version
+```
+
+### Local release build
+
+Use the repository build when contributing or validating rulepack changes.
+
+```bash
+cargo build --release -p bonsai_cli
+./target/release/bonsai-ninja --version
+```
+
+## First Scan
+
+```bash
+./target/release/bonsai-ninja index ./examples/python/mega_flow
+./target/release/bonsai-ninja security ./examples/python/mega_flow taint-analysis --rules-dir ./security-patterns
+```
+
+For CI or scripts:
+
+```bash
+./target/release/bonsai-ninja security ./src taint-analysis \
+  --rules-dir ./security-patterns \
+  --format json \
+  --all \
+  --no-color \
+  --no-progress
+```
+
+## Read A Finding
+
+Each finding has a stable `S:` ID, a source rule, a sink rule, a status, and a primary `F:` flow ID. The source and sink show exact file, line, function, and rule metadata. The flow block shows the call path and the tainted argument at each hop.
+
+<Tip>
+Use `--no-compact` when you want every function body rendered in the text report. Use compact output when you only need the chain and step labels.
+</Tip>
+
+```bash
+./target/release/bonsai-ninja inspect ./src --query os.system --flow F:0123456789abcdef
+```

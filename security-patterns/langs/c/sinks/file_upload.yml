@@ -1,0 +1,89 @@
+# C file-upload sinks (libmicrohttpd / civetweb / mongoose POST handlers).
+- id: c.upload.mhd_postprocessor
+  enabled: true
+  language: c
+  tag: file-upload
+  severity: medium
+  packages: [libmicrohttpd]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: MHD_create_post_processor
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmicrohttpd/microhttpd.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        MHD_create_post_processor(arg);
+      }
+  description: "MHD POST processor — filename from multipart is client-controlled."
+
+- id: c.upload.civetweb_form_data_handler
+  enabled: true
+  language: c
+  tag: file-upload
+  severity: medium
+  packages: [civetweb]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: mg_handle_form_request
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <civetweb.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_handle_form_request(arg);
+      }
+  description: "civetweb mg_handle_form_request."
+
+- id: c.upload.mongoose_mg_http_upload
+  enabled: true
+  language: c
+  tag: file-upload
+  severity: medium
+  packages: [mongoose]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: mg_http_upload
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongoose.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_http_upload(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        mg_http_upload("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "mongoose mg_http_upload — flag tainted destination."
+
+- id: c.upload.fopen_uploaded_path
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: c
+  tag: file-upload
+  severity: medium
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: fopen
+  description: "Disabled — generic fopen, covered by path-traversal."

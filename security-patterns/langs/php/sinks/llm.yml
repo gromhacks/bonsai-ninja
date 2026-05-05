@@ -1,0 +1,133 @@
+- id: php.llm.openai_chat_create
+  enabled: true
+  language: php
+  tag: web-llm
+  severity: medium
+  packages:
+  - openai-php/client
+  cwe:
+  - CWE-20
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - chat
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: openai chat create
+    code: |
+      <?php
+      use openaiphp\client;
+      use openaiphp\client;
+      use openai-php\client;
+      function example($client, $input) {
+        return $client->chat($input);
+      }
+    expect_match_text:
+    - $client->chat
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use openaiphp\client;
+      function example($client, $input) {
+        return $client->chat(["messages" => [["role" => "user", "content" => "hello"]]]);
+      }
+    expect_no_match: true
+  description: OpenAI client chat request — tainted prompt/tool content reaches an LLM instruction surface.
+  imports:
+  - openaiphp
+  - openaiphp/client
+  - openaiphp\client
+- id: php.llm.anthropic_messages_create
+  enabled: true
+  language: php
+  tag: web-llm
+  severity: medium
+  packages:
+  - anthropic-php/anthropic
+  cwe:
+  - CWE-20
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - anthropic
+      - messages
+      - create
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: anthropic messages create
+    code: |
+      <?php
+      use anthropicphp\anthropic;
+      use anthropicphp\anthropic;
+      use anthropic-php\anthropic;
+      function example($anthropic, $input) {
+        return $anthropic->messages->create($input);
+      }
+    expect_match_text:
+    - $anthropic->messages->create
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use anthropicphp\anthropic;
+      function example($anthropic, $input) {
+        return $anthropic->messages->create(["messages" => [["role" => "user", "content" => "hello"]]]);
+      }
+    expect_no_match: true
+  description: Anthropic messages create — tainted prompt content can steer model output or tool calls.
+  imports:
+  - anthropicphp
+  - anthropicphp/anthropic
+  - anthropicphp\anthropic
+- id: php.llm.bedrock_invoke_model
+  enabled: true
+  language: php
+  tag: web-llm
+  severity: medium
+  packages:
+  - aws/aws-sdk-php
+  cwe:
+  - CWE-20
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      attribute:
+      - bedrock
+      - invokeModel
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bedrock invoke model
+    code: |
+      <?php
+      use aws\awssdkphp;
+      use aws\awssdkphp;
+      use aws\aws-sdk-php;
+      function example($bedrock, $input) {
+        return $bedrock->invokeModel($input);
+      }
+    expect_match_text:
+    - $bedrock->invokeModel
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use aws\awssdkphp;
+      function example($bedrock, $input) {
+        return $bedrock->invokeModel(["body" => "{}"]);
+      }
+    expect_no_match: true
+  description: Bedrock invokeModel — tainted model body reaches a foundation-model execution surface.
+  imports:
+  - aws
+  - aws/awssdkphp
+  - aws\awssdkphp

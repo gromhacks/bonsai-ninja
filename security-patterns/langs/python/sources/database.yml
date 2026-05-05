@@ -1,0 +1,38 @@
+# Python ORM / DB-origin sources.
+- id: python.django.model_manager_values_list
+  enabled: true
+  language: python
+  trust: database
+  tag: db-input
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      attribute: [objects, values_list]
+  match_examples:
+  - name: django model manager values list
+    code: |
+      import django
+      def example(user_input):
+          return objects.values_list(user_input)
+  description: "Django Model.objects.values_list — row values read from DB."
+
+- id: python.django.model_manager_values
+  enabled: true
+  language: python
+  trust: database
+  tag: db-input
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      attribute: [objects, values]
+  match_examples:
+  - name: django model manager values
+    code: |
+      import django
+      def example(user_input):
+          return objects.values(user_input)
+  description: "Django Model.objects.values — row values read from DB."

@@ -1,0 +1,97 @@
+# Erlang NoSQL injection (mongodb-erlang / eredis EVAL).
+- id: erlang.nosql.mongoc_find
+  enabled: true
+  language: erlang
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^mongo:find"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("mongodb/include/mongodb.hrl").
+      -export([test/3]).
+      test(Conn, Collection, Input) ->
+        mongo:find(Conn, Collection, Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -include_lib("mongodb/include/mongodb.hrl").
+      -export([test/2]).
+      test(Conn, Collection) ->
+        mongo:find(Conn, Collection, #{}).
+    expect_no_match: true
+  description: "mongodb-erlang mongo:find — tainted selector map (e.g. $where operator) enables query injection/auth bypass."
+
+- id: erlang.nosql.eredis_q
+  enabled: true
+  language: erlang
+  tag: nosql-injection
+  severity: high
+  packages: [eredis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^eredis:q$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("eredis/include/eredis.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Client, Input) ->
+        eredis:q(Client, Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("eredis/include/eredis.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Client) ->
+        eredis:q(Client, ["GET", "key"]).
+    expect_no_match: true
+  description: "eredis:q — tainted command list enables Redis command injection; EVAL path is Lua RCE-adjacent."
+
+- id: erlang.nosql_mongoc_aggregate
+  enabled: true
+  language: erlang
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^mongo:aggregate"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: erlang mongo aggregate pipeline
+    code: |
+      -module(example).
+      -include_lib("mongodb/include/mongodb.hrl").
+      -export([test/3]).
+      test(Conn, Collection, Input) ->
+        mongo:aggregate(Conn, Collection, Input).
+    expect_match_text: ["mongo:aggregate"]
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -include_lib("mongodb/include/mongodb.hrl").
+      -export([test/2]).
+      test(Conn, Collection) ->
+        mongo:aggregate(Conn, Collection, []).
+    expect_no_match: true
+  description: "mongodb-erlang mongo:aggregate — tainted aggregation pipeline can inject operators such as $lookup / $where and bypass authorization logic."

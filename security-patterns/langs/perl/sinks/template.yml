@@ -1,0 +1,182 @@
+# Perl template engines (Template Toolkit / Mason / Text::Template).
+- id: perl.template.toolkit_process
+  enabled: true
+  language: perl
+  tag: ssti
+  severity: high
+  packages: [Template]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: process
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.template.toolkit_process example
+    code: |
+      use Template;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $tt->process($input)
+      }
+  - name: literal toolkit process negative
+    code: |
+      use Template;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $tt->process("pages/home.tt")
+      }
+    expect_no_match: true
+  description: "Template Toolkit $tt->process — tainted template path or string-ref. Receiver allowlist filters unrelated `->process` methods (queue/job/event processors that share the verb name)."
+
+- id: perl.template.text_template_fill_in
+  enabled: true
+  language: perl
+  tag: ssti
+  severity: critical
+  packages: ["Text::Template"]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: fill_in
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.template.text_template_fill_in example
+    code: |
+      use Text::Template;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        fill_in($input)
+      }
+  - name: literal text template fill in negative
+    code: |
+      use Text::Template;
+      sub example {
+        my ($input) = @_;
+        fill_in("Hello [% name %]")
+      }
+    expect_no_match: true
+  description: "Text::Template fill_in — evaluates embedded Perl."
+
+- id: perl.template.text_template_fill_in_string
+  enabled: true
+  language: perl
+  tag: ssti
+  severity: critical
+  packages: ["Text::Template"]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: fill_in_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.template.text_template_fill_in_string example
+    code: |
+      use Text::Template;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        fill_in_string($input)
+      }
+  - name: literal text template fill in string negative
+    code: |
+      use Text::Template;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        fill_in_string("Hello, name")
+      }
+    expect_no_match: true
+  description: "Text::Template fill_in_string — evaluates embedded Perl from tainted string."
+
+- id: perl.template.mason_exec
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: perl
+  tag: ssti
+  severity: critical
+  packages: ["HTML::Mason"]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: exec
+  description: "Disabled — bare `name: exec` collides with perl.cmdi.exec (Perl's builtin exec = cmdi sink). Without receiver-type narrowing we cannot distinguish; the builtin cmdi rule is strictly stronger and already covers the call shape."
+
+- id: perl.template.mojolicious_render_inline
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  tag: ssti
+  severity: critical
+  packages: [Mojolicious]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: render
+  description: "Disabled — bare `name: render` collides with perl.xss.mojolicious_render. Without kwarg-name narrowing we cannot distinguish (inline => tainted) from (text|data => tainted); the xss rule covers the call shape."
+
+- id: perl.template.xslate_render_string
+  enabled: true
+  language: perl
+  tag: ssti
+  severity: high
+  packages: ["Text::Xslate"]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: render_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.template.xslate_render_string example
+    code: |
+      use Text::Xslate;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        render_string($input)
+      }
+  - name: literal xslate render string negative
+    code: |
+      use Text::Xslate;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        render_string("Hello, name")
+      }
+    expect_no_match: true
+  description: "Text::Xslate render_string — tainted template string."
+
+# Templating engine autoescape disabled (T302). Config-shape
+# sinks: when the developer explicitly turns off the engine's
+# default HTML autoescape, every subsequent render is XSS-prone.
+- id: perl.template.template_toolkit_filter_off
+  enabled: true
+  language: perl
+  tag: xss
+  severity: high
+  packages: [Template]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Template, new]
+  match_examples:
+  - name: perl.template.template_toolkit_filter_off example
+    code: |
+      use Template;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Template->new({ FILTERS => {} })
+      }
+  description: "Template::Toolkit Template->new with FILTERS overriding default escape — autoescape off."

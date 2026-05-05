@@ -1,0 +1,44 @@
+# cpp race / TOCTOU sinks (T501).
+
+# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# in source order to identify the race window.
+- id: cpp.toctou.access_check
+  enabled: true
+  language: cpp
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      name: access
+  match_examples:
+    - name: generated direct match
+      code: |
+        void example() {
+          const char *arg = "tainted";
+          const char *fmt = arg;
+          const char *query = arg;
+          access(arg);
+        }
+  description: "C++ access(path, mode) — POSIX TOCTOU check site (typically C-bridged)."
+- id: cpp.toctou.stat_check
+  enabled: true
+  language: cpp
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      name: stat
+  match_examples:
+    - name: generated direct match
+      code: |
+        void example() {
+          const char *arg = "tainted";
+          const char *fmt = arg;
+          const char *query = arg;
+          stat(arg);
+        }
+  description: "C++ stat(path) check site — TOCTOU window before open()."

@@ -1,0 +1,32 @@
+# Kotlin IPC / cross-app input sources.
+- id: kotlin.source.android_getintent_getstringextra
+  enabled: true
+  language: kotlin
+  trust: ipc
+  tag: ipc-input
+  match:
+    kind: call
+    callee:
+      name: getStringExtra
+  match_examples:
+    - name: generated shape example
+      code: |
+        class App {
+          fun handle(input: String) {
+            getStringExtra(input)
+          }
+        }
+  description: "Android getStringExtra(...) — tail-match across local intent variable names."
+
+- id: kotlin.source.android_getintent_getextras
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: ipc
+  tag: ipc-input
+  match:
+    kind: call
+    callee:
+      attribute: [Intent, getExtras]
+  description: "Disabled — typed receiver matching does not work for local intent variables, and `getExtras` is too broad to tail-match safely."

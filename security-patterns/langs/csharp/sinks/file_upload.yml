@@ -1,0 +1,86 @@
+# C# file-upload sinks. ASP.NET Core IFormFile + Web API HttpPostedFile.
+- id: csharp.upload.iformfile_copyto
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: file-upload
+  severity: high
+  packages: [Microsoft.AspNetCore.Http]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [IFormFile, CopyTo]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IFormFile.CopyTo(input); } }
+  description: "Disabled — IFormFile.CopyTo(stream) writes to a stream; unsafe filename/path state is established before this call."
+
+- id: csharp.upload.iformfile_copytoasync
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: file-upload
+  severity: high
+  packages: [Microsoft.AspNetCore.Http]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [IFormFile, CopyToAsync]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IFormFile.CopyToAsync(input); } }
+  description: "Disabled — IFormFile.CopyToAsync(stream) writes to a stream; unsafe filename/path state is established before this call."
+
+- id: csharp.upload.httppostedfile_saveas
+  enabled: true
+  language: csharp
+  tag: file-upload
+  severity: high
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpPostedFile, SaveAs]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { HttpPostedFile.SaveAs(input); } }
+  - name: literal save path negative
+    code: |
+      class App { void Test() { HttpPostedFile.SaveAs("uploads/safe.txt"); } }
+    expect_no_match: true
+  description: "HttpPostedFile.SaveAs (legacy ASP.NET)."
+
+- id: csharp.upload.fileupload_saveas
+  enabled: true
+  language: csharp
+  tag: file-upload
+  severity: high
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FileUpload, SaveAs]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { FileUpload.SaveAs(input); } }
+  - name: literal save path negative
+    code: |
+      class App { void Test() { FileUpload.SaveAs("uploads/safe.txt"); } }
+    expect_no_match: true
+  description: "WebForms FileUpload.SaveAs."

@@ -1,0 +1,559 @@
+- id: elixir.path.file_open
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.open(input)
+        end
+      end
+  - name: literal file open negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.open("priv/static/index.html")
+        end
+      end
+    expect_no_match: true
+  description: "File.open/2 — tainted path reads arbitrary files; with :write modes also overwrites."
+- id: elixir.path.file_read
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, read]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.read(input)
+        end
+      end
+  - name: literal file read negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.read("priv/static/index.html")
+        end
+      end
+    expect_no_match: true
+  description: "File.read/1 — tainted path exfiltrates arbitrary file contents."
+- id: elixir.path.file_rm
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, rm]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.rm(input)
+        end
+      end
+  - name: literal file rm negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.rm("tmp/report.txt")
+        end
+      end
+    expect_no_match: true
+  description: "File.rm/1 — tainted path deletes attacker-chosen files."
+- id: elixir.path.file_write
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  modules: [File]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias File
+      defmodule App do
+        def test(input) do
+          File.write(input)
+        end
+      end
+  - name: literal file write negative
+    code: |
+      alias File
+      defmodule App do
+        def test(input) do
+          File.write("tmp/report.txt")
+        end
+      end
+    expect_no_match: true
+  description: "File.write/2 — tainted path lets attacker clobber arbitrary files."
+- id: elixir.path.file_rename
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  modules: [File]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file rename source
+    code: |
+      alias File
+      defmodule App do
+        def test(input) do
+          File.rename(input, "tmp/report.txt")
+        end
+      end
+  - name: literal file rename source negative
+    code: |
+      alias File
+      defmodule App do
+        def test() do
+          File.rename("tmp/source.txt", "tmp/report.txt")
+        end
+      end
+    expect_no_match: true
+  description: "File.rename/2 — tainted source moves files out of the intended directory."
+- id: elixir.path.file_rename_dest
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  modules: [File]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, rename]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted file rename destination
+    code: |
+      alias File
+      defmodule App do
+        def test(input) do
+          File.rename("tmp/source.txt", input)
+        end
+      end
+  - name: literal file rename destination negative
+    code: |
+      alias File
+      defmodule App do
+        def test() do
+          File.rename("tmp/source.txt", "tmp/report.txt")
+        end
+      end
+    expect_no_match: true
+  description: "File.rename/2 — tainted destination can clobber arbitrary files."
+- id: elixir.path.file_cp
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, cp]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.cp(input)
+        end
+      end
+  - name: literal file cp negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.cp("priv/static/index.html")
+        end
+      end
+    expect_no_match: true
+  description: "File.cp/2 — tainted src exposes arbitrary file contents via the copy."
+- id: elixir.path.file_mkdir_p
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, mkdir_p]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.mkdir_p(input)
+        end
+      end
+  - name: literal file mkdir p negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.mkdir_p("tmp/uploads")
+        end
+      end
+    expect_no_match: true
+  description: "File.mkdir_p!/1 — tainted path creates directories outside the intended root."
+- id: elixir.path.file_stream
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, stream!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.stream!(input)
+        end
+      end
+  - name: literal file stream negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.stream!("priv/static/index.html")
+        end
+      end
+    expect_no_match: true
+  description: "File.stream!/3 — streams the (tainted) path line-by-line; allows arbitrary-file exfiltration."
+
+- id: elixir.path.file_cp_r
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, cp_r]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file cp_r source
+    code: |
+      defmodule App do
+        def test(input) do
+          File.cp_r(input, "tmp/out")
+        end
+      end
+  - name: literal file cp_r source negative
+    code: |
+      defmodule App do
+        def test() do
+          File.cp_r("priv/static", "tmp/out")
+        end
+      end
+    expect_no_match: true
+  description: "File.cp_r/3 — recursive copy; tainted source moves entire trees out of the intended root."
+- id: elixir.path.file_cp_r_dest
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, cp_r]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted file cp_r destination
+    code: |
+      defmodule App do
+        def test(input) do
+          File.cp_r("priv/static", input)
+        end
+      end
+  - name: literal file cp_r destination negative
+    code: |
+      defmodule App do
+        def test() do
+          File.cp_r("priv/static", "tmp/out")
+        end
+      end
+    expect_no_match: true
+  description: "File.cp_r/3 — tainted destination writes a copied tree outside the intended root."
+
+- id: elixir.path.file_rm_rf
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: critical
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, rm_rf]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.rm_rf(input)
+        end
+      end
+  - name: literal file rm rf negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.rm_rf("tmp/uploads")
+        end
+      end
+    expect_no_match: true
+  description: "File.rm_rf/1 — recursive delete; tainted path wipes attacker-chosen directories."
+
+- id: elixir.path.file_ls
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, ls]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.ls(input)
+        end
+      end
+  - name: literal file ls negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.ls("priv/static")
+        end
+      end
+    expect_no_match: true
+  description: "File.ls/1 — lists a tainted directory; information disclosure across the filesystem."
+
+- id: elixir.path.file_read_bang
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, read!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.read!(input)
+        end
+      end
+  - name: literal file read bang negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.read!("priv/static/index.html")
+        end
+      end
+    expect_no_match: true
+  description: "File.read!/1 — bang variant of File.read; tainted path exfiltrates arbitrary file contents (raises on error)."
+
+- id: elixir.path.file_write_bang
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, write!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.write!(input)
+        end
+      end
+  - name: literal file write bang negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.write!("tmp/report.txt")
+        end
+      end
+    expect_no_match: true
+  description: "File.write!/2 — bang variant of File.write; tainted path lets attacker clobber arbitrary files."
+
+- id: elixir.path.file_open_bang
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, open!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          File.open!(input)
+        end
+      end
+  - name: literal file open bang negative
+    code: |
+      defmodule App do
+        def test(input) do
+          File.open!("priv/static/index.html")
+        end
+      end
+    expect_no_match: true
+  description: "File.open!/2 — bang variant of File.open; tainted path opens arbitrary files for read/write."
+
+# Archive extraction (Zip Slip class). Erlang's :zip module is
+# accessible from Elixir as :zip.extract/2. Trusts archive entry
+# names — joining entry name into dest without containment is Zip Slip.
+- id: elixir.path.zip_extract
+  enabled: true
+  language: elixir
+  tag: zip-slip
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [":zip", extract]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :zip.extract(input)
+        end
+      end
+  - name: literal zip extract negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :zip.extract("priv/fixtures/archive.zip")
+        end
+      end
+    expect_no_match: true
+  description: ":zip.extract(archive, opts) — extracts entries to filesystem using attacker-controlled entry names; Zip Slip applies."
+- id: elixir.path.zip_unzip
+  enabled: true
+  language: elixir
+  tag: zip-slip
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [":zip", unzip]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :zip.unzip(input)
+        end
+      end
+  - name: literal zip unzip negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :zip.unzip("priv/fixtures/archive.zip")
+        end
+      end
+    expect_no_match: true
+  description: ":zip.unzip(archive, opts) — same as :zip.extract; documented alias."

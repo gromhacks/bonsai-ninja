@@ -1,0 +1,36 @@
+# scala mass_assignment sinks.
+
+# Mass-assignment sinks (round 2 fill).
+- id: scala.mass_assign.databinder_bind_all
+  enabled: true
+  language: scala
+  tag: mass-assignment
+  severity: medium
+  packages: [org.springframework.web.bind]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [DataBinder, bind]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind._
+      object App {
+        def handle(input: String): Unit = {
+          DataBinder.bind(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.bind._
+      object App {
+        def handle(input: String): Unit = {
+          DataBinder.bind("safe")
+        }
+      }
+    expect_no_match: true
+  description: 'Spring DataBinder.bind (Scala via Java interop).'

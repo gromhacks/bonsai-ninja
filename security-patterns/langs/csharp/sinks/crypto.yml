@@ -1,0 +1,364 @@
+# C# weak / broken cryptography.
+- id: csharp.crypto.md5_create
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [MD5, Create]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; MD5.Create(input); } }
+  description: "MD5.Create — broken hash."
+
+- id: csharp.crypto.md5_new
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: MD5CryptoServiceProvider
+  match_examples:
+  - name: declared shape
+    code: |
+      class MD5CryptoServiceProvider { public MD5CryptoServiceProvider(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new MD5CryptoServiceProvider(input); } }
+  description: "new MD5CryptoServiceProvider."
+
+- id: csharp.crypto.sha1_create
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [SHA1, Create]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SHA1.Create(input); } }
+  description: "SHA1.Create — broken hash function; use SHA-256 or stronger for integrity / HMAC."
+
+- id: csharp.crypto.sha1_new
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: SHA1CryptoServiceProvider
+  match_examples:
+  - name: declared shape
+    code: |
+      class SHA1CryptoServiceProvider { public SHA1CryptoServiceProvider(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new SHA1CryptoServiceProvider(input); } }
+  description: "new SHA1CryptoServiceProvider."
+
+- id: csharp.crypto.des_create
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: high
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [DES, Create]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DES.Create(input); } }
+  description: "DES.Create — broken cipher."
+
+- id: csharp.crypto.des_new
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: high
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: DESCryptoServiceProvider
+  match_examples:
+  - name: declared shape
+    code: |
+      class DESCryptoServiceProvider { public DESCryptoServiceProvider(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new DESCryptoServiceProvider(input); } }
+  description: "new DESCryptoServiceProvider."
+
+- id: csharp.crypto.tripledes_create
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [TripleDES, Create]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TripleDES.Create(input); } }
+  description: "TripleDES.Create — deprecated for new designs."
+
+- id: csharp.crypto.rc2
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: high
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: RC2CryptoServiceProvider
+  match_examples:
+  - name: declared shape
+    code: |
+      class RC2CryptoServiceProvider { public RC2CryptoServiceProvider(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new RC2CryptoServiceProvider(input); } }
+  description: "RC2 — broken stream cipher."
+
+- id: csharp.crypto.aes_ecb_mode
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: high
+  cwe: [CWE-327]
+  match:
+    kind: write
+    target:
+      name: Mode
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Mode = input; } }
+  description: "Aes.Mode = CipherMode.ECB — leaks block patterns."
+
+- id: csharp.crypto.padding_zeros
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: write
+    target:
+      name: Padding
+  description: "Disabled — flag only when Padding=Zeros (constraint TBD)."
+
+- id: csharp.crypto.random_ctor
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-338]
+  match:
+    kind: new
+    callee:
+      name: Random
+  description: "Disabled — System.Random is non-cryptographic; flag only on security-sensitive paths."
+
+- id: csharp.crypto.rfc2898_low_iters
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-916]
+  match:
+    kind: new
+    callee:
+      name: Rfc2898DeriveBytes
+  description: "Disabled — flag only when iteration count < 100k (constraint TBD)."
+
+- id: csharp.crypto.bouncycastle_des
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: high
+  packages: [BouncyCastle]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: DesEngine
+  match_examples:
+  - name: declared shape
+    code: |
+      using BouncyCastle;
+      class DesEngine { public DesEngine(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new DesEngine(input); } }
+  description: "BouncyCastle DesEngine."
+
+- id: csharp.crypto.md5_hashdata
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [MD5, HashData]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; MD5.HashData(input); } }
+  description: "MD5.HashData — one-shot static hash; broken function."
+
+- id: csharp.crypto.sha1_hashdata
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [SHA1, HashData]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SHA1.HashData(input); } }
+  description: "SHA1.HashData — one-shot static hash; broken function."
+
+- id: csharp.crypto.hmac_md5_new
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: HMACMD5
+  match_examples:
+  - name: declared shape
+    code: |
+      class HMACMD5 { public HMACMD5(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new HMACMD5(input); } }
+  description: "new HMACMD5 — MD5-keyed HMAC; weak."
+
+- id: csharp.crypto.hmac_sha1_new
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: HMACSHA1
+  match_examples:
+  - name: declared shape
+    code: |
+      class HMACSHA1 { public HMACSHA1(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new HMACSHA1(input); } }
+  description: "new HMACSHA1 — SHA-1-based HMAC; prefer HMACSHA256 or stronger."
+- id: csharp.crypto.rsa_pkcs1_key_exchange_formatter
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-780]
+  match:
+    kind: call
+    callee:
+      attribute: [RSAPKCS1KeyExchangeFormatter, CreateKeyExchange]
+  match_examples:
+  - name: rsa pkcs1 exchange formatter
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RSAPKCS1KeyExchangeFormatter.CreateKeyExchange(input); } }
+    expect_match_text: [RSAPKCS1KeyExchangeFormatter.CreateKeyExchange]
+  description: "RSAPKCS1KeyExchangeFormatter.CreateKeyExchange — PKCS#1 v1.5 RSA encryption padding; use OAEP."
+- id: csharp.crypto.rsa_pkcs1_key_exchange_deformatter
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-780]
+  match:
+    kind: call
+    callee:
+      attribute: [RSAPKCS1KeyExchangeDeformatter, DecryptKeyExchange]
+  match_examples:
+  - name: rsa pkcs1 exchange deformatter
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange(input); } }
+    expect_match_text: [RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange]
+  description: "RSAPKCS1KeyExchangeDeformatter.DecryptKeyExchange — PKCS#1 v1.5 RSA decryption padding; use OAEP."
+
+- id: csharp.crypto.hmac_ripemd160_new
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: HMACRIPEMD160
+  match_examples:
+  - name: declared shape
+    code: |
+      class HMACRIPEMD160 { public HMACRIPEMD160(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new HMACRIPEMD160(input); } }
+  description: "new HMACRIPEMD160 — non-standard, weak HMAC."
+
+- id: csharp.crypto.tripledes_new
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: TripleDESCryptoServiceProvider
+  match_examples:
+  - name: declared shape
+    code: |
+      class TripleDESCryptoServiceProvider { public TripleDESCryptoServiceProvider(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new TripleDESCryptoServiceProvider(input); } }
+  description: "new TripleDESCryptoServiceProvider — deprecated for new designs."
+
+- id: csharp.crypto.bouncycastle_rc4
+  enabled: true
+  language: csharp
+  tag: weak-crypto
+  severity: high
+  packages: [BouncyCastle]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: RC4Engine
+  match_examples:
+  - name: declared shape
+    code: |
+      using BouncyCastle;
+      class RC4Engine { public RC4Engine(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new RC4Engine(input); } }
+  description: "BouncyCastle RC4Engine — broken stream cipher."
+
+- id: csharp.crypto.random_next_seeded
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [Random, Next]
+  description: "Disabled — System.Random.Next is non-cryptographic; enable in audits where token / nonce generation is the surface."

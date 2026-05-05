@@ -1,0 +1,139 @@
+# JavaScript queue / message-bus consumer sources (trust: service).
+# Queue payloads originate from another service inside the trust boundary,
+# but the *producer* may still be remote-attacker-influenced.
+# Attribute-chain payload reads are precise enough to ship on by default.
+# Bare queue handler param names stay off until we support stronger
+# framework-signature narrowing.
+
+- id: javascript.source.kafkajs_message_value
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: [kafkajs]
+  match:
+    kind: read
+    target:
+      attribute: [message, value]
+  match_examples:
+  - name: kafkajs message value
+    code: |
+      const _u = require("kafkajs");
+      function demo(input, req, obj) {
+        return message.value;
+      }
+  description: "kafkajs consumer message.value — producer-controlled bytes."
+
+- id: javascript.source.amqplib_msg_content
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: [amqplib]
+  match:
+    kind: read
+    target:
+      attribute: [msg, content]
+  match_examples:
+  - name: amqplib msg content
+    code: |
+      const _u = require("amqplib");
+      function demo(input, req, obj) {
+        return msg.content;
+      }
+  description: "amqplib msg.content — RabbitMQ publisher-controlled bytes."
+
+- id: javascript.source.bullmq_job_data
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: [bullmq, bull]
+  match:
+    kind: read
+    target:
+      attribute: [job, data]
+  match_examples:
+  - name: bullmq job data
+    code: |
+      const _u = require("bullmq");
+      function demo(input, req, obj) {
+        return job.data;
+      }
+  description: "bullmq/bull Job.data — enqueuer-controlled payload."
+
+- id: javascript.source.sqs_record_body
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: ["@aws-sdk/client-sqs", "aws-sdk"]
+  match:
+    kind: read
+    target:
+      attribute: [record, body]
+  match_examples:
+  - name: sqs record body
+    code: |
+      const _u = require("@aws-sdk/client-sqs");
+      function demo(input, req, obj) {
+        return record.body;
+      }
+  description: "AWS Lambda SQS event record.body — producer-controlled message payload."
+
+- id: javascript.source.nats_msg_data
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: [nats]
+  match:
+    kind: read
+    target:
+      attribute: [msg, data]
+  match_examples:
+  - name: nats msg data
+    code: |
+      const _u = require("nats");
+      function demo(input, req, obj) {
+        return msg.data;
+      }
+  description: "NATS Msg.data — publisher-controlled payload."
+
+- id: javascript.source.pubsub_message_data
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: ["@google-cloud/pubsub"]
+  match:
+    kind: read
+    target:
+      attribute: [message, data]
+  match_examples:
+  - name: pubsub message data
+    code: |
+      const _u = require("@google-cloud/pubsub");
+      function demo(input, req, obj) {
+        return message.data;
+      }
+  description: "GCP Pub/Sub Message.data — publisher-controlled Buffer. This owns the ambiguous `message.data` adapter fact; WebSocket structured frames use `frame.data` / `packet.data` to avoid duplicate source evidence."
+
+- id: javascript.source.azure_servicebus_message_body
+  enabled: true
+  language: javascript
+  trust: service
+  tag: queue-input
+  packages: ["@azure/service-bus"]
+  match:
+    kind: read
+    target:
+      attribute: [message, body]
+  match_examples:
+  - name: azure servicebus message body
+    code: |
+      const _u = require("@azure/service-bus");
+      function demo(input, req, obj) {
+        return message.body;
+      }
+  description: "Azure Service Bus message.body."

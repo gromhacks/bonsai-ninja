@@ -1,0 +1,156 @@
+# Erlang open-redirect (CWE-601).
+#
+# Why this family is sparse:
+#   The dominant Erlang web stack (cowboy) has no dedicated redirect helper —
+#   redirects are issued via cowboy_req:reply(302, #{<<"location">> => Url}, Req),
+#   the same call used for every other status. The adapter strips arity, so
+#   `^cowboy_req:reply` cannot be narrowed to "reply with Location header"
+#   without map-key constraint support. We keep that broad rule disabled
+#   (see cowboy_reply_location below) to avoid flagging every 200 OK.
+#
+#   Frameworks/libraries that DO expose explicit redirect helpers — Yaws's
+#   {redirect, Url} return tuple is matched server-side (not via a callable);
+#   Nova exposes nova:redirect/1; ChicagoBoss exposes cb_controller:redirect.
+#   Those are flagged precisely below.
+- id: erlang.open_redirect.cowboy_reply_location
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: erlang
+  tag: open-redirect
+  severity: high
+  packages: [cowboy]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:reply"
+  description: "Disabled — must inspect status code and Location header map; bare cowboy_req:reply matches normal 200 responses."
+
+- id: erlang.open_redirect.nova_redirect
+  enabled: true
+  language: erlang
+  tag: open-redirect
+  severity: high
+  packages: [nova]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      regex: "^nova:redirect$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("nova/include/nova.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        nova:redirect(Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("nova/include/nova.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        nova:redirect("/home").
+    expect_no_match: true
+  description: "nova:redirect/1 — Nova framework explicit 302 helper; tainted URL → phishing/SSO bypass."
+
+- id: erlang.open_redirect.cb_controller_redirect
+  enabled: true
+  language: erlang
+  tag: open-redirect
+  severity: high
+  packages: [chicagoboss]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      regex: "^cb_controller:redirect$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("chicagoboss/include/chicagoboss.hrl").
+      -export([test/1]).
+      test(Input) ->
+        cb_controller:redirect(Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -include_lib("chicagoboss/include/chicagoboss.hrl").
+      -export([test/0]).
+      test() ->
+        cb_controller:redirect("/home").
+    expect_no_match: true
+  description: "ChicagoBoss cb_controller:redirect — explicit 302/303 helper; tainted Location enables open-redirect to attacker host."
+
+- id: erlang.open_redirect.yaws_api_redirect
+  enabled: true
+  language: erlang
+  tag: open-redirect
+  severity: high
+  packages: [yaws]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      regex: "^yaws_api:redirect$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("yaws/include/yaws.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        yaws_api:redirect(Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("yaws/include/yaws.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        yaws_api:redirect("/home").
+    expect_no_match: true
+  description: "yaws_api:redirect/1 — Yaws helper that builds a {redirect, Url} response; tainted URL is an open-redirect."
+
+- id: erlang.open_redirect.mochiweb_redirect
+  enabled: true
+  language: erlang
+  tag: open-redirect
+  severity: high
+  packages: [mochiweb]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      regex: "^mochiweb_response:respond_redirect$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("mochiweb/include/mochiweb.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mochiweb_response:respond_redirect(Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("mochiweb/include/mochiweb.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        mochiweb_response:respond_redirect("/home").
+    expect_no_match: true
+  description: "mochiweb_response:respond_redirect — explicit redirect responder; tainted target → open-redirect."

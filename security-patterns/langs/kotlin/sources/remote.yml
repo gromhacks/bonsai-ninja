@@ -1,0 +1,1429 @@
+# Kotlin HTTP / RPC / cross-app request sources.
+#
+# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# Many Kotlin/JVM source surfaces are property accesses (Ktor
+# `call.parameters`, `call.request.queryParameters`, `call.request.headers`,
+# `call.request.cookies`, `PartData.originalFileName`) and JVM annotation
+# binding (Spring `@RequestParam`/`@RequestBody`/`@PathVariable`/
+# `@RequestHeader`/`@CookieValue`/`@KafkaListener`/`@RabbitListener`,
+# JAX-RS `@QueryParam`/`@PathParam`/`@HeaderParam`/`@FormParam`/
+# `@CookieParam`, Azure `@HttpTrigger`). The shared adapter kit now emits
+# common member-read facts and parameter annotation metadata, so the Ktor,
+# Spring, and JAX-RS rules below are enabled where their shapes are precise.
+# Remaining gaps are receiver-type precision and framework-specific
+# annotation shapes that are not surfaced yet. The current Kotlin adapter:
+#
+#   1. Emits common `read` facts and parameter annotations.
+#   2. Does NOT carry static receiver-type information for local variables
+#      (`val record: ConsumerRecord`, `val msg: TextMessage`,
+#      `val intent: Intent`), so attribute-style `[ConsumerRecord, value]`
+#      matches miss real call sites.
+#
+# Per docs/pattern-guide.mdx the fix is in the Kotlin adapter, not here:
+#
+#   > If a source-visible value flow is missing, fix adapter extraction or
+#   > the semantic graph. Do not encode the missing edge in YAML.
+#
+# Tracking task: propagate declared receiver types on local variables and add
+# any missing framework-specific annotation shapes. Once shipped, flip the
+# remaining `enabled: false` typed rules below to true and re-run the audit.
+#
+# Below this header: enabled annotation/read sources and callable-shape
+# sources that work today, plus tail-matched receivers that are stable enough
+# to enable.
+
+- id: kotlin.source.spring_request_param
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: RequestParam
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@RequestParam value: String) {
+        }
+      }
+  description: "Spring @RequestParam annotated parameter — query/form value bound from the HTTP request."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_request_body
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: RequestBody
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@RequestBody value: String) {
+        }
+      }
+  description: "Spring @RequestBody annotated parameter — request body payload bound to the handler."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_request_part
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [multipart]
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: RequestPart
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@RequestPart value: String) {
+        }
+      }
+  description: "Spring @RequestPart annotated parameter — multipart part supplied by the client."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_path_variable
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: PathVariable
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@PathVariable value: String) {
+        }
+      }
+  description: "Spring @PathVariable annotated parameter — URL path segment supplied by the client."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_request_header
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: RequestHeader
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@RequestHeader value: String) {
+        }
+      }
+  description: "Spring @RequestHeader annotated parameter — client-supplied HTTP header."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_cookie_value
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: CookieValue
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@CookieValue value: String) {
+        }
+      }
+  description: "Spring @CookieValue annotated parameter — client-supplied cookie value."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_matrix_variable
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: MatrixVariable
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@MatrixVariable value: String) {
+        }
+      }
+  description: "Spring @MatrixVariable annotated parameter — matrix URI variable supplied by the client."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_model_attribute
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [org.springframework.web]
+  match:
+    kind: param
+    target:
+      annotation: ModelAttribute
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(@ModelAttribute value: String) {
+        }
+      }
+  description: "Spring @ModelAttribute annotated parameter — request values bound onto a model object."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.spring_multipart_getname
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [org.springframework.web]
+  match:
+    kind: call
+    callee:
+      attribute: [MultipartFile, getName]
+  description: "Disabled — `getName` is too broad to tail-match safely, and typed receiver matching does not work for local multipart-file variables."
+
+- id: kotlin.source.jaxrs_query_param
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["javax.ws.rs", "jakarta.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: QueryParam
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(@QueryParam value: String) {
+        }
+      }
+  description: "JAX-RS @QueryParam annotated parameter — query value bound from the HTTP request."
+
+- id: kotlin.source.jaxrs_path_param
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["javax.ws.rs", "jakarta.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: PathParam
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(@PathParam value: String) {
+        }
+      }
+  description: "JAX-RS @PathParam annotated parameter — path value bound from the HTTP request."
+
+- id: kotlin.source.jaxrs_header_param
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["javax.ws.rs", "jakarta.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: HeaderParam
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(@HeaderParam value: String) {
+        }
+      }
+  description: "JAX-RS @HeaderParam annotated parameter — client-supplied HTTP header."
+
+- id: kotlin.source.jaxrs_form_param
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  packages: ["javax.ws.rs", "jakarta.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: FormParam
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(@FormParam value: String) {
+        }
+      }
+  description: "JAX-RS @FormParam annotated parameter — form value bound from the HTTP request."
+
+- id: kotlin.source.jaxrs_cookie_param
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: ["javax.ws.rs", "jakarta.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: CookieParam
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(@CookieParam value: String) {
+        }
+      }
+  description: "JAX-RS @CookieParam annotated parameter — client-supplied cookie value."
+
+- id: kotlin.source.jaxrs_matrix_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["javax.ws.rs", "jakarta.ws.rs"]
+  match:
+    kind: param
+    target:
+      name: MatrixParam
+  description: "Disabled — matcher only sees parameter identifiers, not JAX-RS @MatrixParam annotations."
+
+- id: kotlin.source.jaxrs_bean_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["javax.ws.rs", "jakarta.ws.rs"]
+  match:
+    kind: param
+    target:
+      name: BeanParam
+  description: "Disabled — matcher only sees parameter identifiers, not JAX-RS @BeanParam annotations."
+
+- id: kotlin.source.servlet_getparameter
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      name: getParameter
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getParameter(input)
+        }
+      }
+  description: "HttpServletRequest.getParameter."
+
+- id: kotlin.source.servlet_getparametervalues
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getParameterValues
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getParameterValues(input)
+        }
+      }
+  description: "HttpServletRequest.getParameterValues."
+
+- id: kotlin.source.servlet_getparametermap
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getParameterMap
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getParameterMap(input)
+        }
+      }
+  description: "HttpServletRequest.getParameterMap."
+
+- id: kotlin.source.servlet_getheader
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  match:
+    kind: call
+    callee:
+      name: getHeader
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getHeader(input)
+        }
+      }
+  description: "HttpServletRequest.getHeader."
+
+- id: kotlin.source.servlet_getheaders
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getHeaders
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getHeaders(input)
+        }
+      }
+  description: "HttpServletRequest.getHeaders."
+
+- id: kotlin.source.servlet_getheadernames
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getHeaderNames
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getHeaderNames(input)
+        }
+      }
+  description: "HttpServletRequest.getHeaderNames."
+
+- id: kotlin.source.servlet_getcookies
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  match:
+    kind: call
+    callee:
+      name: getCookies
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getCookies(input)
+        }
+      }
+  description: "HttpServletRequest.getCookies."
+
+- id: kotlin.source.servlet_getinputstream
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getInputStream
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getInputStream(input)
+        }
+      }
+  description: "HttpServletRequest.getInputStream — raw body."
+
+- id: kotlin.source.servlet_getreader
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getReader
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getReader(input)
+        }
+      }
+  description: "HttpServletRequest.getReader."
+
+- id: kotlin.source.servlet_getquerystring
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      name: getQueryString
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getQueryString(input)
+        }
+      }
+  description: "HttpServletRequest.getQueryString."
+
+- id: kotlin.source.servlet_getrequesturi
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      name: getRequestURI
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getRequestURI(input)
+        }
+      }
+  description: "HttpServletRequest.getRequestURI."
+
+- id: kotlin.source.servlet_getrequesturl
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      name: getRequestURL
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getRequestURL(input)
+        }
+      }
+  description: "HttpServletRequest.getRequestURL."
+
+- id: kotlin.source.servlet_getpathinfo
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      name: getPathInfo
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          request.getPathInfo(input)
+        }
+      }
+  description: "HttpServletRequest.getPathInfo."
+
+- id: kotlin.source.servlet_part_getsubmittedfilename
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file]
+  packages: [org.springframework.web]
+  match:
+    kind: call
+    callee:
+      name: getSubmittedFileName
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(input: String) {
+          getSubmittedFileName(input)
+        }
+      }
+  description: "Servlet getSubmittedFileName() — tail-match across local upload-part variable names."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.ktor_call_receive
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: [io.ktor]
+  match:
+    kind: call
+    callee:
+      attribute: [call, receive]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          call.receive(input)
+        }
+      }
+  description: "Ktor `call.receive<T>()` — decoded request body from the HTTP caller."
+
+- id: kotlin.source.ktor_call_receive_multipart
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [multipart]
+  packages: [io.ktor]
+  match:
+    kind: call
+    callee:
+      attribute: [call, receiveMultipart]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          call.receiveMultipart(input)
+        }
+      }
+  description: "Ktor `call.receiveMultipart()` — multipart request body from the HTTP caller."
+
+- id: kotlin.source.ktor_call_receive_channel
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [io.ktor]
+  match:
+    kind: call
+    callee:
+      attribute: [call, receiveChannel]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          call.receiveChannel(input)
+        }
+      }
+  description: "Ktor `call.receiveChannel()` — raw request byte channel."
+
+- id: kotlin.source.ktor_call_parameters
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: [io.ktor]
+  match:
+    kind: read
+    target:
+      attribute: [ApplicationCall, parameters]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          val out = ApplicationCall.parameters["x"]
+        }
+      }
+  description: "Ktor call.parameters property read — path/query parameters from the remote request."
+
+- id: kotlin.source.ktor_request_query_parameters
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: [io.ktor]
+  match:
+    kind: read
+    target:
+      attribute: [request, queryParameters]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          val out = request.queryParameters["x"]
+        }
+      }
+  description: "Ktor call.request.queryParameters property read — query-string parameters from the remote request."
+
+- id: kotlin.source.ktor_request_headers
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: [io.ktor]
+  match:
+    kind: read
+    target:
+      attribute: [request, headers]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          val out = request.headers["x"]
+        }
+      }
+  description: "Ktor call.request.headers property read — client-supplied HTTP headers."
+
+- id: kotlin.source.ktor_request_cookies
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: [io.ktor]
+  match:
+    kind: read
+    target:
+      attribute: [request, cookies]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          val out = request.cookies["x"]
+        }
+      }
+  description: "Ktor call.request.cookies property read — client-supplied cookie values."
+
+- id: kotlin.source.ktor_receivetext
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [io.ktor]
+  match:
+    kind: call
+    callee:
+      name: receiveText
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          receiveText(input)
+        }
+      }
+  description: "Ktor receiveText."
+
+- id: kotlin.source.ktor_receiveparameters
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [io.ktor]
+  match:
+    kind: call
+    callee:
+      name: receiveParameters
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          receiveParameters(input)
+        }
+      }
+  description: "Ktor receiveParameters."
+
+- id: kotlin.source.spring_multipart_originalfilename
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [multipart]
+  packages: [org.springframework.web]
+  match:
+    kind: call
+    callee:
+      name: getOriginalFilename
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(input: String) {
+          getOriginalFilename(input)
+        }
+      }
+  description: "Spring getOriginalFilename() — tail-match across local multipart-file variable names."
+
+  imports:
+  - org.springframework.web
+- id: kotlin.source.ktor_partdata_original_filename
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [multipart]
+  packages: [io.ktor]
+  match:
+    kind: read
+    target:
+      attribute: [PartData, originalFileName]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          val out = PartData.originalFileName["x"]
+        }
+      }
+  description: "Ktor PartData.originalFileName property read — client-supplied upload filename."
+
+- id: kotlin.source.android_getintent_getdata
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      attribute: [Intent, getData]
+  description: "Disabled — `getData` is too broad to tail-match safely, and typed receiver matching does not work for local intent variables."
+
+- id: kotlin.source.android_getintent_getparcelableextra
+  enabled: true
+  language: kotlin
+  trust: ipc
+  tag: ipc-input
+  match:
+    kind: call
+    callee:
+      name: getParcelableExtra
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          getParcelableExtra(input)
+        }
+      }
+  description: "Android Intent.getParcelableExtra(...) — tail-match across local intent variables; carries cross-app Parcelable payloads."
+
+- id: kotlin.source.android_getintent_getserializableextra
+  enabled: true
+  language: kotlin
+  trust: ipc
+  tag: ipc-input
+  match:
+    kind: call
+    callee:
+      name: getSerializableExtra
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          getSerializableExtra(input)
+        }
+      }
+  description: "Android Intent.getSerializableExtra(...) — tail-match; cross-app Serializable payload."
+
+- id: kotlin.source.android_getintent_getbooleanextra
+  enabled: true
+  language: kotlin
+  trust: ipc
+  tag: ipc-input
+  match:
+    kind: call
+    callee:
+      name: getBooleanExtra
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          getBooleanExtra(input)
+        }
+      }
+  description: "Android Intent.getBooleanExtra(...) — cross-app boolean extra."
+
+- id: kotlin.source.android_getintent_getintextra
+  enabled: true
+  language: kotlin
+  trust: ipc
+  tag: ipc-input
+  match:
+    kind: call
+    callee:
+      name: getIntExtra
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          getIntExtra(input)
+        }
+      }
+  description: "Android Intent.getIntExtra(...) — cross-app int extra."
+
+- id: kotlin.source.android_getintent_getdatastring
+  enabled: true
+  language: kotlin
+  trust: ipc
+  tag: ipc-input
+  payload_types: [url]
+  match:
+    kind: call
+    callee:
+      name: getDataString
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          getDataString(input)
+        }
+      }
+  description: "Android Intent.getDataString() — tail-match; cross-app URI string."
+
+- id: kotlin.source.android_uri_getqueryparameter
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: ipc-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, getQueryParameter]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          Uri.getQueryParameter(input)
+        }
+      }
+  description: "Android Uri.getQueryParameter(name) — pulls attacker-controlled query value out of a deep-link/intent URI."
+
+- id: kotlin.source.ktor_call_principal
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [io.ktor]
+  match:
+    kind: read
+    target:
+      attribute: [call, principal]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          val out = call.principal["x"]
+        }
+      }
+  description: "Ktor call.principal property read — authenticated principal payload such as JWT claims."
+
+- id: kotlin.source.kafka_consumer_poll
+  enabled: true
+  language: kotlin
+  trust: service
+  tag: queue-input
+  category: queue-input
+  packages: [org.apache.kafka.clients.consumer]
+  match:
+    kind: call
+    callee:
+      attribute: [KafkaConsumer, poll]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.kafka.clients.consumer.*
+      class App {
+        fun handle(input: String) {
+          KafkaConsumer.poll(input)
+        }
+      }
+  description: "KafkaConsumer.poll(timeout) — returns ConsumerRecords; payload originates from broker peer and is attacker-influenced."
+
+  imports:
+  - org.apache.kafka.clients.consumer
+- id: kotlin.source.coroutine_channel_receive
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: kotlin
+  trust: service
+  tag: queue-input
+  category: queue-input
+  packages: ["org.jetbrains.kotlinx:kotlinx-coroutines-core"]
+  match:
+    kind: call
+    callee:
+      attribute: [Channel, receive]
+  description: "Disabled — Kotlin coroutine Channel.receive is process-local in most uses; only a remote source when the producer side is a network socket bridge. Adapter cannot distinguish today."
+
+- id: kotlin.source.grpc_oncall_request
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: kotlin
+  trust: remote
+  tag: rpc-input
+  packages: ["io.grpc"]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — gRPC service-impl methods take a `request` param, but bare-name `request` overmatches Spring/Ktor handlers and ordinary helpers; needs annotation/receiver-type signal the adapter does not yet surface."
+
+- id: kotlin.source.graphql_datafetching_environment_getargument
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: graphql-input
+  payload_types: [json]
+  packages: ["com.graphql-java:graphql-java"]
+  match:
+    kind: call
+    callee:
+      name: getArgument
+  constraints:
+  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
+  - min_args: 1
+  match_examples:
+  - name: graphql data fetching argument
+    code: |
+      import com.graphqljava.graphqljava.*
+      class App {
+        fun handle(env: DataFetchingEnvironment, name: String): Any? {
+          return env.getArgument(name)
+        }
+      }
+      class DataFetchingEnvironment {
+        fun getArgument(vararg args: Any?): Any? = null
+      }
+    expect_match_text: [env.getArgument]
+  description: "graphql-java DataFetchingEnvironment.getArgument(name) — resolver argument supplied by the GraphQL caller."
+
+  imports:
+  - com
+  - com.graphqljava.graphqljava
+- id: kotlin.source.graphql_datafetching_environment_getarguments
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: graphql-input
+  payload_types: [json]
+  packages: ["com.graphql-java:graphql-java"]
+  match:
+    kind: call
+    callee:
+      name: getArguments
+  constraints:
+  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
+  - max_args: 0
+  match_examples:
+  - name: graphql all resolver arguments
+    code: |
+      import com.graphqljava.graphqljava.*
+      class App {
+        fun handle(environment: DataFetchingEnvironment): Any? {
+          return environment.getArguments()
+        }
+      }
+      class DataFetchingEnvironment {
+        fun getArguments(vararg args: Any?): Any? = null
+      }
+    expect_match_text: [environment.getArguments]
+  description: "graphql-java DataFetchingEnvironment.getArguments() — map of caller-controlled resolver arguments."
+
+  imports:
+  - com
+  - com.graphqljava.graphqljava
+- id: kotlin.source.spring_graphql_argument
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: graphql-input
+  payload_types: [json]
+  packages: ["org.springframework.graphql"]
+  match:
+    kind: param
+    target:
+      annotation: Argument
+  match_examples:
+  - name: spring graphql argument annotation
+    code: |
+      import org.springframework.graphql.*
+      class App {
+        fun bookById(@Argument id: String): String {
+          return id
+        }
+      }
+  description: "Spring GraphQL @Argument annotated resolver parameter — value supplied by the GraphQL caller."
+
+- id: kotlin.source.micronaut_queryvalue
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["io.micronaut.http"]
+  match:
+    kind: param
+    target:
+      annotation: QueryValue
+  match_examples:
+  - name: micronaut query value
+    code: |
+      import io.micronaut.http.*
+      class App {
+        fun handle(@QueryValue value: String) {
+        }
+      }
+  description: "Micronaut @QueryValue annotated parameter — query value bound from the HTTP request."
+
+- id: kotlin.source.micronaut_body
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["io.micronaut.http"]
+  match:
+    kind: param
+    target:
+      annotation: Body
+  match_examples:
+  - name: micronaut body
+    code: |
+      import io.micronaut.http.*
+      class App {
+        fun handle(@Body value: String) {
+        }
+      }
+  description: "Micronaut @Body annotated parameter — request body supplied by the HTTP caller."
+
+- id: kotlin.source.websocket_message_payload_text
+  enabled: true
+  language: kotlin
+  trust: remote
+  tag: ws-input
+  payload_types: [text]
+  packages: ["org.springframework.web.socket", "javax.websocket", "jakarta.websocket"]
+  match:
+    kind: call
+    callee:
+      name: getPayloadAsText
+  constraints:
+  - receiver_name_in: [message, msg, webSocketMessage, wsMessage]
+  - max_args: 0
+  match_examples:
+  - name: spring websocket text payload
+    code: |
+      import org.springframework.web.socket.*
+      class App {
+        fun handle(message: WebSocketMessage): String {
+          return message.getPayloadAsText()
+        }
+      }
+      class WebSocketMessage {
+        fun getPayloadAsText(vararg args: Any?): String = ""
+      }
+    expect_match_text: [message.getPayloadAsText]
+  description: "Spring WebSocketMessage.getPayloadAsText() — text frame payload supplied by the websocket peer."

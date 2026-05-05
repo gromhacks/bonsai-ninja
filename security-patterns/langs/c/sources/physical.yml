@@ -1,0 +1,316 @@
+# C hardware / physical-input sources (GPIO, I2C/SMBus, SPI, UART, ADC).
+- id: c.phys.gpio_get_value
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [linux-gpio]
+  match:
+    kind: call
+    callee:
+      name: gpio_get_value
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/gpio.h>
+      #include <linux/gpio.h>
+      #include <linux/gpio.h> /* linux-gpio */
+      #include <linux/gpio.h> /* linux-gpio */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        gpio_get_value(arg);
+      }
+  description: "Linux gpio_get_value — GPIO pin read; physical-origin bit."
+
+  imports:
+  - linux
+  - linux/gpio.h
+- id: c.phys.gpiod_line_get_value
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [libgpiod]
+  match:
+    kind: call
+    callee:
+      name: gpiod_line_get_value
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libgpiod.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        gpiod_line_get_value(arg);
+      }
+  description: "libgpiod gpiod_line_get_value — GPIO line state from external hardware."
+
+- id: c.phys.i2c_smbus_read_byte
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [linux-i2c]
+  match:
+    kind: call
+    callee:
+      name: i2c_smbus_read_byte
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        i2c_smbus_read_byte(arg);
+      }
+  description: "i2c_smbus_read_byte — I2C peripheral byte read."
+
+  imports:
+  - linux
+  - linux/i2c-dev.h
+- id: c.phys.i2c_smbus_read_byte_data
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [linux-i2c]
+  match:
+    kind: call
+    callee:
+      name: i2c_smbus_read_byte_data
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        i2c_smbus_read_byte_data(arg);
+      }
+  description: "i2c_smbus_read_byte_data — reads a device register over SMBus/I2C."
+
+  imports:
+  - linux
+  - linux/i2c-dev.h
+- id: c.phys.i2c_smbus_read_word_data
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [linux-i2c]
+  match:
+    kind: call
+    callee:
+      name: i2c_smbus_read_word_data
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        i2c_smbus_read_word_data(arg);
+      }
+  description: "i2c_smbus_read_word_data — reads a 16-bit register from an attached device."
+
+  imports:
+  - linux
+  - linux/i2c-dev.h
+- id: c.phys.wiringpi_i2c_read_reg8
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: wiringPiI2CReadReg8
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        wiringPiI2CReadReg8(arg);
+      }
+  description: "wiringPiI2CReadReg8 — 8-bit register read from a chip-to-chip bus."
+
+- id: c.phys.wiringpi_i2c_read_reg16
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: wiringPiI2CReadReg16
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        wiringPiI2CReadReg16(arg);
+      }
+  description: "wiringPiI2CReadReg16 — 16-bit register read from a peripheral."
+
+- id: c.phys.serial_getchar
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: serialGetchar
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        serialGetchar(arg);
+      }
+  description: "wiringPi serialGetchar — UART/serial byte received from external hardware."
+
+- id: c.phys.serialport_blocking_read
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [libserialport]
+  match:
+    kind: call
+    callee:
+      name: sp_blocking_read
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libserialport.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        sp_blocking_read(arg);
+      }
+  description: "libserialport sp_blocking_read — serial frame bytes from a connected device."
+
+- id: c.phys.wiringpi_spi_data_rw
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: wiringPiSPIDataRW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        wiringPiSPIDataRW(arg);
+      }
+  description: "wiringPiSPIDataRW — full-duplex SPI exchange reads peripheral response bytes."
+
+- id: c.phys.mraa_gpio_read
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [mraa]
+  match:
+    kind: call
+    callee:
+      name: mraa_gpio_read
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mraa.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mraa_gpio_read(arg);
+      }
+  description: "mraa_gpio_read — digital pin state from hardware."
+
+- id: c.phys.mraa_aio_read
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [mraa]
+  match:
+    kind: call
+    callee:
+      name: mraa_aio_read
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mraa.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mraa_aio_read(arg);
+      }
+  description: "mraa_aio_read — analog sensor sample from an attached device."
+
+- id: c.phys.analogread
+  enabled: true
+  language: c
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [arduino]
+  match:
+    kind: call
+    callee:
+      name: analogRead
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Arduino.h>
+      #include <Arduino.h>
+      #include <Arduino.h> /* arduino */
+      #include <Arduino.h> /* arduino */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        analogRead(arg);
+      }
+  description: "Arduino analogRead — ADC sample from a physical pin."
+  imports:
+  - Arduino.h
+  - Arduino

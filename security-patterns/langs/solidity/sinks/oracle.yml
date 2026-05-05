@@ -1,0 +1,101 @@
+- id: solidity.oracle.unprotected_set_price
+  enabled: true
+  language: solidity
+  tag: oracle-manipulation
+  severity: high
+  cwe: [CWE-840]
+  match:
+    kind: call
+    callee:
+      regex: "^(setPrice|updatePrice|setRate|setExchangeRate)$"
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { setPrice(input); } }
+  description: "Privileged price setter — must be authz-checked."
+- id: solidity.oracle.spot_price_lookup
+  enabled: true
+  language: solidity
+  tag: oracle-manipulation
+  severity: medium
+  cwe: [CWE-840]
+  match:
+    kind: call
+    callee:
+      regex: "(^|\\.)(getReserves|getAmountsOut|getAmountsIn)$"
+  match_examples:
+    - name: uniswap spot quote
+      code: |
+        pragma solidity ^0.8.0;
+        interface Router { function getAmountsOut(uint256 amount, address[] memory path) external returns (uint256[] memory); }
+        contract App { function test(Router router, uint256 amount, address[] memory path) public { router.getAmountsOut(amount, path); } }
+  description: "Uniswap-style spot reserve/quote lookup. If this value prices mint/burn/liquidation/swap settlement without TWAP or bounds, a flash loan can manipulate the result."
+- id: solidity.oracle.curve_virtual_price_read
+  enabled: true
+  language: solidity
+  tag: readonly-reentrancy
+  severity: high
+  cwe: [CWE-841]
+  match:
+    kind: call
+    callee:
+      regex: "(^|\\.)get_virtual_price$"
+  match_examples:
+    - name: curve virtual price
+      code: |
+        pragma solidity ^0.8.0;
+        interface CurvePool { function get_virtual_price() external returns (uint256); }
+        contract App { function test(CurvePool pool) public { pool.get_virtual_price(); } }
+  description: "Curve get_virtual_price() can be stale during read-only reentrancy if the integration reads it without an external reentrancy guard or post-state consistency check."
+- id: solidity.oracle.balancer_pool_tokens_read
+  enabled: true
+  language: solidity
+  tag: readonly-reentrancy
+  severity: high
+  cwe: [CWE-841]
+  match:
+    kind: call
+    callee:
+      regex: "(^|\\.)getPoolTokens$"
+  match_examples:
+    - name: balancer pool tokens
+      code: |
+        pragma solidity ^0.8.0;
+        interface BalancerVault { function getPoolTokens(bytes32 poolId) external returns (address[] memory, uint256[] memory, uint256); }
+        contract App { function test(BalancerVault vault, bytes32 poolId) public { vault.getPoolTokens(poolId); } }
+  description: "Balancer Vault.getPoolTokens() oracle read. During pool callbacks, balances may expose read-only reentrancy state unless guarded by Balancer's Vault reentrancy protection pattern."
+- id: solidity.oracle.balancer_rate_read
+  enabled: true
+  language: solidity
+  tag: readonly-reentrancy
+  severity: high
+  cwe: [CWE-841]
+  match:
+    kind: call
+    callee:
+      regex: "(^|\\.)getRate$"
+  match_examples:
+    - name: balancer rate
+      code: |
+        pragma solidity ^0.8.0;
+        interface BalancerPool { function getRate() external returns (uint256); }
+        contract App { function test(BalancerPool pool) public { pool.getRate(); } }
+  description: "Balancer getRate() oracle read. Treat as an audit sink when used for pricing without read-only reentrancy defenses."
+- id: solidity.oracle.keeper_current_quote
+  enabled: true
+  language: solidity
+  tag: oracle-manipulation
+  severity: medium
+  cwe: [CWE-840]
+  match:
+    kind: call
+    callee:
+      regex: "(^|\\.)current$"
+  match_examples:
+    - name: keeper current quote
+      code: |
+        pragma solidity ^0.8.0;
+        interface Keeper { function current(address tokenIn, uint256 amountIn, address tokenOut) external returns (uint256); }
+        contract App { function test(Keeper keeper, address tokenIn, address tokenOut, uint256 amountIn) public { keeper.current(tokenIn, amountIn, tokenOut); } }
+  description: "Keeper/Uniswap-style current(tokenIn, amountIn, tokenOut) spot quote. Review for TWAP, liquidity, and manipulation resistance before using the returned price."

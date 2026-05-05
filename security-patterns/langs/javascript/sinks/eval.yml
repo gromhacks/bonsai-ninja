@@ -1,0 +1,397 @@
+# JavaScript eval / dynamic-code sinks.
+- id: javascript.eval.builtin_eval
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^eval$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: builtin eval
+    code: |
+      function demo(input, req, obj) {
+        return eval(input);
+      }
+  - name: literal eval negative
+    code: |
+      function demo() {
+        return eval("1 + 1");
+      }
+    expect_no_match: true
+  description: |
+    eval() — attacker-controlled JS is executed in the current scope.
+    Bare-name match is intentional: `eval` is a real ECMAScript global.
+    The `top_level: true` constraint excludes property access shapes
+    like `foo.eval(x)` (e.g. mongodb db.eval, vm.runInThisContext)
+    which are covered by their own package-scoped rules.
+
+- id: javascript.eval.function_constructor
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: javascript
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: new
+    callee:
+      name: Function
+  description: "Disabled duplicate — adapter also emits new Function(...) as the call-form Function fact, covered by javascript.eval.function_constructor_call."
+
+- id: javascript.eval.function_constructor_call
+  aliases: [javascript.eval.function_constructor]
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: Function
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: function constructor
+    code: |
+      function demo(input, req, obj) {
+        return new Function(input);
+      }
+    expect_match_text: [Function]
+  - name: function constructor call concat
+    code: |
+      function demo(body) {
+        return Function("return " + body);
+      }
+    expect_match_text: [Function]
+  - name: function constructor call body variable
+    code: |
+      function demo(body) {
+        return Function(body);
+      }
+    expect_match_text: [Function]
+  - name: arg tainted literal negative
+    code: "function demo(input, req, obj) {\n  return new Function(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "Function('...' + body) / Function(body) — call-form Function constructor compiles attacker-controlled source."
+
+- id: javascript.eval.settimeout_string
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: setTimeout
+  description: "Disabled — setTimeout(fn, ms) is almost always called with a function; the eval-string form is uncommon and can't be distinguished without a string-type constraint we don't have."
+
+- id: javascript.eval.setinterval_string
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: setInterval
+  description: "Disabled — same as setTimeout; enable only when first-arg-type analysis is available."
+
+- id: javascript.eval.setimmediate_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: setImmediate
+  description: "Disabled — setImmediate doesn't even accept a string form; kept as a placeholder."
+
+- id: javascript.eval.execscript
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: execScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: execscript
+    code: |
+      function demo(input, req, obj) {
+        return execScript(input);
+      }
+  - name: literal execscript negative
+    code: |
+      function demo() {
+        return execScript("1 + 1");
+      }
+    expect_no_match: true
+  description: execScript() — legacy IE explicit-eval API; no legitimate modern use.
+
+- id: javascript.eval.vm_runinthiscontext
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages: [vm]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [vm, runInThisContext]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vm runinthiscontext
+    code: |
+      const _u = require("vm");
+      function demo(input, req, obj) {
+        return vm.runInThisContext(input);
+      }
+  - name: literal vm runinthiscontext negative
+    code: |
+      const _u = require("vm");
+      function demo() {
+        return vm.runInThisContext("1 + 1");
+      }
+    expect_no_match: true
+  description: Node vm.runInThisContext(tainted) — runs JS source in the host realm.
+
+- id: javascript.eval.vm_runinnewcontext
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages: [vm]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [vm, runInNewContext]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vm runinnewcontext
+    code: |
+      const _u = require("vm");
+      function demo(input, req, obj) {
+        return vm.runInNewContext(input);
+      }
+  - name: arg tainted literal negative
+    code: "const _u = require(\"vm\");\nfunction demo(input, req, obj) {\n  return vm.runInNewContext(\"safe\");\n}\n"
+    expect_no_match: true
+  description: vm.runInNewContext(tainted) — runs JS source, sandbox escapes are common.
+
+- id: javascript.eval.vm_runincontext
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages: [vm]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [vm, runInContext]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vm runincontext
+    code: |
+      const _u = require("vm");
+      function demo(input, req, obj) {
+        return vm.runInContext(input);
+      }
+  - name: literal vm runincontext negative
+    code: |
+      const _u = require("vm");
+      function demo(ctx) {
+        return vm.runInContext("1 + 1", ctx);
+      }
+    expect_no_match: true
+  description: vm.runInContext(tainted) — runs JS source in a pre-built context.
+
+- id: javascript.eval.safe_eval
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages: [safe-eval]
+  imports: [safe-eval]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^(safeEval|safeEval2|safeEvalModule|safeEvalPackage)$|^safeEval\\.safeEval$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: safe-eval default import
+    code: |
+      const safeEval = require("safe-eval");
+      function run(input) {
+        return safeEval(input);
+      }
+    expect_match_text: [safeEval]
+  - name: safe-eval namespace call
+    code: |
+      const _u = require("safe-eval");
+      function run(safeEval, input) {
+        return safeEval.safeEval(input);
+      }
+    expect_match_text: [safeEval.safeEval]
+  - name: literal safe-eval negative
+    code: |
+      const safeEval = require("safe-eval");
+      function run() {
+        return safeEval("1 + 1");
+      }
+    expect_no_match: true
+  description: "safe-eval evaluates JavaScript source and has had sandbox-escape CVEs; tainted code remains code injection."
+
+- id: javascript.eval.vm_compilefunction
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages: [vm]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [vm, compileFunction]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vm compilefunction
+    code: |
+      const _u = require("vm");
+      function demo(input, req, obj) {
+        return vm.compileFunction(input);
+      }
+  - name: literal vm compilefunction negative
+    code: |
+      const _u = require("vm");
+      function demo() {
+        return vm.compileFunction("return 1");
+      }
+    expect_no_match: true
+  description: vm.compileFunction(tainted) — compiles attacker-controlled body.
+
+- id: javascript.eval.vm_script_ctor
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages: [vm]
+  cwe: [CWE-94]
+  match:
+    kind: new
+    callee:
+      attribute: [vm, Script]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vm script ctor
+    code: |
+      const _u = require("vm");
+      function demo(input, req, obj) {
+        return new vm.Script(input);
+      }
+  - name: literal vm script ctor negative
+    code: |
+      const _u = require("vm");
+      function demo() {
+        return new vm.Script("1 + 1");
+      }
+    expect_no_match: true
+  description: new vm.Script(tainted) — compiles a Script object from attacker source.
+
+- id: javascript.eval.dynamic_import
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: import
+  description: "Disabled — bare `import(x)` fires on every dynamic import; dangerous only when the module specifier is tainted. Enable with source-proximity."
+
+- id: javascript.eval.require_dynamic
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: require
+  description: "Disabled — bare `require(...)` fires on every module load; dangerous only when the specifier is tainted. Enable with source-proximity."
+
+# Reflection-based dynamic invocation (T406). Tag
+# code-injection so reviewer enumerates with `security sinks
+# --tag code-injection`. Treats reflection as eval-equivalent
+# when the dispatched name comes from attacker input.
+- id: javascript.eval.bracket_index_dynamic_call
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: high
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Reflect, apply]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bracket index dynamic call
+    code: |
+      function demo(input, req, obj) {
+        return Reflect.apply(input);
+      }
+  - name: literal bracket index dynamic call negative
+    code: |
+      function demo() {
+        return Reflect.apply(Math.max, null, [1, 2]);
+      }
+    expect_no_match: true
+  description: "Reflect.apply(target, this, args) — when target is selected by attacker name, eval-equivalent. TODO(only_when_packaged): JS Reflect global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Reflect', 'apply']` match only."

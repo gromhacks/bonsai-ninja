@@ -1,0 +1,43 @@
+# Objective-C file-upload sinks (NSURLSession upload, AFNetworking multipart).
+- id: objc.upload.nsurlsession_uploadtask
+  enabled: true
+  language: objc
+  tag: file-upload
+  severity: medium
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "^(uploadTaskWithRequest|uploadTaskWithStreamedRequest)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; uploadTaskWithRequest(input); }
+  description: "NSURLSession -uploadTaskWithRequest:fromFile: / -uploadTaskWithStreamedRequest: — tainted file path permits upload of arbitrary local files."
+
+- id: objc.upload.afnetworking_multipart
+  enabled: true
+  language: objc
+  tag: file-upload
+  severity: medium
+  packages: [AFNetworking]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "^(appendPartWithFileURL|appendPartWithFileData|appendPartWithFormData)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(id input) { id target = input; int amount = 1; appendPartWithFileURL(input); }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        afnetworking_multipart("safe");
+      }
+    expect_no_match: true
+  description: "AFHTTPBodyPart / AFMultipartFormData -appendPartWithFileURL:name:fileName:... with tainted filename/URL — arbitrary file upload."

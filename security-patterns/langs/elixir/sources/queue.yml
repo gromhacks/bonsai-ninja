@@ -1,0 +1,166 @@
+# Async queue / pipeline sources. All marked `trust: service` — the
+# queue operator is semi-trusted but the payload itself often
+# originates from an external caller that eventually becomes a
+# message.
+- id: elixir.broadway.message
+  enabled: true
+  language: elixir
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  frameworks: [broadway]
+  packages: [broadway]
+  match:
+    kind: param
+    target:
+      name: message
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Broadway
+      defmodule App do
+        def handle(message) do
+          message
+        end
+      end
+  description: "Broadway handle_message/3 `message` — payload from SQS/Kafka/RabbitMQ/GCPubSub; .data byte-blob is attacker-reachable."
+
+  imports:
+  - Broadway
+- id: elixir.broadway.batch_messages
+  enabled: true
+  language: elixir
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  frameworks: [broadway]
+  packages: [broadway]
+  match:
+    kind: param
+    target:
+      name: messages
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Broadway
+      defmodule App do
+        def handle(messages) do
+          messages
+        end
+      end
+  description: "Broadway handle_batch/4 `messages` list — batch of payloads from the queue; each element is attacker-reachable."
+
+  imports:
+  - Broadway
+- id: elixir.oban.job_args
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: elixir
+  trust: service
+  tag: queue-input
+  payload_types: [json]
+  packages: [oban]
+  match:
+    kind: read
+    target:
+      name: args
+  description: "Disabled — current Elixir adapter does not emit `kind: read` property facts for `%Oban.Job{}.args`. The `elixir.oban.worker_perform` `job` param rule already taints the worker entrypoint; re-enable once the adapter exposes field reads."
+
+- id: elixir.oban.worker_perform
+  enabled: true
+  language: elixir
+  trust: service
+  tag: queue-input
+  payload_types: [json]
+  packages: [oban]
+  match:
+    kind: param
+    target:
+      name: job
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Oban
+      defmodule App do
+        def handle(job) do
+          job
+        end
+      end
+  description: "Oban.Worker perform/1 `%Oban.Job{}` parameter — .args/.meta carries enqueue-time payload."
+
+  imports:
+  - Oban
+- id: elixir.genstage.handle_events
+  enabled: true
+  language: elixir
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: [gen_stage]
+  match:
+    kind: param
+    target:
+      name: events
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Gen_stage
+      defmodule App do
+        def handle(events) do
+          events
+        end
+      end
+  description: "GenStage handle_events/3 `events` list — upstream producer payload."
+
+  imports:
+  - Gen_stage
+- id: elixir.amqp.basic_deliver
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: elixir
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: [amqp]
+  match:
+    kind: param
+    target:
+      name: payload
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Amqp
+      defmodule App do
+        def handle(payload) do
+          payload
+        end
+      end
+  description: "Disabled — duplicate bare `payload` parameter shape with elixir.phoenix.channel_handle_in under the current matcher."
+
+  imports:
+  - Amqp
+- id: elixir.bandit.handle_data
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [binary]
+  packages: [bandit]
+  match:
+    kind: param
+    target:
+      name: data
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Bandit
+      defmodule App do
+        def handle(data) do
+          data
+        end
+      end
+  description: "Bandit/Cowboy raw socket handler — `handle_data/handle_info` `data` parameter carries unparsed bytes from the peer. Bare-name match on `data`."
+  imports:
+  - Bandit

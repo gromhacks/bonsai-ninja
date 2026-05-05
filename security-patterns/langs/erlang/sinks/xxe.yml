@@ -1,0 +1,151 @@
+# Erlang XXE sinks (xmerl + erlsom). Default DTD/external-entity resolution.
+- id: erlang.xxe.xmerl_scan_file
+  enabled: true
+  language: erlang
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^xmerl_scan:file"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        xmerl_scan:file(Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        xmerl_scan:file("priv/feed.xml").
+    expect_no_match: true
+  description: "xmerl_scan:file — resolves external DTD entities by default; attacker DTD → file read / SSRF."
+
+- id: erlang.xxe.xmerl_scan_string
+  enabled: true
+  language: erlang
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^xmerl_scan:string"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        xmerl_scan:string(Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        xmerl_scan:string("<root/>").
+    expect_no_match: true
+  description: "xmerl_scan:string — same external-entity surface as xmerl_scan:file."
+
+- id: erlang.xxe.erlsom_simple_form
+  enabled: true
+  language: erlang
+  tag: xxe
+  severity: high
+  packages: [erlsom]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^erlsom:simple_form"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("erlsom/include/erlsom.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlsom:simple_form(Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("erlsom/include/erlsom.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        erlsom:simple_form("<root/>").
+    expect_no_match: true
+  description: "erlsom:simple_form — SAX parser that honors external entities unless explicitly disabled."
+
+- id: erlang.xxe.erlsom_scan
+  enabled: true
+  language: erlang
+  tag: xxe
+  severity: high
+  packages: [erlsom]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^erlsom:scan"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("erlsom/include/erlsom.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlsom:scan(Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("erlsom/include/erlsom.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        erlsom:scan("<root/>").
+    expect_no_match: true
+  description: "erlsom:scan — same XXE surface as simple_form."
+
+- id: erlang.xxe.xmerl_sax_parser
+  enabled: true
+  language: erlang
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^xmerl_sax_parser:(file|stream)"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        xmerl_sax_parser:file(Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        xmerl_sax_parser:file("priv/feed.xml").
+    expect_no_match: true
+  description: "xmerl_sax_parser — SAX API also resolves external entities without {external,none}."

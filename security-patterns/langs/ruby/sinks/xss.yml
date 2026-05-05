@@ -1,0 +1,260 @@
+- id: ruby.xss.html_safe
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: html_safe
+  match_examples:
+  - name: ruby.xss.html_safe example
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        html_safe(input)
+      end
+  description: "Disabled — html_safe marks the receiver string safe; needs receiver-taint tracking."
+- id: ruby.xss.raw
+  enabled: true
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xss.raw example
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        raw(input)
+      end
+  - name: ruby.xss.raw literal negative
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        raw("<p>Hello</p>")
+      end
+    expect_no_match: true
+  description: 'raw() in ERB / view helpers. Deliberately not top_level-constrained: ERB preprocessing can wrap embedded expressions in a synthetic block context, while ActionView package metadata plus taint flow gate real findings.'
+- id: ruby.xss.sanitize_helper_off
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: xss
+  severity: medium
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: sanitize
+  description: "Disabled — sanitize is normally safe; flag only on tainted config."
+- id: ruby.xss.concat
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: xss
+  severity: medium
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: concat
+  description: "Disabled — concat is widely used and not always XSS-relevant."
+- id: ruby.xss.content_tag
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: xss
+  severity: medium
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: content_tag
+  description: "Disabled — content_tag escapes by default."
+- id: ruby.xss.javascript_tag
+  enabled: true
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: javascript_tag
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xss.javascript_tag example
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        javascript_tag(input)
+      end
+  - name: ruby.xss.javascript_tag literal negative
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        javascript_tag("console.log('ok')")
+      end
+    expect_no_match: true
+  description: javascript_tag with tainted content.
+- id: ruby.xss.link_to_unescaped
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: xss
+  severity: medium
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: link_to
+  description: "Disabled — link_to escapes by default."
+- id: ruby.xss.haml_preserve
+  enabled: true
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - haml
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: preserve
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xss.haml_preserve example
+    code: |
+      require "haml"
+      def example(input, url, id, payload, request, params)
+        preserve(input)
+      end
+  - name: ruby.xss.haml_preserve literal negative
+    code: |
+      require "haml"
+      def example(input, url, id, payload, request, params)
+        preserve("<p>Hello</p>")
+      end
+    expect_no_match: true
+  description: "Haml#preserve — emits raw HTML."
+- id: ruby.xss.slim_html_safe
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: xss
+  severity: medium
+  packages:
+  - slim
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: html_escape
+  description: "Disabled — Slim html_escape is a sanitizer (opposite of XSS risk)."
+- id: ruby.xss.safe_concat
+  enabled: true
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: safe_concat
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xss.safe_concat example
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        safe_concat(input)
+      end
+  - name: ruby.xss.safe_concat literal negative
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        safe_concat("<p>Hello</p>")
+      end
+    expect_no_match: true
+  description: "ActionView::Helpers#safe_concat — appends tainted content without escaping."
+- id: ruby.xss.sinatra_body_html_concat
+  enabled: true
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - sinatra
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: body
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sinatra body html concat
+    code: |
+      require "sinatra"
+      def example(input, url, id, payload, request, params)
+        body(input)
+      end
+    expect_match_text:
+    - body
+  - name: ruby.xss.sinatra_body_html_concat literal negative
+    code: |
+      require "sinatra"
+      def example(input, url, id, payload, request, params)
+        body("<p>Hello</p>")
+      end
+    expect_no_match: true
+  description: Sinatra body(...) with string-built HTML - tainted response content is returned directly.

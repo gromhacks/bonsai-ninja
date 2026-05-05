@@ -1,0 +1,113 @@
+# Elixir LLM sinks (OpenAI / Anthropic / Bedrock client wrappers).
+- id: elixir.llm.openai_chat_completion
+  enabled: true
+  language: elixir
+  tag: web-llm
+  severity: medium
+  packages: [openai]
+  imports:
+  - openai
+  - Openai
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [OpenAI, chat_completion]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: elixir openai chat completion
+    code: |
+      alias Openai
+      defmodule App do
+        def test(prompt) do
+          OpenAI.chat_completion(prompt)
+        end
+      end
+    expect_match_text: [OpenAI.chat_completion]
+  - name: literal openai chat completion negative
+    code: |
+      alias Openai
+      defmodule App do
+        def test(prompt) do
+          OpenAI.chat_completion("Summarize this document.")
+        end
+      end
+    expect_no_match: true
+  description: "OpenAI.chat_completion — tainted prompt content reaches an LLM instruction / tool surface."
+
+- id: elixir.llm.anthropic_messages_create
+  enabled: true
+  language: elixir
+  tag: web-llm
+  severity: medium
+  packages: [anthropic]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [Anthropic, Messages, create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: elixir anthropic messages create
+    code: |
+      alias Anthropic
+      # uses anthropic
+      defmodule App do
+        def test(prompt) do
+          Anthropic.Messages.create(prompt)
+        end
+      end
+    expect_match_text: [Anthropic.Messages.create]
+  - name: literal anthropic messages create negative
+    code: |
+      alias Anthropic
+      defmodule App do
+        def test(prompt) do
+          Anthropic.Messages.create("Summarize this document.")
+        end
+      end
+    expect_no_match: true
+  description: "Anthropic.Messages.create — tainted prompt content reaches Claude."
+
+  imports:
+  - Anthropic
+- id: elixir.llm.ex_aws_bedrock_invoke_model
+  enabled: true
+  language: elixir
+  tag: web-llm
+  severity: medium
+  packages: [ex_aws_bedrock]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [ExAws, Bedrock, invoke_model]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: elixir ex aws bedrock invoke model
+    code: |
+      alias Ex_aws_bedrock
+      defmodule App do
+        def test(prompt) do
+          ExAws.Bedrock.invoke_model(prompt)
+        end
+      end
+    expect_match_text: [ExAws.Bedrock.invoke_model]
+  - name: literal bedrock invoke model negative
+    code: |
+      alias Ex_aws_bedrock
+      defmodule App do
+        def test(prompt) do
+          ExAws.Bedrock.invoke_model("{\"prompt\":\"Summarize\"}")
+        end
+      end
+    expect_no_match: true
+  description: "ExAws.Bedrock.invoke_model — tainted request body steers the underlying foundation model."
+  imports:
+  - Ex_aws_bedrock

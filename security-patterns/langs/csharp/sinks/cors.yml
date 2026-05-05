@@ -1,0 +1,19 @@
+# csharp CORS misconfiguration sinks (T403).
+- id: csharp.cors.addcors_allowanyorigin
+  enabled: true
+  language: csharp
+  tag: cors
+  severity: medium
+  packages: [Microsoft.AspNetCore.Cors]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      name: AllowAnyOrigin
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Cors;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AllowAnyOrigin(input); } }
+  description: |-
+    ASP.NET Core CORS policy.AllowAnyOrigin() — wildcard allow-all.

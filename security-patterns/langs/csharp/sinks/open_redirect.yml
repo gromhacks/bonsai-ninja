@@ -1,0 +1,105 @@
+# C# open-redirect sinks.
+- id: csharp.open_redirect.controller_redirect
+  enabled: true
+  language: csharp
+  tag: open-redirect
+  severity: high
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Microsoft, AspNetCore, Mvc, Redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test(string input) { Microsoft.AspNetCore.Mvc.Redirect(input); } }
+  - name: literal local redirect negative
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { Microsoft.AspNetCore.Mvc.Redirect("/home"); } }
+    expect_no_match: true
+  description: "Controller.Redirect(tainted url) — scoped to MVC namespace to avoid colliding with other Redirect helpers."
+
+- id: csharp.open_redirect.controller_redirectpermanent
+  enabled: true
+  language: csharp
+  tag: open-redirect
+  severity: high
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: RedirectPermanent
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test(string input) { Microsoft.AspNetCore.Mvc.RedirectPermanent(input); } }
+  - name: literal local redirect negative
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { Microsoft.AspNetCore.Mvc.RedirectPermanent("/home"); } }
+    expect_no_match: true
+  description: "Controller.RedirectPermanent — scoped to MVC. Same literal-constant filter as controller_redirect."
+
+- id: csharp.open_redirect.controller_redirecttoaction_url
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: open-redirect
+  severity: medium
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: RedirectToAction
+  description: "Disabled — RedirectToAction routes internally; safe unless action name tainted."
+
+- id: csharp.open_redirect.response_redirect
+  enabled: true
+  language: csharp
+  tag: open-redirect
+  severity: high
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, Redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Response.Redirect(input); } }
+  - name: literal local redirect negative
+    code: |
+      class App { void Test() { Response.Redirect("/home"); } }
+    expect_no_match: true
+  description: "Response.Redirect(tainted url)."
+
+- id: csharp.open_redirect.localredirect
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: open-redirect
+  severity: low
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: LocalRedirect
+  description: "Disabled — LocalRedirect rejects external URLs by default."

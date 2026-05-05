@@ -1,0 +1,68 @@
+# ruby mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: ruby.mass_assign.update_attributes
+  enabled: true
+  language: ruby
+  tag: mass-assignment
+  severity: high
+  packages:
+  - activerecord
+  imports:
+  - active_record
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [ActiveRecord, update_attributes]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.mass_assign.update_attributes example
+    code: |
+      require "active_record"
+      def example(input, url, id, payload, request, params)
+        ActiveRecord.update_attributes(input)
+      end
+  - name: ruby.mass_assign.update_attributes literal negative
+    code: |
+      require "active_record"
+      def example(input, url, id, payload, request, params)
+        ActiveRecord.update_attributes({name: "alice"})
+      end
+    expect_no_match: true
+  description: "Rails ActiveRecord#update_attributes(params[:user]) — mass-assigns every key in params; admin/role fields slip through unless strong_parameters narrow the hash."
+- id: ruby.mass_assign.assign_attributes
+  enabled: true
+  language: ruby
+  tag: mass-assignment
+  severity: high
+  packages:
+  - activerecord
+  imports:
+  - active_record
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [ActiveRecord, assign_attributes]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.mass_assign.assign_attributes example
+    code: |
+      require "active_record"
+      def example(input, url, id, payload, request, params)
+        ActiveRecord.assign_attributes(input)
+      end
+  - name: ruby.mass_assign.assign_attributes literal negative
+    code: |
+      require "active_record"
+      def example(input, url, id, payload, request, params)
+        ActiveRecord.assign_attributes({name: "alice"})
+      end
+    expect_no_match: true
+  description: "ActiveRecord#assign_attributes(params[:user]) — same overpost surface as update_attributes; permit narrowing required."

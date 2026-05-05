@@ -1,0 +1,32 @@
+# perl race / TOCTOU sinks (T501).
+
+# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# in source order to identify the race window.
+- id: perl.toctou.file_exists
+  enabled: true
+  language: perl
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      name: stat
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: perl.toctou.file_exists example
+      code: |
+        sub example {
+          my ($input, $url, $id, $payload, $request) = @_;
+          stat($input)
+        }
+    - name: literal stat negative
+      code: |
+        sub example {
+          my ($input, $url, $id, $payload, $request) = @_;
+          stat("tmp/report.txt")
+        }
+      expect_no_match: true
+  description: "Perl stat(path) — check site preceding open() is TOCTOU."

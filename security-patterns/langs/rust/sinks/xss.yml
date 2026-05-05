@@ -1,0 +1,183 @@
+# Rust XSS sinks (template trust markers + raw HTML responses).
+- id: rust.xss.maud_pre_escaped
+  enabled: true
+  language: rust
+  tag: xss
+  severity: high
+  packages: [maud]
+  cwe: [CWE-79]
+  match:
+    kind: new
+    callee:
+      name: PreEscaped
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted maud pre escaped body
+    code: |
+      use maud::dummy;
+      struct PreEscaped<T>(T);
+      fn example(target: &str) {
+          let _x = PreEscaped(target);
+      }
+  - name: literal maud pre escaped body negative
+    code: |
+      use maud::dummy;
+      struct PreEscaped<T>(T);
+      fn example() {
+          let _x = PreEscaped("<b>safe</b>");
+      }
+    expect_no_match: true
+  description: "maud PreEscaped(tainted) — bypasses HTML escape."
+
+- id: rust.xss.axum_html_response
+  enabled: true
+  language: rust
+  tag: xss
+  severity: high
+  packages: [axum]
+  cwe: [CWE-79]
+  match:
+    kind: new
+    callee:
+      attribute: [response, Html]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted axum html response body
+    code: |
+      use axum::dummy;
+      mod response { pub struct Html<T>(pub T); }
+      fn example(target: &str) {
+          let _x = response::Html(target);
+      }
+  - name: literal axum html response body negative
+    code: |
+      use axum::dummy;
+      mod response { pub struct Html<T>(pub T); }
+      fn example() {
+          let _x = response::Html("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "axum::response::Html(tainted) — marks string as text/html response; no escape."
+- id: rust.xss.askama_html_unsafe
+  enabled: true
+  language: rust
+  tag: xss
+  severity: medium
+  packages: [askama]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [askama, filters, safe]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted askama safe filter value
+    code: |
+      use askama::dummy;
+      fn example(target: &str) {
+          askama::filters::safe(target);
+      }
+  - name: literal askama safe filter value negative
+    code: |
+      use askama::dummy;
+      fn example() {
+          askama::filters::safe("<b>safe</b>");
+      }
+    expect_no_match: true
+  description: "askama::filters::safe(tainted) — explicit call bypassing auto-escape."
+
+- id: rust.xss.rocket_rawhtml
+  enabled: true
+  language: rust
+  tag: xss
+  severity: high
+  packages: [rocket]
+  cwe: [CWE-79]
+  match:
+    kind: new
+    callee:
+      attribute: [content, RawHtml]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rocket raw html body
+    code: |
+      use rocket::dummy;
+      mod content { pub struct RawHtml<T>(pub T); }
+      fn example(target: &str) {
+          let _x = content::RawHtml(target);
+      }
+  - name: literal rocket raw html body negative
+    code: |
+      use rocket::dummy;
+      mod content { pub struct RawHtml<T>(pub T); }
+      fn example() {
+          let _x = content::RawHtml("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "rocket::response::content::RawHtml(tainted) — wraps raw HTML response body; skips escaping."
+
+- id: rust.xss.warp_html
+  enabled: true
+  language: rust
+  tag: xss
+  severity: high
+  packages: [warp]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [reply, html]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted warp html body
+    code: |
+      use warp::dummy;
+      fn example(target: &str) {
+          reply::html(target);
+      }
+  - name: literal warp html body negative
+    code: |
+      use warp::dummy;
+      fn example() {
+          reply::html("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "warp reply::html(tainted) — wraps body in a text/html response; no escaping applied."
+
+- id: rust.xss.actix_response_body_html
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: xss
+  severity: high
+  packages: [actix_web]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpResponseBuilder, content_type]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use actix_web;
+      use actix_web;
+      use actix_web::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          HttpResponseBuilder::content_type(target);
+      }
+  description: "Disabled — content_type(\"text/html\") only sets response state; the tainted body is supplied by a later builder call, so this requires receiver-state tracking."
+  imports:
+  - actix_web

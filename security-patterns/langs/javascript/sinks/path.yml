@@ -1,0 +1,723 @@
+- id: javascript.path.fs_readfile
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  imports: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^fs\\.readFile$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs readfile
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.readFile(input);
+      }
+  - name: literal fs readfile negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.readFile("/var/app/config.json");
+      }
+    expect_no_match: true
+  description: fs.readFile — tainted path enables directory traversal.
+
+- id: javascript.path.fs_readfile_sync
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  imports: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, readFileSync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs readfile sync
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.readFileSync(input);
+      }
+  - name: literal fs readfile sync negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.readFileSync("/var/app/config.json");
+      }
+    expect_no_match: true
+  description: fs.readFileSync — same traversal hazard as readFile.
+
+- id: javascript.path.fs_writefile
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  imports: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^fs\\.writeFile$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs writefile
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.writeFile(input);
+      }
+  - name: literal fs writefile negative
+    code: |
+      const _u = require("fs");
+      function demo(input) {
+        return fs.writeFile("/var/app/output.txt", input);
+      }
+    expect_no_match: true
+  description: fs.writeFile — tainted path can overwrite files outside the intended directory.
+
+- id: javascript.path.fs_writefile_sync
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, writeFileSync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs writefile sync
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.writeFileSync(input);
+      }
+  - name: literal fs writefile sync negative
+    code: |
+      const _u = require("fs");
+      function demo(input) {
+        return fs.writeFileSync("/var/app/output.txt", input);
+      }
+    expect_no_match: true
+  description: fs.writeFileSync — same arbitrary-write hazard as writeFile.
+
+- id: javascript.path.fs_appendfile
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, appendFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs appendfile
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.appendFile(input);
+      }
+  - name: literal fs appendfile negative
+    code: |
+      const _u = require("fs");
+      function demo(input) {
+        return fs.appendFile("/var/app/output.txt", input);
+      }
+    expect_no_match: true
+  description: fs.appendFile — tainted path enables writing outside the intended directory.
+
+- id: javascript.path.fs_createwritestream
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  imports: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, createWriteStream]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs createwritestream
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.createWriteStream(input);
+      }
+  - name: literal fs createwritestream negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.createWriteStream("/var/app/output.txt");
+      }
+    expect_no_match: true
+  description: fs.createWriteStream — tainted path enables arbitrary-file write.
+
+- id: javascript.path.fs_createreadstream
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, createReadStream]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs createreadstream
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.createReadStream(input);
+      }
+  - name: literal fs createreadstream negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.createReadStream("/var/app/config.json");
+      }
+    expect_no_match: true
+  description: fs.createReadStream — tainted path enables arbitrary-file read.
+
+- id: javascript.path.fs_unlink
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, unlink]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs unlink
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.unlink(input);
+      }
+  - name: literal fs unlink negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.unlink("/var/app/tmp.txt");
+      }
+    expect_no_match: true
+  description: fs.unlink — tainted path enables deletion outside the intended directory.
+
+- id: javascript.path.fs_rename
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs rename source
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.rename(input, "/var/app/final.txt");
+      }
+  - name: literal fs rename negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.rename("/var/app/tmp.txt", "/var/app/final.txt");
+      }
+    expect_no_match: true
+  description: fs.rename(oldPath, newPath) — tainted source path enables arbitrary-file move.
+
+- id: javascript.path.fs_rename_destination
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, rename]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: fs rename destination
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.rename("/var/app/tmp.txt", input);
+      }
+  - name: literal fs rename destination negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.rename("/var/app/tmp.txt", "/var/app/final.txt");
+      }
+    expect_no_match: true
+  description: fs.rename(oldPath, newPath) — tainted destination path enables arbitrary-file move/overwrite.
+
+- id: javascript.path.fs_open
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs open
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.open(input);
+      }
+  - name: literal fs open negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.open("/var/app/config.json");
+      }
+    expect_no_match: true
+  description: fs.open — tainted path enables arbitrary-file access.
+
+- id: javascript.path.fs_mkdir
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: medium
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, mkdir]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs mkdir
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.mkdir(input);
+      }
+  - name: literal fs mkdir negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.mkdir("/var/app/cache");
+      }
+    expect_no_match: true
+  description: fs.mkdir — tainted path can create directories in sensitive locations.
+
+- id: javascript.path.fs_promises_readfile
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fsp, readFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs promises readfile
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fsp.readFile(input);
+      }
+  - name: literal fs promises readfile negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fsp.readFile("/var/app/config.json");
+      }
+    expect_no_match: true
+  description: fs/promises readFile (import-alias `fsp`) — tainted path enables traversal.
+
+- id: javascript.path.fs_promises_writefile
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fsp, writeFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs promises writefile
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fsp.writeFile(input);
+      }
+  - name: literal fs promises writefile negative
+    code: |
+      const _u = require("fs");
+      function demo(input) {
+        return fsp.writeFile("/var/app/output.txt", input);
+      }
+    expect_no_match: true
+  description: fs/promises writeFile (import-alias `fsp`) — tainted path enables arbitrary-file write.
+
+- id: javascript.path.fs_promises_readfile_chain
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^fs\\.promises\\.readFile$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs promises readfile chain
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.promises.readFile(input);
+      }
+  - name: literal fs promises readfile chain negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.promises.readFile("/var/app/config.json");
+      }
+    expect_no_match: true
+  description: fs.promises.readFile — tainted path enables traversal.
+
+- id: javascript.path.fs_promises_writefile_chain
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^fs\\.promises\\.writeFile$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs promises writefile chain
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.promises.writeFile(input);
+      }
+  - name: literal fs promises writefile chain negative
+    code: |
+      const _u = require("fs");
+      function demo(input) {
+        return fs.promises.writeFile("/var/app/output.txt", input);
+      }
+    expect_no_match: true
+  description: fs.promises.writeFile — tainted path enables arbitrary-file write.
+
+- id: javascript.path.fs_copyfile
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, copyFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fs copyfile source
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.copyFile(input, "/var/app/copy.txt");
+      }
+  - name: literal fs copyfile negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.copyFile("/var/app/source.txt", "/var/app/copy.txt");
+      }
+    expect_no_match: true
+  description: fs.copyFile(src, dest) — tainted source path enables arbitrary-file copy.
+
+- id: javascript.path.fs_copyfile_destination
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, copyFile]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: fs copyfile destination
+    code: |
+      const _u = require("fs");
+      function demo(input, req, obj) {
+        return fs.copyFile("/var/app/source.txt", input);
+      }
+  - name: literal fs copyfile destination negative
+    code: |
+      const _u = require("fs");
+      function demo() {
+        return fs.copyFile("/var/app/source.txt", "/var/app/copy.txt");
+      }
+    expect_no_match: true
+  description: fs.copyFile(src, dest) — tainted destination path enables arbitrary-file overwrite.
+
+- id: javascript.path.express_sendfile
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [express]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [res, sendFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express sendfile
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.sendFile(input);
+      }
+  - name: literal express sendfile negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.sendFile("/var/app/public/index.html");
+      }
+    expect_no_match: true
+  description: Express res.sendFile(tainted path) — arbitrary file read via path traversal.
+
+- id: javascript.path.express_download
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [express]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [res, download]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express download
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.download(input);
+      }
+  - name: literal express download negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.download("/var/app/public/report.pdf");
+      }
+    expect_no_match: true
+  description: Express res.download(tainted path) — arbitrary file download via path traversal.
+
+- id: javascript.path.extract_zip
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [extract-zip]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^extract$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: extract zip
+    code: |
+      const _u = require("extract-zip");
+      function demo(input, req, obj) {
+        return extract(input);
+      }
+  - name: literal extract zip negative
+    code: |
+      const _u = require("extract-zip");
+      function demo() {
+        return extract("/var/app/archive.zip");
+      }
+    expect_no_match: true
+  description: extract-zip — zip-slip vulnerability when archive filenames are not sanitised.
+
+- id: javascript.path.adm_zip_extractallto
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [adm-zip]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [zip, extractAllTo]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: adm zip extractallto
+    code: |
+      const _u = require("adm-zip");
+      function demo(input, req, obj) {
+        return zip.extractAllTo(input);
+      }
+  - name: literal adm zip extractallto negative
+    code: |
+      const _u = require("adm-zip");
+      function demo(zip) {
+        return zip.extractAllTo("/var/app/uploads");
+      }
+    expect_no_match: true
+  description: adm-zip extractAllTo(targetPath) — tainted extraction target enables arbitrary-file writes.
+
+- id: javascript.path.tar_extract
+  enabled: true
+  language: javascript
+  tag: path-traversal
+  severity: high
+  packages: [tar]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [tar, extract]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tar extract
+    code: |
+      const _u = require("tar");
+      function demo(input, req, obj) {
+        return tar.extract(input);
+      }
+  - name: literal tar extract negative
+    code: |
+      const _u = require("tar");
+      function demo() {
+        return tar.extract("/var/app/archive.tgz");
+      }
+    expect_no_match: true
+  description: tar.extract — tainted archive can write outside cwd (tar-slip).
+
+- id: javascript.path.fs_readdir
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: path-traversal
+  severity: medium
+  packages: [fs]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, readdir]
+  description: "Disabled — readdir listing is rarely the injection vector; enable only when the listing is returned to the user."
+
+- id: javascript.path.path_join
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: path-traversal
+  severity: low
+  packages: [path]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [path, join]
+  description: "Disabled — path.join is ubiquitous in legitimate code; without a root-check constraint this is all false positives."

@@ -1,0 +1,26 @@
+# elixir mass_assignment sinks.
+
+# Mass-assignment sinks (round 2 fill).
+- id: elixir.mass_assign.ecto_cast_no_permitted
+  enabled: true
+  language: elixir
+  tag: mass-assignment
+  severity: high
+  packages: [ecto]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [Ecto.Changeset, cast]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          Ecto.Changeset.cast(params)
+        end
+      end
+  description: 'Ecto.Changeset.cast(struct, params, [...]) — third arg is the permitted-field list. Casting with too broad a list (or building it from `params` keys) is mass-assignment.'
+  imports:
+  - Ecto

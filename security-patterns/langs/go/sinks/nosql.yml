@@ -1,0 +1,366 @@
+- id: go.nosql.mongo_find
+  enabled: true
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - go.mongodb.org/mongo-driver
+  - github.com/antchfx/xmlquery
+  - github.com/antchfx/htmlquery
+  cwe:
+  - CWE-943
+  - CWE-643
+  match:
+    kind: call
+    callee:
+      regex: \.Find$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo find with bson filter
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func lookup(ctx any, coll interface{ Find(any, any) (any, error) }, body string) {
+        _, _ = coll.Find(ctx, bson.M{"name": body})
+      }
+    expect_match_text:
+    - coll.Find
+  - name: mongo find with caller controlled map filter
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver"
+      func lookup(ctx any, coll interface{ Find(any, any) (any, error) }, filter map[string]any) {
+        _, _ = coll.Find(ctx, filter)
+      }
+    expect_match_text:
+    - coll.Find
+  - name: mongo find with operator object filter
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func lookup(ctx any, coll interface{ Find(any, any) (any, error) }, body string) {
+        _, _ = coll.Find(ctx, bson.M{"role": bson.M{"$ne": body}})
+      }
+    expect_match_text:
+    - coll.Find
+  - name: mongo find literal filter negative
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func lookup(ctx any, coll interface{ Find(any, any) (any, error) }) {
+        _, _ = coll.Find(ctx, bson.M{"active": true})
+      }
+    expect_no_match: true
+  description: "mongo-go-driver Collection.Find(ctx, filter) — object-injection via bson.M/map filters from caller-controlled values, including nested $-operator objects. Merged collision aliases: go.nosql.mongo_findone, go.xpath.xmlquery_find."
+  aliases:
+  - go.nosql.mongo_findone
+  - go.xpath.xmlquery_find
+- id: go.nosql.mongo_aggregate
+  enabled: true
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - go.mongodb.org/mongo-driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.Aggregate$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo aggregate tainted pipeline
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver"
+      func example(ctx any, coll interface{ Aggregate(any, any) (any, error) }, pipeline any) {
+        _, _ = coll.Aggregate(ctx, pipeline)
+      }
+  - name: mongo aggregate literal pipeline negative
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver"
+      func example(ctx any, coll interface{ Aggregate(any, any) (any, error) }) {
+        _, _ = coll.Aggregate(ctx, []any{"$match"})
+      }
+    expect_no_match: true
+  description: "mongo Collection.Aggregate(tainted pipeline) — stages include $where etc."
+- id: go.nosql.mongo_updatemany
+  enabled: true
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - go.mongodb.org/mongo-driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.UpdateMany$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo updatemany tainted filter
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, coll interface{ UpdateMany(any, any, any) (any, error) }, filter any) {
+        _, _ = coll.UpdateMany(ctx, filter, bson.M{"$set": bson.M{"active": true}})
+      }
+  - name: mongo updatemany literal filter negative
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, coll interface{ UpdateMany(any, any, any) (any, error) }) {
+        _, _ = coll.UpdateMany(ctx, bson.M{"active": false}, bson.M{"$set": bson.M{"active": true}})
+      }
+    expect_no_match: true
+  description: "mongo Collection.UpdateMany(ctx, tainted filter, update) — operator injection in the selector."
+- id: go.nosql.mongo_updatemany_update_doc
+  enabled: true
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - go.mongodb.org/mongo-driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.UpdateMany$
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: mongo updatemany tainted update
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, coll interface{ UpdateMany(any, any, any) (any, error) }, update any) {
+        _, _ = coll.UpdateMany(ctx, bson.M{"active": false}, update)
+      }
+  - name: mongo updatemany literal update negative
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, coll interface{ UpdateMany(any, any, any) (any, error) }) {
+        _, _ = coll.UpdateMany(ctx, bson.M{"active": false}, bson.M{"$set": bson.M{"active": true}})
+      }
+    expect_no_match: true
+  description: "mongo Collection.UpdateMany(ctx, filter, tainted update) — attacker-controlled update documents can inject operators."
+- id: go.nosql.mongo_deletemany
+  enabled: true
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - go.mongodb.org/mongo-driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.DeleteMany$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo deletemany tainted filter
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, coll interface{ DeleteMany(any, any) (any, error) }, filter any) {
+        _, _ = coll.DeleteMany(ctx, filter)
+      }
+  - name: mongo deletemany literal filter negative
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, coll interface{ DeleteMany(any, any) (any, error) }) {
+        _, _ = coll.DeleteMany(ctx, bson.M{"inactive": true})
+      }
+    expect_no_match: true
+  description: mongo Collection.DeleteMany(tainted filter).
+- id: go.nosql.mongo_runcommand
+  enabled: true
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - go.mongodb.org/mongo-driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.RunCommand$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo runcommand tainted command
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, db interface{ RunCommand(any, any) any }, command any) {
+        _ = db.RunCommand(ctx, command)
+      }
+  - name: mongo runcommand literal negative
+    code: |
+      package main
+      import "go.mongodb.org/mongo-driver/bson"
+      func example(ctx any, db interface{ RunCommand(any, any) any }) {
+        _ = db.RunCommand(ctx, bson.D{{"ping", 1}})
+      }
+    expect_no_match: true
+  description: "mongo Database.RunCommand(tainted) — runs arbitrary DB command."
+- id: go.nosql.redis_evalsha
+  enabled: true
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - github.com/go-redis/redis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.EvalSha$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: redis evalsha tainted hash
+    code: |
+      package main
+      import "github.com/go-redis/redis"
+      func example(ctx any, client interface{ EvalSha(any, string, []string, ...any) any }, sha string) {
+        _ = client.EvalSha(ctx, sha, nil)
+      }
+  - name: redis evalsha literal hash negative
+    code: |
+      package main
+      import "github.com/go-redis/redis"
+      func example(ctx any, client interface{ EvalSha(any, string, []string, ...any) any }) {
+        _ = client.EvalSha(ctx, "0123456789abcdef", nil)
+      }
+    expect_no_match: true
+  description: "go-redis Client.EvalSha — tainted script hash or KEYS/ARGV."
+- id: go.nosql.redigo_eval
+  enabled: true
+  language: go
+  tag: code-injection
+  severity: high
+  packages:
+  - github.com/gomodule/redigo/redis
+  - github.com/garyburd/redigo/redis
+  cwe:
+  - CWE-943
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      regex: ^(conn|redisConn|redigoConn)\.Do$
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"EVAL"'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: redigo eval
+    code: |
+      import "github.com/gomodule/redigo/redis"
+      package main
+      func run(conn RedisConn, script string) {
+        _, _ = conn.Do("EVAL", script, 0)
+      }
+      type RedisConn struct{}
+      func (r RedisConn) Do(commandName string, args ...any) (any, error) { return nil, nil }
+    expect_match_text:
+    - conn.Do
+  - name: redigo eval literal script negative
+    code: |
+      package main
+      import "github.com/gomodule/redigo/redis"
+      func run(conn RedisConn) {
+        _, _ = conn.Do("EVAL", "return 1", 0)
+      }
+      type RedisConn struct{}
+      func (r RedisConn) Do(commandName string, args ...any) (any, error) { return nil, nil }
+    expect_no_match: true
+  description: "redigo Conn.Do(\"EVAL\", taintedScript, ...) — attacker-controlled Lua executes inside Redis."
+- id: go.nosql.cassandra_query
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: go
+  tag: cql-injection
+  severity: high
+  packages:
+  - github.com/gocql/gocql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: \.Query$
+  description: "Disabled — bare `.Query$` regex double-fires with go.sqli.db_query. The sqli rule already covers the call shape; without receiver-type narrowing we would double-count every SQL or Cassandra Query call."
+- id: go.nosql.elasticsearch_search
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: go
+  tag: nosql-injection
+  severity: high
+  packages:
+  - github.com/elastic/go-elasticsearch
+  - github.com/olivere/elastic
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.Search$
+  description: "Disabled — bare `.Search$` regex double-fires with go.ldap.conn_search. The ldap rule already covers the call shape; without receiver-type narrowing we would double-count."
+- id: go.nosql.neo4j_run
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: go
+  tag: cypher-injection
+  severity: high
+  packages:
+  - github.com/neo4j/neo4j-go-driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.Run$
+  description: "Disabled — bare `.Run$` regex double-fires with go.eval.otto_run. The eval rule already covers the call shape; without receiver-type narrowing we would double-count."
+- id: go.nosql.dynamodb_scan
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - github.com/aws/aws-sdk-go
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: \.Scan$
+  description: "Disabled — DynamoDB Scan; flag only when FilterExpression is string-built from input."

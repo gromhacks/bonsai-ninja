@@ -1,0 +1,29 @@
+# Swift queue/messaging sources (less common in Swift ecosystem).
+- id: swift.queue.nio_amqp_delivery
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: service
+  tag: queue-input
+  payload_types: [binary]
+  packages: ["AMQPClient"]
+  match:
+    kind: param
+    target:
+      name: delivery
+  description: "Disabled — Swift NIO AMQP delivery param; enable when using RabbitMQ consumer."
+- id: swift.queue.kafka_message
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: service
+  tag: queue-input
+  payload_types: [binary]
+  packages: ["Kafka"]
+  match:
+    kind: param
+    target:
+      name: message
+  description: "Disabled — Kafka consumer message param; enable when active."

@@ -1,0 +1,167 @@
+- id: php.jwt.firebase_decode
+  enabled: true
+  language: php
+  tag: jwt
+  severity: high
+  packages:
+  - firebase/php-jwt
+  cwe:
+  - CWE-347
+  - CWE-345
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JWT
+      - decode
+  match_examples:
+  - name: php.jwt.firebase_decode example
+    code: |
+      <?php
+      use firebase\phpjwt;
+      use firebase\phpjwt;
+      use firebase\php-jwt;
+      function example($input, $url, $id, $payload, $request) {
+        JWT::decode($input);
+      }
+  description: 'Firebase JWT::decode — flag missing/none alg whitelist. Merged aliases: php.jwt.alg_confusion.'
+  aliases:
+  - php.jwt.alg_confusion
+  imports:
+  - firebase/phpjwt
+  - firebase
+  - firebase\phpjwt
+- id: php.jwt.firebase_encode_none
+  enabled: true
+  language: php
+  tag: jwt
+  severity: critical
+  packages:
+  - firebase/php-jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JWT
+      - encode
+  match_examples:
+  - name: php.jwt.firebase_encode_none example
+    code: |
+      <?php
+      use firebase\phpjwt;
+      use firebase\phpjwt;
+      use firebase\php-jwt;
+      function example($input, $url, $id, $payload, $request) {
+        JWT::encode($input, $input, "none");
+      }
+  description: JWT::encode with alg='none'.
+  imports:
+  - firebase/phpjwt
+  - firebase
+  - firebase\phpjwt
+- id: php.jwt.lcobucci_parser_parse
+  enabled: true
+  language: php
+  tag: jwt
+  severity: high
+  packages:
+  - lcobucci/jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Parser
+      - parse
+  match_examples:
+  - name: php.jwt.lcobucci_parser_parse example
+    code: |
+      <?php
+      use lcobucci\jwt;
+      use lcobucci\jwt;
+      function example($input, $url, $id, $payload, $request) {
+        Parser::parse($input);
+      }
+  description: lcobucci/jwt Parser::parse — flag if no subsequent validate/verify.
+  imports:
+  - lcobucci\jwt
+  - lcobucci
+- id: php.jwt.lcobucci_validator_unverified
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: jwt
+  severity: medium
+  packages:
+  - lcobucci/jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Validator
+      - validate
+  description: Disabled — Validator is the check; flag missing SignedWith constraint.
+- id: php.jwt.web_token_jws_loader
+  enabled: true
+  language: php
+  tag: jwt
+  severity: high
+  packages:
+  - web-token/jwt-framework
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JWSLoader
+      - loadAndVerifyWithKey
+  match_examples:
+  - name: php.jwt.web_token_jws_loader example
+    code: |
+      <?php
+      use webtoken\jwtframework;
+      use webtoken\jwtframework;
+      use web-token\jwt-framework;
+      function example($input, $url, $id, $payload, $request) {
+        JWSLoader::loadAndVerifyWithKey($input);
+      }
+  description: web-token JWSLoader — flag if no alg whitelist.
+  imports:
+  - webtoken
+  - webtoken/jwtframework
+  - webtoken\jwtframework
+- id: php.jwt.jose_php_decode
+  enabled: true
+  language: php
+  tag: jwt
+  severity: high
+  packages:
+  - emarref/jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Token
+      - deserialize
+  match_examples:
+  - name: php.jwt.jose_php_decode example
+    code: |
+      <?php
+      use emarref\jwt;
+      use emarref\jwt;
+      function example($input, $url, $id, $payload, $request) {
+        Token::deserialize($input);
+      }
+  description: emarref Token::deserialize — parses without verification.
+  imports:
+  - emarref\jwt
+  - emarref

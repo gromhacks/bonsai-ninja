@@ -1,0 +1,509 @@
+# C# deserialization sinks. BinaryFormatter, Json.NET TypeNameHandling,
+# JavaScriptSerializer, NetDataContractSerializer, etc.
+- id: csharp.deser.binaryformatter_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [BinaryFormatter, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(object input) { BinaryFormatter.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { BinaryFormatter.Deserialize("safe"); } }
+    expect_no_match: true
+  description: "BinaryFormatter.Deserialize — gadget-chain RCE; deprecated in .NET 5+."
+
+- id: csharp.deser.binaryformatter_new
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: BinaryFormatter
+  match_examples:
+  - name: binaryformatter constructor
+    code: |
+      class BinaryFormatter { public BinaryFormatter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new BinaryFormatter(input); } }
+    expect_match_text: [BinaryFormatter]
+  description: "new BinaryFormatter — dangerous formatter API even before the Deserialize call; do not process untrusted data with it."
+
+- id: csharp.deser.formatter_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Formatter, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(object input) { Formatter.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { Formatter.Deserialize("safe"); } }
+    expect_no_match: true
+  description: "IFormatter.Deserialize — same family as BinaryFormatter."
+
+- id: csharp.deser.netdatacontract_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [NetDataContractSerializer, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(object input) { NetDataContractSerializer.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { NetDataContractSerializer.Deserialize("safe"); } }
+    expect_no_match: true
+  description: "NetDataContractSerializer.Deserialize — type-info on the wire."
+
+- id: csharp.deser.netdatacontract_new
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: NetDataContractSerializer
+  match_examples:
+  - name: netdatacontractserializer constructor
+    code: |
+      class NetDataContractSerializer { public NetDataContractSerializer(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new NetDataContractSerializer(input); } }
+    expect_match_text: [NetDataContractSerializer]
+  description: "new NetDataContractSerializer — serializes CLR type metadata and is unsafe for untrusted payloads."
+
+- id: csharp.deser.soap_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [SoapFormatter, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(object input) { SoapFormatter.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { SoapFormatter.Deserialize("safe"); } }
+    expect_no_match: true
+  description: "SoapFormatter.Deserialize."
+
+- id: csharp.deser.soapformatter_new
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: SoapFormatter
+  match_examples:
+  - name: soapformatter constructor
+    code: |
+      class SoapFormatter { public SoapFormatter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new SoapFormatter(input); } }
+    expect_match_text: [SoapFormatter]
+  description: "new SoapFormatter — legacy formatter with gadget-chain deserialization risk."
+
+- id: csharp.deser.losformatter_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [LosFormatter, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { LosFormatter.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { LosFormatter.Deserialize("safe"); } }
+    expect_no_match: true
+  description: "LosFormatter.Deserialize — ASP.NET ViewState path."
+
+- id: csharp.deser.losformatter_new
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: LosFormatter
+  match_examples:
+  - name: losformatter constructor
+    code: |
+      class LosFormatter { public LosFormatter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new LosFormatter(input); } }
+    expect_match_text: [LosFormatter]
+  description: "new LosFormatter — ASP.NET ViewState formatter; unsafe for untrusted state when MAC/signing is weak or disabled."
+
+- id: csharp.deser.objectstateformatter_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectStateFormatter, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { ObjectStateFormatter.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { ObjectStateFormatter.Deserialize("safe"); } }
+    expect_no_match: true
+  description: "ObjectStateFormatter.Deserialize."
+
+- id: csharp.deser.javascriptserializer_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: high
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [JavaScriptSerializer, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { JavaScriptSerializer.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { JavaScriptSerializer.Deserialize("{\"name\":\"safe\"}"); } }
+    expect_no_match: true
+  description: "JavaScriptSerializer.Deserialize — risky with custom resolver."
+
+- id: csharp.deser.jsonconvert_type_name_handling
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  packages: [Newtonsoft.Json]
+  cwe: [CWE-502]
+  match:
+    kind: write
+    target:
+      name: TypeNameHandling
+  match_examples:
+  - name: declared shape
+    code: |
+      using Newtonsoft.Json;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TypeNameHandling = input; } }
+  description: "JsonSerializerSettings.TypeNameHandling != None — gadget-chain RCE."
+
+- id: csharp.deser.jsonconvert_deserialize_types
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: insecure-deserialization
+  severity: high
+  packages: [Newtonsoft.Json]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [JsonConvert, DeserializeObject]
+  description: "Disabled — DeserializeObject is safe unless TypeNameHandling set."
+
+- id: csharp.deser.xmlserializer_deserialize_dynamictype
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: insecure-deserialization
+  severity: medium
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [XmlSerializer, Deserialize]
+  description: "Disabled — XmlSerializer is safe unless type-resolver tainted."
+
+- id: csharp.deser.datacontractjson_deserialize
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: insecure-deserialization
+  severity: medium
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [DataContractJsonSerializer, ReadObject]
+  description: "Disabled — DataContractJsonSerializer is type-bounded."
+
+- id: csharp.deser.yamldotnet_deserialize_object
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  packages: [YamlDotNet]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Deserializer, Deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using YamlDotNet;
+      class App { void Test(string input) { Deserializer.Deserialize(input); } }
+  - name: literal payload negative
+    code: |
+      using YamlDotNet;
+      class App { void Test() { Deserializer.Deserialize("name: safe"); } }
+    expect_no_match: true
+  description: "YamlDotNet Deserializer.Deserialize — flag with WithTagMapping unsafe types."
+
+- id: csharp.deser.formatterservices_getsafeuninitialized
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: high
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [FormatterServices, GetSafeUninitializedObject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; FormatterServices.GetSafeUninitializedObject(input); } }
+  - name: literal formatterservices type negative
+    code: |
+      class App { void Test() { FormatterServices.GetSafeUninitializedObject("System.String"); } }
+    expect_no_match: true
+  description: "FormatterServices.GetSafeUninitializedObject — bypasses ctors; gadget building block when type name is tainted."
+
+- id: csharp.deser.binaryformatter_unsafedeserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [BinaryFormatter, UnsafeDeserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(object input) { BinaryFormatter.UnsafeDeserialize(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { BinaryFormatter.UnsafeDeserialize("safe"); } }
+    expect_no_match: true
+  description: "BinaryFormatter.UnsafeDeserialize — same gadget surface as Deserialize; explicitly unsafe variant."
+
+- id: csharp.deser.messagepack_typeless
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  packages: [MessagePack]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [TypelessContractlessStandardResolver, Instance]
+  match_examples:
+  - name: declared shape
+    code: |
+      using MessagePack;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TypelessContractlessStandardResolver.Instance(input); } }
+  description: "MessagePack TypelessContractlessStandardResolver.Instance — embeds type info on the wire (typeless), enabling gadget chains."
+
+- id: csharp.deser.messagepack_typeless_deserialize
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  packages: [MessagePack]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [MessagePackSerializer, Typeless]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using MessagePack;
+      class App { void Test(byte[] input) { MessagePackSerializer.Typeless(input); } }
+  - name: literal payload negative
+    code: |
+      using MessagePack;
+      class App { void Test() { MessagePackSerializer.Typeless(new byte[] {}); } }
+    expect_no_match: true
+  description: "MessagePackSerializer.Typeless — typeless API path used to deserialize attacker bytes into arbitrary types."
+
+- id: csharp.deser.servicestack_text_deserialize
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: insecure-deserialization
+  severity: medium
+  packages: [ServiceStack.Text]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [JsonSerializer, DeserializeFromString]
+  description: "Disabled — ServiceStack.Text JsonSerializer.DeserializeFromString is type-bounded; flag only when target type uses runtime type discrimination."
+
+- id: csharp.deser.fastjson_toobject
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: high
+  packages: [fastJSON]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [JSON, ToObject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using fastJSON;
+      class App { void Test(string input) { JSON.ToObject(input); } }
+  - name: literal payload negative
+    code: |
+      using fastJSON;
+      class App { void Test() { JSON.ToObject("{\"name\":\"safe\"}"); } }
+    expect_no_match: true
+  description: "fastJSON JSON.ToObject — uses $type metadata by default (UseExtensions=true), enabling gadget instantiation."
+
+- id: csharp.deser.jsonconvert_deserialize_with_typename
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: insecure-deserialization
+  severity: high
+  packages: [Newtonsoft.Json]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [JsonSerializer, Deserialize]
+  description: "Disabled — JsonSerializer.Deserialize is safe unless TypeNameHandling != None on the configured serializer; flag with constraint."
+
+- id: csharp.deser.objectstateformatter_deserialize_string
+  enabled: true
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectStateFormatter, DeserializeWithAssert]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { ObjectStateFormatter.DeserializeWithAssert(input); } }
+  - name: literal payload negative
+    code: |
+      class App { void Test() { ObjectStateFormatter.DeserializeWithAssert("safe"); } }
+    expect_no_match: true
+  description: "ObjectStateFormatter.DeserializeWithAssert — ViewState parsing path; gadget RCE when MAC is disabled or key leaked."
+
+# Inline-new shape: `new BinaryFormatter().Deserialize(stream)`. The
+# attribute rule above keys on `[BinaryFormatter, Deserialize]` which
+# requires receiver-name `BinaryFormatter`; the inline-new shape has
+# no receiver name and is missed. Match the temp-receiver Deserialize
+# call directly. Engine taint flow remains the second gate.
+- id: csharp.deser.binaryformatter
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: csharp
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [BinaryFormatter, Deserialize]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BinaryFormatter.Deserialize(input); } }
+  description: "Disabled — duplicate of csharp.deser.binaryformatter_deserialize with the current matcher shape."

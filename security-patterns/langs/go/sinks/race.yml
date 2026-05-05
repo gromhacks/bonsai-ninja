@@ -1,0 +1,111 @@
+# go race / TOCTOU sinks (T501).
+
+# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# in source order to identify the race window.
+- id: go.toctou.os_stat
+  enabled: true
+  language: go
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Stat]
+  match_examples:
+    - name: generated direct match
+      code: |
+        package main
+
+        func example() {
+          target := "tainted"
+          name := "user"
+          value := "value"
+          os.Stat(target)
+        }
+  description: "os.Stat(path) check site; followed by os.OpenFile is the TOCTOU window."
+- id: go.toctou.os_lstat
+  enabled: true
+  language: go
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Lstat]
+  match_examples:
+    - name: generated direct match
+      code: |
+        package main
+
+        func example() {
+          target := "tainted"
+          name := "user"
+          value := "value"
+          os.Lstat(target)
+        }
+  description: "os.Lstat(path) — check; same TOCTOU shape."
+- id: go.race.mutex_unlock
+  enabled: true
+  language: go
+  tag: race
+  severity: medium
+  packages: [sync]
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Unlock$
+  match_examples:
+    - name: mutex unlock site
+      code: |
+        package main
+        import "sync"
+        func handle(mu *sync.Mutex) {
+          mu.Unlock()
+        }
+      expect_match_text: [mu.Unlock]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). sync.Mutex.Unlock() / RWMutex.Unlock() — subsequent guarded-region reads/writes without a re-Lock are racy (CWE-833)."
+- id: go.race.tx_commit
+  enabled: true
+  language: go
+  tag: race
+  severity: medium
+  packages: [database/sql]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Commit$
+  match_examples:
+    - name: tx commit site
+      code: |
+        package main
+        import "database/sql"
+        func handle(tx *sql.Tx) {
+          tx.Commit()
+        }
+      expect_match_text: [tx.Commit]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). database/sql Tx.Commit() — transaction-after-error race-pair; subsequent tx.Exec/tx.Query calls on the same handle return ErrTxDone or run outside the intended transaction window."
+- id: go.race.tx_rollback
+  enabled: true
+  language: go
+  tag: race
+  severity: medium
+  packages: [database/sql]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Rollback$
+  match_examples:
+    - name: tx rollback site
+      code: |
+        package main
+        import "database/sql"
+        func handle(tx *sql.Tx) {
+          tx.Rollback()
+        }
+      expect_match_text: [tx.Rollback]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). database/sql Tx.Rollback() — transaction-after-error race-pair; later tx.Exec on the same handle returns ErrTxDone."

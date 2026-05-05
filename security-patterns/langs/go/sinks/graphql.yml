@@ -1,0 +1,52 @@
+- id: go.graphql.graphql_do
+  enabled: true
+  language: go
+  tag: graphql-injection
+  severity: high
+  packages:
+  - github.com/graphql-go/graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - graphql
+      - Do
+  match_examples:
+  - name: graphql do
+    code: |
+      import "github.com/graphql-go/graphql"
+      package main
+      func example(params graphql.Params) {
+        graphql.Do(params)
+      }
+    expect_match_text:
+    - graphql.Do
+  description: "graphql.Do(params) — dynamic GraphQL query text or context reaches resolver execution."
+- id: go.graphql.playground_handler
+  enabled: true
+  language: go
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - github.com/99designs/gqlgen/graphql/playground
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - playground
+      - Handler
+  match_examples:
+  - name: playground handler
+    code: |
+      import "github.com/99designs/gqlgen/graphql/playground"
+      package main
+      func example() {
+        playground.Handler("GraphQL playground", "/query")
+      }
+    expect_match_text:
+    - playground.Handler
+  description: "playground.Handler — exposes interactive GraphQL execution and introspection entry points."

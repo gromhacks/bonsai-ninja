@@ -1,0 +1,318 @@
+# Swift path-traversal sinks.
+#
+# NOTE: Swift labeled-init forms like String(contentsOfFile:),
+# FileHandle(forReadingAtPath:), URL(fileURLWithPath:), Data(contentsOf:)
+# appear as init calls keyed only on the type name. The engine has no
+# keyword-arg-presence constraint (only equals), and matching bare
+# `String(...)` / `URL(...)` fires on every stringification. Those rules
+# are therefore disabled until a presence constraint is added.
+- id: swift.path.string_contents_of_init
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: String
+  description: "Disabled — String(contentsOfFile:) init; bare `String(...)` is ubiquitous without kwarg-presence filter."
+- id: swift.path.file_handle_init
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: FileHandle
+  description: "Disabled — FileHandle(forReadingAtPath:) init; needs kwarg-presence constraint."
+- id: swift.path.url_fileurl_init
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: URL
+  description: "Disabled — URL(fileURLWithPath:) init; bare `URL(...)` is ubiquitous."
+- id: swift.path.data_init_contents
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: Data
+  description: "Disabled — Data(contentsOf:) init; bare `Data(...)` is ubiquitous."
+- id: swift.path.fm_create_file
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: createFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { createFile(input) }
+  - name: literal create file negative
+    code: |
+      func test() { createFile("/tmp/safe.txt") }
+    expect_no_match: true
+  description: "FileManager.default.createFile(atPath:)."
+- id: swift.path.fm_remove_item
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: removeItem
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { removeItem(input) }
+  - name: literal remove item negative
+    code: |
+      func test() { removeItem("/tmp/safe.txt") }
+    expect_no_match: true
+  description: "FileManager.default.removeItem(at:) / removeItem(atPath:)."
+- id: swift.path.fm_copy_item
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: copyItem
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; copyItem(input) }
+  - name: literal arg 0 negative
+    code: |
+      func test() { copyItem("safe") }
+    expect_no_match: true
+  description: "FileManager.default.copyItem(at:to:)."
+- id: swift.path.fm_copy_item_dest
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: copyItem
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      func test(input: String) { copyItem("safe", input) }
+  - name: literal arg 1 negative
+    code: |
+      func test() { copyItem("safe", "safe") }
+    expect_no_match: true
+  description: "FileManager.copyItem(at:to:) — tainted destinations can overwrite files outside the intended directory."
+- id: swift.path.fm_move_item
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: moveItem
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; moveItem(input) }
+  - name: literal arg 0 negative
+    code: |
+      func test() { moveItem("safe") }
+    expect_no_match: true
+  description: "FileManager.default.moveItem(at:to:)."
+- id: swift.path.fm_move_item_dest
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: moveItem
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      func test(input: String) { moveItem("safe", input) }
+  - name: literal arg 1 negative
+    code: |
+      func test() { moveItem("safe", "safe") }
+    expect_no_match: true
+  description: "FileManager.moveItem(at:to:) — tainted destinations can overwrite files outside the intended directory."
+- id: swift.path.fm_contents_of_dir
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: contentsOfDirectory
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { contentsOfDirectory(input) }
+  - name: literal contents of directory negative
+    code: |
+      func test() { contentsOfDirectory("/tmp/safe") }
+    expect_no_match: true
+  description: "FileManager.default.contentsOfDirectory(atPath:) — directory enumeration."
+- id: swift.path.fm_create_directory
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: createDirectory
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { createDirectory(input) }
+  - name: literal create directory negative
+    code: |
+      func test() { createDirectory("/tmp/safe") }
+    expect_no_match: true
+  description: "FileManager.default.createDirectory(atPath:)."
+- id: swift.path.zip_unzip
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  packages: [ZIPFoundation]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: unzipItem
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import ZIPFoundation // ZIPFoundation
+      func test() { let input = "x"; let amount = 1; unzipItem(input) }
+  - name: literal arg 0 negative
+    code: |
+      func test() { unzipItem("safe") }
+    expect_no_match: true
+  description: "ZIPFoundation unzipItem(at:to:) — zip slip risk."
+
+# FileManager.default.contents(atPath:) — read-arbitrary-file. The
+# `String(contentsOfFile:)` family above is disabled until the engine
+# has labeled-init kwarg-presence narrowers, but FileManager's
+# `contents` method is unambiguous and has stable receiver+selector
+# shape, so it's safe to enable.
+- id: swift.path.zip_unzip_dest
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  packages: [ZIPFoundation]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: unzipItem
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      import ZIPFoundation // ZIPFoundation
+      func test(input: String) { unzipItem("safe", input) }
+  - name: literal arg 1 negative
+    code: |
+      func test() { unzipItem("safe", "safe") }
+    expect_no_match: true
+  description: "ZIPFoundation unzipItem(at:to:) — tainted destinations can extract outside the intended directory."
+
+# FileManager.default.contents(atPath:) — read-arbitrary-file. The
+# `String(contentsOfFile:)` family above is disabled until the engine
+# has labeled-init kwarg-presence narrowers, but FileManager's
+# `contents` method is unambiguous and has stable receiver+selector
+# shape, so it's safe to enable.
+- id: swift.path.filemanager_contents
+  enabled: true
+  language: swift
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: contents
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { FileManager.contents(input) }
+  - name: literal filemanager contents negative
+    code: |
+      func test() { FileManager.contents("/tmp/safe.txt") }
+    expect_no_match: true
+  description: "FileManager.default.contents(atPath: \"...\" + name) — reads arbitrary file when path is tainted; first-arg concat shape is the canonical traversal vector."

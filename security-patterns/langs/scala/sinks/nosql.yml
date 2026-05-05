@@ -1,0 +1,294 @@
+- id: scala.nosql.reactivemongo_find
+  enabled: true
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - reactivemongo
+  - org.mongodb.scala
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - BSONCollection
+      - find
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import reactivemongo._
+      object App {
+        def handle(input: String): Unit = {
+          BSONCollection.find(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import reactivemongo._
+      object App {
+        def handle(input: String): Unit = {
+          BSONCollection.find("safe")
+        }
+      }
+    expect_no_match: true
+  description: "ReactiveMongo BSONCollection.find — tainted BSON filter object. Merged collision aliases: scala.nosql.mongo_collection_find, scala.nosql.mongo_collection_find_local_document."
+  aliases:
+  - scala.nosql.mongo_collection_find
+  - scala.nosql.mongo_collection_find_local_document
+- id: scala.nosql.reactivemongo_update
+  enabled: true
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - reactivemongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - BSONCollection
+      - update
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import reactivemongo._
+      // uses reactivemongo
+      object App {
+        def handle(input: String): Unit = {
+          BSONCollection.update(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import reactivemongo._
+      // uses reactivemongo
+      object App {
+        def handle(input: String): Unit = {
+          BSONCollection.update("safe")
+        }
+      }
+    expect_no_match: true
+  description: "ReactiveMongo BSONCollection.update — tainted filter/modifier."
+- id: scala.nosql.casbah_find
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - casbah
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MongoCollection
+      - find
+  description: "Disabled — Casbah is deprecated; canonical rule is scala.nosql.mongo_collection_find (same `[MongoCollection, find]` attribute chain)."
+- id: scala.nosql.mongo_command
+  enabled: true
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb.scala
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MongoDatabase
+      - runCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.mongodb.scala._
+      object App {
+        def handle(input: String): Unit = {
+          MongoDatabase.runCommand(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.scala._
+      object App {
+        def handle(input: String): Unit = {
+          MongoDatabase.runCommand("safe")
+        }
+      }
+    expect_no_match: true
+  description: mongo-scala-driver MongoDatabase.runCommand(tainted).
+  imports:
+  - org.mongodb.scala
+- id: scala.nosql.bson_document_from_map
+  enabled: true
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb.scala
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: Document
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bson document from caller map
+    code: |
+      import org.mongodb.scala._
+      object App {
+        def handle(callerMap: Map[String, Any]): Any = {
+          new Document(callerMap)
+        }
+      }
+      class Document(args: Any*)
+    expect_match_text:
+    - Document
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.scala._
+      object App {
+        def handle(callerMap: Map[String, Any]): Any = {
+          new Document(Map("name" -> "safe"))
+        }
+      }
+      class Document(args: Any*)
+    expect_no_match: true
+  description: "new Document(callerMap) — MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
+  imports:
+  - org.mongodb.scala
+- id: scala.nosql.basicdbobject_operator_ctor
+  enabled: true
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb.scala
+  - casbah
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: BasicDBObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: basic db object operator constructor
+    code: |
+      import casbah._
+      object App {
+        def handle(operator: String): Any = {
+          new BasicDBObject(operator, "value")
+        }
+      }
+      class BasicDBObject(args: Any*)
+    expect_match_text:
+    - BasicDBObject
+  - name: literal basicdbobject operator negative
+    code: |
+      import casbah._
+      object App {
+        def handle(): Any = {
+          new BasicDBObject("$ne", "value")
+        }
+      }
+      class BasicDBObject(args: Any*)
+    expect_no_match: true
+  description: "new BasicDBObject(\"$ne\", value) and related operator keys — caller-controlled operator objects can bypass intended equality checks."
+- id: scala.nosql.spring_mongo_template_criteria_is
+  enabled: true
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.springframework.data.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Criteria
+      - is
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spring criteria operator object
+    code: |
+      import org.springframework.data.mongodb._
+      object App {
+        def handle(operatorObject: Any): Any = {
+          Criteria.is(operatorObject)
+        }
+      }
+    expect_match_text:
+    - Criteria.is
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.data.mongodb._
+      object App {
+        def handle(operatorObject: Any): Any = {
+          Criteria.is("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Spring Data Mongo Criteria.is(operator object) — caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
+  imports:
+  - org.springframework.data.mongodb
+- id: scala.nosql.elastic4s_search
+  enabled: true
+  language: scala
+  tag: nosql-injection
+  severity: high
+  packages:
+  - elastic4s
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: rawQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import elastic4s._
+      object App {
+        def handle(input: String): Unit = {
+          rawQuery(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import elastic4s._
+      object App {
+        def handle(input: String): Unit = {
+          rawQuery("safe")
+        }
+      }
+    expect_no_match: true
+  description: "elastic4s rawQuery(tainted JSON) — raw ES query bypass."

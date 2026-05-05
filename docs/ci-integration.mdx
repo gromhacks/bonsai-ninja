@@ -1,0 +1,105 @@
+---
+title: "CI Integration"
+description: "Run bonsai-ninja in GitHub Actions, GitLab CI, and CircleCI."
+---
+
+# CI Integration
+
+Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts.
+
+## GitHub Actions
+
+```yaml
+name: bonsai-security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p bonsai_cli --locked
+      - run: |
+          ./target/release/bonsai-ninja security . taint-analysis \
+            --rules-dir security-patterns \
+            --format sarif \
+            --all \
+            --no-color \
+            --no-progress > bonsai.sarif.json
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: bonsai.sarif.json
+```
+
+<Note>
+GitHub SARIF upload requires `security-events: write`. For forked pull requests, upload permissions depend on repository settings.
+</Note>
+
+## GitLab CI
+
+```yaml
+stages: [security]
+
+bonsai_security:
+  image: rust:latest
+  stage: security
+  script:
+    - cargo build --release -p bonsai_cli --locked
+    - ./target/release/bonsai-ninja security . taint-analysis
+        --rules-dir security-patterns
+        --format json
+        --all
+        --no-color
+        --no-progress
+        > bonsai-findings.json
+  artifacts:
+    when: always
+    paths:
+      - bonsai-findings.json
+```
+
+## CircleCI
+
+```yaml
+version: 2.1
+
+jobs:
+  bonsai-security:
+    docker:
+      - image: cimg/rust:stable
+    steps:
+      - checkout
+      - run: cargo build --release -p bonsai_cli --locked
+      - run: |
+          ./target/release/bonsai-ninja security . taint-analysis \
+            --rules-dir security-patterns \
+            --format json \
+            --all \
+            --no-color \
+            --no-progress > bonsai-findings.json
+      - store_artifacts:
+          path: bonsai-findings.json
+
+workflows:
+  security:
+    jobs:
+      - bonsai-security
+```
+
+## Exit Codes
+
+| Command outcome | Exit code | Notes |
+|---|---:|---|
+| Successful scan, findings or no findings | 0 | Findings are report data, not a process failure. |
+| Invalid flags, bad regex, missing workspace | Non-zero | Treat as CI failure. |
+| Rulepack validation failure | Non-zero | Fix schema, examples, or collisions. |
+
+Use a small wrapper if your policy requires failing builds when findings exist.

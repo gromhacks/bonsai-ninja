@@ -1,0 +1,358 @@
+# Phoenix / Plug / Absinthe / LiveView HTTP + socket request sources.
+# Every enabled rule MUST have `trust:` — without it the security
+# dataflow ranker can't tell attacker input apart from service or local
+# input. All of these are `trust: remote`.
+- id: elixir.phoenix.params
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query, json]
+  frameworks: [phoenix]
+  packages: [phoenix]
+  manifests: [mix.exs]
+  match:
+    kind: param
+    target:
+      name: params
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Phoenix
+      defmodule App do
+        def handle(params) do
+          params
+        end
+      end
+  description: "Phoenix.Controller action `params` — second arg of every controller `action(conn, params)`; carries merged route/query/body params. Bare-name match: also fires on any other function with a `params` parameter."
+
+  imports:
+  - Phoenix
+- id: elixir.phoenix.conn_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [json, query]
+  frameworks: [phoenix, plug]
+  packages: [plug]
+  match:
+    kind: param
+    target:
+      name: conn
+  description: "Disabled — whole Plug.Conn taints too broadly without field-sensitive conn access tracking; params/read_body/header accessors stay enabled."
+
+- id: elixir.plug.conn_params_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [plug]
+  match:
+    kind: read
+    target:
+      name: params
+  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.params`; Phoenix `params` parameter rules cover the common source shape."
+
+# Bare-name `params` source on Plug.Conn. Distinct ID from the read-
+# shape rule above so the param-shape match (which the elixir adapter
+# DOES emit on bare receivers) provides cross-fn coverage of the
+# `conn.params["body"]` access pattern via the param identifier.
+- id: elixir.source.plug_conn_params
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query, json]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: param
+    target:
+      name: conn
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def handle(conn) do
+          conn
+        end
+      end
+  description: "Plug action `conn` parameter — first arg of every Plug callback. Bare-name match: also fires on any other function with a `conn` parameter; treat findings on non-Plug modules as audit hints. Used to seed `conn.params[...]` access flows that the read-shape rule cannot model."
+
+  imports:
+  - Plug
+- id: elixir.plug.query_params_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [plug]
+  match:
+    kind: read
+    target:
+      name: query_params
+  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.query_params`."
+
+- id: elixir.plug.body_params_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [plug]
+  match:
+    kind: read
+    target:
+      name: body_params
+  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.body_params`."
+
+- id: elixir.plug.cookies_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [plug]
+  match:
+    kind: read
+    target:
+      name: cookies
+  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.cookies`."
+
+- id: elixir.plug.req_headers_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [plug]
+  match:
+    kind: read
+    target:
+      name: req_headers
+  description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.req_headers`."
+
+- id: elixir.plug.fetch_query_params
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, fetch_query_params]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Conn.fetch_query_params(input)
+        end
+      end
+  description: "Plug.Conn.fetch_query_params/2 — parses the raw query string into conn.query_params; the returned conn carries attacker-controlled query data."
+
+  imports:
+  - Plug
+- id: elixir.plug.fetch_cookies
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, fetch_cookies]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Conn.fetch_cookies(input)
+        end
+      end
+  description: "Plug.Conn.fetch_cookies/2 — parses request cookies into conn.cookies/req_cookies; values are attacker-controlled."
+
+  imports:
+  - Plug
+- id: elixir.plug.fetch_session
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, fetch_session]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Conn.fetch_session(input)
+        end
+      end
+  description: "Plug.Conn.fetch_session/2 — loads session data from a (potentially attacker-supplied) cookie; values originate from the request."
+
+  imports:
+  - Plug
+- id: elixir.plug.get_session
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [plug]
+  packages: [plug]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, get_session]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Conn.get_session(input)
+        end
+      end
+  description: "Plug.Conn.get_session/2 — returns a session value sourced from the request cookie/store; treat as remote until explicitly validated."
+
+  imports:
+  - Plug
+- id: elixir.plug.read_body
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [plug]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, read_body]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Plug.Conn.read_body(input)
+        end
+      end
+  description: "Plug.Conn.read_body/2 — raw request body bytes; attacker-controlled."
+
+- id: elixir.plug.get_req_header
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [plug]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, get_req_header]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Plug.Conn.get_req_header(input)
+        end
+      end
+  description: "Plug.Conn.get_req_header/2 — attacker-controlled request header values."
+
+- id: elixir.phoenix.channel_handle_in
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [phoenix]
+  packages: [phoenix]
+  match:
+    kind: param
+    target:
+      name: payload
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Phoenix
+      defmodule App do
+        def handle(payload) do
+          payload
+        end
+      end
+  description: "Phoenix.Channel handle_in/3 `payload` — client-sent message body over a websocket/long-poll transport. Bare-name match: also fires on any other function with a `payload` parameter; treat findings on non-channel modules as audit hints."
+
+  imports:
+  - Phoenix
+- id: elixir.phoenix.liveview_handle_event
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: elixir.phoenix.params
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [phoenix_live_view]
+  packages: [phoenix_live_view]
+  match:
+    kind: param
+    target:
+      name: params
+  description: "Disabled duplicate — bare `param name: params` is already covered by elixir.phoenix.params; v1 matching cannot distinguish controller vs LiveView callback context, so a second rule on the same name only emits redundant rows."
+
+- id: elixir.absinthe.resolver_args
+  enabled: true
+  language: elixir
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [absinthe]
+  packages: [absinthe]
+  match:
+    kind: param
+    target:
+      name: args
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Absinthe
+      defmodule App do
+        def handle(args) do
+          args
+        end
+      end
+  description: "Absinthe resolver `args` — first positional arg of a `resolve fn args, _ -> ... end` callback; carries the GraphQL query variables. Bare-name match: also fires on any other function with an `args` parameter."
+  imports:
+  - Absinthe

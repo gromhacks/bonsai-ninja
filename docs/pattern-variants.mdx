@@ -1,0 +1,415 @@
+---
+title: "Pattern Variants"
+description: "Common source, sink, sanitizer, lifecycle, and constraint rule shapes you can adapt."
+---
+
+# Pattern variants
+
+Common rule shapes by category. Use these as templates when authoring new
+rules.
+
+---
+
+## Sources
+
+### HTTP request — attribute read
+
+```yaml
+- id: python.flask.request_args_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [flask]
+  packages: [flask]
+  match:
+    kind: call
+    callee:
+      attribute: [request, args, get]
+  match_examples:
+    - name: flask request args get
+      code: |
+        from flask import request
+        def example():
+            return request.args.get("q")
+  description: "Flask request.args.get(name) — query parameter from remote client."
+```
+
+### HTTP request — receiver-agnostic regex
+
+When the receiver varies but the suffix is distinctive:
+
+```yaml
+- id: javascript.source.koa_request_body
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: http-input
+  packages: [koa, koa-body, "@koa/router", fastify]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.body$"
+  match_examples:
+    - name: koa request body
+      code: |
+        const _u = require("koa");
+        function demo(request) {
+          return request.body;
+        }
+  description: "Koa/Fastify request.body — HTTP request body."
+```
+
+### Class-method override
+
+When the source is a method on a framework base class that the user's
+class overrides:
+
+```yaml
+- id: python.tornado.websocket_on_message_payload
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  packages: [tornado]
+  match:
+    kind: param
+    target:
+      name: message
+      in_class: WebSocketHandler
+  match_examples:
+    - name: tornado websocket on_message
+      code: |
+        import tornado.websocket
+        class Echo(tornado.websocket.WebSocketHandler):
+            def on_message(self, message):
+                use(message)
+  description: "Tornado WebSocketHandler.on_message — peer-controlled message payload."
+```
+
+### Decorated function parameter (FastAPI)
+
+```yaml
+- id: python.fastapi.body_param
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  packages: [fastapi]
+  match:
+    kind: param
+    target:
+      annotation: Body
+  match_examples:
+    - name: fastapi body param
+      code: |
+        from fastapi import FastAPI, Body
+        app = FastAPI()
+        @app.post("/items")
+        def create(item: dict = Body(...)):
+            return item
+```
+
+---
+
+## Sinks
+
+### Command injection — Type-method
+
+```yaml
+- id: python.cmdi.os_system
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports: [os]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [os, system]
+  constraints:
+    - arg_tainted: { index: 0 }
+  match_examples:
+    - name: os.system tainted
+      code: |
+        import os
+        def run(user):
+            os.system(user)
+      expect_match_text: [os.system]
+  description: "os.system(cmd) — tainted shell command execution."
+```
+
+### SQL injection — keyword arg
+
+```yaml
+- id: python.sqli.cursor_execute_string_format
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [sqlite3, psycopg2, mysql, pymysql]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [cursor, execute]
+  constraints:
+    - arg_tainted: { index: 0 }
+  match_examples:
+    - name: cursor.execute tainted
+      code: |
+        import sqlite3
+        def query(user):
+            con = sqlite3.connect(":memory:")
+            con.cursor().execute("SELECT * WHERE u = '" + user + "'")
+```
+
+### Path traversal — argument constraint
+
+```yaml
+- id: python.path.open_tainted
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: open
+  constraints:
+    - arg_tainted: { index: 0 }
+  match_examples:
+    - name: open tainted path
+      code: |
+        def read(user):
+            with open(user) as f:
+                return f.read()
+```
+
+### Eval / deserialisation
+
+```yaml
+- id: python.eval_deser.eval
+  enabled: true
+  language: python
+  tag: eval-deser
+  severity: critical
+  cwe: [CWE-94, CWE-95]
+  match:
+    kind: call
+    callee:
+      name: eval
+  constraints:
+    - arg_tainted: { index: 0 }
+  match_examples:
+    - name: eval tainted
+      code: |
+        def run(expr):
+            return eval(expr)
+```
+
+### Header injection
+
+```yaml
+- id: go.header.responsewriter_header_chain_set
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  cwe: [CWE-113, CWE-601, CWE-444]
+  match:
+    kind: call
+    callee:
+      regex: ^(w|rw|writer|responseWriter)\.Header\(\)\.Set$
+  match_examples:
+    - name: response writer header chain set
+      code: |
+        import "net/http"
+        func hdr(w http.ResponseWriter, name string, val string) {
+          w.Header().Set(name, val)
+        }
+      expect_match_text: [w.Header().Set]
+  description: "w.Header().Set(name, value) — response header injection risk."
+  packages:
+    - net/http
+```
+
+---
+
+## Sanitizers
+
+### HTML escape
+
+```yaml
+- id: python.sanitizer.html_escape
+  enabled: true
+  language: python
+  tag: html-encode
+  imports: [html]
+  match:
+    kind: call
+    callee:
+      attribute: [html, escape]
+  match_examples:
+    - name: html.escape
+      code: |
+        import html
+        def render(user):
+            return f"<p>{html.escape(user)}</p>"
+```
+
+### Parameterised query
+
+```yaml
+- id: python.sanitizer.parametrised_execute
+  enabled: true
+  language: python
+  tag: parameterized-query
+  match:
+    kind: call
+    callee:
+      attribute: [cursor, execute]
+  constraints:
+    - max_args: 2
+    - arg_matches_regex:
+        index: 0
+        regex: "\\?|\\$\\d+"
+```
+
+### Token verification
+
+```yaml
+- id: python.sanitizer.jwt_decode_verify
+  enabled: true
+  language: python
+  tag: signed-token-verify
+  packages: [jose, pyjwt]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, decode]
+  constraints:
+    - keyword_arg_equals: { name: verify, value: "True" }
+```
+
+---
+
+## Inheritance + scoping (in_class / in_method)
+
+```yaml
+- id: python.tornado.request_handler_get_argument
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  packages: [tornado]
+  match:
+    kind: call
+    callee:
+      attribute: [self, get_argument]
+    in_class: RequestHandler
+  match_examples:
+    - name: tornado get_argument
+      code: |
+        import tornado.web
+        class Echo(tornado.web.RequestHandler):
+            def get(self):
+                self.get_argument("q")
+```
+
+The matcher consults `Decl.bases` so this rule fires on any class
+extending `tornado.web.RequestHandler` directly or transitively.
+
+---
+
+## Per-arg constraints
+
+When the same callee has multiple sink modes:
+
+```yaml
+# subprocess.run(cmd, shell=True) — shell mode
+- id: python.cmdi.subprocess_run_shell_true
+  match:
+    kind: call
+    callee:
+      attribute: [subprocess, run]
+  constraints:
+    - arg_tainted: { index: 0 }
+    - keyword_arg_equals: { name: shell, value: "True" }
+  cwe: [CWE-78]
+  severity: critical
+
+# subprocess.run([cmd, ...]) — argv mode is over-broad without
+# additional constraints (no shell interpolation, list-form invocation)
+- id: python.cmdi.subprocess_run_argv
+  enabled: false
+  disabled_reason:
+    code: over-broad
+```
+
+When every argument is the same dangerous payload surface, use
+`any_arg_tainted` instead of cloning a rule for every position:
+
+```yaml
+- id: python.cmdi.command_fragments
+  match:
+    kind: call
+    callee:
+      name: run_fragments
+  constraints:
+    - any_arg_tainted: true
+  cwe: [CWE-78]
+  severity: high
+```
+
+Do not use `any_arg_tainted` for fixed-slot APIs where only one argument
+is the vulnerable operand; keep those on `arg_tainted: { index: N }` or a
+keyword-specific form.
+
+When the vulnerable operand is the call receiver, use `receiver_tainted`
+instead of inventing an argument index:
+
+```yaml
+- id: scala.cmdi.bang
+  match:
+    kind: call
+    callee:
+      regex: "\\.!$"
+  constraints:
+    - receiver_tainted: true
+```
+
+---
+
+## Receiver-agnostic regex with package gate
+
+When the receiver name varies but the verb identifies the API:
+
+```yaml
+- id: javascript.proto_pollution.lodash_namespace_merge_variants
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash, lodash.merge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$"
+  match_examples:
+    - name: lodash namespace merge
+      code: |
+        const lodash = require("lodash");
+        function applyConfig(input) {
+          return lodash.merge({}, input);
+        }
+      expect_match_text: [lodash.merge]
+```
+
+The OnlyWhenPackaged lax-tail keeps this from firing on
+`recursiveDeepMerge.merge` in files that don't import lodash.

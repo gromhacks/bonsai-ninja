@@ -1,0 +1,430 @@
+---
+title: "Analysis Roadmap"
+description: "Current and planned analyzer primitives for taint, lifecycle, and rule precision."
+---
+
+# Analysis roadmap
+
+Focused on the bug classes the tool actually ships findings for —
+**injection / taint-reachable** as the primary mission, **UAF and
+similar lifecycle bugs** (use-after-close, double-free, lock-not-released,
+iterator invalidation, use-after-move) as the secondary track. Both are
+in scope; the difference is the rule-pack value per engineering week.
+
+The plan is grouped by the engine primitive each unlocks. Each
+primitive ships once in the engine; the per-language work is in the
+adapters (surface the new fact) and the rulepack (anchor on the new
+constraint).
+
+---
+
+## Status snapshot
+
+| Primitive | Engine | Adapters | Rulepack |
+|---|---|---|---|
+| **P1 — Type-aware flow narrowing** | **Shipped (lexical)** — `RequiresRuntimeType` constraint reads `instanceof X` / `isinstance(_, X)` / `_ is X` / `typeof _ === "X"` predicates and gates rules on the narrowing. CFG-aware variant (block-dominance) is the remaining lift. | n/a — the lexical implementation reads `FlowEvent::Branch.condition` text. | Available; no pack-side adoption yet (constraint is opt-in). |
+| **P2 — Sanitizer crediting precision** | **Shipped** — `FindingMatch.sanitised_arg_indices` records which arg slots got cleansed; multi-step sanitiser chains carry both wrappers. | n/a. | Available; report renderer surfaces it. |
+| **P3 — Constants / value-range tracking** | **Shipped** — `arg_lt` / `arg_le` / `arg_gt` / `arg_ge` constraints with sign / hex / oct / bin / underscore-aware literal parsing. | n/a — uses existing arg `value_text`. | Adopted by weak-crypto-strength rules (`RSA.new < 2048`, etc.). |
+| **P4 — Missing-call detection** | **Shipped (intra-procedural)** — `MatchKind::Missing` walker fires on decls that don't call the expected target. Cross-procedural BFS through the call graph is the remaining lift. | n/a. | Available; pack adoption pending. |
+| **P5 — Must-alias / points-to** | **Shipped (intra-procedural)** — `MustAlias` constraint resolves simple rename chains (`y = x`) within a decl. Compound RHS is not aliasing; cross-procedure aliasing is conservative. Foundation for P6. | n/a. | Available; opt-in. |
+| **P6 — Lifecycle state machine** | **Shipped** — flow-sensitive lattice consumes `FlowEvent::Lifecycle { name, transition }` events; `RequiresState` constraint queries the state at each call site. Canonical states: `freed`, `closed`, `unlocked`, `cancelled`, `moved`. | **All 21 langs** emit lifecycle events for their idiomatic free / close / unlock / cancel / move calls via `bonsai_lang_api::inject_lifecycle_events`. | Available; pack-side promotion of audit-pair rules in flight. |
+
+`MATCHER_POLICY_FINGERPRINT` currently `0x0015` — bumped each time the
+matcher's evaluation surface changes in a way that can affect cached
+findings.
+
+---
+
+## Where the engine stands today
+
+The taint engine already does the heavy lifting for injection analysis:
+
+- **Source → sink interprocedural flow** across resolved call edges,
+  with per-language adapter facts.
+- **Sanitizer crediting** with chain-aware tag-matching and
+  arg-position attribution.
+- **Field-sensitive write/read precision** (`obj.value =` writes only
+  `obj.value`, not bare `obj`), with carrier-arg propagation.
+- **Path-sensitive branch merge** via per-arm cloning + union, plus
+  pattern-arm disjointness for Scala / Swift / Rust match expressions.
+- **Typed catch-arm narrowing** for Java / Kotlin / C# — `IOException`
+  catch arm doesn't seed from a `RuntimeException` body throw.
+- **Reflection rewrites** in Python (`getattr`/`setattr`/`hasattr`) and
+  Java (`Class.forName(...).getMethod(...).invoke(...)`).
+- **Detached-future isolation** (Rust spawn bodies don't poison the
+  caller's continuation).
+- **Quoted-literal short-circuit** preventing identifiers inside string
+  literals from polluting state.
+- **Lifecycle transitions** — adapters emit `FlowEvent::Lifecycle`
+  on idiomatic free / close / unlock / cancel / move calls; the
+  matcher's flow-sensitive lattice gates `requires_state` rules
+  against the binding's observed transition.
+
+What's left below — primitives P1 / P4 still have a precision gap
+(CFG-aware narrowing for P1; cross-procedural reach for P4); P6 is
+fully wired but pack-side promotion of the audit-pair rules to use
+`requires_state` is in flight.
+
+---
+
+## Primitive 1 — Type-aware flow narrowing (extend existing typed-catch work) — **shipped (lexical), CFG-aware variant pending**
+
+**Why it matters for injection.** Today's engine over-approximates
+virtual dispatch: `Repository.find(tainted)` blooms to every implementor.
+A user's `class SqlRepo extends Repository` makes the `find` call
+`OverApproximate`. With type narrowing, `repo: SqlRepo = new SqlRepo();
+repo.find(input)` resolves to exactly `SqlRepo.find` — the SQLi rule
+either fires or doesn't, no spurious flows.
+
+Also: discriminated-union sinks (`if (msg.type === "shell") run(msg.cmd)`)
+and instanceof-narrowed sinks (`if (x instanceof File) read(x)`) only
+fire inside the narrowed block.
+
+**Engine work.** Generalise the `Throw::thrown_type` ↔ `Try::catch_types`
+machinery into a per-value `runtime_type` field on the taint state. Adapters
+surface type assertions; engine narrows on the true-branch and restores on
+the false-branch.
+
+**Per-language adapter work.**
+
+| Lang | Surface | Effort |
+|---|---|---|
+| Java | `instanceof X`, catch arms — already done | 0 |
+| Kotlin | `is X` smart-cast, `when { is X -> }` | 1d |
+| C# | `is X y`, pattern matching | 1d |
+| Scala | `case x: X =>` | 1d |
+| TypeScript | `instanceof`, `typeof`, discriminated unions (`x.kind === "a"`) | 2d |
+| JavaScript | Same minus generics | 1d |
+| Go | `v.(T)`, `switch v.(type) { case T: }` | 2d |
+| Rust | enum-variant `match` arms (partial today) | 1d |
+| Swift | `if let x = obj as? T`, `case let x as T` | 1d |
+| Python | `isinstance(x, X)`, `match Foo():`, assert-narrowing | 2d |
+| Ruby | `case x; when X; end`, `x.is_a?(X)` | 1d |
+| PHP | `instanceof X`, match expressions | 1d |
+| Dart | `is X` smart-cast, Dart 3 patterns | 1d |
+| Elixir | `is_binary/1`, struct pattern `%X{}` | 1d |
+| Erlang | guard `is_atom/1`, record `#x{}` | 1d |
+| Objective-C | `[obj isKindOfClass:[X class]]` | 1d |
+| C / C++ | `dynamic_cast<T>`, C casts | 2d |
+| Lua / Perl / Solidity | minimal/none | 0d |
+
+**Engine ship.** ~5d. Adapter ship: ~20d, parallelisable across adapters.
+
+**Bug classes unlocked.**
+
+- Polymorphic dispatch narrowing — fewer `OverApproximate` virtual edges
+  on real codebases (lifts SQLi/SSRF/cmd-injection recall by reducing
+  noise filters).
+- Discriminated-union XSS / cmd-injection — only the
+  `payload.kind === "shell"` arm flows.
+- Instanceof-gated sinks — sink rules anchored on
+  `[FileUpload, save_to_disk]` only fire after `x instanceof FileUpload`.
+- Sealed-class / enum exhaustiveness narrowing — Rust/Swift/Scala arms
+  fork state per variant (extension of pattern-arm disjointness).
+- Better catch-arm narrowing in 18 more languages.
+
+---
+
+## Primitive 2 — Sanitizer crediting precision — **shipped**
+
+**Why it matters for injection.** Every false positive on a sanitised
+flow is wasted reviewer time. The engine already credits sanitizers but
+in three under-specified cases:
+
+1. **Arg-position-specific sanitisers.** `safe = shlex.quote(x);
+   os.system(f"echo {safe} {raw}")` — only `safe` is cleansed; `raw`
+   still taints. Today the chain attribution is correct for a single
+   sanitised value but the matcher's per-finding "sanitizers_seen" doesn't
+   surface which argument was actually cleansed.
+2. **Path-sensitive sanitiser.** `if (validate(x)) sink(x); else sink(x);`
+   — the false branch is not sanitised. Already correct via per-arm
+   cloning; surfacing it in the report is a UX fix.
+3. **Multi-step sanitiser chains.** `cleaned = html.escape(json.dumps(x))`
+   — both wrappers in different categories; report should list both.
+
+**Engine work.** Extend `sanitizers_seen` with per-arg attribution and
+chain order. ~3d. Mostly a finding-pipeline change in
+`bonsai_security::analysis`, not a taint-engine change.
+
+**Per-language adapter work.** 0d — sanitizer rules already surface the
+position via `arg_matches_regex` constraints.
+
+**Bug classes unlocked.**
+
+- Reduced FPs on partially-sanitised mixed-arg sinks
+  (`format(safe_a, raw_b)`).
+- Better visualisation of multi-step sanitiser pipelines for reviewers.
+
+---
+
+## Primitive 3 — Constant / value-range tracking (`arg_lt` / `arg_le`) — **shipped**
+
+**Why it matters for injection.** A class of crypto-strength /
+auth-strength rules fall under "tainted-or-too-weak". Today `arg_tainted`
+catches the tainted case; `arg_lt` / `arg_le` would catch the static-but-too-weak
+case (RSA 1024-bit, bcrypt cost 4, PBKDF2 1000 iterations, JWT expiry
+> 1 year). Same matcher infrastructure, different constraint kind.
+
+**Engine work.** Extend the constraint vocabulary with comparison
+operators on integer literals. Adapters already surface
+`source_text` for `Assign`, so the matcher just needs to parse a
+literal int from the call-site arg. ~3d. No adapter work.
+
+**Bug classes unlocked.**
+
+- Weak crypto strength — `RSA.new(1024)`, `Cipher.getInstance("AES/ECB")`,
+  insufficient PBKDF iterations, low bcrypt cost.
+- Insecure session timeout — `setMaxAge(31536000)` (>1 year).
+- Insecure JWT expiry — `expires_in > N` checks.
+- Format-spec arg-count audit (count `%s`/`%d` in the literal vs the
+  actual arg count).
+
+These don't require taint flow — they're constant-shape checks that
+the matcher would do today if the constraint kind existed.
+
+---
+
+## Primitive 4 — Missing-call detection (`MatchKind::Missing`) — **shipped (intra-procedural), cross-proc BFS pending**
+
+**Why it matters for injection.** Some injection-class bugs are about
+what *didn't* happen on a path: CSRF tokens never validated, rate-limit
+middleware never invoked, auth check skipped on a sensitive route, TLS
+verification not enabled before connecting, escaping never applied
+before output. The engine already walks every reachable path; inverting
+the matcher to flag paths *missing* a required helper is the new piece.
+
+**Engine work.** Add `MatchKind::Missing` to the rule schema. For each
+sink site, walk every CFG path back to the entrypoint and check whether
+any call to a declared "guard helper" appears. If no path crosses one,
+emit a finding with kind=Missing. ~10d. Mostly matcher-side; the taint
+engine already provides the reachability primitives.
+
+**Per-language adapter work.** 0d.
+
+**Bug classes unlocked.**
+
+- **CSRF token unvalidated** — mutating handler with no
+  `validate_csrf()` / `csrf_protect` middleware on any path before the
+  mutation.
+- **Rate-limit absent** — endpoint missing `@rate_limit` /
+  `app.use(rateLimit())`.
+- **Auth check absent** — sensitive route without `@require_auth` /
+  `if (!user) return 401;`.
+- **Audit log missing on auth failure** — no `audit_log()` on the
+  failure branch.
+- **TLS-verify-disabled** is the dual: catch *presence* of
+  `verify=False` (already covered structurally). Catch *absence* of
+  `set_verify_mode(VERIFY_PEER)` is the Missing variant.
+- **Output not escaped** — sink reachable on a path that never crosses
+  a sanitizer (the dual of sanitizer credit, which today only adjusts
+  precision after the chain runs).
+
+These are classic injection-adjacent bug classes (CSRF/rate-limit/auth)
+where the rule pack is currently silent.
+
+---
+
+## Primitive 5 — Must-alias / points-to (foundation for UAF & friends) — **shipped (intra-procedural)**
+
+**Why it matters.** UAF, use-after-close, double-free, lock-not-released
+all share the same shape: an event happens to a value (`free`, `close`,
+`unlock`, `move`), and we need to ask "did the same value reach a later
+sink?" That requires tracking pointer/object identity across statements,
+parameter passes, returns, and field stores. The taint engine already
+does this for *taint identity* — we extend the same memoisation to track
+*alias identity* per value.
+
+**Engine work.** Extend the per-value state in the inter-pass to carry
+an alias representative. Conservative-by-default: distinct names get
+distinct reps; assignment unifies; opaque returns broaden to a fresh
+rep. Refines on type and on syntactic path equality. ~2 weeks.
+
+**Adapter work.** 0d — adapters already emit `source_name` /
+`source_call` / `source_call_args`, which is what the engine threads.
+
+This primitive is the foundation for primitive 6.
+
+**Bug classes unlocked alone.** None directly — it's plumbing.
+
+---
+
+## Primitive 6 — Per-value lifecycle state machine (UAF, use-after-close, etc.) — **shipped**
+
+**Why it matters.** UAF and the whole family of bugs that look like UAF
+("you did X to this value, now you can't do Y to it") share one pattern:
+*a transition event* happens to a value, then *a forbidden operation*
+happens to the same value later. The list:
+
+- Use-after-free / double-free (CWE-416 / CWE-415)
+- Use-after-close (CWE-404 family) — file, socket, DB connection
+- Use-after-dispose (.NET `IDisposable`)
+- Use-after-move (CWE-672) — C++ `std::move`, Rust ownership transfer
+- Use-after-cancel — async task / cancellation token
+- Iterator invalidation (CWE-672) — `vec.push_back; *it`
+- Concurrent modification (Java `for(e:list){list.remove(...)}`)
+- Lock-not-released-on-throw (CWE-833)
+- Resource leak on exception (CWE-775) — opened-but-not-closed on a path
+- TOCTOU (CWE-367) — `access(p); ... open(p);`
+- Transaction-after-error — `tx.commit()` after a failed step
+
+**Engine work.** Per-value lifecycle lattice (`Live → Closed → Released`)
+threaded through the CFG on top of primitive 5's alias tracking. Adapters
+surface "transition events"; rules add `requires_state` constraints.
+~7d engine.
+
+**FlowEvent change.** Add `FlowEvent::Lifecycle { span, transition,
+value }`. Reuse `FlowEvent::Defer` body events for RAII (Go `defer
+file.Close()`, Swift `defer { ... }`, C++ destructors).
+
+**Per-language adapter work.**
+
+| Lang | Transition shapes | Effort |
+|---|---|---|
+| C | `free`, `fclose`, `close`, `pthread_mutex_unlock` | 2d |
+| C++ | `delete`, `delete[]`, `std::move`, `unique_ptr.release`, RAII via destructor | 3d |
+| Rust | `drop`, `Box::from_raw`, `std::mem::replace`, move semantics in `let y = x` | 3d |
+| Java | `Closeable.close`, try-with-resources (already RAII-modelled), `Future.cancel` | 2d |
+| Kotlin | Same as Java + `.use { }` block | 1d |
+| Scala | Same as Java + `Using.resource` | 1d |
+| C# | `Dispose`, `using` block, `IAsyncDisposable.DisposeAsync`, `CancellationTokenSource.Cancel` | 2d |
+| Go | `defer file.Close()`, `ctx.Done()`, `mu.Unlock()` | 2d |
+| Python | `__exit__` via `with`, `close`, `cancel`, generator `close` | 2d |
+| Ruby | `IO.close`, ensure-block close, `Mutex.unlock` | 1d |
+| PHP | `fclose`, PDO close, try/finally | 1d |
+| Swift | `defer { f.close() }`, `Task.cancel`, ARC retain/release | 2d |
+| Objective-C | `release`/`autorelease`/`CFRelease`, ARC modelled differently | 2d |
+| JavaScript | `stream.destroy`, `controller.abort` | 1d |
+| TypeScript | Same as JS + `using` declarations (TS 5.2+) | 1.5d |
+| Dart | `IOSink.close`, `Stream.cancel`, `cancelOnError` | 1d |
+| Elixir | `:gen_server.stop`, `:ets.delete`, supervisor child shutdown | 1d |
+| Erlang | Same as Elixir | 1d |
+| Lua | `io.close`, `coroutine.close`, `os.exit` | 1d |
+| Perl | `close $fh`, file-handle scope-end | 1d |
+| Solidity | `selfdestruct`, contract-state finalisation | 1d |
+
+**Engine ship.** ~7d after primitive 5 lands. Adapter ship: ~30d total
+across 21 langs, parallelisable.
+
+**Rule-pack already in place.** The recent UAF / lifecycle additions
+(Rust `Box::from_raw` / `ptr::drop_in_place` / `ManuallyDrop::drop`,
+C++ `unique_ptr.release` / `delete`, Go cgo `C.free`, Swift `Unmanaged`
+/ `deallocate`, ObjC `CFRelease` / `free`, C `umask(0)`) are *audit-pair
+sites* today — they fire on the transition event. Once primitive 6
+lands, those same rules promote to true UAF/lifecycle findings by
+adding a `requires_state: Live` (or `requires_state: !Freed`) constraint
+to the existing rule.
+
+**Bug classes unlocked.** Everything in the list at the top of this
+section, across all 21 adapters that surface the relevant transition.
+
+---
+
+## Pure rule-pack expansion (no engine work)
+
+The biggest near-term recall lift is more sources/sinks/sanitizers in
+the existing engine. The recently completed Tier-1 additions (cookie
+misconfig, world-writable, weak RNG audit, JWT alg=none) are the
+template; the next sweep would cover:
+
+| Family | Languages | Effort |
+|---|---|---|
+| GraphQL injection sinks (resolver-context inputs → SQL/cmd/path) | py, js, ts, rb, java | 1d/lang |
+| OAuth / OIDC misconfig (open redirect, alg confusion, missing state) | py, js, ts, java, go | 1d/lang |
+| LLM prompt injection (LangChain / OpenAI SDK arg flows) | py, js, ts | 1d/lang |
+| ORM raw-string sinks (Sequelize raw, Diesel literal SQL, Mongoose `$where`) | js, ts, rust, py | 0.5d/lang |
+| Template engine SSTI (Jinja2 sandbox bypass, EJS, Twig, ERB) | py, js, ts, rb, php | 0.5d/lang |
+| WebSocket / SSE handler sources (where adapters expose `on_message` shape) | py, js, ts, java | 0.5d/lang |
+| File-upload framework sinks (multer, busboy, formidable, FastAPI UploadFile) | js, ts, py | 0.5d/lang |
+| Header-injection per-framework (Hapi, Fastify, gin, echo, Spring `@RequestHeader`) | js, ts, java, kotlin, go | 0.5d/lang |
+| Cookie misconfig in remaining langs (rb, php, go, ts) | rb, php, go, ts | 0.5d/lang |
+| GraphQL operation-name injection (Apollo, gqlgen) | js, ts, go | 0.5d/lang |
+
+Roughly 25–40 days of rule authoring, each rule pack release would lift
+recall by 5–15% on real codebases (CodeQL parity benchmarks).
+
+---
+
+## Shipping order (impact-per-week)
+
+**Injection track** (drives the bulk of findings on real codebases):
+
+1. **Rule-pack expansion** (no engine work) — 25–40d of authoring,
+   immediate recall lifts. Runs in parallel.
+2. **Primitive 3** (constants) — 3d, unlocks crypto-strength /
+   weak-auth rules.
+3. **Primitive 4** (Missing) — 10d, unlocks CSRF / rate-limit /
+   auth-bypass / missing-escaping families.
+4. **Primitive 2** (sanitiser precision) — 3d, reduces FP noise.
+5. **Primitive 1** (typed flow) — 5d engine + ~20d adapters in
+   parallel. Big precision lift on virtual dispatch + finishes typed
+   catch arms in 18 more languages.
+
+Injection-track total: ~45–55 calendar days.
+
+**UAF / lifecycle track** (large per-bug-class value, larger lift):
+
+6. **Primitive 5** (must-alias) — ~2 weeks engine, 0d adapter. Plumbing.
+7. **Primitive 6** (lifecycle state machine) — 7d engine + ~30d
+   adapters, parallelisable. Unlocks UAF, use-after-close, double-free,
+   use-after-move, iterator invalidation, lock-not-released-on-throw,
+   resource-leak-on-exception, TOCTOU, transaction-after-error.
+
+UAF track total: ~6 calendar weeks (after primitive 5 ships, primitive
+6's adapter work runs in parallel).
+
+**Combined total**: ~12–14 calendar weeks for one engineer to ship all
+six primitives end-to-end across all 21 adapters, plus the rule-pack
+expansion. The two tracks are independent — primitives 5+6 don't block
+1–4 and vice versa, so two engineers could parallelise the work to
+~6–7 weeks wall-clock.
+
+---
+
+## Where the rulepack stands today vs. after each primitive
+
+### Injection-track bug classes
+
+| Bug class | Today | After P3 | After P4 | After P1 |
+|---|---|---|---|---|
+| SQL / NoSQL injection | ✅ | — | — | tighter (less OverApproximate) |
+| Command injection | ✅ | — | — | tighter |
+| Path traversal | ✅ | — | — | tighter |
+| SSRF | ✅ | — | — | tighter |
+| XSS / SSTI | ✅ | — | — | tighter |
+| LDAP / XPath | ✅ | — | — | tighter |
+| Header / open-redirect | ✅ | — | — | tighter |
+| Cookie misconfig | ✅ | — | — | — |
+| World-writable / chmod | ✅ | — | — | — |
+| Format-string | ✅ | — | — | — |
+| JWT alg=none | ✅ | — | — | — |
+| Weak crypto algorithm (DES, MD5) | ✅ | — | — | — |
+| Weak crypto **strength** (RSA-1024, bcrypt-4) | partial | ✅ | — | — |
+| Insecure session timeout | ✗ | ✅ | — | — |
+| CSRF / rate-limit absent | ✗ | — | ✅ | — |
+| Auth check absent | ✗ | — | ✅ | — |
+| Output escaping missing on a path | partial | — | ✅ | — |
+| Polymorphic dispatch precision | partial | — | — | ✅ |
+| Typed catch arm narrowing | ✅ J/K/C# | — | — | ✅ all 21 |
+| Discriminated-union narrowed sinks | ✗ | — | — | ✅ |
+
+### UAF / lifecycle bug classes
+
+| Bug class | Today | After P5 (alias) | After P6 (lifecycle) |
+|---|---|---|---|
+| UAF / double-free | partial (audit sites) | — | ✅ |
+| Use-after-close (file/socket/conn) | ✗ | — | ✅ |
+| Use-after-dispose (.NET) | ✗ | — | ✅ |
+| Use-after-move (C++ / Rust) | ✗ | — | ✅ |
+| Use-after-cancel (async / token) | ✗ | — | ✅ |
+| Iterator invalidation | ✗ | — | ✅ |
+| Concurrent modification (Java) | ✗ | — | ✅ |
+| Lock-not-released-on-throw | ✗ | — | ✅ |
+| Resource leak on exception | ✗ | — | ✅ |
+| TOCTOU | partial (toctou.access pair) | — | ✅ |
+| Transaction commit-after-error | ✗ | — | ✅ |
+
+"partial" today means the rule pack already names the API site as an
+audit-pair signal; the engine just doesn't yet correlate it with a
+later use of the same value. Once each primitive lands, those rules'
+precision lifts automatically — no rule-pack rewrites required, just
+add a `requires_state` constraint to the existing rule.

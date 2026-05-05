@@ -1,0 +1,475 @@
+- id: ruby.ssrf.net_http_get
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Net::HTTP
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.net_http_get example
+    code: "def example(input, url, id, payload, request, params)\n  Net::HTTP.get(input)\n\
+      end\n"
+  - name: ruby.ssrf.net_http_get literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Net::HTTP.get(\"\
+      https://example.com\")\nend\n"
+    expect_no_match: true
+  description: Net::HTTP.get with tainted URL.
+- id: ruby.ssrf.net_http_get_response
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - net-http
+  imports:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Net::HTTP
+      - get_response
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.net_http_get_response example
+    code: "require \"net/http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::HTTP.get_response(input)\nend\n"
+  - name: ruby.ssrf.net_http_get_response literal negative
+    code: "require \"net/http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::HTTP.get_response(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: Net::HTTP.get_response.
+- id: ruby.ssrf.net_http_post
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Net::HTTP
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.net_http_post example
+    code: "def example(input, url, id, payload, request, params)\n  Net::HTTP.post(input)\n\
+      end\n"
+  - name: ruby.ssrf.net_http_post literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Net::HTTP.post(\"\
+      https://example.com\", \"body\")\nend\n"
+    expect_no_match: true
+  description: Net::HTTP.post.
+- id: ruby.ssrf.net_http_start
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - net-http
+  imports:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Net::HTTP
+      - start
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.net_http_start example
+    code: "require \"net/http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::HTTP.start(input)\nend\n"
+  - name: ruby.ssrf.net_http_start literal negative
+    code: "require \"net/http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::HTTP.start(\"example.com\")\nend\n"
+    expect_no_match: true
+  description: Net::HTTP.start.
+- id: ruby.ssrf.openuri_open
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - open-uri
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: open
+  description: "Disabled \u2014 duplicates ruby.cmdi.kernel_open_pipe on name: open;\
+    \ use ruby.ssrf.uri_open (URI.open) which is the modern shape."
+- id: ruby.ssrf.faraday_get
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - faraday
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Faraday
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.faraday_get example
+    code: "require \"faraday\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Faraday.get(input)\nend\n"
+  - name: ruby.ssrf.faraday_get literal negative
+    code: "require \"faraday\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Faraday.get(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: Faraday.get with tainted URL.
+- id: ruby.ssrf.faraday_post
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - faraday
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Faraday
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.faraday_post example
+    code: "require \"faraday\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Faraday.post(input)\nend\n"
+  - name: ruby.ssrf.faraday_post literal negative
+    code: "require \"faraday\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Faraday.post(\"https://example.com\", \"body\")\nend\n"
+    expect_no_match: true
+  description: "Faraday.post(url) \u2014 HTTP POST to tainted URL allows SSRF with\
+    \ request-body exfiltration."
+- id: ruby.ssrf.httparty_get
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - httparty
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTParty
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.httparty_get example
+    code: "require \"httparty\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTParty.get(input)\nend\n"
+  - name: ruby.ssrf.httparty_get literal negative
+    code: "require \"httparty\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTParty.get(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: "HTTParty.get(url) \u2014 HTTP GET to tainted URL allows SSRF to internal\
+    \ services / cloud metadata."
+- id: ruby.ssrf.httparty_post
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - httparty
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTParty
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.httparty_post example
+    code: "require \"httparty\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTParty.post(input)\nend\n"
+  - name: ruby.ssrf.httparty_post literal negative
+    code: "require \"httparty\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTParty.post(\"https://example.com\", body: \"ok\")\nend\n"
+    expect_no_match: true
+  description: "HTTParty.post(url) \u2014 HTTP POST to tainted URL allows SSRF with\
+    \ request-body exfiltration."
+- id: ruby.ssrf.rest_client_get
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - rest-client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestClient
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.rest_client_get example
+    code: "require \"rest-client\"\ndef example(input, url, id, payload, request,\
+      \ params)\n  RestClient.get(input)\nend\n"
+  - name: ruby.ssrf.rest_client_get literal negative
+    code: "require \"rest-client\"\ndef example(input, url, id, payload, request,\
+      \ params)\n  RestClient.get(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: RestClient.get.
+- id: ruby.ssrf.rest_client_execute
+  enabled: false
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - rest-client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestClient::Request
+      - execute
+  match_examples:
+  - name: ruby.ssrf.rest_client_execute example
+    code: "require \"rest-client\"\ndef example(input, url, id, payload, request,\
+      \ params)\n  RestClient::Request.execute(input)\nend\n"
+  description: RestClient::Request.execute.
+  disabled_reason:
+    code: over-broad
+- id: ruby.ssrf.http_rb_get
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTP
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.http_rb_get example
+    code: "require \"http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTP.get(input)\nend\n"
+  - name: ruby.ssrf.http_rb_get literal negative
+    code: "require \"http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTP.get(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: http.rb HTTP.get.
+- id: ruby.ssrf.typhoeus_get
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - typhoeus
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Typhoeus
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.typhoeus_get example
+    code: "require \"typhoeus\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Typhoeus.get(input)\nend\n"
+  - name: ruby.ssrf.typhoeus_get literal negative
+    code: "require \"typhoeus\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Typhoeus.get(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: "Typhoeus.get(url) \u2014 libcurl-backed HTTP GET to tainted URL allows\
+    \ SSRF."
+- id: ruby.ssrf.excon_get
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - excon
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Excon
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.excon_get example
+    code: "require \"excon\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Excon.get(input)\nend\n"
+  - name: ruby.ssrf.excon_get literal negative
+    code: "require \"excon\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Excon.get(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: "Excon.get(url) \u2014 HTTP GET to tainted URL allows SSRF to internal\
+    \ services / cloud metadata."
+- id: ruby.ssrf.typhoeus_post
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - typhoeus
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Typhoeus
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.typhoeus_post example
+    code: "require \"typhoeus\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Typhoeus.post(input)\nend\n"
+  - name: ruby.ssrf.typhoeus_post literal negative
+    code: "require \"typhoeus\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Typhoeus.post(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: "Typhoeus.post(url) \u2014 libcurl-backed HTTP POST to tainted URL\
+    \ allows SSRF with request-body exfiltration."
+- id: ruby.ssrf.faraday_run_request
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - faraday
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: run_request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ruby.ssrf.faraday_run_request example
+    code: "require \"faraday\"\ndef example(input, url, id, payload, request, params)\n\
+      \  run_request(:get, url)\nend\n"
+  - name: ruby.ssrf.faraday_run_request literal negative
+    code: "require \"faraday\"\ndef example(input, url, id, payload, request, params)\n\
+      \  run_request(:get, \"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: Faraday connection.run_request(method, url, ...).
+- id: ruby.ssrf.rest_client_post
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - rest-client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestClient
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.rest_client_post example
+    code: "require \"rest-client\"\ndef example(input, url, id, payload, request,\
+      \ params)\n  RestClient.post(input)\nend\n"
+  - name: ruby.ssrf.rest_client_post literal negative
+    code: "require \"rest-client\"\ndef example(input, url, id, payload, request,\
+      \ params)\n  RestClient.post(\"https://example.com\", \"body\")\nend\n"
+    expect_no_match: true
+  description: RestClient.post.
+- id: ruby.ssrf.http_rb_post
+  enabled: true
+  language: ruby
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTP
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ssrf.http_rb_post example
+    code: "require \"http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTP.post(input)\nend\n"
+  - name: ruby.ssrf.http_rb_post literal negative
+    code: "require \"http\"\ndef example(input, url, id, payload, request, params)\n\
+      \  HTTP.post(\"https://example.com\")\nend\n"
+    expect_no_match: true
+  description: http.rb HTTP.post.

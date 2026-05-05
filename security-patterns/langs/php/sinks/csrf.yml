@@ -1,0 +1,25 @@
+- id: php.csrf.wordpress_check_ajax_referer_no_die
+  enabled: true
+  language: php
+  tag: csrf
+  severity: medium
+  packages:
+  - wordpress
+  cwe:
+  - CWE-352
+  match:
+    kind: call
+    callee:
+      name: check_ajax_referer
+  match_examples:
+  - name: php.csrf.wordpress_check_ajax_referer_no_die example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        check_ajax_referer('export-report', '_ajax_nonce', false);
+      }
+    expect_match_text:
+    - check_ajax_referer
+  description: WordPress check_ajax_referer(..., ..., false/0) verifies the nonce but does not stop execution on failure; audit explicit failure handling.

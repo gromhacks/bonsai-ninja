@@ -1,0 +1,304 @@
+- id: ruby.template.erb_new
+  enabled: true
+  language: ruby
+  tag: ssti
+  severity: critical
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ERB
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.template.erb_new example
+    code: "def example(input, url, id, payload, request, params)\n  ERB.new(input)\nend\n"
+  - name: ruby.template.erb_new literal negative
+    code: "def example(input, url, id, payload, request, params)\n  ERB.new(\"hello <%= user %>\")\nend\n"
+    expect_no_match: true
+  description: "ERB.new(tainted) — Ruby code execution via templates."
+- id: ruby.template.erb_result_with_hash
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: ssti
+  severity: medium
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      name: result_with_hash
+  description: "Disabled — execution risk is in the template body compiled by ERB.new, not result_with_hash itself."
+- id: ruby.template.liquid_template_parse
+  enabled: true
+  language: ruby
+  tag: ssti
+  severity: high
+  packages:
+  - liquid
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Liquid::Template
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.template.liquid_template_parse example
+    code: |
+      require "liquid"
+      def example(input, url, id, payload, request, params)
+        Liquid::Template.parse(input)
+      end
+  - name: ruby.template.liquid_template_parse literal negative
+    code: |
+      require "liquid"
+      def example(input, url, id, payload, request, params)
+        Liquid::Template.parse("hello {{ user }}")
+      end
+    expect_no_match: true
+  description: "Liquid::Template.parse(tainted) — restricted DSL but still injection."
+- id: ruby.template.haml_engine_new
+  enabled: true
+  language: ruby
+  tag: ssti
+  severity: critical
+  packages:
+  - haml
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Haml
+      - Engine
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.template.haml_engine_new example
+    code: |
+      require "haml"
+      def example(input, url, id, payload, request, params)
+        Haml::Engine.new(input)
+      end
+  - name: ruby.template.haml_engine_new literal negative
+    code: |
+      require "haml"
+      def example(input, url, id, payload, request, params)
+        Haml::Engine.new("%p Hello")
+      end
+    expect_no_match: true
+  description: "Haml::Engine.new(tainted) — Ruby code execution."
+- id: ruby.template.slim_template_new
+  enabled: true
+  language: ruby
+  tag: ssti
+  severity: critical
+  packages:
+  - slim
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Slim
+      - Template
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.template.slim_template_new example
+    code: |
+      require "slim"
+      def example(input, url, id, payload, request, params)
+        Slim::Template.new(input)
+      end
+  - name: ruby.template.slim_template_new literal negative
+    code: |
+      require "slim"
+      def example(input, url, id, payload, request, params)
+        Slim::Template.new("p Hello")
+      end
+    expect_no_match: true
+  description: Slim::Template.new(tainted).
+- id: ruby.template.tilt_new
+  enabled: true
+  language: ruby
+  tag: ssti
+  severity: high
+  packages:
+  - tilt
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Tilt
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.template.tilt_new example
+    code: |
+      require "tilt"
+      def example(input, url, id, payload, request, params)
+        Tilt.new(input)
+      end
+  - name: ruby.template.tilt_new literal negative
+    code: |
+      require "tilt"
+      def example(input, url, id, payload, request, params)
+        Tilt.new("views/show.erb")
+      end
+    expect_no_match: true
+  description: "Tilt.new(tainted_template_path) — loads and compiles a template by path."
+- id: ruby.template.actionview_render_inline
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: ssti
+  severity: critical
+  packages:
+  - actionview
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      name: render
+  description: "Disabled — render() fires on every controller action. Enable only with LLM-assisted per-call review of the inline: kwarg."
+- id: ruby.template.html_safe
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - String
+      - html_safe
+  match_examples:
+  - name: ruby.template.html_safe example
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        String.html_safe("{{ user }}")
+      end
+  description: "Disabled duplicate — covered by ruby.xss.html_safe. Receiver typing is not available in YAML, so keeping both rules makes the same ActionView html_safe call produce duplicate sink facts."
+- id: ruby.template.raw_helper
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: xss
+  severity: high
+  packages:
+  - actionview
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: raw
+  description: "Disabled — bare `raw` is too ambiguous (collides with local variables named `raw`); enable with a Rails view-context constraint when one becomes available."
+
+- id: ruby.template.tilt_new_with_block
+  enabled: true
+  language: ruby
+  tag: ssti
+  severity: critical
+  packages:
+  - tilt
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Tilt::ERBTemplate
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby template tilt erbtemplate new tainted
+    code: |
+      require "tilt"
+      def example(user_input)
+        Tilt::ERBTemplate.new(user_input)
+      end
+    expect_match_text: ["Tilt::ERBTemplate.new"]
+  - name: ruby template tilt erbtemplate new literal negative
+    code: |
+      require "tilt"
+      def example
+        Tilt::ERBTemplate.new("views/show.erb")
+      end
+    expect_no_match: true
+  description: "Tilt::ERBTemplate.new(tainted) — explicit ERB template constructor with attacker-controlled source enables Ruby code execution."
+
+- id: ruby.template.erubi_engine_new
+  enabled: true
+  language: ruby
+  tag: ssti
+  severity: critical
+  packages:
+  - erubi
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Erubi::Engine
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby template erubi engine new tainted
+    code: |
+      require "erubi"
+      def example(user_input)
+        Erubi::Engine.new(user_input)
+      end
+    expect_match_text: ["Erubi::Engine.new"]
+  - name: ruby template erubi engine new literal negative
+    code: |
+      require "erubi"
+      def example
+        Erubi::Engine.new("hello <%= user %>")
+      end
+    expect_no_match: true
+  description: "Erubi::Engine.new(tainted) — Erubi (modern ERB) compiles tainted source to executable Ruby; classic SSTI to RCE."

@@ -1,0 +1,131 @@
+# Objective-C insecure-deserialization sinks (NSKeyedUnarchiver, NSPropertyListSerialization).
+- id: objc.deser.nskeyedunarchiver_data
+  enabled: true
+  language: objc
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unarchiveObjectWithData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; unarchiveObjectWithData(input); }
+    - name: literal archive data negative
+      code: |
+        void test(void) { unarchiveObjectWithData(@"safe"); }
+      expect_no_match: true
+  description: "NSKeyedUnarchiver +unarchiveObjectWithData: (deprecated) — decodes arbitrary classes without secure-coding check = RCE on tainted data."
+
+- id: objc.deser.nskeyedunarchiver_file
+  enabled: true
+  language: objc
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unarchiveObjectWithFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; unarchiveObjectWithFile(input); }
+    - name: literal archive file negative
+      code: |
+        void test(void) { unarchiveObjectWithFile(@"/tmp/safe.archive"); }
+      expect_no_match: true
+  description: "NSKeyedUnarchiver +unarchiveObjectWithFile: (deprecated) — class substitution on tainted archive file."
+
+- id: objc.deser.nskeyedunarchiver_top_level
+  enabled: true
+  language: objc
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unarchiveTopLevelObjectWithData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; unarchiveTopLevelObjectWithData(input); }
+    - name: literal top level archive negative
+      code: |
+        void test(void) { unarchiveTopLevelObjectWithData(@"safe"); }
+      expect_no_match: true
+  description: "NSKeyedUnarchiver +unarchiveTopLevelObjectWithData:error: — same RCE risk as unarchiveObjectWithData:."
+
+- id: objc.deser.requires_secure_coding_no
+  enabled: true
+  language: objc
+  tag: insecure-deserialization
+  severity: high
+  cwe: [CWE-502]
+  match:
+    kind: write
+    target:
+      name: requiresSecureCoding
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; NSKeyedUnarchiver.requiresSecureCoding = input; }
+  description: "NSKeyedUnarchiver .requiresSecureCoding = NO — disables NSSecureCoding enforcement, reintroducing class-substitution RCE."
+
+- id: objc.deser.nspropertylist
+  enabled: true
+  language: objc
+  tag: insecure-deserialization
+  severity: high
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: propertyListWithData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; propertyListWithData(input); }
+    - name: literal property list data negative
+      code: |
+        void test(void) { propertyListWithData(@"safe"); }
+      expect_no_match: true
+  description: "NSPropertyListSerialization +propertyListWithData:options:format:error: — with NSPropertyListMutableContainersAndLeaves on tainted data allows object substitution."
+
+- id: objc.deser.nspropertylist_stream
+  enabled: true
+  language: objc
+  tag: insecure-deserialization
+  severity: high
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: propertyListWithStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; propertyListWithStream(input); }
+    - name: literal property list stream negative
+      code: |
+        void test(void) { propertyListWithStream(@"safe"); }
+      expect_no_match: true
+  description: "NSPropertyListSerialization +propertyListWithStream:options:format:error: — streaming plist parse with tainted input."

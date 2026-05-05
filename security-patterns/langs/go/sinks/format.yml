@@ -1,0 +1,101 @@
+- id: go.format.fmt_printf_tainted
+  enabled: true
+  language: go
+  tag: format-string
+  severity: medium
+  packages: ["fmt"]
+  imports: ["fmt"]
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, Printf]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      package main
+      import "fmt"
+      func handle(input string) {
+        fmt.Printf(input)
+      }
+    expect_match_text: [fmt.Printf]
+  - name: literal format negative
+    code: |
+      package main
+      import "fmt"
+      func handle() {
+        fmt.Printf("%s", "safe")
+      }
+    expect_no_match: true
+  description: "fmt.Printf with tainted format string — attacker can include extra `%s`/`%d` directives that read past the supplied arg list (Go panics on arg-count mismatch but still leaks pre-panic output)."
+
+- id: go.format.fmt_sprintf_tainted
+  enabled: true
+  language: go
+  tag: format-string
+  severity: medium
+  packages: ["fmt"]
+  imports: ["fmt"]
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, Sprintf]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      package main
+      import "fmt"
+      func handle(input string) string {
+        return fmt.Sprintf(input)
+      }
+    expect_match_text: [fmt.Sprintf]
+  - name: literal format negative
+    code: |
+      package main
+      import "fmt"
+      func handle() string {
+        return fmt.Sprintf("%s", "safe")
+      }
+    expect_no_match: true
+  description: "fmt.Sprintf with tainted format string."
+
+- id: go.format.fmt_errorf_tainted
+  enabled: true
+  language: go
+  tag: format-string
+  severity: medium
+  packages: ["fmt"]
+  imports: ["fmt"]
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, Errorf]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      package main
+      import "fmt"
+      func handle(input string) error {
+        return fmt.Errorf(input)
+      }
+    expect_match_text: [fmt.Errorf]
+  - name: literal format negative
+    code: |
+      package main
+      import "fmt"
+      func handle() error {
+        return fmt.Errorf("%s", "safe")
+      }
+    expect_no_match: true
+  description: "fmt.Errorf with tainted format string."

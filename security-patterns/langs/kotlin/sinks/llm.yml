@@ -1,0 +1,146 @@
+# Kotlin LLM sinks (OpenAI, Anthropic, Bedrock, LangChain4j).
+- id: kotlin.llm.openai_chatcompletion
+  enabled: true
+  language: kotlin
+  tag: web-llm
+  severity: medium
+  packages: [com.openai.api]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [OpenAI, chatCompletion]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.openai.api.*
+      class App {
+        fun handle(input: String) {
+          OpenAI.chatCompletion(input)
+        }
+      }
+    expect_match_text: [OpenAI.chatCompletion]
+  - name: arg tainted literal negative
+    code: |
+      import com.openai.api.*
+      class App {
+      fun handle(input: String) {
+        OpenAI.chatCompletion("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Kotlin OpenAI client chatCompletion - tainted prompt content reaches an LLM instruction and tool surface."
+
+  imports:
+  - com.openai.api
+- id: kotlin.llm.anthropic_create_message
+  enabled: true
+  language: kotlin
+  tag: web-llm
+  severity: medium
+  packages: [com.anthropic.api]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [AnthropicClient, createMessage]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.anthropic.api.*
+      class App {
+        fun handle(input: String) {
+          AnthropicClient.createMessage(input)
+        }
+      }
+    expect_match_text: [AnthropicClient.createMessage]
+  - name: arg tainted literal negative
+    code: |
+      import com.anthropic.api.*
+      class App {
+      fun handle(input: String) {
+        AnthropicClient.createMessage("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Anthropic client createMessage - tainted user content reaches a model instruction surface."
+
+  imports:
+  - com.anthropic.api
+- id: kotlin.llm.bedrock_invokemodel
+  enabled: true
+  language: kotlin
+  tag: web-llm
+  severity: medium
+  packages: [software.amazon.awssdk]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [BedrockRuntimeClient, invokeModel]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import software.amazon.awssdk.*
+      class App {
+        fun handle(input: String) {
+          BedrockRuntimeClient.invokeModel(input)
+        }
+      }
+    expect_match_text: [BedrockRuntimeClient.invokeModel]
+  - name: arg tainted literal negative
+    code: |
+      import software.amazon.awssdk.*
+      class App {
+      fun handle(input: String) {
+        BedrockRuntimeClient.invokeModel("safe")
+      }
+      }
+    expect_no_match: true
+  description: "AWS Bedrock Runtime invokeModel - tainted request bodies steer foundation model output."
+
+- id: kotlin.llm.langchain4j_generate
+  enabled: true
+  language: kotlin
+  tag: web-llm
+  severity: medium
+  packages: [langchain4j]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [ChatLanguageModel, generate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import langchain4j.*
+      // uses langchain4j
+      class App {
+        fun handle(input: String) {
+          ChatLanguageModel.generate(input)
+        }
+      }
+    expect_match_text: [ChatLanguageModel.generate]
+  - name: arg tainted literal negative
+    code: |
+      import langchain4j.*
+      // uses langchain4j
+      class App {
+      fun handle(input: String) {
+        ChatLanguageModel.generate("safe")
+      }
+      }
+    expect_no_match: true
+  description: "LangChain4j ChatLanguageModel.generate - tainted prompt content reaches a model call."

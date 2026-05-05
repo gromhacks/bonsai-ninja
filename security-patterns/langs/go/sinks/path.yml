@@ -1,0 +1,651 @@
+# Go path-traversal sinks. os.* and ioutil.* / os.ReadFile/WriteFile
+# accept arbitrary paths; tainted paths reach user-chosen files.
+- id: go.path.os_open
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os open path
+    code: |
+      package main
+      import "os"
+
+      func file(path string) {
+        _, _ = os.Open(path)
+      }
+    expect_match_text: [os.Open]
+  - name: literal os open path negative
+    code: |
+      package main
+      import "os"
+
+      func file() {
+        _, _ = os.Open("/srv/files/readme.txt")
+      }
+    expect_no_match: true
+  description: "os.Open(tainted path) — reads an attacker-chosen file; classic traversal when joined with ../."
+- id: go.path.os_openfile
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, OpenFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os openfile path
+    code: |
+      package main
+      import "os"
+
+      func file(path string) {
+        _, _ = os.OpenFile(path, os.O_RDONLY, 0)
+      }
+    expect_match_text: [os.OpenFile]
+  - name: literal os openfile path negative
+    code: |
+      package main
+      import "os"
+
+      func file() {
+        _, _ = os.OpenFile("/srv/files/readme.txt", os.O_RDONLY, 0)
+      }
+    expect_no_match: true
+  description: "os.OpenFile(tainted path, flags, mode) — tainted path + O_CREATE enables arbitrary write."
+- id: go.path.os_readfile
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, ReadFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os readfile path
+    code: |
+      package main
+      import "os"
+
+      func file(path string) {
+        _, _ = os.ReadFile(path)
+      }
+    expect_match_text: [os.ReadFile]
+  - name: literal os readfile path negative
+    code: |
+      package main
+      import "os"
+
+      func file() {
+        _, _ = os.ReadFile("/srv/files/readme.txt")
+      }
+    expect_no_match: true
+  description: "os.ReadFile(tainted path) — reads attacker-chosen file."
+- id: go.path.os_create
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os create path
+    code: |
+      package main
+      import "os"
+
+      func file(path string) {
+        _, _ = os.Create(path)
+      }
+    expect_match_text: [os.Create]
+  - name: literal os create path negative
+    code: |
+      package main
+      import "os"
+
+      func file() {
+        _, _ = os.Create("/srv/files/output.txt")
+      }
+    expect_no_match: true
+  description: "os.Create(tainted path) — truncates/creates at attacker-chosen location, including filepath.Join(base, archive entry name) Zip Slip extraction paths."
+
+- id: go.path.os_remove
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Remove]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os remove path
+    code: |
+      package main
+      import "os"
+
+      func remove(path string) {
+        os.Remove(path)
+      }
+    expect_match_text: [os.Remove]
+  - name: literal os remove path negative
+    code: |
+      package main
+      import "os"
+
+      func remove() {
+        os.Remove("/srv/files/output.txt")
+      }
+    expect_no_match: true
+  description: "os.Remove(tainted path) — deletes attacker-chosen file."
+- id: go.path.os_remove_all
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: critical
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, RemoveAll]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os removeall path
+    code: |
+      package main
+      import "os"
+
+      func remove(path string) {
+        os.RemoveAll(path)
+      }
+    expect_match_text: [os.RemoveAll]
+  - name: literal os removeall path negative
+    code: |
+      package main
+      import "os"
+
+      func remove() {
+        os.RemoveAll("/srv/files/tmp")
+      }
+    expect_no_match: true
+  description: "os.RemoveAll(tainted path) — recursive delete; traversal can wipe arbitrary directories."
+- id: go.path.os_rename
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted old path
+    code: |
+      package main
+      import "os"
+
+      func move(oldPath string) {
+        os.Rename(oldPath, "/srv/files/output.txt")
+      }
+    expect_match_text: [os.Rename]
+  - name: literal old path negative
+    code: |
+      package main
+      import "os"
+
+      func move() {
+        os.Rename("/srv/files/input.txt", "/srv/files/output.txt")
+      }
+    expect_no_match: true
+  description: "os.Rename(oldpath, newpath) — tainted either side = move attacker-chosen file."
+- id: go.path.os_rename_newpath
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Rename]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted new path
+    code: |
+      package main
+      import "os"
+
+      func move(newPath string) {
+        os.Rename("/srv/files/input.txt", newPath)
+      }
+    expect_match_text: [os.Rename]
+  - name: literal new path negative
+    code: |
+      package main
+      import "os"
+
+      func move() {
+        os.Rename("/srv/files/input.txt", "/srv/files/output.txt")
+      }
+    expect_no_match: true
+  description: "os.Rename(oldpath, newpath) — tainted destination path can overwrite or move files outside the intended directory."
+- id: go.path.os_writefile
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, WriteFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os writefile path
+    code: |
+      package main
+      import "os"
+
+      func write(path string) {
+        os.WriteFile(path, []byte("ok"), 0600)
+      }
+    expect_match_text: [os.WriteFile]
+  - name: literal os writefile path negative
+    code: |
+      package main
+      import "os"
+
+      func write() {
+        os.WriteFile("/srv/files/output.txt", []byte("ok"), 0600)
+      }
+    expect_no_match: true
+  description: "os.WriteFile(tainted path, data, mode) — writes at attacker-chosen location."
+- id: go.path.os_mkdirall
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: medium
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, MkdirAll]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os mkdirall path
+    code: |
+      package main
+      import "os"
+
+      func mkdir(path string) {
+        os.MkdirAll(path, 0755)
+      }
+    expect_match_text: [os.MkdirAll]
+  - name: literal os mkdirall path negative
+    code: |
+      package main
+      import "os"
+
+      func mkdir() {
+        os.MkdirAll("/srv/files/tmp", 0755)
+      }
+    expect_no_match: true
+  description: "os.MkdirAll(tainted path, mode) — creates nested directories at attacker-chosen location."
+- id: go.path.os_mkdir
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: medium
+  packages: [os]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, Mkdir]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted os mkdir path
+    code: |
+      package main
+      import "os"
+
+      func mkdir(path string) {
+        os.Mkdir(path, 0755)
+      }
+    expect_match_text: [os.Mkdir]
+  - name: literal os mkdir path negative
+    code: |
+      package main
+      import "os"
+
+      func mkdir() {
+        os.Mkdir("/srv/files/tmp", 0755)
+      }
+    expect_no_match: true
+  description: "os.Mkdir(tainted path, mode) — creates a directory at attacker-chosen location."
+- id: go.path.ioutil_readfile
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: ["io/ioutil"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [ioutil, ReadFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted ioutil readfile path
+    code: |
+      package main
+      import "io/ioutil"
+
+      func file(path string) {
+        ioutil.ReadFile(path)
+      }
+    expect_match_text: [ioutil.ReadFile]
+  - name: literal ioutil readfile path negative
+    code: |
+      package main
+      import "io/ioutil"
+
+      func file() {
+        ioutil.ReadFile("/srv/files/readme.txt")
+      }
+    expect_no_match: true
+  description: "ioutil.ReadFile(tainted path) — legacy alias of os.ReadFile."
+- id: go.path.ioutil_writefile
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: ["io/ioutil"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [ioutil, WriteFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted ioutil writefile path
+    code: |
+      package main
+      import "io/ioutil"
+
+      func write(path string) {
+        ioutil.WriteFile(path, []byte("ok"), 0600)
+      }
+    expect_match_text: [ioutil.WriteFile]
+  - name: literal ioutil writefile path negative
+    code: |
+      package main
+      import "io/ioutil"
+
+      func write() {
+        ioutil.WriteFile("/srv/files/output.txt", []byte("ok"), 0600)
+      }
+    expect_no_match: true
+  description: "ioutil.WriteFile(tainted path, …) — legacy alias of os.WriteFile."
+- id: go.path.http_servefile
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: ["net/http"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [http, ServeFile]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted servefile path
+    code: |
+      package main
+      import "net/http"
+
+      func serve(path string) {
+        http.ServeFile(nil, nil, path)
+      }
+    expect_match_text: [http.ServeFile]
+  - name: literal servefile path negative
+    code: |
+      package main
+      import "net/http"
+
+      func serve() {
+        http.ServeFile(nil, nil, "/srv/files/readme.txt")
+      }
+    expect_no_match: true
+  description: "http.ServeFile(w, r, tainted path) — serves attacker-chosen file from disk."
+- id: go.path.http_fileserver
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: medium
+  packages: ["net/http"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [http, FileServer]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "net/http"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        http.FileServer(target)
+      }
+  description: "http.FileServer(http.Dir(tainted)) — serves everything under a directory; attacker-chosen root = full traversal of that subtree."
+- id: go.path.filepath_walk
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: path-traversal
+  severity: medium
+  packages: ["path/filepath"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [filepath, Walk]
+  description: "Disabled — Walk is safe unless the root is tainted; enable with a tainted-root constraint."
+- id: go.path.filepath_join
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: ["path/filepath"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [filepath, Join]
+  match_examples:
+  - name: join base with request path segment
+    code: |
+      package main
+      import (
+        "net/http"
+        "path/filepath"
+      )
+      func file(r *http.Request) string {
+        name := input
+        return filepath.Join("/srv/files", name)
+      }
+    expect_match_text: [filepath.Join]
+  - name: join base with uploaded filename
+    code: |
+      package main
+      import (
+        "mime/multipart"
+        "path/filepath"
+      )
+      func dst(fh *multipart.FileHeader) string {
+        return filepath.Join("/srv/uploads", fh.Filename)
+      }
+    expect_match_text: [filepath.Join]
+  - name: tar extraction join with header name
+    code: |
+      package main
+      import (
+        "archive/tar"
+        "path/filepath"
+      )
+      func dst(root string, hdr *tar.Header) string {
+        return filepath.Join(root, hdr.Name)
+      }
+    expect_match_text: [filepath.Join]
+  - name: zip extraction join with entry name
+    code: |
+      package main
+      import (
+        "archive/zip"
+        "path/filepath"
+      )
+      func dst(root string, f *zip.File) string {
+        return filepath.Join(root, f.Name)
+      }
+    expect_match_text: [filepath.Join]
+  description: "filepath.Join(base, tainted...) — Join does NOT prevent traversal; an attacker segment containing '..' escapes `base`. Tainted segments here are a real path-traversal sink unless followed by a containment check (e.g. strings.HasPrefix on the cleaned result against a fixed root)."
+- id: go.path.path_join
+  enabled: true
+  language: go
+  tag: path-traversal
+  severity: high
+  packages: [path]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [path, Join]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "path"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        path.Join(target)
+      }
+  description: "path.Join(base, tainted...) — same traversal exposure as filepath.Join; '..' segments are not stripped by Join alone."
+
+# Archive extraction (Zip Slip class). The destination path is built
+# from the entry's name field; the library trusts the archive to
+# specify safe relative paths. Gitea CVE-2022-1928 is the canonical
+# motivator: services/repository/archiver/archiver.go used os.Create
+# with filepath.Join(dest, header.Name) where header.Name was
+# attacker-controlled.
+- id: go.path.tar_reader_next
+  enabled: true
+  language: go
+  tag: zip-slip
+  severity: critical
+  packages: [archive/tar]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Next$"
+  match_examples:
+  - name: tar reader next
+    code: |
+      package main
+      import "archive/tar"
+      func next(tr *tar.Reader) {
+        _, _ = tr.Next()
+      }
+    expect_match_text: [tr.Next]
+  description: "tar.Reader.Next() — returns header whose Name field is attacker-controlled inside the archive. Joining header.Name into a destination path without containment check is Zip Slip (CVE-2022-1928 shape)."
+- id: go.path.zip_reader_open
+  enabled: true
+  language: go
+  tag: zip-slip
+  severity: high
+  packages: [archive/zip]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [zip, OpenReader]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "archive/zip"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        zip.OpenReader(target)
+      }
+  description: "zip.OpenReader returns *Reader whose File entries carry attacker-controlled Name fields. The Zip Slip vector is using entry.Name as a path component without containment check."

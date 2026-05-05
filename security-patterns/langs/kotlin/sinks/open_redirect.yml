@@ -1,0 +1,287 @@
+- id: kotlin.open_redirect.send_redirect
+  enabled: true
+  language: kotlin
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpServletResponse
+      - sendRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    HttpServletResponse.sendRedirect(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        HttpServletResponse.sendRedirect("safe")
+      }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.sendRedirect(tainted).
+- id: kotlin.open_redirect.spring_redirect_view
+  enabled: true
+  language: kotlin
+  tag: open-redirect
+  severity: high
+  packages:
+  - org.springframework.web.servlet
+  cwe:
+  - CWE-601
+  match:
+    kind: new
+    callee:
+      name: RedirectView
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.servlet.*
+      class App {
+        fun handle(input: String) {
+          RedirectView(input)
+        }
+      }
+      class RedirectView(vararg args: Any?)
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.servlet.*
+      class App {
+      fun handle(input: String) {
+        RedirectView("safe")
+      }
+      }
+      class RedirectView(vararg args: Any?)
+    expect_no_match: true
+  description: new RedirectView(tainted).
+  imports:
+  - org.springframework.web.servlet
+- id: kotlin.open_redirect.spring_modelandview_redirect
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: open-redirect
+  severity: high
+  packages:
+  - org.springframework.web.servlet
+  cwe:
+  - CWE-601
+  match:
+    kind: new
+    callee:
+      name: ModelAndView
+  description: "Disabled — `new ModelAndView(...)` is ubiquitous and only a redirect when first arg starts with `redirect:`; needs string-prefix constraint."
+- id: kotlin.open_redirect.jaxrs_response_seeother
+  enabled: true
+  language: kotlin
+  tag: open-redirect
+  severity: high
+  packages:
+  - javax.ws.rs
+  - jakarta.ws.rs
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - seeOther
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(input: String) {
+          Response.seeOther(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.ws.rs.*
+      class App {
+      fun handle(input: String) {
+        Response.seeOther("safe")
+      }
+      }
+    expect_no_match: true
+  description: JAX-RS Response.seeOther(tainted URI).
+- id: kotlin.open_redirect.jaxrs_response_temporaryredirect
+  enabled: true
+  language: kotlin
+  tag: open-redirect
+  severity: high
+  packages:
+  - javax.ws.rs
+  - jakarta.ws.rs
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - temporaryRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(input: String) {
+          Response.temporaryRedirect(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.ws.rs.*
+      class App {
+      fun handle(input: String) {
+        Response.temporaryRedirect("safe")
+      }
+      }
+    expect_no_match: true
+  description: JAX-RS Response.temporaryRedirect.
+- id: kotlin.open_redirect.ktor_respond_redirect
+  enabled: true
+  language: kotlin
+  tag: open-redirect
+  severity: high
+  packages:
+  - io.ktor
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: respondRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          respondRedirect(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import io.ktor.*
+      class App {
+      fun handle(input: String) {
+        respondRedirect("safe")
+      }
+      }
+    expect_no_match: true
+  description: Ktor ApplicationCall.respondRedirect(tainted).
+- id: kotlin.open_redirect.struts_redirect
+  enabled: true
+  language: kotlin
+  tag: open-redirect
+  severity: high
+  packages:
+  - struts2
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ActionRedirectResult
+      - setLocation
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import struts2.*
+      class App {
+        fun handle(input: String) {
+          ActionRedirectResult.setLocation(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import struts2.*
+      class App {
+      fun handle(input: String) {
+        ActionRedirectResult.setLocation("safe")
+      }
+      }
+    expect_no_match: true
+  description: Struts2 ActionRedirectResult.setLocation.
+- id: kotlin.open_redirect.spring_responseentity_status
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: open-redirect
+  severity: medium
+  packages:
+  - org.springframework.web
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - status
+  description: "Disabled — flag only when 30x + Location header is tainted."
+- id: kotlin.open_redirect.android_intent_parseuri
+  enabled: true
+  language: kotlin
+  tag: intent-redirection
+  severity: high
+  packages:
+  - android.content
+  cwe:
+  - CWE-601
+  - CWE-940
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Intent
+      - parseUri
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.content.*
+      class App {
+        fun handle(input: String) {
+          Intent.parseUri(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import android.content.*
+      class App {
+      fun handle(input: String) {
+        Intent.parseUri("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Android Intent.parseUri(tainted) — attacker-controlled URI string can craft an Intent targeting any component (intent-redirection / privilege escalation)."

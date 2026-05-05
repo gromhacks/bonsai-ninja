@@ -1,0 +1,21 @@
+[package]
+name = "bonsai_lang_rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust language adapter (reference implementation)."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_lang_api = { workspace = true }
+tree-sitter = { workspace = true }
+
+[dev-dependencies]
+bonsai_conformance = { workspace = true }
+bonsai_testkit = { workspace = true }
+bonsai_workspace = { workspace = true }
+
+[lints]
+workspace = true

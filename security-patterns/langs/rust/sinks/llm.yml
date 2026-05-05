@@ -1,0 +1,105 @@
+# Rust LLM sinks (OpenAI / Anthropic / Bedrock client wrappers).
+- id: rust.llm.openai_api_rs_chat_completion_create
+  enabled: true
+  language: rust
+  tag: web-llm
+  severity: medium
+  packages: [openai_api_rs]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: chat_completion_create
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted openai chat completion request
+    code: |
+      use openai_api_rs;
+      use openai_api_rs;
+      use openai_api_rs::dummy;
+      fn example(prompt: &str) {
+          chat_completion_create(prompt);
+      }
+    expect_match_text: [chat_completion_create]
+  - name: literal openai chat completion request negative
+    code: |
+      use openai_api_rs;
+      use openai_api_rs;
+      use openai_api_rs::dummy;
+      fn example() {
+          chat_completion_create("Summarize the release notes");
+      }
+    expect_no_match: true
+  description: "openai-api-rs chat_completion_create — tainted prompt content reaches an LLM instruction / tool surface."
+
+  imports:
+  - openai_api_rs
+- id: rust.llm.aws_bedrock_invoke_model
+  enabled: true
+  language: rust
+  tag: web-llm
+  severity: medium
+  packages: [aws_sdk_bedrockruntime]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: invoke_model
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted bedrock invoke_model request
+    code: |
+      use aws_sdk_bedrockruntime;
+      use aws_sdk_bedrockruntime;
+      use aws_sdk_bedrockruntime::dummy;
+      fn example(prompt: &str) {
+          invoke_model(prompt);
+      }
+    expect_match_text: [invoke_model]
+  - name: literal bedrock invoke_model request negative
+    code: |
+      use aws_sdk_bedrockruntime;
+      use aws_sdk_bedrockruntime;
+      use aws_sdk_bedrockruntime::dummy;
+      fn example() {
+          invoke_model("Summarize the release notes");
+      }
+    expect_no_match: true
+  description: "aws-sdk-bedrockruntime invoke_model — tainted request body steers the underlying foundation model."
+
+  imports:
+  - aws_sdk_bedrockruntime
+- id: rust.llm.anthropic_messages_create
+  enabled: true
+  language: rust
+  tag: web-llm
+  severity: medium
+  packages: [anthropic]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [anthropic, messages, create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted anthropic messages request
+    code: |
+      use anthropic::dummy;
+      fn example(prompt: &str) {
+          anthropic::messages::create(prompt);
+      }
+    expect_match_text: ["anthropic::messages::create"]
+  - name: literal anthropic messages request negative
+    code: |
+      use anthropic::dummy;
+      fn example() {
+          anthropic::messages::create("Summarize the release notes");
+      }
+    expect_no_match: true
+  description: "Anthropic Rust client messages::create — tainted prompt content reaches Claude."

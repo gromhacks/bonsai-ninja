@@ -1,0 +1,77 @@
+- id: objc.access.aws_get_object
+  enabled: true
+  language: objc
+  tag: access-control
+  severity: high
+  packages: [AWSS3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: getObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AWSS3/AWSS3.h>
+      void test(id input) { id target = input; int amount = 1; getObject(input); }
+  - name: literal s3 get request negative
+    code: |
+      #import <AWSS3/AWSS3.h>
+      void test(void) { getObject(@"safe-key"); }
+    expect_no_match: true
+  description: "AWSS3 getObject — tainted bucket/key selector reads arbitrary object data."
+
+- id: objc.access.aws_put_object
+  enabled: true
+  language: objc
+  tag: access-control
+  severity: high
+  packages: [AWSS3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: putObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AWSS3/AWSS3.h>
+      void test(id input) { id target = input; int amount = 1; putObject(input); }
+  - name: literal s3 put request negative
+    code: |
+      #import <AWSS3/AWSS3.h>
+      void test(void) { putObject(@"safe-key"); }
+    expect_no_match: true
+  description: "AWSS3 putObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+
+- id: objc.access.aws_get_secret_value
+  enabled: true
+  language: objc
+  tag: access-control
+  severity: high
+  packages: [AWSSecretsManager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      name: getSecretValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AWSSecretsManager/AWSSecretsManager.h>
+      void test(id input) { id target = input; int amount = 1; getSecretValue(input); }
+  - name: literal secret id negative
+    code: |
+      #import <AWSSecretsManager/AWSSecretsManager.h>
+      void test(void) { getSecretValue(@"safe-secret"); }
+    expect_no_match: true
+  description: "AWS Secrets Manager getSecretValue — tainted secret id reads arbitrary secret material."

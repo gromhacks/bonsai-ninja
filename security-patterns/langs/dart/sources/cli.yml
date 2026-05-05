@@ -1,0 +1,131 @@
+# Dart CLI / local sources.
+- id: dart.cli.main_arguments
+  enabled: true
+  language: dart
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: param
+    target:
+      name: arguments
+  match_examples:
+  - name: declared shape
+    code: |
+      void handle(String arguments) { var seen = arguments; }
+  description: "main(List<String> arguments) — argv."
+
+- id: dart.cli.args_param
+  enabled: true
+  language: dart
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: param
+    target:
+      name: args
+  match_examples:
+  - name: declared shape
+    code: |
+      void handle(String args) { var seen = args; }
+  description: "main(List<String> args) — argv (short form)."
+
+- id: dart.cli.stdin_readline_sync
+  enabled: true
+  language: dart
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [stdin, readLineSync]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; stdin.readLineSync(input); }
+  description: "stdin.readLineSync — interactive input."
+
+- id: dart.cli.stdin_read_byte_sync
+  enabled: true
+  language: dart
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      attribute: [stdin, readByteSync]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; stdin.readByteSync(input); }
+  description: "stdin.readByteSync."
+
+- id: dart.os.platform_environment
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: environment
+  description: "Disabled — the current Dart adapter does not index `Platform.environment` property reads."
+
+- id: dart.os.platform_script
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: script
+  description: "Disabled — the current Dart adapter does not index `Platform.script` property reads."
+
+- id: dart.args.argparser_parse
+  enabled: true
+  language: dart
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [args]
+  match:
+    kind: call
+    callee:
+      attribute: [parser, parse]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:args/args.dart';
+      import 'package:args/args.dart';
+      import 'package:args/args.dart';
+      import 'package:args/args.dart';
+      import 'package:args/args.dart'; // args
+      void test() { var input = "x"; var amount = 1; parser.parse(input); }
+  description: "package:args ArgParser.parse."
+
+  imports:
+  - args/args.dart
+- id: dart.flutter.text_editing_controller
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  frameworks: [flutter]
+  match:
+    kind: read
+    target:
+      name: text
+  description: "Disabled — FP-prone. Bare name 'text' matches every .text attribute across Flutter widgets."

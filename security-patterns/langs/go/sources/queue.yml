@@ -1,0 +1,111 @@
+# Go queue / broker message sources.
+- id: go.kafka.consumer_message
+  enabled: true
+  language: go
+  trust: service
+  tag: queue-input
+  category: queue-input
+  payload_types: [event]
+  packages:
+  - "github.com/Shopify/sarama"
+  - "github.com/segmentio/kafka-go"
+  - "github.com/confluentinc/confluent-kafka-go"
+  match:
+    kind: read
+    target:
+      attribute: [msg, Value]
+  match_examples:
+  - name: sarama kafka consumer message
+    code: |
+      package main
+      import "github.com/Shopify/sarama"
+      func handle(msg *sarama.ConsumerMessage) {
+        _ = msg.Value
+      }
+    expect_match_text: [msg.Value]
+  description: "Kafka ConsumerMessage.Value / Message.Value — narrowed to attribute chain."
+
+- id: go.amqp.delivery_body
+  enabled: true
+  language: go
+  trust: service
+  tag: queue-input
+  category: queue-input
+  payload_types: [event]
+  packages: ["github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp"]
+  match:
+    kind: read
+    target:
+      attribute: [delivery, Body]
+  match_examples:
+  - name: amqp delivery body
+    code: |
+      package main
+      import amqp "github.com/rabbitmq/amqp091-go"
+      func handle(delivery amqp.Delivery) {
+        _ = delivery.Body
+      }
+    expect_match_text: [delivery.Body]
+  description: "amqp Delivery.Body — narrowed to attribute chain."
+
+- id: go.nats.msg_data
+  enabled: true
+  language: go
+  trust: service
+  tag: queue-input
+  category: queue-input
+  payload_types: [event]
+  packages: ["github.com/nats-io/nats.go", "cloud.google.com/go/pubsub"]
+  match:
+    kind: read
+    target:
+      attribute: [msg, Data]
+  match_examples:
+  - name: nats message data
+    code: |
+      package main
+      import "github.com/nats-io/nats.go"
+      func handle(msg *nats.Msg) {
+        _ = msg.Data
+      }
+    expect_match_text: [msg.Data]
+  description: "nats.Msg.Data / GCP pubsub.Message.Data — attacker-controlled queue message payload. Shared attribute chain covers both libraries."
+
+- id: go.gcp.pubsub_message_data
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: service
+  tag: queue-input
+  category: queue-input
+  payload_types: [event]
+  packages: ["cloud.google.com/go/pubsub"]
+  match:
+    kind: read
+    target:
+      attribute: [msg, Data]
+  description: "Disabled — duplicate signature with go.nats.msg_data (both match attribute chain [msg, Data] on kind:read). The nats rule's packages list now documents GCP pubsub coverage."
+
+- id: go.aws.sqs_message_body
+  enabled: true
+  language: go
+  trust: service
+  tag: queue-input
+  category: queue-input
+  payload_types: [event]
+  packages: ["github.com/aws/aws-sdk-go", "github.com/aws/aws-sdk-go-v2"]
+  match:
+    kind: read
+    target:
+      attribute: [message, Body]
+  match_examples:
+  - name: aws sqs message body
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go/service/sqs"
+      func handle(message *sqs.Message) {
+        _ = message.Body
+      }
+    expect_match_text: [message.Body]
+  description: "AWS SQS types.Message.Body — attacker-controlled message content pulled from a queue."

@@ -1,0 +1,538 @@
+# C++ eval / dynamic-code sinks (embedded interpreters + dynamic loading).
+- id: cpp.eval.dlopen
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: dlopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        dlopen(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        dlopen("safe");
+      }
+    expect_no_match: true
+  description: "dlopen(tainted) — loads arbitrary shared library as code."
+
+- id: cpp.eval.dlsym
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: dlsym
+  description: "Disabled — dlsym is benign unless the symbol name is tainted."
+
+- id: cpp.eval.loadlibrary
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: LoadLibraryA
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        LoadLibraryA(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        LoadLibraryA("safe");
+      }
+    expect_no_match: true
+  description: "Win32 LoadLibraryA(tainted) — loads arbitrary DLL."
+
+- id: cpp.eval.loadlibraryw
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: LoadLibraryW
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        LoadLibraryW(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        LoadLibraryW("safe");
+      }
+    expect_no_match: true
+  description: "Win32 LoadLibraryW(tainted) — loads arbitrary DLL (wide-char)."
+
+- id: cpp.eval.loadlibraryex
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: LoadLibraryExA
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        LoadLibraryExA(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        LoadLibraryExA("safe");
+      }
+    expect_no_match: true
+  description: "Win32 LoadLibraryExA(tainted) — loads arbitrary DLL."
+
+- id: cpp.eval.lua_dostring
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [lua, sol2]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: luaL_dostring
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <lua.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        luaL_dostring(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        luaL_dostring("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Embedded Lua luaL_dostring(L, tainted) — evaluates Lua source."
+
+- id: cpp.eval.lua_dofile
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [lua]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: luaL_dofile
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <lua.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        luaL_dofile(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        luaL_dofile("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Embedded Lua luaL_dofile(L, tainted) — runs file as Lua."
+
+- id: cpp.eval.sol_do_string
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [sol2]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [state, do_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <sol/sol.hpp>
+      #include <sol/sol.hpp>
+      #include <sol/sol.hpp> /* sol2 */
+      #include <sol/sol.hpp> /* sol2 */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        state::do_string(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        state::do_string("safe");
+      }
+    expect_no_match: true
+  description: "sol::state::do_string(tainted) — evaluates Lua source."
+
+  imports:
+  - sol
+  - sol/sol.hpp
+- id: cpp.eval.sol_script
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [sol2]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [state, script]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <sol/sol.hpp>
+      #include <sol/sol.hpp>
+      #include <sol/sol.hpp> /* sol2 */
+      #include <sol/sol.hpp> /* sol2 */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        state::script(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        state::script("safe");
+      }
+    expect_no_match: true
+  description: "sol::state::script(tainted) — evaluates Lua source."
+
+  imports:
+  - sol
+  - sol/sol.hpp
+- id: cpp.eval.python_pyrun_simplestring
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [python]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: PyRun_SimpleString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Python.h>
+      #include <Python.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        PyRun_SimpleString(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        PyRun_SimpleString("safe");
+      }
+    expect_no_match: true
+  description: "Embedded CPython PyRun_SimpleString(tainted) — executes Python source."
+
+  imports:
+  - Python
+  - Python.h
+- id: cpp.eval.python_pyrun_string
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [python]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: PyRun_String
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Python.h>
+      #include <Python.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        PyRun_String(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        PyRun_String("safe");
+      }
+    expect_no_match: true
+  description: "Embedded CPython PyRun_String(tainted, ...) — executes Python source."
+
+  imports:
+  - Python
+  - Python.h
+- id: cpp.eval.v8_compile_unbound_script
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [v8]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Script, Compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <v8.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        Script::Compile(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Script::Compile("safe");
+      }
+    expect_no_match: true
+  description: "v8::Script::Compile(tainted) then Run() — JS execution."
+
+- id: cpp.eval.duktape_eval
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [duktape]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: duk_eval_string
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <duktape.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        duk_eval_string(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        duk_eval_string("safe", "safe");
+      }
+    expect_no_match: true
+  description: "duktape duk_eval_string — evaluates JS source."
+
+- id: cpp.eval.duktape_peval
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [duktape]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: duk_peval_string
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <duktape.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        duk_peval_string(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        duk_peval_string("safe", "safe");
+      }
+    expect_no_match: true
+  description: "duktape duk_peval_string — protected eval of JS source."
+
+- id: cpp.eval.quickjs_eval
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [quickjs]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: JS_Eval
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <quickjs.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        JS_Eval(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        JS_Eval("safe", "safe");
+      }
+    expect_no_match: true
+  description: "QuickJS JS_Eval — evaluates JS source."
+
+- id: cpp.eval.chaiscript_eval
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [chaiscript]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ChaiScript, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <chaiscript.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        ChaiScript::eval(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        ChaiScript::eval("safe");
+      }
+    expect_no_match: true
+  description: "ChaiScript::eval(tainted) — evaluates ChaiScript source."
+
+- id: cpp.eval.chaiscript_eval_file
+  enabled: true
+  language: cpp
+  tag: code-injection
+  severity: critical
+  packages: [chaiscript]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ChaiScript, eval_file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <chaiscript.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        ChaiScript::eval_file(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        ChaiScript::eval_file("safe");
+      }
+    expect_no_match: true
+  description: "ChaiScript::eval_file(tainted) — executes file as ChaiScript."

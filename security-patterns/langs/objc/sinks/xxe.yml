@@ -1,0 +1,133 @@
+# Objective-C XXE sinks (NSXMLParser, NSXMLDocument, libxml2 bridge).
+- id: objc.xxe.nsxmlparser_initwithdata
+  enabled: true
+  language: objc
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: initWithData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [NSXMLParser initWithData:input]; }
+  - name: literal xml data negative
+    code: |
+      void test(void) { [NSXMLParser initWithData:@"<root/>"]; }
+    expect_no_match: true
+  description: "[[NSXMLParser alloc] initWithData:] — parses tainted XML; default allows external entities unless -setShouldResolveExternalEntities:NO is set."
+
+- id: objc.xxe.nsxmlparser_initwithstream
+  enabled: true
+  language: objc
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: initWithStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [NSXMLParser initWithStream:input]; }
+  - name: literal xml stream negative
+    code: |
+      void test(void) { [NSXMLParser initWithStream:@"safe"]; }
+    expect_no_match: true
+  description: "NSXMLParser -initWithStream: — streaming XML parse; same external-entity risk as initWithData:."
+
+- id: objc.xxe.nsxmlparser_initwithcontentsofurl
+  enabled: true
+  language: objc
+  tag: xxe
+  severity: high
+  cwe: [CWE-611, CWE-918]
+  match:
+    kind: call
+    callee:
+      name: initWithContentsOfURL
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [NSXMLParser initWithContentsOfURL:input]; }
+  - name: literal xml url negative
+    code: |
+      void test(void) { [NSXMLParser initWithContentsOfURL:@"https://safe.example/feed.xml"]; }
+    expect_no_match: true
+  description: "NSXMLParser/NSXMLDocument -initWithContentsOfURL: — fetches and parses remote XML; both XXE and SSRF."
+
+- id: objc.xxe.shouldresolveexternalentities_yes
+  enabled: true
+  language: objc
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: write
+    target:
+      name: shouldResolveExternalEntities
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; shouldResolveExternalEntities = input; }
+  description: "NSXMLParser.shouldResolveExternalEntities = YES — explicitly enables external entity resolution (XXE)."
+
+- id: objc.xxe.nsxmldocument_initwithxmlstring
+  enabled: true
+  language: objc
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: initWithXMLString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [NSXMLDocument initWithXMLString:input]; }
+  - name: literal xml string negative
+    code: |
+      void test(void) { [NSXMLDocument initWithXMLString:@"<root/>"]; }
+    expect_no_match: true
+  description: "NSXMLDocument -initWithXMLString:options: — parses tainted XML; if options include NSXMLNodeLoadExternalEntitiesAlways allows XXE."
+
+- id: objc.xxe.libxml2_xmlread
+  enabled: true
+  language: objc
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^(xmlReadMemory|xmlReadFile|xmlReadDoc|xmlReadIO|xmlCtxtReadMemory|xmlCtxtReadFile|xmlParseMemory|xmlParseFile)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; xmlReadMemory(input); }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        libxml2_xmlread("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlRead*/xmlParse* — tainted XML parsed with default options allows DTD-based XXE (XML_PARSE_NOENT)."

@@ -1,0 +1,31 @@
+# erlang log_injection sinks.
+
+# Log-injection sinks (round 2 fill).
+- id: erlang.log_injection.logger_info
+  enabled: true
+  language: erlang
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [logger, info]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted logger info args
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          logger:info("~ts", [Input]).
+    - name: literal logger info args negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          logger:info("~ts", ["safe"]).
+      expect_no_match: true
+  description: 'logger:info("...~ts...~n", [User]) — log forging.'

@@ -1,0 +1,123 @@
+---
+title: "Review Checklist"
+description: "Change-class checklist for bonsai-ninja reviewers and contributors."
+---
+
+# PR review checklist
+
+A change-class checklist for reviewers and contributors. Match your PR's
+class and verify each box.
+
+---
+
+## Engine change (`crates/taint/src/inter/`, `intra.rs`, `assignment.rs`, `reachable.rs`)
+
+- [ ] **Test pins the change.** A new test in `inter/tests.rs`,
+      `tests/over_taint_matrix.rs`, `tests/ten_concept_alignment.rs`, or
+      `tests/interprocedural_constructs.rs` reproduces the bug or
+      demonstrates the new behaviour.
+- [ ] **Empty seed invariant holds.** `interproc_false_path_clean_seed_
+      does_not_propagate` and `concept_1_source_model_empty_seed_no_
+      propagation` both pass.
+- [ ] **Over-taint matrix passes.** `cargo test -p bonsai_taint --test
+      over_taint_matrix` is green for all 21 languages.
+- [ ] **Determinism holds.** `finding_ids_deterministic_across_runs`
+      passes.
+- [ ] **Quoted-literal short-circuit unchanged.** `arg_text_is_tainted` /
+      `rhs_operand_is_tainted` do not propagate identifier tokens from
+      inside string literals.
+- [ ] **Matcher policy fingerprint bumped.** If the change alters
+      propagation semantics, `MATCHER_POLICY_FINGERPRINT` is incremented.
+- [ ] **Documentation updated.** `docs/contributing/taint-engine-spec.mdx` reflects the
+      new behaviour.
+
+## Adapter change (`crates/lang_*/src/lib.rs`)
+
+- [ ] **Conformance test passes.** `cargo test -p bonsai_lang_<name>`.
+- [ ] **Workspace test passes.** `cargo test -p bonsai_workspace --test
+      lang_<name>` and `--test inspect_lang_<name>`.
+- [ ] **Per-language matrix passes.** `cargo test -p bonsai_cli --test
+      per_lang_cli_matrix <lang>_matrix`.
+- [ ] **Mega-flow fixture intact.** `scripts/validate-mega-cli.py`
+      reports the expected finding count.
+- [ ] **Capabilities declaration matches reality.** `fn capabilities()`
+      reflects the actual coverage; `Unsupported` levels are honest.
+- [ ] **Adapter never reaches into core analysis.** Imports are limited
+      to `bonsai_lang_api` and tree-sitter.
+- [ ] **Documentation updated.** `docs/contributing/architecture.mdx` per-language
+      summary reflects new GrammarHandler config.
+
+## Rule pack change (`security-patterns/`)
+
+- [ ] **Validator passes.** `cargo run --bin bonsai-ninja -- security
+      ./security-patterns pack --validate` reports `valid: true` with
+      zero error- or warning-level issues.
+- [ ] **Rulepack conformance passes.** `cargo test -p bonsai_security
+      --test rulepack_conformance`.
+- [ ] **No FP audit passes.** `cargo test -p bonsai_security --test
+      no_fp_audit`.
+- [ ] **Match examples are realistic.** Imports use real adapter-visible
+      forms (e.g. `from Crypto.Cipher import DES`, not `import
+      pycryptodome`).
+- [ ] **Discriminating constraints have positive AND negative examples.**
+- [ ] **Disabled rules have `subsumed_by` pointing at an enabled
+      canonical** (or transitively-enabled chain).
+- [ ] **CWE / severity declared on sinks.** Validator catches missing
+      values.
+
+## Browse / Inspect / Trace change (`crates/browse`, `crates/inspect`, `crates/trace`)
+
+- [ ] **Browse tests pass.** `cargo test -p bonsai_workspace --test
+      flow_event_audit_fixes` and the per-command tests.
+- [ ] **JSON shape stable.** Field names in `*Out` structs match
+      previous releases unless explicitly breaking.
+- [ ] **CLI output unchanged.** `cargo test -p bonsai_cli --test
+      browse_commands` passes.
+- [ ] **SDK parity intact.** `cargo test -p bonsai_cli --test
+      sdk_cli_parity`.
+- [ ] **Pagination still works** for the affected command.
+
+## Security analysis change (`crates/security`)
+
+- [ ] **Findings deterministic.** `finding_ids_deterministic_across_runs`
+      passes.
+- [ ] **SARIF parity intact.** `<lang>_matrix::micro_security_sarif_shape`
+      tests pass.
+- [ ] **Sanitizer fixtures intact.** `cargo test -p bonsai_cli --test
+      sanitizer_fixtures` reports expected raw + sanitized findings.
+- [ ] **Validator matches CLI.** `cargo test -p bonsai_cli --test
+      validate_script` passes.
+- [ ] **Documentation updated.** `docs/security-spec.mdx` reflects schema
+      / lifecycle changes.
+
+## CLI change (`crates/cli`)
+
+- [ ] **Command coverage test passes.** `cargo test -p bonsai_cli --test
+      command_coverage`.
+- [ ] **All-flag test passes.** Every command accepts the relevant
+      `--all` / `--page` / `--context` flags consistently.
+- [ ] **Theme / paging integration intact.** Output respects
+      `BONSAI_THEME`, `--theme`, `--page`, `--context`.
+
+## SDK change (`crates/sdk`)
+
+- [ ] **Public re-exports preserved.** Existing consumers of
+      `bonsai_sdk::*` still compile.
+- [ ] **SDK / CLI parity intact.** `cargo test -p bonsai_cli --test
+      sdk_cli_parity` passes.
+- [ ] **Documentation updated.** `docs/contributing/sdk.mdx` lists the new API.
+
+## Documentation-only change
+
+- [ ] **Code references match.** File paths, function names, type
+      signatures referenced in docs match the current code.
+- [ ] **Cross-links resolve.** Markdown links point at existing files
+      and sections.
+
+## All changes
+
+- [ ] `cargo build --release` is warning-free.
+- [ ] `cargo test --workspace` passes (full sweep before merging).
+- [ ] No `panic!` / `unwrap()` introduced on user input.
+- [ ] No `unsafe_code` introduced.
+- [ ] Commit message explains the why, not just the what.

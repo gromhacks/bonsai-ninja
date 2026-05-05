@@ -1,0 +1,128 @@
+# Java file-upload sinks (Spring + Servlet + commons-fileupload).
+- id: java.upload.spring_multipart_transferto
+  enabled: true
+  language: java
+  tag: file-upload
+  severity: high
+  packages: [org.springframework.web.multipart]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [MultipartFile, transferTo]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.multipart.*;
+      class App {
+        void handle(String input) throws Exception {
+          MultipartFile.transferTo(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.multipart.*;
+      class App {
+        void handle(String input) throws Exception {
+          MultipartFile.transferTo("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Spring MultipartFile.transferTo."
+
+  imports:
+  - org.springframework.web.multipart
+- id: java.upload.servlet_part_write
+  enabled: true
+  language: java
+  tag: file-upload
+  severity: high
+  packages: [javax.servlet, jakarta.servlet]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Part, write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          Part.write(input);
+        }
+      }
+  - name: jakarta servlet part write
+    code: |
+      import jakarta.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          Part.write(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          Part.write("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Servlet Part.write(filename)."
+
+- id: java.upload.commons_fileupload_write
+  enabled: true
+  language: java
+  tag: file-upload
+  severity: high
+  packages: [org.apache.commons.fileupload]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FileItem, write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.fileupload.*;
+      class App {
+        void handle(String input) throws Exception {
+          FileItem.write(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.fileupload.*;
+      class App {
+        void handle(String input) throws Exception {
+          FileItem.write("safe");
+        }
+      }
+    expect_no_match: true
+  description: "commons-fileupload FileItem.write."
+
+  imports:
+  - org.apache.commons.fileupload
+- id: java.upload.transferto_generic
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: java
+  tag: file-upload
+  severity: low
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: transferTo
+  description: "Disabled — generic name; covered by package-scoped rule above."

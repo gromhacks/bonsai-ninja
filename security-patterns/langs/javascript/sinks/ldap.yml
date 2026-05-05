@@ -1,0 +1,199 @@
+# JavaScript LDAP-injection (ldapjs / ldap-client / activedirectory).
+- id: javascript.ldap.ldapjs_search
+  enabled: true
+  language: javascript
+  tag: ldap-injection
+  severity: high
+  packages: [ldapjs, ldapts]
+  imports: [ldapjs, ldapts]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [client, search]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldapjs search
+    code: |
+      const _u = require("ldapjs");
+      function demo(input, req, obj) {
+        return client.search("(uid=" + input + ")");
+      }
+    expect_match_text: [client.search]
+  - name: literal ldapjs search negative
+    code: |
+      const _u = require("ldapjs");
+      function demo() {
+        return client.search("(uid=alice)");
+      }
+    expect_no_match: true
+  description: "ldapjs/ldapts client.search with tainted filter."
+
+- id: javascript.ldap.ldapjs_event_search
+  enabled: true
+  language: javascript
+  tag: ldap-injection
+  severity: high
+  packages: [ldapjs]
+  imports: [ldapjs]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [ev, search]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldapjs event search filter
+    code: |
+      const _u = require("ldapjs");
+      function demo(ev, input) {
+        return ev.search("(uid=" + input + ")");
+      }
+    expect_match_text: [ev.search]
+  - name: literal ldapjs event search negative
+    code: |
+      const _u = require("ldapjs");
+      function demo(ev) {
+        return ev.search("(uid=alice)");
+      }
+    expect_no_match: true
+  description: "ldapjs ev.search(filter) — tainted LDAP filter expression."
+
+- id: javascript.ldap.ldapjs_modify
+  enabled: true
+  language: javascript
+  tag: ldap-injection
+  severity: high
+  packages: [ldapjs]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [client, modify]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldapjs modify
+    code: |
+      const _u = require("ldapjs");
+      function demo(input, req, obj) {
+        return client.modify("(uid=" + input + ")");
+      }
+  - name: literal ldapjs modify negative
+    code: |
+      const _u = require("ldapjs");
+      function demo() {
+        return client.modify("(uid=alice)");
+      }
+    expect_no_match: true
+  description: "ldapjs client.modify."
+
+- id: javascript.ldap.ldapjs_add
+  enabled: true
+  language: javascript
+  tag: ldap-injection
+  severity: high
+  packages: [ldapjs]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [client, add]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldapjs add
+    code: |
+      const _u = require("ldapjs");
+      function demo(input, req, obj) {
+        return client.add("(uid=" + input + ")");
+      }
+  - name: literal ldapjs add negative
+    code: |
+      const _u = require("ldapjs");
+      function demo() {
+        return client.add("(uid=alice)");
+      }
+    expect_no_match: true
+  description: "ldapjs client.add."
+
+- id: javascript.ldap.ldapjs_del
+  enabled: true
+  language: javascript
+  tag: ldap-injection
+  severity: critical
+  packages: [ldapjs]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [client, del]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ldapjs del
+    code: |
+      const _u = require("ldapjs");
+      function demo(input, req, obj) {
+        return client.del("(uid=" + input + ")");
+      }
+  - name: literal ldapjs del negative
+    code: |
+      const _u = require("ldapjs");
+      function demo() {
+        return client.del("(uid=alice)");
+      }
+    expect_no_match: true
+  description: "ldapjs client.del."
+
+- id: javascript.ldap.activedirectory_authenticate
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: ldap-injection
+  severity: medium
+  packages: [activedirectory, activedirectory2]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [ad, authenticate]
+  description: "Disabled — authenticate is auth, not injection; flag DN-injection only."
+
+- id: javascript.ldap.activedirectory_find_user
+  enabled: true
+  language: javascript
+  tag: ldap-injection
+  severity: high
+  packages: [activedirectory, activedirectory2]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [ad, findUser]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: activedirectory find user
+    code: |
+      const _u = require("activedirectory");
+      function demo(input, req, obj) {
+        return ad.findUser("(uid=" + input + ")");
+      }
+  - name: literal activedirectory find user negative
+    code: |
+      const _u = require("activedirectory");
+      function demo() {
+        return ad.findUser("(uid=alice)");
+      }
+    expect_no_match: true
+  description: "activedirectory findUser with tainted username."

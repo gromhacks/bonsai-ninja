@@ -1,0 +1,93 @@
+# Solidity block-context sources.
+#
+# Every value in the `block` magic global is influenced by the block
+# proposer/miner. Treat these as `service`-trust seeds: not
+# attacker-from-network, but attacker-from-validator. Manipulation
+# matters for: weak randomness, time-locks, fee math, MEV.
+- id: solidity.block.timestamp
+  enabled: true
+  language: solidity
+  trust: service
+  tag: block-context
+  match:
+    kind: read
+    target:
+      name: timestamp
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.timestamp); } }
+  description: "block.timestamp — proposer-influenceable within ~15s drift. Unsafe as entropy source, deadline boundary, or strict ordering key."
+- id: solidity.block.coinbase
+  enabled: true
+  language: solidity
+  trust: service
+  tag: block-context
+  match:
+    kind: read
+    target:
+      name: coinbase
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.coinbase); } }
+  description: "block.coinbase — the proposer's address; chosen by proposer. Unsafe for fee-distribution / reward logic and for entropy."
+- id: solidity.block.difficulty
+  enabled: true
+  language: solidity
+  trust: service
+  tag: block-context
+  match:
+    kind: read
+    target:
+      name: difficulty
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.difficulty); } }
+  description: "block.difficulty / prevrandao (post-Merge) — proposer can influence / bias. Unsafe as randomness."
+- id: solidity.block.gaslimit
+  enabled: true
+  language: solidity
+  trust: service
+  tag: block-context
+  match:
+    kind: read
+    target:
+      name: gaslimit
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.gaslimit); } }
+  description: "block.gaslimit — consensus-chosen per block; unsafe for branching / availability-critical logic."
+- id: solidity.block.basefee
+  enabled: true
+  language: solidity
+  trust: service
+  tag: block-context
+  match:
+    kind: read
+    target:
+      name: basefee
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable dst, bytes memory payload, uint256 amount) public { uint256 result = uint256(block.basefee); } }
+  description: "block.basefee — EIP-1559 base fee; proposer/MEV-influenceable, unsafe as a fee oracle or pricing input."
+- id: solidity.block.number
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: solidity
+  trust: service
+  tag: block-context
+  match:
+    kind: read
+    target:
+      name: number
+  description: "Disabled — `.number` field name collides with too many ordinary struct/var reads (e.g. `token.number`, `req.number`); re-enable only with block-expression context (attribute chain [block, number])."

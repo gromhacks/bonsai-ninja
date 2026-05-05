@@ -1,0 +1,132 @@
+# Dart JWT sinks.
+- id: dart.jwt.dart_jsonwebtoken_verify
+  aliases:
+  - dart.jwt.alg_confusion
+  enabled: true
+  language: dart
+  tag: jwt
+  severity: high
+  packages: [dart_jsonwebtoken]
+  cwe: [CWE-347, CWE-345]
+  match:
+    kind: call
+    callee:
+      attribute: [JWT, verify]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken
+      // uses dart_jsonwebtoken
+      void test() { var input = "x"; var amount = 1; JWT.verify(input); }
+  description: "dart_jsonwebtoken JWT.verify — check algorithm whitelist + key pinning. Also covers merged aliases: dart.jwt.alg_confusion."
+
+  imports:
+  - dart_jsonwebtoken/dart_jsonwebtoken.dart
+- id: dart.jwt.dart_jsonwebtoken_decode
+  enabled: true
+  language: dart
+  tag: jwt
+  severity: high
+  packages: [dart_jsonwebtoken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JWT, decode]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken
+      // uses dart_jsonwebtoken
+      void test() { var input = "x"; var amount = 1; JWT.decode(input); }
+  description: "dart_jsonwebtoken JWT.decode — does not verify signature."
+
+  imports:
+  - dart_jsonwebtoken/dart_jsonwebtoken.dart
+- id: dart.jwt.jose_unverified
+  enabled: true
+  language: dart
+  tag: jwt
+  severity: critical
+  packages: [jose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JsonWebToken, unverified]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:jose/jose.dart';
+      import 'package:jose/jose.dart';
+      import 'package:jose/jose.dart';
+      import 'package:jose/jose.dart';
+      import 'package:jose/jose.dart'; // jose
+      // uses jose
+      void test() { var input = "x"; var amount = 1; JsonWebToken.unverified(input); }
+  description: "jose JsonWebToken.unverified — explicit no-verify."
+
+  imports:
+  - jose/jose.dart
+- id: dart.jwt.jaguar_verify
+  enabled: true
+  language: dart
+  tag: jwt
+  severity: high
+  packages: [jaguar_jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: verifyJwtHS256Signature
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:jaguar_jwt/jaguar_jwt.dart';
+      import 'package:jaguar_jwt/jaguar_jwt.dart';
+      import 'package:jaguar_jwt/jaguar_jwt.dart';
+      import 'package:jaguar_jwt/jaguar_jwt.dart';
+      import 'package:jaguar_jwt/jaguar_jwt.dart';
+      void test() { var input = "x"; var amount = 1; verifyJwtHS256Signature(input); }
+  description: "jaguar_jwt verifyJwtHS256Signature — check secret not attacker-controlled."
+
+  imports:
+  - jaguar_jwt/jaguar_jwt.dart
+- id: dart.jwt.corsac_parse
+  enabled: true
+  language: dart
+  tag: jwt
+  severity: high
+  packages: [corsac_jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JWT, parse]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:corsac_jwt/corsac_jwt.dart';
+      import 'package:corsac_jwt/corsac_jwt.dart';
+      import 'package:corsac_jwt/corsac_jwt.dart';
+      import 'package:corsac_jwt/corsac_jwt.dart';
+      import 'package:corsac_jwt/corsac_jwt.dart'; // corsac_jwt
+      // uses corsac_jwt
+      void test() { var input = "x"; var amount = 1; JWT.parse(input); }
+  description: "corsac_jwt JWT.parse — does not verify signature."
+
+# JWT alg-confusion (T400). HMAC verify with an RSA public
+# key — when both HS* and RS* algorithms are allowed in the
+# verifier's algorithm list, an attacker can sign their own
+# token with the public key as the HMAC secret. Detect by
+# matching the algorithm-list shape at the verify call.
+  imports:
+  - corsac_jwt/corsac_jwt.dart

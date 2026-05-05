@@ -1,0 +1,155 @@
+# Python hardware / physical-input sources (GPIO, I2C/SMBus, SPI, UART).
+- id: python.physical.rpigpio_input
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  frameworks: [raspberry-pi]
+  packages: [RPi.GPIO]
+  match:
+    kind: call
+    callee:
+      attribute: [GPIO, input]
+  match_examples:
+  - name: physical rpigpio input
+    code: |
+      import RPi.GPIO
+      def example(user_input):
+          return GPIO.input(user_input)
+  description: "RPi.GPIO GPIO.input(pin) — physical pin state read."
+
+- id: python.physical.smbus_read_byte
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [smbus, smbus2]
+  match:
+    kind: call
+    callee:
+      name: read_byte
+  match_examples:
+  - name: physical smbus read byte
+    code: |
+      import smbus
+      def example(user_input):
+          return read_byte(user_input)
+  description: "SMBus read_byte — byte read from an I2C/SMBus peripheral."
+
+- id: python.physical.smbus_read_byte_data
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [smbus, smbus2]
+  match:
+    kind: call
+    callee:
+      name: read_byte_data
+  match_examples:
+  - name: physical smbus read byte data
+    code: |
+      import smbus
+      def example(user_input):
+          return read_byte_data(user_input)
+  description: "SMBus read_byte_data — device register read over a chip-to-chip bus."
+
+- id: python.physical.smbus_read_word_data
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [smbus, smbus2]
+  match:
+    kind: call
+    callee:
+      name: read_word_data
+  match_examples:
+  - name: physical smbus read word data
+    code: |
+      import smbus
+      def example(user_input):
+          return read_word_data(user_input)
+  description: "SMBus read_word_data — 16-bit register read from an attached device."
+
+- id: python.physical.smbus_read_i2c_block_data
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [smbus, smbus2]
+  match:
+    kind: call
+    callee:
+      name: read_i2c_block_data
+  match_examples:
+  - name: physical smbus read i2c block data
+    code: |
+      import smbus
+      def example(user_input):
+          return read_i2c_block_data(user_input)
+  description: "SMBus read_i2c_block_data — block read from a peripheral over I2C."
+
+- id: python.physical.spidev_readbytes
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [spidev]
+  match:
+    kind: call
+    callee:
+      name: readbytes
+  match_examples:
+  - name: physical spidev readbytes
+    code: |
+      import spidev
+      def example(user_input):
+          return readbytes(user_input)
+  description: "spidev readbytes — SPI peripheral bytes clocked in from external hardware."
+
+- id: python.physical.pyserial_read_until
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [pyserial]
+  match:
+    kind: call
+    callee:
+      name: read_until
+  match_examples:
+  - name: physical pyserial read until
+    code: |
+      import pyserial
+      def example(user_input):
+          return read_until(user_input)
+  description: "pyserial read_until — UART/serial frame bytes received from connected hardware."
+
+- id: python.physical.periphery_gpio_read_event
+  enabled: true
+  language: python
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [periphery]
+  match:
+    kind: call
+    callee:
+      name: read_event
+  match_examples:
+  - name: physical periphery gpio read event
+    code: |
+      import pythonperiphery
+      def example(user_input):
+          return read_event(user_input)
+  description: "python-periphery read_event — edge event from GPIO-backed hardware."
+  imports:
+  - pythonperiphery

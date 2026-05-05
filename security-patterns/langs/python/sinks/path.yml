@@ -1,0 +1,651 @@
+- id: python.path.pathlib_open
+  enabled: false
+  language: python
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Path
+      - open
+  match_examples:
+  - name: path pathlib open
+    code: "def example(user_input):\n    return Path.open(user_input)\n"
+  description: pathlib Path.open.
+  disabled_reason:
+    code: over-broad
+- id: python.path.os_makedirs
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - makedirs
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os makedirs
+    code: "def example(user_input):\n    return os.makedirs(user_input)\n"
+  - name: os makedirs literal negative
+    code: "def example(user_input):\n    return os.makedirs('safe')\n"
+    expect_no_match: true
+  description: "os.makedirs() with tainted path — attacker-controlled paths create directories outside the intended root (traversal scaffolding)."
+- id: python.path.os_rename
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - rename
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os rename source
+    code: "import os\ndef example(user_input):\n    return os.rename(user_input, 'tmp/report.txt')\n"
+  - name: os rename source literal negative
+    code: "import os\ndef example():\n    return os.rename('tmp/source.txt', 'tmp/report.txt')\n"
+    expect_no_match: true
+  description: "os.rename(tainted source, destination) — moves attacker-selected files."
+- id: python.path.os_rename_dest
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - rename
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: path os rename destination
+    code: "import os\ndef example(user_input):\n    return os.rename('tmp/source.txt', user_input)\n"
+  - name: os rename destination literal negative
+    code: "import os\ndef example():\n    return os.rename('tmp/source.txt', 'tmp/report.txt')\n"
+    expect_no_match: true
+  description: "os.rename(source, tainted destination) — clobbers attacker-selected paths."
+- id: python.path.zipfile_extract
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  tag: zip-slip
+  severity: high
+  packages:
+  - zipfile
+  imports:
+  - zipfile
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ZipFile
+      - extractall
+  match_examples:
+  - name: path zipfile extract
+    code: "import zipfile\ndef example(user_input):\n    return ZipFile.extractall(user_input)\n"
+  description: "Disabled until archive-entry state tracking exists — Zip Slip depends on tainted archive member names, not the extractall destination argument alone."
+- id: python.path.tarfile_extractall
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  tag: zip-slip
+  severity: high
+  packages:
+  - tarfile
+  imports:
+  - tarfile
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TarFile
+      - extractall
+  match_examples:
+  - name: path tarfile extractall
+    code: "import tarfile\ndef example(user_input):\n    return TarFile.extractall(user_input)\n"
+  description: "Disabled until archive-entry state tracking exists — Tar Slip depends on tainted archive member names, not the extractall destination argument alone."
+- id: python.path.open
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-read
+  packages:
+  - builtins
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^open$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path open
+    code: "import builtins\ndef example(user_input):\n    return open(user_input)\n"
+  - name: open literal negative
+    code: "import builtins\n\ndef example(user_input):\n    return open('safe')\n"
+    expect_no_match: true
+  description: "Bare `open(...)` with a tainted path — use `os.path.normpath` + validation. Merged collision aliases: python.path.open_read_chain."
+  aliases:
+  - python.path.open_read_chain
+- id: python.path.os_path_join
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-read
+  packages:
+  - os
+  imports:
+  - os
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - path
+      - join
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: os path join request segment
+    code: "import os\ndef read_file(user_input):\n    path = os.path.join(\"/srv/files\", user_input)\n    return path\n"
+    expect_match_text:
+    - os.path.join
+  - name: os path join literal segment negative
+    code: "import os\ndef read_file():\n    path = os.path.join('/srv/files', 'report.txt')\n    return path\n"
+    expect_no_match: true
+  description: "os.path.join(base, tainted) — join does not prevent `..` traversal; use normpath/resolve plus containment checks before open/read."
+- id: python.path.pathlib_pureposixpath
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-read
+  packages:
+  - pathlib
+  imports:
+  - pathlib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.PurePosixPath$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: pathlib pureposixpath from request segment
+    code: "import pathlib\ndef read_file(user_input):\n    path = pathlib.PurePosixPath(\"/srv/files\", user_input)\n    return path\n"
+    expect_match_text:
+    - pathlib.PurePosixPath
+  - name: pathlib pureposixpath literal segment negative
+    code: "import pathlib\ndef read_file():\n    path = pathlib.PurePosixPath('/srv/files', 'report.txt')\n    return path\n"
+    expect_no_match: true
+  description: pathlib.PurePosixPath(base, tainted) - lexical path construction does not prevent `..` traversal before open/read.
+- id: python.path.pureposixpath_ctor
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-read
+  packages:
+  - pathlib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^PurePosixPath$
+  match_examples:
+  - name: imported pureposixpath from request segment
+    code: "from pathlib import PurePosixPath\ndef read_file(user_input):\n    path = PurePosixPath(\"/srv/files\", user_input)\n    return path\n"
+    expect_match_text:
+    - PurePosixPath
+  description: "Disabled duplicate — current matching cannot distinguish imported `PurePosixPath(...)` from `pathlib.PurePosixPath(...)`; python.path.pathlib_pureposixpath covers both emitted shapes."
+- id: python.path.os_remove
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-write
+  packages:
+  - os
+  imports:
+  - os
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - remove
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os remove
+    code: "import os\ndef example(user_input):\n    return os.remove(user_input)\n"
+  - name: os remove literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.remove('safe')\n"
+    expect_no_match: true
+  description: os.remove on a tainted path.
+- id: python.path.shutil_copy
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  category: file-write
+  packages:
+  - shutil
+  imports:
+  - shutil
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - shutil
+      - copy
+  match_examples:
+  - name: path shutil copy
+    code: "import shutil\ndef example(user_input):\n    return shutil.copy(user_input)\n"
+  description: shutil.copy target / source may include attacker-controlled paths.
+- id: python.path.shutil_copy2
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - shutil
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - shutil
+      - copy2
+  match_examples:
+  - name: path shutil copy2
+    code: "import shutil\ndef example(user_input):\n    return shutil.copy2(user_input)\n"
+  description: "shutil.copy2 — same exposure as copy but also propagates metadata; tainted source / destination paths allow reading or overwriting arbitrary files."
+- id: python.path.shutil_copyfile
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - shutil
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - shutil
+      - copyfile
+  match_examples:
+  - name: path shutil copyfile
+    code: "import shutil\ndef example(user_input):\n    return shutil.copyfile(user_input)\n"
+  description: "shutil.copyfile — copies bytes between two file paths; tainted source or destination enables arbitrary-file read / write."
+- id: python.path.shutil_move
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - shutil
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - shutil
+      - move
+  match_examples:
+  - name: path shutil move
+    code: "import shutil\ndef example(user_input):\n    return shutil.move(user_input)\n"
+  description: "shutil.move — tainted source or destination can move files outside the intended directory or clobber arbitrary targets."
+- id: python.path.shutil_rmtree
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: critical
+  packages:
+  - shutil
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - shutil
+      - rmtree
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path shutil rmtree
+    code: "import shutil\ndef example(user_input):\n    return shutil.rmtree(user_input)\n"
+  - name: shutil rmtree literal negative
+    code: "import shutil\n\ndef example(user_input):\n    return shutil.rmtree('safe')\n"
+    expect_no_match: true
+  description: "shutil.rmtree — recursive delete on tainted path lets the attacker wipe arbitrary directories (application data, system configs)."
+- id: python.path.os_mkdir
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: medium
+  packages:
+  - os
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - mkdir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os mkdir
+    code: "import os\ndef example(user_input):\n    return os.mkdir(user_input)\n"
+  - name: os mkdir literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.mkdir('safe')\n"
+    expect_no_match: true
+  description: "os.mkdir with tainted path — attacker-controlled paths create directories outside the intended root (traversal scaffolding)."
+- id: python.path.os_rmdir
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - os
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - rmdir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os rmdir
+    code: "import os\ndef example(user_input):\n    return os.rmdir(user_input)\n"
+  - name: os rmdir literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.rmdir('safe')\n"
+    expect_no_match: true
+  description: "os.rmdir — tainted path lets the attacker delete arbitrary empty directories."
+- id: python.path.os_unlink
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - os
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - unlink
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os unlink
+    code: "import os\ndef example(user_input):\n    return os.unlink(user_input)\n"
+  - name: os unlink literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.unlink('safe')\n"
+    expect_no_match: true
+  description: "os.unlink — alias for os.remove; tainted path allows arbitrary-file deletion."
+- id: python.path.os_chmod
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - os
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - chmod
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os chmod
+    code: "import os\ndef example(user_input):\n    return os.chmod(user_input)\n"
+  - name: os chmod literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.chmod('safe')\n"
+    expect_no_match: true
+  description: "os.chmod — tainted path lets the attacker change permissions on arbitrary files (privilege escalation, TOCTOU)."
+- id: python.path.os_chown
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - os
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - chown
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: path os chown
+    code: "import os\ndef example(user_input):\n    return os.chown(user_input)\n"
+  - name: os chown literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.chown('safe')\n"
+    expect_no_match: true
+  description: "os.chown — tainted path allows ownership change on arbitrary files (requires CAP_CHOWN; privilege escalation on root-owned daemons)."
+- id: python.path.os_symlink
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - os
+  cwe:
+  - CWE-22
+  - CWE-59
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - symlink
+  match_examples:
+  - name: path os symlink
+    code: "import os\ndef example(user_input):\n    return os.symlink(user_input)\n"
+  description: "os.symlink — tainted source or destination creates attacker-controlled symlinks, enabling symlink-race attacks against privileged readers."
+- id: python.path.os_link
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - os
+  cwe:
+  - CWE-22
+  - CWE-59
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - link
+  match_examples:
+  - name: path os link
+    code: "import os\ndef example(user_input):\n    return os.link(user_input)\n"
+  description: "os.link — hard links to tainted target; defeats per-path access checks by creating a second name for a sensitive file."
+- id: python.path.pathlib_write_text
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Path
+      - write_text
+  match_examples:
+  - name: path pathlib write text
+    code: "def example(user_input):\n    return Path.write_text(user_input)\n"
+  description: "pathlib Path.write_text — tainted path writes attacker-controlled text to arbitrary files."
+- id: python.path.pathlib_write_bytes
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Path
+      - write_bytes
+  match_examples:
+  - name: path pathlib write bytes
+    code: "def example(user_input):\n    return Path.write_bytes(user_input)\n"
+  description: "pathlib Path.write_bytes — tainted path writes attacker-controlled bytes to arbitrary files."
+- id: python.path.pathlib_unlink
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - pathlib
+  imports:
+  - pathlib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Path
+      - unlink
+  match_examples:
+  - name: path pathlib unlink
+    code: "import pathlib\ndef example(user_input):\n    return Path.unlink(user_input)\n"
+  description: "pathlib Path.unlink — tainted path deletes arbitrary files."
+- id: python.path.pathlib_rename
+  enabled: true
+  language: python
+  tag: path-traversal
+  severity: high
+  packages:
+  - pathlib
+  imports:
+  - pathlib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Path
+      - rename
+  match_examples:
+  - name: path pathlib rename
+    code: "import pathlib\ndef example(user_input):\n    return Path.rename(user_input)\n"
+  description: "pathlib Path.rename — tainted source or destination can move files outside the intended directory."
+- id: python.path.tempfile_mkstemp_tainted
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: path-traversal
+  severity: medium
+  packages:
+  - tempfile
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - tempfile
+      - mkstemp
+  description: "Disabled — mkstemp generates a secure random name; enable only when `dir=` is tainted and attacker-controlled directory placement is the concern."
+- id: python.path.tempfile_mktemp
+  enabled: true
+  language: python
+  tag: insecure-temp-file
+  severity: medium
+  packages:
+  - tempfile
+  cwe:
+  - CWE-377
+  match:
+    kind: call
+    callee:
+      attribute:
+      - tempfile
+      - mktemp
+  match_examples:
+  - name: path tempfile mktemp
+    code: "import tempfile\ndef example(user_input):\n    return tempfile.mktemp(user_input)\n"
+  description: "tempfile.mktemp() — returns a predictable name; symlink TOCTOU between mktemp and open. Use NamedTemporaryFile / mkstemp instead."

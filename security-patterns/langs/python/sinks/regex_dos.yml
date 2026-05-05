@@ -1,0 +1,24 @@
+- id: python.redos.re_compile
+  enabled: true
+  language: python
+  tag: redos
+  severity: medium
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [re, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: redos re compile
+    code: |
+      def example(user_input):
+          return re.compile(user_input)
+  - name: re compile literal negative
+    code: |
+      def example(user_input):
+          return re.compile('safe')
+    expect_no_match: true
+  description: "re.compile(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."

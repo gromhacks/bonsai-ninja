@@ -1,0 +1,305 @@
+# C++ deserialization sinks (Boost.Serialization + cereal + Qt + protobuf).
+- id: cpp.deser.boost_text_iarchive
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: high
+  packages: [boost.serialization]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: text_iarchive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/serialization/serialization.hpp>
+      #include <boost/serialization/serialization.hpp>
+      #include <boost/serialization/serialization.hpp>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new text_iarchive(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new text_iarchive("safe");
+      }
+    expect_no_match: true
+  description: "boost::archive::text_iarchive — gadget-chain RCE risk when polymorphic types are registered."
+
+  imports:
+  - boost/serialization/serialization.hpp
+  - boost
+- id: cpp.deser.boost_binary_iarchive
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: critical
+  packages: [boost.serialization]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: binary_iarchive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/serialization/serialization.hpp>
+      #include <boost/serialization/serialization.hpp>
+      #include <boost/serialization/serialization.hpp>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new binary_iarchive(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new binary_iarchive("safe");
+      }
+    expect_no_match: true
+  description: "boost::archive::binary_iarchive — gadget-chain RCE risk."
+
+  imports:
+  - boost/serialization/serialization.hpp
+  - boost
+- id: cpp.deser.boost_xml_iarchive
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: high
+  packages: [boost.serialization]
+  cwe: [CWE-502, CWE-611]
+  match:
+    kind: new
+    callee:
+      name: xml_iarchive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/serialization/serialization.hpp>
+      #include <boost/serialization/serialization.hpp>
+      #include <boost/serialization/serialization.hpp>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new xml_iarchive(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new xml_iarchive("safe");
+      }
+    expect_no_match: true
+  description: "boost::archive::xml_iarchive — gadget-chain RCE and XXE vector."
+
+  imports:
+  - boost/serialization/serialization.hpp
+  - boost
+- id: cpp.deser.cereal_binary_iarchive
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: high
+  packages: [cereal]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: BinaryInputArchive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cereal/archives/binary.hpp>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new BinaryInputArchive(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new BinaryInputArchive("safe");
+      }
+    expect_no_match: true
+  description: "cereal BinaryInputArchive — flag tainted stream with polymorphic types."
+
+- id: cpp.deser.cereal_portable_binary_iarchive
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: high
+  packages: [cereal]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: PortableBinaryInputArchive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cereal/archives/binary.hpp>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new PortableBinaryInputArchive(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new PortableBinaryInputArchive("safe");
+      }
+    expect_no_match: true
+  description: "cereal PortableBinaryInputArchive — same RCE risk as BinaryInputArchive."
+
+- id: cpp.deser.cereal_json_iarchive
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: medium
+  packages: [cereal]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: JSONInputArchive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cereal/archives/binary.hpp>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new JSONInputArchive(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new JSONInputArchive("safe");
+      }
+    expect_no_match: true
+  description: "cereal JSONInputArchive — polymorphic type instantiation via name lookup."
+
+- id: cpp.deser.cereal_xml_iarchive
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: medium
+  packages: [cereal]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: XMLInputArchive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cereal/archives/binary.hpp>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new XMLInputArchive(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new XMLInputArchive("safe");
+      }
+    expect_no_match: true
+  description: "cereal XMLInputArchive — polymorphic type instantiation via name lookup."
+
+- id: cpp.deser.qdatastream_op_in
+  enabled: true
+  language: cpp
+  tag: insecure-deserialization
+  severity: high
+  packages: [Qt]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: QDataStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new QDataStream(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new QDataStream("safe");
+      }
+    expect_no_match: true
+  description: "Qt QDataStream — flag when reading QVariant or polymorphic types from untrusted stream."
+
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.deser.protobuf_parsefromstring
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: insecure-deserialization
+  severity: low
+  packages: [protobuf]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: ParseFromString
+  description: "Disabled — protobuf is type-bounded; flag only when untyped Any is used."
+
+- id: cpp.deser.msgpack_unpacked
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: insecure-deserialization
+  severity: low
+  packages: [msgpack-c]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: msgpack_unpack_next
+  description: "Disabled — msgpack is type-bounded."
+
+- id: cpp.deser.flatbuffers_getroot
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: insecure-deserialization
+  severity: low
+  packages: [flatbuffers]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: GetRoot
+  description: "Disabled — FlatBuffers is type-bounded (tables verified by schema)."

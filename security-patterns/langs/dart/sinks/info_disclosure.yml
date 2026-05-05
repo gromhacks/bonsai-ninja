@@ -1,0 +1,70 @@
+# Dart information-disclosure sinks (logs, debug output, error responses).
+- id: dart.info_disclosure.print_secret
+  aliases:
+  - dart.log_injection.print_newline
+  enabled: true
+  language: dart
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200, CWE-117]
+  match:
+    kind: call
+    callee:
+      name: print
+  match_examples:
+  - name: dart print secret-shaped data
+    code: |
+      void test() { var input = "x"; print("api_key=$input"); }
+    expect_match_text: [print]
+  description: "print(...) with secret-shaped data — credentials or tokens can leak to stdout / platform logs. Also covers merged aliases: dart.log_injection.print_newline."
+
+- id: dart.info_disclosure.shelf_internal_server_error
+  enabled: true
+  language: dart
+  tag: information-disclosure
+  severity: high
+  packages: [shelf]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, internalServerError]
+  match_examples:
+  - name: dart shelf error response body
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test(Object error) { Response.internalServerError(body: "stack: $error"); }
+    expect_match_text: [Response.internalServerError]
+  description: "shelf Response.internalServerError(body: error/stack) — sends diagnostic internals to the client."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.info_disclosure.flutter_dump_error
+  enabled: true
+  language: dart
+  tag: information-disclosure
+  severity: medium
+  packages: [flutter]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [FlutterError, dumpErrorToConsole]
+  match_examples:
+  - name: dart flutter debug error page
+    code: |
+      import 'package:flutter/flutter.dart';
+      import 'package:flutter/flutter.dart';
+      import 'package:flutter/flutter.dart';
+      import 'package:flutter/flutter.dart';
+      import 'package:flutter/material.dart'; // flutter
+      void test(dynamic details) { FlutterError.dumpErrorToConsole(details); }
+    expect_match_text: [FlutterError.dumpErrorToConsole]
+  description: "FlutterError.dumpErrorToConsole(details) — debug exception details can disclose stack traces and application state."
+  imports:
+  - flutter/flutter.dart
+  - flutter/material.dart

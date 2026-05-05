@@ -1,0 +1,19 @@
+[package]
+name = "bonsai_abstract_interp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Abstract interpretation / symbolic trace engine."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_cfg = { workspace = true }
+bonsai_lang_api = { workspace = true }
+ahash = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
+
+[lints]
+workspace = true

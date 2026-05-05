@@ -1,0 +1,53 @@
+# C++ queue / streaming consumer sources.
+- id: cpp.input.librdkafka_consumer_poll
+  enabled: true
+  language: cpp
+  trust: service
+  tag: queue-input
+  packages: [librdkafka]
+  match:
+    kind: call
+    callee:
+      name: rd_kafka_consumer_poll
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <librdkafka/rdkafka.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        rd_kafka_consumer_poll(arg);
+      }
+  description: "librdkafka rd_kafka_consumer_poll — broker message payload."
+- id: cpp.input.cppkafka_consume
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: cpp
+  trust: service
+  tag: queue-input
+  packages: [cppkafka]
+  match:
+    kind: call
+    callee:
+      attribute: [Consumer, poll]
+  description: "Disabled — adapters index local receivers like `consumer.poll`, not receiver types like `Consumer.poll`."
+- id: cpp.input.amqpcpp_message
+  enabled: true
+  language: cpp
+  trust: service
+  tag: queue-input
+  packages: [amqpcpp]
+  match:
+    kind: param
+    target:
+      name: message
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <amqpcpp.h>
+      void example(const char *message) {
+        (void)message;
+      }
+  description: "AMQP-CPP onReceived message parameter."

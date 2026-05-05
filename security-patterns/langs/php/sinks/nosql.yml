@@ -1,0 +1,156 @@
+- id: php.nosql.mongo_collection_find
+  enabled: true
+  language: php
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb/mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Collection
+      - find
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.nosql.mongo_collection_find example
+    code: |
+      <?php
+      use mongodb\mongodb;
+      use mongodb\mongodb;
+      function example($input, $url, $id, $payload, $request) {
+        Collection::find($payload);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use mongodb\mongodb;
+      function example($input, $url, $id, $payload, $request) {
+        Collection::find(["status" => "active"]);
+      }
+    expect_no_match: true
+  description: 'MongoDB\Collection::find — flag tainted filter array. Merged collision aliases: php.nosql.mongo_collection_findone, php.nosql.mongo_collection_filter_value_object.'
+  aliases:
+  - php.nosql.mongo_collection_findone
+  - php.nosql.mongo_collection_filter_value_object
+  imports:
+  - mongodb\mongodb
+  - mongodb
+- id: php.nosql.mongo_collection_aggregate
+  enabled: true
+  language: php
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb/mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Collection
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.nosql.mongo_collection_aggregate example
+    code: |
+      <?php
+      use mongodb\mongodb;
+      use mongodb\mongodb;
+      function example($input, $url, $id, $payload, $request) {
+        Collection::aggregate($payload);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use mongodb\mongodb;
+      function example($input, $url, $id, $payload, $request) {
+        Collection::aggregate([["match" => ["status" => "active"]]]);
+      }
+    expect_no_match: true
+  description: MongoDB\Collection::aggregate.
+  imports:
+  - mongodb\mongodb
+  - mongodb
+- id: php.nosql.mongo_command
+  enabled: true
+  language: php
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb/mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - command
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.nosql.mongo_command example
+    code: |
+      <?php
+      use mongodb\mongodb;
+      use mongodb\mongodb;
+      function example($input, $url, $id, $payload, $request) {
+        Database::command($payload);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use mongodb\mongodb;
+      function example($input, $url, $id, $payload, $request) {
+        Database::command(["ping" => 1]);
+      }
+    expect_no_match: true
+  description: MongoDB\Database::command.
+  imports:
+  - mongodb\mongodb
+  - mongodb
+- id: php.nosql.mongo_legacy_find
+  enabled: true
+  language: php
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MongoCollection
+      - find
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.nosql.mongo_legacy_find example
+    code: |
+      <?php
+      use mongo;
+      use mongo;
+      function example($input, $url, $id, $payload, $request) {
+        MongoCollection::find($payload);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use mongo;
+      function example($input, $url, $id, $payload, $request) {
+        MongoCollection::find(["status" => "active"]);
+      }
+    expect_no_match: true
+  description: Legacy MongoCollection::find.

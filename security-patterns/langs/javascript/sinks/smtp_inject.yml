@@ -1,0 +1,34 @@
+- id: javascript.smtpinj.nodemailer_send_mail
+  enabled: true
+  language: javascript
+  tag: smtp-injection
+  severity: medium
+  packages: ["nodemailer"]
+  imports: ["nodemailer"]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [transporter, sendMail]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nodemailer sendMail
+    code: |
+      const nodemailer = require("nodemailer");
+      function handle(input) {
+        const transporter = nodemailer.createTransport({});
+        const opts = {from: "a@x", to: input, subject: input, text: "hi"};
+        return transporter.sendMail(opts);
+      }
+    expect_match_text: [transporter.sendMail]
+  - name: literal opts negative
+    code: |
+      const nodemailer = require("nodemailer");
+      function handle() {
+        const transporter = nodemailer.createTransport({});
+        return transporter.sendMail({from: "a@x", to: "b@x", subject: "fixed"});
+      }
+    expect_no_match: true
+  description: "nodemailer transporter.sendMail({from, to, subject, ...}) — CR/LF in any header field injects additional headers / recipients."

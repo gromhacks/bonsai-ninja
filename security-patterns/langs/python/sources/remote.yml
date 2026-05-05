@@ -1,0 +1,759 @@
+- id: python.aiohttp.request_query
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [aiohttp, bottle]
+  packages: [aiohttp, bottle]
+  match:
+    kind: read
+    target:
+      attribute: [request, query]
+  match_examples:
+  - name: aiohttp request query
+    code: |
+      import aiohttp
+      def example():
+          value = request.query
+          return value
+  description: aiohttp/Bottle request.query — query-string params. Same adapter fact is canonicalized here to avoid duplicate framework-specific query sources.
+- id: python.aiohttp.request_rel_url
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path, query]
+  frameworks: [aiohttp]
+  match:
+    kind: read
+    target:
+      attribute: [request, rel_url]
+  match_examples:
+  - name: aiohttp request rel url
+    code: |
+      def example():
+          value = request.rel_url
+          return value
+  description: aiohttp request.rel_url — relative URL object (path + query) from the client.
+- id: python.aiohttp.request_cookies
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [aiohttp, fastapi, flask]
+  packages: [aiohttp, fastapi, flask, starlette]
+  match:
+    kind: read
+    target:
+      attribute: [request, cookies]
+  description: "Disabled — `request.cookies` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+- id: python.aiohttp.request_headers
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [aiohttp, django, fastapi, flask]
+  packages: [aiohttp, django, fastapi, flask, starlette]
+  match:
+    kind: read
+    target:
+      attribute: [request, headers]
+  description: "Disabled — `request.headers` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+- id: python.tornado.request_body
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.tornado.self_request_body
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [tornado]
+  match:
+    kind: read
+    target:
+      attribute: [request, body]
+  description: "Disabled duplicate — bare `request.body` is too broad; python.tornado.self_request_body covers Tornado's `self.request.body` precisely via suffix regex."
+- id: python.django.request_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [django, pyramid]
+  packages: [django, pyramid]
+  manifests: [pyproject.toml, requirements.txt, setup.py]
+  match:
+    kind: read
+    target:
+      attribute: [request, GET]
+  match_examples:
+  - name: django request get
+    code: |
+      import django
+      def example():
+          value = request.GET
+          return value
+  description: Django/Pyramid request.GET — query parameters supplied by the remote client.
+- id: python.django.request_post
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [django, pyramid]
+  packages: [django, pyramid]
+  match:
+    kind: read
+    target:
+      attribute: [request, POST]
+  match_examples:
+  - name: django request post
+    code: |
+      import django
+      def example():
+          value = request.POST
+          return value
+  description: Django/Pyramid request.POST — form parameters supplied by the remote client.
+- id: python.django.request_body
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [django]
+  match:
+    kind: read
+    target:
+      attribute: [request, body]
+  description: "Disabled — `request.body` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+- id: python.django.request_cookies
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [django]
+  match:
+    kind: read
+    target:
+      attribute: [request, COOKIES]
+  match_examples:
+  - name: django request cookies
+    code: |
+      def example():
+          value = request.COOKIES
+          return value
+  description: Django request.COOKIES.
+- id: python.django.request_headers
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.web.request_headers_get
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [django]
+  match:
+    kind: read
+    target:
+      attribute: [request, headers]
+  description: "Disabled duplicate — bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks (aiohttp, bottle, fastapi, flask, pyramid, sanic, starlette, tornado, django)."
+- id: python.django.request_meta
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [django]
+  match:
+    kind: read
+    target:
+      attribute: [request, META]
+  match_examples:
+  - name: django request meta
+    code: |
+      def example():
+          value = request.META
+          return value
+  description: Django request.META.
+- id: python.django.request_files
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file]
+  frameworks: [django, django-rest-framework]
+  packages: [django, djangorestframework]
+  match:
+    kind: read
+    target:
+      attribute: [request, FILES]
+  match_examples:
+  - name: django request files
+    code: |
+      import django
+      def example():
+          value = request.FILES
+          return value
+  description: Django/DRF request.FILES — uploaded files supplied by the remote client.
+- id: python.fastapi.request_path
+  enabled: true
+  language: python
+  tag: http-input
+  trust: remote
+  category: http-input
+  frameworks: [fastapi]
+  packages: [fastapi, starlette]
+  imports: [fastapi]
+  payload_types: [path, query]
+  match:
+    kind: read
+    target:
+      attribute: [request, path_params]
+  match_examples:
+  - name: fastapi request path
+    code: |
+      import fastapi
+      def example():
+          value = request.path_params
+          return value
+  description: FastAPI / Starlette request.path_params — dict of URL path params.
+
+- id: python.fastapi.request_query_params
+  enabled: true
+  language: python
+  tag: http-input
+  trust: remote
+  category: http-input
+  frameworks: [fastapi, starlette, django-rest-framework]
+  packages: [fastapi, starlette, djangorestframework]
+  payload_types: [query]
+  match:
+    kind: read
+    target:
+      attribute: [request, query_params]
+  match_examples:
+  - name: fastapi request query params
+    code: |
+      import fastapi
+      def example():
+          value = request.query_params
+          return value
+    expect_match_text: [request.query_params]
+  description: FastAPI / Starlette / DRF request.query_params.
+
+- id: python.fastapi.request_json
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.aiohttp.request_json
+  language: python
+  tag: http-input
+  trust: remote
+  category: http-input
+  frameworks: [fastapi]
+  packages: [fastapi, starlette]
+  imports: [fastapi]
+  payload_types: [json]
+  match:
+    kind: call
+    callee:
+      attribute: [request, json]
+  constraints:
+  - max_args: 0
+  description: "Disabled duplicate — same `request.json()` adapter fact as python.aiohttp.request_json (enabled), which carries fastapi/starlette in frameworks/packages."
+
+- id: python.fastapi.uploadfile_filename
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  tag: http-input
+  trust: remote
+  category: http-input
+  frameworks: [fastapi, starlette]
+  payload_types: [file, multipart]
+  match:
+    kind: read
+    target:
+      attribute: [UploadFile, filename]
+  description: "Disabled — adapters index local reads like `file.filename`, not receiver types like `UploadFile.filename`."
+- id: python.fastapi.request_form
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.flask.request_form
+  language: python
+  tag: http-input
+  category: http-input
+  trust: remote
+  frameworks: [fastapi, starlette]
+  packages: [fastapi, starlette]
+  payload_types: [form, multipart]
+  match:
+    kind: call
+    callee:
+      attribute: [request, form]
+  constraints:
+  - max_args: 0
+  description: "Disabled duplicate — current matching also emits `request.form`; python.flask.request_form (enabled) carries FastAPI/Starlette package metadata for this adapter fact."
+- id: python.fastapi.request_body
+  enabled: true
+  language: python
+  tag: http-input
+  category: http-input
+  trust: remote
+  frameworks: [fastapi, starlette]
+  packages: [fastapi, starlette]
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      attribute: [request, body]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: fastapi request body
+    code: |
+      import fastapi
+      def example(user_input):
+          return request.body()
+  description: "Starlette/FastAPI await request.body() — raw request bytes. `body()` takes 0 args; `max_args: 0` rejects unrelated overloads."
+- id: python.fastapi.request_cookies
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.pyramid.request_cookies
+  language: python
+  tag: http-input
+  category: http-input
+  trust: remote
+  frameworks: [fastapi, starlette]
+  payload_types: [cookie]
+  match:
+    kind: read
+    target:
+      attribute: [request, cookies]
+  description: "Disabled duplicate — same `request.cookies` shape as python.pyramid.request_cookies (enabled), which carries fastapi/starlette in frameworks/packages."
+- id: python.fastapi.request_headers
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.web.request_headers_get
+  language: python
+  tag: http-input
+  category: http-input
+  trust: remote
+  frameworks: [fastapi, starlette]
+  payload_types: [header]
+  match:
+    kind: read
+    target:
+      attribute: [request, headers]
+  description: "Disabled duplicate — bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
+- id: python.fastapi.depends_param
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  frameworks: [fastapi]
+  packages: [fastapi]
+  cwe: [CWE-20]
+  match:
+    kind: param
+    target:
+      annotation: Depends
+  match_examples:
+  - name: fastapi depends param
+    code: |
+      from fastapi import Depends, FastAPI
+      app = FastAPI()
+      def get_token():
+          return ""
+      def handler(token: str = Depends(get_token)):
+          return token
+    expect_match_text: [token]
+  description: "FastAPI `Depends(...)` parameter binder — value is the dependency factory's return. Annotation-based match per python adapter's binder-marker support; only fires when the parameter's default-value is a `Depends(...)` call (G1)."
+- id: python.flask.request_args
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [flask, sanic]
+  packages: [flask, sanic]
+  manifests: [pyproject.toml, requirements.txt, setup.py]
+  lockfiles: [poetry.lock, Pipfile.lock, uv.lock]
+  match:
+    kind: read
+    target:
+      attribute: [request, args]
+  match_examples:
+  - name: flask request args
+    code: |
+      import flask
+      def example():
+          value = request.args
+          return value
+  description: "Disabled duplicate — python.flask.request_args_get covers query values at the call site and avoids duplicate source findings on request.args.get(...)."
+- id: python.flask.request_args_get
+  aliases: [python.flask.request_args]
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [flask, sanic]
+  packages: [flask, sanic]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: flask request args get
+    code: |
+      import flask
+      def example(user_input):
+          return request.args.get(user_input)
+    expect_match_text: [request.args.get]
+  description: "Flask/Sanic request.args.get(name) — explicit query-value source retained for source-rule filtering and precise call-site attribution."
+- id: python.flask.req_args_get
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.flask.request_args_get
+    reenable_when: "The receiver-agnostic `^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$` regex on python.flask.request_args_get already covers any local variable name (req, request, r, etc.); this rule's match shape is now identical and would collide."
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [flask]
+  packages: [flask]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: flask short req args get
+    code: |
+      import flask
+      def example(req):
+          return req.args.get("name")
+    expect_match_text: [req.args.get]
+  description: "Flask-style short handler variable `req.args.get(...)` — common in internal helpers and tests where the request object is passed as `req`. Subsumed by python.flask.request_args_get after the receiver-agnostic regex transform."
+- id: python.flask.request_json
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [flask]
+  match:
+    kind: read
+    target:
+      attribute: [request, json]
+  description: "Disabled — `request.json` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+- id: python.flask.request_form
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [flask, fastapi, sanic, starlette]
+  packages: [flask, fastapi, sanic, starlette]
+  match:
+    kind: read
+    target:
+      attribute: [request, form]
+  match_examples:
+  - name: flask request form
+    code: |
+      import flask
+      def example():
+          value = request.form
+          return value
+  description: Flask/FastAPI/Sanic/Starlette request.form — URL-encoded / multipart form body. Same adapter fact is canonicalized here to avoid duplicate framework-specific form sources.
+- id: python.flask.request_files
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file, multipart]
+  frameworks: [flask]
+  match:
+    kind: read
+    target:
+      attribute: [request, files]
+  description: "Disabled — `request.files` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+- id: python.flask.request_headers
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.web.request_headers_get
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [flask]
+  match:
+    kind: read
+    target:
+      attribute: [request, headers]
+  description: "Disabled duplicate — bare `request.headers` is too broad; python.web.request_headers_get covers `request.headers.get(name)` across all major frameworks."
+- id: python.flask.request_cookies
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [flask]
+  match:
+    kind: read
+    target:
+      attribute: [request, cookies]
+  description: "Disabled duplicate — same `request.cookies` shape as python.aiohttp.request_cookies; package metadata is merged there."
+- id: python.flask.request_values
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, form]
+  frameworks: [flask]
+  match:
+    kind: read
+    target:
+      attribute: [request, values]
+  match_examples:
+  - name: flask request values
+    code: |
+      def example():
+          value = request.values
+          return value
+  description: Flask request.values — combined view of args + form.
+- id: python.tornado.get_argument
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [tornado]
+  packages: [tornado]
+  match:
+    kind: call
+    callee:
+      attribute: [self, get_argument]
+  constraints:
+  - min_args: 1
+  - max_args: 3
+  match_examples:
+  - name: tornado get argument
+    code: |
+      import tornado
+      def example(user_input):
+          return self.get_argument(user_input)
+  description: "tornado self.get_argument(...). Signature `get_argument(name, default=_ARG_DEFAULT, strip=True)`; `min_args/max_args 1..3` matches the canonical signature and rejects same-name decoys."
+- id: python.tornado.get_body_argument
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  frameworks: [tornado]
+  packages: [tornado]
+  match:
+    kind: call
+    callee:
+      attribute: [self, get_body_argument]
+  constraints:
+  - min_args: 1
+  - max_args: 3
+  match_examples:
+  - name: tornado get body argument
+    code: |
+      import tornado
+      def example(user_input):
+          return self.get_body_argument(user_input)
+  description: "tornado self.get_body_argument(...). Signature `get_body_argument(name, default=_ARG_DEFAULT, strip=True)`; `min_args/max_args 1..3` matches canonical signature."
+
+- id: python.tornado.request_headers_get
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [tornado]
+  packages: [tornado]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request\\.headers\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  description: "Disabled duplicate — suffix matching makes `self.request.headers.get` the same adapter fact as python.web.request_headers_get; package metadata is merged there."
+
+- id: python.tornado.self_request_body
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  frameworks: [tornado]
+  packages: [tornado]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request\\.body$"
+  match_examples:
+  - name: tornado request body
+    code: |
+      import tornado
+      def example():
+          value = self.request.body
+          return value
+    expect_match_text: [self.request.body]
+  description: "Tornado self.request.body - raw request body bytes."
+
+- id: python.tornado.get_cookie
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [tornado]
+  packages: [tornado]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.get_cookie$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: tornado get cookie
+    code: |
+      import tornado
+      def example(name):
+          return self.get_cookie(name)
+    expect_match_text: [self.get_cookie]
+  description: "Tornado self.get_cookie(name) - attacker-controlled cookie value."
+
+- id: python.graphql.strawberry_info
+  enabled: true
+  language: python
+  trust: remote
+  category: graphql-input
+  tag: graphql-input
+  payload_types: [graphql]
+  frameworks: [strawberry]
+  packages: [strawberry]
+  match:
+    kind: param
+    target:
+      name: info
+      in_method: [resolver, resolve, resolve_field]
+  match_examples:
+  - name: strawberry resolver info param
+    code: |
+      import strawberry
+      class Query:
+          def resolver(self, info):
+              return info
+    expect_match_text: [info]
+  description: "Strawberry GraphQL resolver `info` parameter — carries variable_values, context, and request envelope from the GraphQL request. Param-rule scoping (`in_method`) pins the resolver signature so unrelated helpers with an `info` param do not match."
+
+- id: python.graphql.graphene_resolver_kwargs
+  enabled: true
+  language: python
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  frameworks: [graphene, ariadne]
+  packages: [graphene, ariadne]
+  match:
+    kind: param
+    target:
+      name: kwargs
+  match_examples:
+  - name: graphene resolver kwargs
+    code: |
+      import graphene
+      def resolve_user(parent, info, **kwargs):
+          return kwargs
+    expect_match_text: [kwargs]
+  description: "Graphene/Ariadne resolver **kwargs — client-supplied GraphQL field arguments. This is the representable resolver-argument shape in v1 matching; the sink flow is the second gate."
+
+- id: python.graphql.graphene_resolver_args
+  enabled: true
+  language: python
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  frameworks: [graphene, ariadne]
+  packages: [graphene, ariadne]
+  match:
+    kind: param
+    target:
+      name: args
+  match_examples:
+  - name: ariadne resolver args
+    code: |
+      import graphene
+      def resolve_user(obj, info, args):
+          return args
+    expect_match_text: [args]
+  description: "GraphQL resolver `args` parameter in Graphene/Ariadne-style handlers — field arguments supplied by the client."

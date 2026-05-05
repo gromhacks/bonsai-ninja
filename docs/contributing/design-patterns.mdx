@@ -1,0 +1,210 @@
+---
+title: "Design Patterns"
+description: "Engineering invariants contributors should preserve when changing the analyzer."
+---
+
+# Design patterns
+
+The invariants every contributor should know. Each one exists because we
+got burned by the alternative — these are guarantees, not preferences.
+
+If you're reading this for the first time, skim the section headings and
+come back to a section when something forces you to.
+
+## 1. Resolve names by structure, not by string
+
+Name resolution always goes through `bonsai_resolve::resolve_callable_with_context`
+with a real `ResolveContext`: caller file, caller module, optional receiver
+type, optional alias map. The resolver then walks every decl with that name
+and applies `visibility_allows` before returning candidates.
+
+Callable values are normalised through
+`bonsai_common::callable_reference_variants` so that `&fn/1`, `fun fn/1`,
+`\&fn`, PHP string callables, Ruby `method(:fn)`, and qualified tails all
+collapse to the same bare callable before lookup.
+
+What this buys you: two unrelated codebases can both declare `static fn
+error(…)` without colliding, because each is `Visibility::Private` and the
+resolver filters by file. What it forbids: bare `find_by_name(name)` lookups
+above the resolver, ad-hoc matching languages, treating a function-name
+string match as a call.
+
+The receiver-callback shorthand is intentionally narrower than method
+calls. `cb.call(x)` / `cb.run(x)` only dispatches when `cb` resolves to a
+callable value. Constructed objects (`repo = Repository(x); repo.run()`) go
+through receiver-type semantics, not callable resolution. Don't add results
+of constructor-shaped calls to the callable binding map.
+
+## 2. Empty seed produces no propagation
+
+Given `(entry_func, empty_seed, config, db)`, the engine produces zero
+records. Every taint introduction goes through the `entry_sources: TokenSet`
+parameter. The engine never invents taint from heuristics or implicit-source
+patterns.
+
+The single exception is `InterTaintConfig.source_bearing_functions`, a
+security-layer-controlled set of helpers whose return values are tainted.
+The set is empty by default; only `bonsai_security` populates it.
+
+Source seeding is identity-strict. A matched source `os.getenv` may seed
+`os.getenv` and the tail `getenv`, but never the receiver `os`. A matched
+container source `req.query` doesn't seed `req.user` or the whole `req`.
+Receiver and sibling substring matches are not proof.
+
+Read-source seeding may add `param.*` descendants when the matched source
+is structurally read through a qualified container access, and parameter
+source rules may explicitly seed `param.*`. Ordinary call sources don't
+get wildcard semantics.
+
+## 3. No text fallbacks for taint introduction
+
+Identifier tokens used in taint state come from adapter-emitted
+`source_names`, never from text-walking arbitrary expression strings.
+
+The `identifier_tokens_from_text` helper in the kit is quote-aware: it
+tracks `"..."`, `'...'`, and backticks and skips their contents. The
+engine's `arg_text_is_tainted` and `rhs_operand_is_tainted` short-circuit
+`false` on `is_quoted_literal` before any other check.
+
+This matters because a string literal like `'.category == "electronics"'`
+must never produce identifier tokens that pollute state. An earlier version
+walked through string literals and every seed name that happened to appear
+inside a comment string produced spurious flows.
+
+Value-free type/size operators get the same treatment. `sizeof(c)`,
+`alignof(T)`, `typeof(x)`, `nameof(x)` mention identifiers but don't read
+their runtime values. The engine strips those operands so
+`sizeof(c) * cap` only taints when `cap` is tainted.
+
+Sigil interpolation is boundary-aware: a seed `$c` matches `$c` and
+`${c}` but not `$cap`.
+
+## 4. Precision is a first-class fact
+
+Every fact crossing a layer boundary carries a `Precision` from the lattice
+`Exact < Narrowed < OverApproximate < Unknown`.
+
+- Direct resolved edges → Exact.
+- Single resolution narrowed by aliases → Narrowed.
+- Multiple resolved candidates (virtual dispatch) → OverApproximate.
+- Unresolved or budget-truncated → Unknown.
+- `meet(a, b)` returns the worse; chain precision is the worst seen.
+
+Findings render with a `precision` field in JSON / SARIF so consumers can
+distinguish proven evidence from over-approximation.
+
+## 5. Content-addressed caching
+
+Sidecar caches are keyed on content hashes plus a policy fingerprint, never
+on volatile IDs. Per-file caches use `(FileId, version)`; per-function
+caches use `(FuncId, file_version)`; cross-process caches use file content
+hash plus `MATCHER_POLICY_FINGERPRINT`.
+
+Bumping the policy fingerprint is required when you change resolver
+narrowing, engine semantics (the various `_is_tainted` paths,
+`apply_unresolved_call_side_effects`, `try_body_throws_tainted`), adapter
+fact shape, or matcher policy.
+
+## 6. Monotonic invalidation
+
+Edits invalidate; we never compact or reuse symbol slots. When a file is
+removed:
+
+1. The VFS bumps `version`.
+2. `AnalyzerDb` evicts per-file caches.
+3. `GlobalIndex::remove_file` tombstones every `SymbolId` — the slot is
+   never reused.
+4. Cached structures referencing tombstoned IDs resolve to `None`, not to
+   whatever decl now occupies the same index after a re-insert.
+
+`SymbolId`s are stable across the workspace's lifetime. Code holding stale
+IDs gets `None` lookups, not silently wrong data.
+
+## 7. One source of truth for imports
+
+`AnalyzerDb::imports_for(file)` is the only path that produces import
+facts. It consults the adapter's `extract_imports` first; on absence it
+falls back to a generic syntax extractor. The matcher, the dependency
+inventory, and the resolver's alias map all see the same shape.
+
+Don't parse imports ad-hoc inside consumer crates.
+
+## 8. Field-sensitive writes and reads, carrier-aware arg passing
+
+Per-field taint precision is split across four engine functions, each with
+a tightly-scoped contract:
+
+- **Write side** (`insert_target_taint`): a qualified write `obj.value =
+  tainted` writes only `obj.value` into state. The bare carrier `obj` is
+  not promoted.
+- **Read side** (`arg_text_is_tainted`): a qualified read `obj.safe`
+  matches only an explicit qualified seed. A bare tainted carrier doesn't
+  poison every field.
+- **Carrier argument passing**: `process(obj)` matches any qualified seed
+  sharing the same base via `state_qualified_token_matches_text`. This
+  preserves whole-object propagation when a tainted field is passed
+  through its carrier.
+- **Strict RHS** (`rhs_operand_is_tainted`): assignment RHS uses a
+  stricter check that doesn't promote bare-name reads to qualified-seed
+  matches. `out = data['other']` doesn't inherit `data.value`'s taint.
+
+Named constructor/object fields seed exact fields. `env = Envelope({cmd:
+raw, kind: K})` taints `env.cmd` but not `env.kind` or `env.*`. Positional
+constructors without named-field facts may still carry descendant-container
+taint when a tainted argument flows into a resolved type-like constructor.
+
+## 9. Path-sensitive branch merge via per-arm cloning
+
+`walk_events_for_propagation` clones state for each branch arm, walks both
+arms independently, and unions post-states at the merge. The clone-walk-
+union pattern keeps the engine path-sensitive without enumerating paths.
+
+Match/switch arms get the same treatment. Adapters whose grammar emits a
+flat `Branch` with every arm concatenated into `then_events` collect arm
+spans and pass them through `split_match_arms_in_branch_events`, which
+reshapes the flat event list into a right-leaning chain of nested
+branches.
+
+When the language has typed catch arms, the engine narrows by type:
+`catch (IOException e)` doesn't seed when the body throws a
+`RuntimeException`, unless the catch type is an absolute root
+(`Exception`, `Throwable`, `Error`, `System.Exception`, `Object`) — those
+catch anything by spec and seed conservatively.
+
+## 10. Async / spawn isolation
+
+Detached futures don't poison the caller's continuation. When an adapter
+identifies a spawn body (Rust `tokio::spawn`, `std::thread::spawn`, etc.),
+the body events are wrapped in `FlowEvent::Defer` so the engine treats
+them as scope-local. The caller's post-spawn state continues from the
+pre-spawn state without absorbing whatever happened inside the body.
+
+## 11. Reflection and dynamic dispatch rewrites
+
+Where a literal-string call can be statically resolved, the adapter
+rewrites it to a direct call before the engine runs. Python
+`getattr(obj, "method")` and Java
+`Class.forName("X").getMethod("Y").invoke(...)` both lower to the
+equivalent direct method call so the resolver narrows them like any other
+dispatch.
+
+Truly dynamic shapes (computed string arguments, runtime lookup tables)
+remain `OverApproximate` and the engine doesn't pretend otherwise.
+
+## 12. Adapter responsibility versus engine responsibility
+
+The dividing line: language-specific shapes go in adapters; cross-language
+analysis goes in the engine.
+
+If a fact is reasoning about *what the source did syntactically* — `throw
+new IOException(...)` exposes the type; `tokio::spawn` opens a detached
+scope; `module_function :foo` exposes the surface — that's an adapter
+post-process.
+
+If a fact is reasoning about *what the engine should do given the
+adapter's facts* — should `IOException` taint propagate to a `catch
+(Exception e)` arm, should a `Defer` body block continuation taint — that's
+the engine.
+
+When in doubt, push the work to the adapter. Engine code should look the
+same regardless of the source language.

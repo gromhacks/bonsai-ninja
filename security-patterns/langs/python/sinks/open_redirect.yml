@@ -1,0 +1,397 @@
+# Python open-redirect sinks (Flask, Django, FastAPI, Starlette, Tornado, aiohttp).
+- id: python.open_redirect.flask_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [flask]
+  imports: [flask]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [flask, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect flask redirect
+    code: |
+      import flask
+      def example(user_input):
+          return flask.redirect(user_input)
+  - name: flask redirect literal negative
+    code: |
+      import flask
+
+      def example(user_input):
+          return flask.redirect('safe')
+    expect_no_match: true
+  description: "flask.redirect(tainted) — fully-qualified form; returns a 302 with a tainted Location."
+
+- id: python.open_redirect.flask_redirect_bare
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [flask]
+  imports: [flask]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: redirect
+  description: "Disabled — bare `redirect(...)` collides with app-defined helpers. Re-enable per-project when imports of `flask.redirect` / `django.shortcuts.redirect` can be resolved and gated."
+
+- id: python.open_redirect.werkzeug_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [werkzeug]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [werkzeug, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect werkzeug redirect
+    code: |
+      import werkzeug
+      def example(user_input):
+          return werkzeug.redirect(user_input)
+  - name: werkzeug redirect literal negative
+    code: |
+      import werkzeug
+
+      def example(user_input):
+          return werkzeug.redirect('safe')
+    expect_no_match: true
+  description: "werkzeug.utils.redirect."
+
+- id: python.open_redirect.django_http_response_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [django]
+  cwe: [CWE-601]
+  match:
+    kind: new
+    callee:
+      name: HttpResponseRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect django http response redirect
+    code: |
+      import django
+      class HttpResponseRedirect:
+          pass
+
+      def example(user_input):
+          return HttpResponseRedirect(user_input)
+  - name: django http response redirect literal negative
+    code: |
+      import django
+
+      class HttpResponseRedirect:
+          pass
+
+      def example(user_input):
+          return HttpResponseRedirect('safe')
+    expect_no_match: true
+  description: "django HttpResponseRedirect(tainted)."
+
+- id: python.open_redirect.django_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [django]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [shortcuts, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect django redirect
+    code: |
+      import django
+      def example(user_input):
+          return shortcuts.redirect(user_input)
+  - name: django redirect literal negative
+    code: |
+      import django
+
+      def example(user_input):
+          return shortcuts.redirect('safe')
+    expect_no_match: true
+  description: "django.shortcuts.redirect."
+
+- id: python.open_redirect.django_http_response_permanent_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [django]
+  cwe: [CWE-601]
+  match:
+    kind: new
+    callee:
+      name: HttpResponsePermanentRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect django http response permanent redirect
+    code: |
+      import django
+      class HttpResponsePermanentRedirect:
+          pass
+
+      def example(user_input):
+          return HttpResponsePermanentRedirect(user_input)
+  - name: django http response permanent redirect literal negative
+    code: |
+      import django
+
+      class HttpResponsePermanentRedirect:
+          pass
+
+      def example(user_input):
+          return HttpResponsePermanentRedirect('safe')
+    expect_no_match: true
+  description: "django HttpResponsePermanentRedirect."
+
+- id: python.open_redirect.fastapi_redirect_response
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [fastapi, starlette]
+  cwe: [CWE-601]
+  match:
+    kind: new
+    callee:
+      name: RedirectResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect fastapi redirect response
+    code: |
+      import fastapi
+      class RedirectResponse:
+          pass
+
+      def example(user_input):
+          return RedirectResponse(user_input)
+  - name: fastapi redirect response literal negative
+    code: |
+      import fastapi
+
+      class RedirectResponse:
+          pass
+
+      def example(user_input):
+          return RedirectResponse('safe')
+    expect_no_match: true
+  description: "FastAPI/Starlette RedirectResponse(tainted)."
+
+- id: python.open_redirect.tornado_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [tornado]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [RequestHandler, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect tornado redirect
+    code: |
+      import tornado
+      def example(user_input):
+          return RequestHandler.redirect(user_input)
+  - name: tornado redirect literal negative
+    code: |
+      import tornado
+
+      def example(user_input):
+          return RequestHandler.redirect('safe')
+    expect_no_match: true
+  description: "Tornado RequestHandler.redirect(tainted)."
+
+- id: python.open_redirect.aiohttp_response_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [aiohttp]
+  cwe: [CWE-601]
+  match:
+    kind: new
+    callee:
+      attribute: [web, HTTPFound]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect aiohttp response redirect
+    code: |
+      import aiohttp
+      class HTTPFound:
+          pass
+
+      def example(user_input):
+          return web.HTTPFound(user_input)
+  - name: aiohttp response redirect literal negative
+    code: |
+      import aiohttp
+
+      class HTTPFound:
+          pass
+
+      def example(user_input):
+          return web.HTTPFound('safe')
+    expect_no_match: true
+  description: "aiohttp web.HTTPFound(tainted)."
+
+- id: python.open_redirect.response_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [sanic, aiohttp]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [response, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect response redirect
+    code: |
+      import sanic
+      def example(user_input):
+          return response.redirect(user_input)
+    expect_match_text: [response.redirect]
+  - name: response redirect literal negative
+    code: |
+      import sanic
+
+      def example(user_input):
+          return response.redirect('safe')
+    expect_no_match: true
+  description: "response.redirect(tainted) in Sanic/aiohttp-style response helpers - returns a redirect with attacker-controlled Location."
+
+- id: python.open_redirect.bottle_redirect
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [bottle]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [bottle, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect bottle redirect
+    code: |
+      import bottle
+      def example(user_input):
+          return bottle.redirect(user_input)
+  - name: bottle redirect literal negative
+    code: |
+      import bottle
+
+      def example(user_input):
+          return bottle.redirect('safe')
+    expect_no_match: true
+  description: "bottle.redirect(tainted)."
+
+- id: python.open_redirect.pyramid_httpfound
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [pyramid]
+  cwe: [CWE-601]
+  match:
+    kind: new
+    callee:
+      attribute: [httpexceptions, HTTPFound]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: open redirect pyramid httpfound
+    code: |
+      import pyramid
+      class HTTPFound:
+          pass
+
+      def example(user_input):
+          return httpexceptions.HTTPFound(user_input)
+  - name: pyramid httpfound literal negative
+    code: |
+      import pyramid
+
+      class HTTPFound:
+          pass
+
+      def example(user_input):
+          return httpexceptions.HTTPFound('safe')
+    expect_no_match: true
+  description: "pyramid httpexceptions.HTTPFound(location=tainted)."
+
+- id: python.open_redirect.authlib_authorize_redirect_tainted
+  enabled: true
+  language: python
+  tag: open-redirect
+  severity: high
+  packages: [authlib]
+  imports: [authlib]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [oauth, authorize_redirect]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: authlib authorize_redirect tainted redirect_uri
+    code: |
+      import authlib
+      def example(request, user_input):
+          return oauth.authorize_redirect(request, user_input)
+    expect_match_text: [oauth.authorize_redirect]
+  - name: authlib authorize_redirect literal negative
+    code: |
+      import authlib
+      def example(request):
+          return oauth.authorize_redirect(request, '/callback')
+    expect_no_match: true
+  description: "Authlib oauth.authorize_redirect(request, tainted_redirect_uri) — attacker-controlled redirect URI permits OAuth open-redirect / token theft via callback hijack."

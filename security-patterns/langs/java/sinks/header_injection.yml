@@ -1,0 +1,384 @@
+- id: java.header.servlet_response_setheader
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - javax.servlet
+  - jakarta.servlet
+  cwe:
+  - CWE-113
+  - CWE-601
+  - CWE-444
+  match:
+    kind: call
+    callee:
+      regex: ^HttpServletResponse\.setHeader$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: servlet response header tainted value
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpServletResponse.setHeader("X-Name", input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpServletResponse.setHeader(input, "safe");
+        }
+      }
+    expect_no_match: true
+  description: "HttpServletResponse.setHeader — flag tainted value (CRLF). Merged aliases: java.header.content_disposition_setheader, java.open_redirect.servlet_response_setheader_location."
+  aliases:
+  - java.header.content_disposition_setheader
+  - java.open_redirect.servlet_response_setheader_location
+  - java.smuggle.set_dual_cl_te_headers
+- id: java.header.servlet_response_addheader
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - javax.servlet
+  - jakarta.servlet
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpServletResponse
+      - addHeader
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: servlet response add header tainted value
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpServletResponse.addHeader("X-Name", input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpServletResponse.addHeader(input, "safe");
+        }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.addHeader.
+- id: java.header.servlet_response_addcookie
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - javax.servlet
+  - jakarta.servlet
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpServletResponse
+      - addCookie
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpServletResponse.addCookie(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpServletResponse.addCookie("safe");
+        }
+      }
+    expect_no_match: true
+  description: "HttpServletResponse.addCookie — flag tainted Cookie name/value."
+- id: java.header.spring_response_entity_header
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.http
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpHeaders
+      - add
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: spring httpheaders add tainted value
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpHeaders.add("X-Name", input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpHeaders.add(input, "safe");
+        }
+      }
+    expect_no_match: true
+  description: Spring HttpHeaders.add(name, tainted).
+  imports:
+  - org.springframework.http
+- id: java.header.spring_response_set
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.http
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpHeaders
+      - set
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: spring httpheaders set tainted value
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpHeaders.set("X-Name", input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpHeaders.set(input, "safe");
+        }
+      }
+    expect_no_match: true
+  description: Spring HttpHeaders.set.
+  imports:
+  - org.springframework.http
+- id: java.header.cookie_setvalue
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: medium
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cookie
+      - setValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Cookie.setValue(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Cookie.setValue("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Cookie.setValue — flag tainted value."
+- id: java.header.spring_responseentity_header
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.http
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: responseentity header tainted value
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String value) throws Exception {
+          ResponseEntity.header("X-Name", value);
+        }
+      }
+  - name: responseentity header
+    code: |
+      import org.springframework.http.*;
+      class App {
+        Object handle(String value) {
+          return ResponseEntity.header("X-Name", value);
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.header
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String value) throws Exception {
+          ResponseEntity.header(value, "safe");
+        }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.header(name, tainted) — CRLF response header injection. Merged aliases: java.header.spring_responseentity_content_disposition, java.open_redirect.spring_responseentity_header_location."
+  aliases:
+  - java.header.spring_responseentity_content_disposition
+  - java.open_redirect.spring_responseentity_header_location
+  imports:
+  - org.springframework.http
+- id: java.header.webflux_serverresponse_header
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServerResponse
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: webflux server response tainted header value
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        void handle(String value) throws Exception {
+          ServerResponse.header("X-Name", value);
+        }
+      }
+  - name: webflux server response header
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        Object handle(String value) {
+          return ServerResponse.header("X-Name", value);
+        }
+      }
+    expect_match_text:
+    - ServerResponse.header
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        void handle(String value) throws Exception {
+          ServerResponse.header(value, "safe");
+        }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.header(name, tainted) — CRLF response header injection. Merged aliases: java.open_redirect.webflux_serverresponse_header_location."
+  aliases:
+  - java.open_redirect.webflux_serverresponse_header_location
+- id: java.header.vertx_response_putheader
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: high
+  packages:
+  - io.vertx
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: putHeader
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: vertx response tainted header value
+    code: |
+      import io.vertx.*;
+      class App {
+        void handle(HttpServerResponse response, String value) throws Exception {
+          response.putHeader("X-Name", value);
+        }
+      }
+      class HttpServerResponse {
+        void putHeader(Object... args) {}
+      }
+  - name: vertx response put header
+    code: |
+      import io.vertx.*;
+      class App {
+        void handle(HttpServerResponse response, String value) {
+          response.putHeader("X-Name", value);
+        }
+      }
+      class HttpServerResponse {
+        void putHeader(Object... args) {}
+      }
+    expect_match_text:
+    - response.putHeader
+  - name: arg tainted literal negative
+    code: |
+      import io.vertx.*;
+      class App {
+        void handle(HttpServerResponse response, String value) throws Exception {
+          response.putHeader(value, "safe");
+        }
+      }
+      class HttpServerResponse {
+        void putHeader(Object... args) {}
+      }
+    expect_no_match: true
+  description: "Vert.x HttpServerResponse.putHeader(name, tainted) — CRLF response header injection. Merged aliases: java.open_redirect.vertx_response_putheader_location."
+  aliases:
+  - java.open_redirect.vertx_response_putheader_location

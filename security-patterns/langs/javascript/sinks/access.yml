@@ -1,0 +1,139 @@
+- id: javascript.access.aws_get_object_command
+  enabled: true
+  language: javascript
+  tag: access-control
+  severity: high
+  packages: ["@aws-sdk/client-s3"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: new
+    callee:
+      name: GetObjectCommand
+  match_examples:
+  - name: aws get object command
+    code: |
+      const _u = require("@aws-sdk/client-s3");
+      function demo(input, req, obj) {
+        return new GetObjectCommand(input);
+      }
+  description: "new GetObjectCommand({Bucket, Key}) — tainted selector reads arbitrary S3 objects."
+
+- id: javascript.access.aws_put_object_command
+  enabled: true
+  language: javascript
+  tag: access-control
+  severity: high
+  packages: ["@aws-sdk/client-s3"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: new
+    callee:
+      name: PutObjectCommand
+  match_examples:
+  - name: aws put object command
+    code: |
+      const _u = require("@aws-sdk/client-s3");
+      function demo(input, req, obj) {
+        return new PutObjectCommand(input);
+      }
+  description: "new PutObjectCommand({Bucket, Key}) — tainted selector overwrites attacker-chosen S3 objects."
+
+- id: javascript.access.aws_get_secret_value_command
+  enabled: true
+  language: javascript
+  tag: access-control
+  severity: high
+  packages: ["@aws-sdk/client-secrets-manager"]
+  cwe: [CWE-284]
+  match:
+    kind: new
+    callee:
+      name: GetSecretValueCommand
+  match_examples:
+  - name: aws get secret value command
+    code: |
+      const _u = require("@aws-sdk/client-secrets-manager");
+      function demo(input, req, obj) {
+        return new GetSecretValueCommand(input);
+      }
+  description: "new GetSecretValueCommand({SecretId}) — tainted secret id reads arbitrary secret material."
+
+- id: javascript.access.aws_invoke_command
+  enabled: true
+  language: javascript
+  tag: access-control
+  severity: high
+  packages: ["@aws-sdk/client-lambda"]
+  cwe: [CWE-284]
+  match:
+    kind: new
+    callee:
+      name: InvokeCommand
+  match_examples:
+  - name: aws invoke command
+    code: |
+      const _u = require("@aws-sdk/client-lambda");
+      function demo(input, req, obj) {
+        return new InvokeCommand(input);
+      }
+  description: "new InvokeCommand({FunctionName, Payload}) — tainted function selector invokes arbitrary Lambda targets."
+
+- id: javascript.access.azure_blob_download
+  enabled: true
+  language: javascript
+  tag: access-control
+  severity: high
+  packages: ["@azure/storage-blob"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.downloadToBuffer$"
+  match_examples:
+  - name: azure blob download
+    code: |
+      const _u = require("@azure/storage-blob");
+      function demo(input, req, obj) {
+        return blobClient.downloadToBuffer(input);
+      }
+  description: "BlobClient.downloadToBuffer — tainted blob selector reads arbitrary Azure blob data."
+
+- id: javascript.access.azure_blob_upload
+  enabled: true
+  language: javascript
+  tag: access-control
+  severity: high
+  packages: ["@azure/storage-blob"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.uploadData$"
+  match_examples:
+  - name: azure blob upload
+    code: |
+      const _u = require("@azure/storage-blob");
+      function demo(input, req, obj) {
+        return blobClient.uploadData(input);
+      }
+  description: "BlobClient.uploadData — tainted container/blob selector writes attacker-chosen storage targets."
+
+- id: javascript.access.gcp_secretmanager_access_secret_version
+  enabled: true
+  language: javascript
+  tag: access-control
+  severity: high
+  packages: ["@google-cloud/secret-manager"]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.accessSecretVersion$"
+  match_examples:
+  - name: gcp secretmanager access secret version
+    code: |
+      const _u = require("@google-cloud/secret-manager");
+      function demo(input, req, obj) {
+        return secretClient.accessSecretVersion(input);
+      }
+  description: "SecretManagerServiceClient.accessSecretVersion — tainted resource name reads arbitrary secret versions."

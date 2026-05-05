@@ -1,0 +1,105 @@
+# Lua JWT sinks (lua-resty-jwt).
+- id: lua.jwt.resty_jwt_verify
+  enabled: true
+  language: lua
+  tag: jwt
+  severity: high
+  packages: [lua-resty-jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, verify]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.jwt.resty_jwt_verify example
+    code: |
+      local _lua_resty_jwt = require("lua-resty-jwt")
+      function example(input, url, id, payload, request, params, user)
+        jwt.verify(input)
+      end
+  - name: literal token negative
+    code: |
+      local _lua_resty_jwt = require("lua-resty-jwt")
+      function example(input, url, id, payload, request, params, user)
+        jwt.verify("eyJhbGciOiJIUzI1NiJ9.e30.sig")
+      end
+    expect_no_match: true
+  description: "lua-resty-jwt jwt:verify — accepts tokens even with alg=none unless alg_whitelist is set."
+
+- id: lua.jwt.resty_jwt_verify_jwt_obj
+  enabled: true
+  language: lua
+  tag: jwt
+  severity: high
+  packages: [lua-resty-jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, verify_jwt_obj]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.jwt.resty_jwt_verify_jwt_obj example
+    code: |
+      local _lua_resty_jwt = require("lua-resty-jwt")
+      function example(input, url, id, payload, request, params, user)
+        jwt.verify_jwt_obj(input)
+      end
+  - name: literal jwt object negative
+    code: |
+      local _lua_resty_jwt = require("lua-resty-jwt")
+      function example(input, url, id, payload, request, params, user)
+        jwt.verify_jwt_obj({ header = { alg = "HS256" }, claims = {} })
+      end
+    expect_no_match: true
+  description: "lua-resty-jwt jwt:verify_jwt_obj — verifies a pre-parsed token; same alg-whitelist pitfall."
+
+- id: lua.jwt.resty_jwt_load
+  enabled: true
+  language: lua
+  tag: jwt
+  severity: high
+  packages: [lua-resty-jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, load_jwt]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.jwt.resty_jwt_load example
+    code: |
+      local _lua_resty_jwt = require("lua-resty-jwt")
+      function example(input, url, id, payload, request, params, user)
+        jwt.load_jwt(input)
+      end
+  - name: literal token negative
+    code: |
+      local _lua_resty_jwt = require("lua-resty-jwt")
+      function example(input, url, id, payload, request, params, user)
+        jwt.load_jwt("eyJhbGciOiJIUzI1NiJ9.e30.sig")
+      end
+    expect_no_match: true
+  description: "lua-resty-jwt jwt:load_jwt — parses header/payload WITHOUT signature verification; trusting claims is auth bypass."
+
+- id: lua.jwt.resty_jwt_sign_none
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: lua
+  tag: jwt
+  severity: high
+  packages: [lua-resty-jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, sign]
+  description: "Disabled — jwt:sign is unsafe only when alg='none'; flag with alg-constant narrowing."

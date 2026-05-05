@@ -1,0 +1,145 @@
+# TypeScript cloud-event sources (Lambda / GCF / Azure Functions / CloudEvents).
+# Bare handler param names (event/req/context) over-fire outside of an
+# audit profile — disabled by default. Attribute-chain sources stay on.
+
+- id: typescript.source.aws_lambda_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: service
+  tag: cloud-event
+  packages: ["aws-lambda"]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "AWS Lambda handler `event` param — APIGatewayEvent body/headers/queryStringParameters are tainted. Disabled — bare `event` matches every event-emitter handler; enable in Lambda audits."
+
+- id: typescript.source.aws_lambda_apigw_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: service
+  tag: cloud-event
+  packages: ["aws-lambda"]
+  match:
+    kind: param
+    target:
+      name: APIGatewayEvent
+  description: "Disabled — `APIGatewayEvent` is a TypeScript type name; parameters are named `event: APIGatewayEvent`, so the param-name match is dead. Use aws_lambda_event in Lambda audits."
+
+
+- id: typescript.source.cloudevents
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: service
+  tag: cloud-event
+  packages: [cloudevents]
+  match:
+    kind: new
+    callee:
+      name: CloudEvent
+  description: "Disabled — `new CloudEvent({data})` is typically constructed by producers, not consumed; consume-side `cloudEvent.data` attribute read is the tainted source."
+
+- id: typescript.source.aws_lambda_event_body
+  enabled: true
+  language: typescript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, body]
+  match_examples:
+  - name: aws lambda event body
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.body;
+      }
+  description: "AWS Lambda/APIGateway event.body — cloud-delivered request payload."
+
+- id: typescript.source.aws_lambda_event_headers
+  enabled: true
+  language: typescript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, header]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, headers]
+  match_examples:
+  - name: aws lambda event headers
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.headers;
+      }
+  description: "AWS Lambda/APIGateway event.headers — attacker-controlled request headers."
+
+- id: typescript.source.aws_lambda_event_query
+  enabled: true
+  language: typescript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, query]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, queryStringParameters]
+  match_examples:
+  - name: aws lambda event query
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.queryStringParameters;
+      }
+  description: "AWS Lambda/APIGateway event.queryStringParameters — cloud-delivered query input."
+
+- id: typescript.source.aws_lambda_event_path
+  enabled: true
+  language: typescript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, path]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, pathParameters]
+  match_examples:
+  - name: aws lambda event path
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.pathParameters;
+      }
+  description: "AWS Lambda/APIGateway event.pathParameters — cloud-delivered route parameters."
+
+- id: typescript.source.cloudevents_data
+  enabled: true
+  language: typescript
+  trust: service
+  tag: cloud-event
+  packages: [cloudevents]
+  match:
+    kind: read
+    target:
+      attribute: [cloudEvent, data]
+  match_examples:
+  - name: cloudevents data
+    code: |
+      const _u = require("cloudevents");
+      function demo(input, req, obj) {
+        return cloudEvent.data;
+      }
+  description: "CloudEvents cloudEvent.data attribute — service-delivered event payload."

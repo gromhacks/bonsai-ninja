@@ -1,0 +1,448 @@
+# Perl path-traversal sinks. Tainted filename = traversal to ../ or /etc/passwd.
+- id: perl.path.open_read
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: open
+  description: "Disabled — bare `name: open` is FP-prone; no canonical exists. Without a mode-string constraint we cannot distinguish path (`<path`) from cmdi (`|cmd`) or other open() shapes. Re-enable when adapter supports mode-string argument inspection. perl.path.file_slurp_read covers the safer File::Slurp call shape."
+
+- id: perl.path.unlink
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: unlink
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.unlink example
+    code: |
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        unlink($input)
+      }
+  - name: literal unlink negative
+    code: |
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        unlink("tmp/report.txt")
+      }
+    expect_no_match: true
+  description: "unlink() — tainted path deletes arbitrary files (DoS, privilege escalation via replace-on-rename races)."
+
+- id: perl.path.rename
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: rename
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.rename source example
+    code: |
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        rename($input, "tmp/output.txt")
+      }
+  - name: literal rename source negative
+    code: |
+      sub example {
+        rename("tmp/input.txt", "tmp/output.txt")
+      }
+    expect_no_match: true
+  description: "rename() — tainted source or destination path allows arbitrary-file overwrite / symlink-race exploitation."
+- id: perl.path.rename_dest
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: rename
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.path.rename destination example
+    code: |
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        rename("tmp/input.txt", $input)
+      }
+  - name: literal rename destination negative
+    code: |
+      sub example {
+        rename("tmp/input.txt", "tmp/output.txt")
+      }
+    expect_no_match: true
+  description: "rename(src, dest) — tainted destination path allows arbitrary-file overwrite / symlink-race exploitation."
+
+- id: perl.path.rmtree
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  packages: ["File::Path"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: rmtree
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.rmtree example
+    code: |
+      use File::Path;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        rmtree($input)
+      }
+  - name: literal rmtree negative
+    code: |
+      use File::Path;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        rmtree("tmp/uploads")
+      }
+    expect_no_match: true
+  description: "File::Path::rmtree / remove_tree — tainted root recursively deletes; traversal = wipe the filesystem."
+
+- id: perl.path.make_path
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: medium
+  packages: ["File::Path"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: make_path
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.make_path example
+    code: |
+      use File::Path;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        make_path($input)
+      }
+  - name: literal make path negative
+    code: |
+      use File::Path;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        make_path("tmp/uploads")
+      }
+    expect_no_match: true
+  description: "File::Path::make_path — tainted path lets attacker create directories outside the intended root (prep step for write-what-where)."
+
+- id: perl.path.file_copy
+  aliases:
+  - perl.upload_file_copy_to_client_filename
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  packages: ["File::Copy"]
+  cwe: [CWE-22, CWE-434]
+  match:
+    kind: call
+    callee:
+      name: copy
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.file_copy source example
+    code: |
+      use File::Copy;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        File::Copy->copy($input, "tmp/output.txt")
+      }
+  - name: literal file copy source negative
+    code: |
+      use File::Copy;
+      sub example {
+        copy("tmp/input.txt", "tmp/output.txt")
+      }
+    expect_no_match: true
+  description: "File::Copy::copy — tainted source/dest path reads or overwrites arbitrary files. Also covers merged aliases: perl.upload_file_copy_to_client_filename."
+- id: perl.path.file_copy_dest
+  aliases:
+  - perl.upload_file_copy_to_client_filename_dest
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  packages: ["File::Copy"]
+  cwe: [CWE-22, CWE-434]
+  match:
+    kind: call
+    callee:
+      name: copy
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.path.file_copy destination example
+    code: |
+      use File::Copy;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        copy("tmp/input.txt", $input)
+      }
+  - name: literal file copy destination negative
+    code: |
+      use File::Copy;
+      sub example {
+        copy("tmp/input.txt", "tmp/output.txt")
+      }
+    expect_no_match: true
+  description: "File::Copy::copy(src, dest) — tainted destination paths overwrite arbitrary files or write uploads outside the intended directory."
+
+- id: perl.path.file_move
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  packages: ["File::Copy"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: move
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.file_move source example
+    code: |
+      use File::Copy;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        move($input, "tmp/output.txt")
+      }
+  - name: literal file move source negative
+    code: |
+      use File::Copy;
+      sub example {
+        move("tmp/input.txt", "tmp/output.txt")
+      }
+    expect_no_match: true
+  description: "File::Copy::move — tainted source/dest path moves/overwrites arbitrary files."
+- id: perl.path.file_move_dest
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  packages: ["File::Copy"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: move
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.path.file_move destination example
+    code: |
+      use File::Copy;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        move("tmp/input.txt", $input)
+      }
+  - name: literal file move destination negative
+    code: |
+      use File::Copy;
+      sub example {
+        move("tmp/input.txt", "tmp/output.txt")
+      }
+    expect_no_match: true
+  description: "File::Copy::move(src, dest) — tainted destination paths move files outside the intended directory or overwrite arbitrary files."
+
+- id: perl.path.file_slurp_read
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  packages: ["File::Slurp"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: read_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.file_slurp_read example
+    code: |
+      use File::Slurp;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        read_file($input)
+      }
+  - name: literal file slurp read negative
+    code: |
+      use File::Slurp;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        read_file("priv/static/index.html")
+      }
+    expect_no_match: true
+  description: "File::Slurp::read_file — tainted path returns arbitrary file contents (/etc/passwd, secrets)."
+
+- id: perl.path.file_slurp_write
+  enabled: true
+  language: perl
+  tag: path-traversal
+  severity: high
+  packages: ["File::Slurp"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: write_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.file_slurp_write example
+    code: |
+      use File::Slurp;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        write_file($input)
+      }
+  - name: literal file slurp write negative
+    code: |
+      use File::Slurp;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        write_file("tmp/output.txt")
+      }
+    expect_no_match: true
+  description: "File::Slurp::write_file — tainted path writes attacker-controlled content anywhere (webshell drop, config overwrite)."
+
+# Archive extraction (Zip Slip class). Archive::Zip and Archive::Extract
+# trust archive entry names; joining entry name into a destination
+# path without containment is Zip Slip.
+- id: perl.path.archive_zip_extract_to_filenamed
+  enabled: true
+  language: perl
+  tag: zip-slip
+  severity: high
+  packages: ["Archive::Zip"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: extractToFileNamed
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.path.archive_zip_extract_to_filenamed example
+    code: |
+      use Archive::Zip;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        extractToFileNamed($input)
+      }
+  - name: literal archive zip extract negative
+    code: |
+      use Archive::Zip;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        extractToFileNamed("tmp/unpacked/file.txt")
+      }
+    expect_no_match: true
+  description: "Archive::Zip member->extractToFileNamed(tainted dest) — destination derived from archive entry name is Zip Slip."
+- id: perl.path.archive_zip_extract_member
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: perl
+  tag: zip-slip
+  severity: high
+  packages: ["Archive::Zip"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: extractMember
+  match_examples:
+  - name: perl.path.archive_zip_extract_member example
+    code: |
+      use Archive::Zip;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        extractMember($input)
+      }
+  description: "Disabled — extractMember(member [, dest]) is only a Zip Slip sink when dest/member state is archive-entry-derived; use extractToFileNamed(dest) until state tracking exists."
+- id: perl.path.archive_extract_extract
+  enabled: true
+  language: perl
+  tag: zip-slip
+  severity: high
+  packages: ["Archive::Extract"]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: extract
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^to$"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.path.archive_extract_extract example
+    code: |
+      use Archive::Extract;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        extract(to => $input)
+      }
+  - name: literal archive extract destination negative
+    code: |
+      use Archive::Extract;
+      sub example {
+        my ($input) = @_;
+        extract(to => "/tmp/out")
+      }
+    expect_no_match: true
+  description: "Archive::Extract ->extract(to => tainted) — auto-detects tar/zip; trusts archive contents."
+
+# 3-arg `open(my $fh, '<', '/var/data/' . $name)` shape with a literal
+# `<` mode. Distinguished from the cmdi `open ... |cmd` form by the
+# arg-1 mode regex requiring `<`, `>`, `>>`, `<+`, `>+`, or `+>` —
+# never a leading `|` (that's the cmdi shape).

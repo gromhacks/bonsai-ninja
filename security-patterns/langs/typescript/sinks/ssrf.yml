@@ -1,0 +1,465 @@
+- id: typescript.ssrf.got
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - got
+  imports:
+  - got
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: got
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: got
+    code: "const _u = require(\"got\");\nfunction demo(input, req, obj) {\n  return\
+      \ got(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"got\");\nfunction demo(input, req, obj) {\n  return\
+      \ got(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: "got(url) \u2014 top-level got() call with tainted URL."
+- id: typescript.ssrf.axios
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - axios
+  imports:
+  - axios
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: axios
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: axios
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios(input);\n}\n"
+  - name: axios literal negative
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: "axios(url) \u2014 top-level axios() with tainted URL."
+- id: typescript.ssrf.axios_get
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - axios
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - axios
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: axios get
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios.get(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios.get(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: axios.get(tainted URL).
+- id: typescript.ssrf.axios_post
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - axios
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - axios
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: axios post
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios.post(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios.post(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: axios.post(tainted URL, data).
+- id: typescript.ssrf.axios_request
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - axios
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - axios
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: axios request
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios.request(input);\n}\n"
+  - name: axios request literal negative
+    code: "const _u = require(\"axios\");\nfunction demo(input, req, obj) {\n  return\
+      \ axios.request({ url: \"https://example.com\" });\n}\n"
+    expect_no_match: true
+  description: 'axios.request({ url: tainted }).'
+- id: typescript.ssrf.node_fetch
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - node-fetch
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^fetch$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: node fetch
+    code: "const _u = require(\"node-fetch\");\nfunction demo(input, req, obj) {\n\
+      \  return fetch(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"node-fetch\");\nfunction demo(input, req, obj) {\n\
+      \  return fetch(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: "fetch(tainted URL) \u2014 global fetch or node-fetch."
+- id: typescript.ssrf.http_request
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  - https
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: http request
+    code: "const _u = require(\"http\");\nfunction demo(input, req, obj) {\n  return\
+      \ http.request(input);\n}\n"
+  - name: http request literal negative
+    code: "const _u = require(\"http\");\nfunction demo(input, req, obj) {\n  return\
+      \ http.request(\"http://example.com\");\n}\n"
+    expect_no_match: true
+  description: http.request(tainted URL/options).
+- id: typescript.ssrf.https_request
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - https
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - https
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: https request
+    code: "const _u = require(\"https\");\nfunction demo(input, req, obj) {\n  return\
+      \ https.request(input);\n}\n"
+  - name: https request literal negative
+    code: "const _u = require(\"https\");\nfunction demo(input, req, obj) {\n  return\
+      \ https.request(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: https.request(tainted URL/options).
+- id: typescript.ssrf.http_get
+  enabled: false
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - get
+  match_examples:
+  - name: http get
+    code: "const _u = require(\"http\");\nfunction demo(input, req, obj) {\n  return\
+      \ http.get(input);\n}\n"
+  description: http.get(tainted URL).
+  disabled_reason:
+    code: over-broad
+- id: typescript.ssrf.https_get
+  enabled: false
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - https
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - https
+      - get
+  match_examples:
+  - name: https get
+    code: "const _u = require(\"https\");\nfunction demo(input, req, obj) {\n  return\
+      \ https.get(input);\n}\n"
+  description: https.get(tainted URL).
+  disabled_reason:
+    code: over-broad
+- id: typescript.ssrf.request_legacy
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - request
+  imports:
+  - request
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: request
+  description: "Disabled \u2014 bare `request` name is too ambiguous (many libs export\
+    \ `request`); use an import-anchored variant if needed."
+- id: typescript.ssrf.superagent_get
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - superagent
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - superagent
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: superagent get
+    code: "const _u = require(\"superagent\");\nfunction demo(input, req, obj) {\n\
+      \  return superagent.get(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"superagent\");\nfunction demo(input, req, obj) {\n\
+      \  return superagent.get(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: superagent.get(tainted URL).
+- id: typescript.ssrf.superagent_post
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - superagent
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - superagent
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: superagent post
+    code: "const _u = require(\"superagent\");\nfunction demo(input, req, obj) {\n\
+      \  return superagent.post(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"superagent\");\nfunction demo(input, req, obj) {\n\
+      \  return superagent.post(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: superagent.post(tainted URL).
+- id: typescript.ssrf.undici_request
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - undici
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - undici
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: undici request
+    code: "const _u = require(\"undici\");\nfunction demo(input, req, obj) {\n  return\
+      \ undici.request(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"undici\");\nfunction demo(input, req, obj) {\n  return\
+      \ undici.request(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: undici.request(tainted URL).
+- id: typescript.ssrf.undici_fetch
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - undici
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - undici
+      - fetch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: undici fetch
+    code: "const _u = require(\"undici\");\nfunction demo(input, req, obj) {\n  return\
+      \ undici.fetch(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"undici\");\nfunction demo(input, req, obj) {\n  return\
+      \ undici.fetch(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: undici.fetch(tainted URL).
+- id: typescript.ssrf.needle
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - needle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: needle
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: needle
+    code: "const _u = require(\"needle\");\nfunction demo(input, req, obj) {\n  return\
+      \ needle(\"get\", input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"needle\");\nfunction demo(input, req, obj) {\n  return\
+      \ needle(\"get\", \"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: "needle(method, url) \u2014 tainted URL enables SSRF."
+- id: typescript.ssrf.ky
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - ky
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ky
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ky
+    code: "const _u = require(\"ky\");\nfunction demo(input, req, obj) {\n  return\
+      \ ky.get(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"ky\");\nfunction demo(input, req, obj) {\n  return\
+      \ ky.get(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: "ky.get(tainted URL) \u2014 fetch-based SSRF."
+- id: typescript.ssrf.ky_post
+  enabled: true
+  language: typescript
+  tag: ssrf
+  severity: high
+  packages:
+  - ky
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ky
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ky post
+    code: "const _u = require(\"ky\");\nfunction demo(input, req, obj) {\n  return\
+      \ ky.post(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"ky\");\nfunction demo(input, req, obj) {\n  return\
+      \ ky.post(\"https://example.com\");\n}\n"
+    expect_no_match: true
+  description: "ky.post(tainted URL) \u2014 fetch-based SSRF."

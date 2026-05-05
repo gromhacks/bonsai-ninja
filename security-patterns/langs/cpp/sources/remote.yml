@@ -1,0 +1,571 @@
+# C++ remote / network input sources.
+- id: cpp.input.recv
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: recv
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        recv(arg);
+      }
+  description: "BSD socket recv — remote bytes."
+- id: cpp.input.recvfrom
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: recvfrom
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        recvfrom(arg);
+      }
+  description: "BSD socket recvfrom — UDP remote bytes."
+- id: cpp.input.read_socket
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: read
+  description: "Disabled — bare `read` name collides with iostream / container `.read()` methods; rely on recv/recvfrom/Boost.Beast for socket reads."
+- id: cpp.input.accept
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  trust: remote
+  tag: network-input
+  match:
+    kind: call
+    callee:
+      name: accept
+  description: "Disabled — accept yields fd, not tainted bytes directly."
+- id: cpp.input.params_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  trust: remote
+  tag: http-input
+  match:
+    kind: param
+    target:
+      name: params
+  description: "Disabled — unscoped `params` parameter name matches every function with a param named `params` (render loops, math helpers, anything). The per-framework crow / drogon / pistache / cpphttplib rules below capture the real HTTP-handler shape with proper package scoping."
+- id: cpp.input.crow_request_param
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [json, query, multipart]
+  frameworks: [crow, drogon, cpphttplib]
+  packages: [crow, drogon, cpp-httplib]
+  match:
+    kind: param
+    target:
+      name: req
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <crow.h> /* crow */
+      void example(const char *req) {
+        (void)req;
+      }
+  description: "HTTP handler `req` parameter — covers Crow, Drogon, cpp-httplib (same param shape)."
+- id: cpp.input.drogon_request_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [json, query, multipart]
+  packages: [drogon]
+  match:
+    kind: param
+    target:
+      name: req
+  description: "Disabled duplicate — merged into cpp.input.crow_request_param."
+- id: cpp.input.pistache_request_param
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  frameworks: [pistache]
+  packages: [pistache]
+  match:
+    kind: param
+    target:
+      name: request
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <pistache/endpoint.h>
+      void example(const char *request) {
+        (void)request;
+      }
+  description: "HTTP handler `request` parameter — covers Pistache Rest::Request&."
+- id: cpp.input.cpphttplib_req_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  trust: remote
+  tag: http-input
+  packages: [cpp-httplib]
+  match:
+    kind: param
+    target:
+      name: req
+  description: "Disabled duplicate — merged into cpp.input.crow_request_param."
+- id: cpp.input.qt_tcpsocket_readall
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: cpp
+  trust: remote
+  tag: network-input
+  packages: [Qt]
+  match:
+    kind: call
+    callee:
+      attribute: [QTcpSocket, readAll]
+  description: "Disabled — adapters index local receivers like `socket.readAll`, not receiver types like `QTcpSocket.readAll`."
+- id: cpp.input.qt_networkreply_readall
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: cpp
+  trust: remote
+  tag: network-input
+  packages: [Qt]
+  match:
+    kind: call
+    callee:
+      attribute: [QNetworkReply, readAll]
+  description: "Disabled — adapters index local receivers like `reply.readAll`, not receiver types like `QNetworkReply.readAll`."
+- id: cpp.input.boost_beast_read
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  packages: [boost.beast]
+  match:
+    kind: call
+    callee:
+      attribute: [http, read]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/beast.hpp>
+      #include <boost/beast.hpp>
+      #include <boost/beast.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        http::read(arg);
+      }
+  description: "Boost.Beast http::read — remote HTTP message."
+
+  imports:
+  - boost/beast.hpp
+  - boost
+- id: cpp.input.boost_asio_read
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [boost.asio]
+  match:
+    kind: call
+    callee:
+      attribute: [asio, read]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        asio::read(arg);
+      }
+  description: "Boost.Asio asio::read(socket, buf) — remote socket bytes."
+
+  imports:
+  - boost
+  - boost/asio.hpp
+- id: cpp.input.boost_asio_async_read
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [boost.asio]
+  match:
+    kind: call
+    callee:
+      attribute: [asio, async_read]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        asio::async_read(arg);
+      }
+  description: "Boost.Asio asio::async_read — async remote socket bytes."
+
+  imports:
+  - boost
+  - boost/asio.hpp
+- id: cpp.input.poco_streamsocket_receivebytes
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [Poco]
+  match:
+    kind: call
+    callee:
+      attribute: [StreamSocket, receiveBytes]
+  description: "Disabled — adapters index local receivers like `stream.receiveBytes`, not receiver types like `StreamSocket.receiveBytes`."
+
+- id: cpp.input.grpc_request_param
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [protobuf]
+  packages: [grpc]
+  match:
+    kind: param
+    target:
+      name: reader
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <grpc.h>
+      void example(const char *reader) {
+        (void)reader;
+      }
+  description: "gRPC server streaming reader parameter — remote protobuf request."
+
+- id: cpp.input.boost_asio_async_receive
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [boost.asio]
+  match:
+    kind: call
+    callee:
+      attribute: [socket, async_receive]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        socket::async_receive(arg);
+      }
+  description: "Boost.Asio socket::async_receive — async UDP/TCP datagram bytes from peer."
+
+  imports:
+  - boost
+  - boost/asio.hpp
+- id: cpp.input.boost_asio_async_receive_from
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [boost.asio]
+  match:
+    kind: call
+    callee:
+      attribute: [socket, async_receive_from]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      #include <boost/asio.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        socket::async_receive_from(arg);
+      }
+  description: "Boost.Asio socket::async_receive_from — async UDP datagram bytes."
+
+  imports:
+  - boost
+  - boost/asio.hpp
+- id: cpp.input.crow_request_get_header_value
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [crow]
+  frameworks: [crow]
+  match:
+    kind: call
+    callee:
+      attribute: [request, get_header_value]
+  constraints:
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <crow.h> /* crow */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        request::get_header_value(arg);
+      }
+  description: "Crow request::get_header_value(name) — caller-controlled HTTP header. Signature: `get_header_value(const std::string &name)` — exactly 1 arg; bounds reject same-name decoys."
+
+- id: cpp.input.crow_request_url_params_get
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [crow]
+  frameworks: [crow]
+  match:
+    kind: call
+    callee:
+      attribute: [url_params, get]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <crow.h> /* crow */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        url_params::get(arg);
+      }
+  description: "Crow url_params.get(name) — query-string parameter."
+
+- id: cpp.input.drogon_request_get_parameter
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [query, form]
+  packages: [drogon]
+  frameworks: [drogon]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpRequest, getParameter]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpRequest::getParameter(arg);
+      }
+  description: "Drogon HttpRequest::getParameter(name) — query/form param."
+
+- id: cpp.input.drogon_request_get_header
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [drogon]
+  frameworks: [drogon]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpRequest, getHeader]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpRequest::getHeader(arg);
+      }
+  description: "Drogon HttpRequest::getHeader(name) — caller-controlled HTTP header."
+
+- id: cpp.input.qt_qnetworkrequest_url
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  packages: [Qt]
+  match:
+    kind: call
+    callee:
+      attribute: [QNetworkRequest, url]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QNetworkRequest::url(arg);
+      }
+  description: "Qt QNetworkRequest::url() — request-controlled URL accessor."
+
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.input.qt_qnetworkrequest_rawheader
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [Qt]
+  match:
+    kind: call
+    callee:
+      attribute: [QNetworkRequest, rawHeader]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QNetworkRequest::rawHeader(arg);
+      }
+  description: "Qt QNetworkRequest::rawHeader(name) — caller-controlled header value."
+
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.input.grpc_servercontext_client_metadata
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [grpc]
+  match:
+    kind: call
+    callee:
+      attribute: [ServerContext, client_metadata]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <grpc.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        ServerContext::client_metadata(arg);
+      }
+  description: "gRPC ServerContext::client_metadata() — client-supplied metadata multimap."
+
+- id: cpp.input.qt_mqtt_message_payload
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: queue-input
+  payload_types: [binary]
+  packages: [Qt]
+  match:
+    kind: call
+    callee:
+      attribute: [QMqttMessage, payload]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QMqttMessage::payload(arg);
+      }
+  description: "Qt QMqttMessage::payload() — broker-delivered MQTT payload bytes."
+
+# Untrusted-size parameter source for the cpp.memory.malloc_tainted_size
+# / calloc / realloc family. Names taken from common C++ network-parser
+# conventions (size, len, length, count, n_bytes). Bare-name regex
+# matches widely; engine taint flow + the malloc-family sinks scope
+# real findings.
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.input.untrusted_size_param
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  match:
+    kind: param
+    target:
+      regex: "^(size|len|length|n|count|n_bytes|num_bytes|payload_len|msg_len|frame_len|total_len|hdr_len)$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(const char *size) {
+        (void)size;
+      }
+  description: "Multi-arg size-style parameter (`size`, `len`, `length`, `count`, …) typically populated from a peer-controlled message header. Pairs with cpp.memory.malloc_tainted_size / calloc / realloc and the memcpy family for CWE-190/787 detection."

@@ -1,0 +1,69 @@
+# Objective-C outbound HTTP header injection (NSMutableURLRequest / AFHTTPRequestSerializer).
+- id: objc.header.nsmutableurlrequest_setvalue
+  enabled: true
+  language: objc
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: setValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [NSMutableURLRequest setValue:input]; }
+    - name: literal header value negative
+      code: |
+        void test(void) { [NSMutableURLRequest setValue:@"safe"]; }
+      expect_no_match: true
+  description: "NSMutableURLRequest -setValue:forHTTPHeaderField: with tainted value — CR/LF permits header splitting / request smuggling. Constrained to URL-request receivers."
+
+- id: objc.header.nsmutableurlrequest_addvalue
+  enabled: true
+  language: objc
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: addValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [NSMutableURLRequest addValue:input]; }
+    - name: literal added header value negative
+      code: |
+        void test(void) { [NSMutableURLRequest addValue:@"safe"]; }
+      expect_no_match: true
+  description: "NSMutableURLRequest -addValue:forHTTPHeaderField: — same CR/LF injection risk as setValue:forHTTPHeaderField:."
+
+- id: objc.header.set_all_http_headers
+  enabled: true
+  language: objc
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: setAllHTTPHeaderFields
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [NSMutableURLRequest setAllHTTPHeaderFields:input]; }
+    - name: literal header dictionary negative
+      code: |
+        void test(void) { [NSMutableURLRequest setAllHTTPHeaderFields:@{@"X-Safe": @"ok"}]; }
+      expect_no_match: true
+  description: "NSMutableURLRequest -setAllHTTPHeaderFields: — tainted dict values allow bulk header injection."

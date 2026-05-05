@@ -1,0 +1,237 @@
+- id: javascript.crypto.createhash_md5
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: low
+  packages:
+  - crypto
+  imports:
+  - crypto
+  cwe:
+  - CWE-327
+  - CWE-328
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createHash
+  match_examples:
+  - name: createhash md5
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createHash('md5');
+      }
+  description: "crypto.createHash('md5') — broken hash. Merged aliases: javascript.crypto.createhash_sha1."
+  aliases:
+  - javascript.crypto.createhash_sha1
+- id: javascript.crypto.createcipher_des
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createCipheriv
+  match_examples:
+  - name: createcipher des
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createCipheriv('des');
+      }
+  description: "crypto.createCipheriv('des', …). Merged aliases: javascript.crypto.createcipher_des_ede, javascript.crypto.createcipher_rc4, javascript.crypto.createcipher_aes128_ecb, javascript.crypto.createcipher_aes192_ecb, javascript.crypto.createcipher_aes256_ecb."
+  aliases:
+  - javascript.crypto.createcipher_des_ede
+  - javascript.crypto.createcipher_rc4
+  - javascript.crypto.createcipher_aes128_ecb
+  - javascript.crypto.createcipher_aes192_ecb
+  - javascript.crypto.createcipher_aes256_ecb
+- id: javascript.crypto.deprecated_createcipher
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createCipher
+  match_examples:
+  - name: deprecated createcipher
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createCipher(input);
+      }
+  description: "crypto.createCipher (no IV) — deprecated, predictable IVs."
+- id: javascript.crypto.deprecated_createdecipher
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto
+  cwe:
+  - CWE-327
+  - CWE-1204
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createDecipher
+  match_examples:
+  - name: deprecated createdecipher
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createDecipher("aes-256-ctr", input);
+      }
+    expect_match_text:
+    - crypto.createDecipher
+  description: "crypto.createDecipher (no IV) — deprecated API derives predictable IVs from password material."
+- id: javascript.crypto.gcm_decipher_no_authtaglength
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: medium
+  packages:
+  - crypto
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createDecipheriv
+  match_examples:
+  - name: gcm decipher missing auth tag length
+    code: |
+      const _u = require("crypto");
+      function demo(key, iv) {
+        return crypto.createDecipheriv("aes-256-gcm", key, iv);
+      }
+    expect_match_text:
+    - crypto.createDecipheriv
+  description: crypto.createDecipheriv('*-gcm', key, iv) without authTagLength can accept unexpectedly short GCM tags.
+- id: javascript.crypto.cryptojs_md5
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: low
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CryptoJS
+      - MD5
+  match_examples:
+  - name: cryptojs md5
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.MD5(input);
+      }
+  description: crypto-js CryptoJS.MD5.
+- id: javascript.crypto.cryptojs_sha1
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: low
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CryptoJS
+      - SHA1
+  match_examples:
+  - name: cryptojs sha1
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.SHA1(input);
+      }
+  description: crypto-js CryptoJS.SHA1.
+- id: javascript.crypto.cryptojs_des
+  enabled: true
+  language: javascript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CryptoJS.DES
+      - encrypt
+  match_examples:
+  - name: cryptojs des
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.DES.encrypt(input);
+      }
+  description: crypto-js DES.encrypt.
+- id: javascript.crypto.math_random
+  enabled: true
+  language: javascript
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Math
+      - random
+  match_examples:
+  - name: math random
+    code: "function demo(input, req, obj) {\n  return Math.random(input);\n}\n"
+  description: "Math.random — non-cryptographic; flag in security-sensitive paths. TODO(only_when_packaged): JS Math global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Math', 'random']` match only."
+- id: javascript.crypto.bcrypt_low_rounds
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: weak-crypto
+  severity: medium
+  packages:
+  - bcrypt
+  - bcryptjs
+  cwe:
+  - CWE-916
+  match:
+    kind: call
+    callee:
+      attribute:
+      - bcrypt
+      - hash
+  description: "Disabled — flag only when rounds < 10."

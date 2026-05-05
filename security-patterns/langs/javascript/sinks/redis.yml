@@ -1,0 +1,104 @@
+- id: javascript.redis.eval
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages: [redis, ioredis]
+  cwe: [CWE-943, CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [redis, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eval
+    code: |
+      const _u = require("redis");
+      function demo(input, req, obj) {
+        return redis.eval(input);
+      }
+  - name: literal redis eval negative
+    code: |
+      const _u = require("redis");
+      function demo() {
+        return redis.eval("return 1");
+      }
+    expect_no_match: true
+  description: redis.eval — Lua script injection when the script or keys/args are tainted.
+
+- id: javascript.redis.ioredis_eval
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages: [ioredis]
+  cwe: [CWE-943, CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ioredis, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ioredis eval
+    code: |
+      const _u = require("ioredis");
+      function demo(input, req, obj) {
+        return ioredis.eval(input);
+      }
+  - name: literal ioredis eval negative
+    code: |
+      const _u = require("ioredis");
+      function demo() {
+        return ioredis.eval("return 1");
+      }
+    expect_no_match: true
+  description: ioredis.eval — same Lua injection hazard as node-redis.
+
+- id: javascript.redis.client_eval
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages: [redis, ioredis]
+  cwe: [CWE-943, CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [client, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: client eval
+    code: |
+      const _u = require("redis");
+      function demo(input, req, obj) {
+        return client.eval(input);
+      }
+  - name: literal client eval negative
+    code: |
+      const _u = require("redis");
+      function demo() {
+        return client.eval("return 1");
+      }
+    expect_no_match: true
+  description: "redis/ioredis client.eval — Lua script injection on tainted script body. `min_args: 1` rejects 0-arg `client.eval()` decoys (the script body is required)."
+
+- id: javascript.redis.client_evalsha
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: nosql-injection
+  severity: medium
+  packages: [redis, ioredis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [client, evalsha]
+  description: "Disabled — evalsha runs a pre-loaded script by hash; only dangerous if the hash itself is attacker-controlled."

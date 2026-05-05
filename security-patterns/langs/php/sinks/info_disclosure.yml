@@ -1,0 +1,95 @@
+- id: php.info_disclosure.error_log_secret
+  enabled: true
+  language: php
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      name: error_log
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: error log secret
+    code: "<?php\nfunction example($secretToken) {\n  error_log($secretToken);\n}\n"
+    expect_match_text:
+    - error_log
+  - name: literal error log negative
+    code: "<?php\nfunction example($secretToken) {\n  error_log(\"startup ok\");\n}\n"
+    expect_no_match: true
+  description: 'error_log(secret/token/password) — secret-shaped data written to PHP error logs. Merged aliases: php.log_injection.error_log_newline, php.log_injection.error_log_concat.'
+  aliases:
+  - php.log_injection.error_log_newline
+  - php.log_injection.error_log_concat
+- id: php.info_disclosure.symfony_response_exception
+  enabled: true
+  language: php
+  tag: information-disclosure
+  severity: high
+  packages:
+  - symfony/http-foundation
+  cwe:
+  - CWE-209
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: Response
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: symfony response exception
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($exception) {
+        return new Response($exception->getMessage());
+      }
+    expect_match_text:
+    - Response
+  - name: literal symfony response negative
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($exception) {
+        return new Response("Internal Server Error");
+      }
+    expect_no_match: true
+  description: 'new Response(exception->getMessage/trace) — exposes internal exception details to the client. Merged aliases: php.xss.symfony_response_html.'
+  aliases:
+  - php.xss.symfony_response_html
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.info_disclosure.var_dump_debug_output
+  enabled: true
+  language: php
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  - CWE-209
+  match:
+    kind: call
+    callee:
+      name: var_dump
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: var dump debug output
+    code: "<?php\nfunction example($exception) {\n  var_dump($exception);\n}\n"
+    expect_match_text:
+    - var_dump
+  - name: literal var dump negative
+    code: "<?php\nfunction example($exception) {\n  var_dump([\"status\" => \"ok\"]);\n}\n"
+    expect_no_match: true
+  description: var_dump(exception/secret/debug data) — debug output can disclose internals in HTTP responses or logs.

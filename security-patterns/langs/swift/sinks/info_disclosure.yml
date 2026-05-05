@@ -1,0 +1,55 @@
+# Swift information-disclosure sinks (logs, debug output, error responses).
+- id: swift.info_disclosure.nslog_secret
+  enabled: true
+  language: swift
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      name: NSLog
+  match_examples:
+  - name: swift nslog secret-shaped data
+    code: |
+      func test(input: String) { NSLog("token=\(input)") }
+    expect_match_text: [NSLog]
+  description: "NSLog with secret-shaped data — values are copied into device / server logs."
+
+- id: swift.info_disclosure.vapor_abort_reason
+  enabled: true
+  language: swift
+  tag: information-disclosure
+  severity: high
+  packages: [vapor]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      name: Abort
+  match_examples:
+  - name: swift vapor abort exposes error
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test(error: Error) { _ = Abort(.internalServerError, reason: error.localizedDescription) }
+    expect_match_text: [Abort]
+  description: "Vapor Abort(reason: error.localizedDescription) — reflects exception text in HTTP error responses."
+
+- id: swift.info_disclosure.debug_print_error
+  enabled: true
+  language: swift
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      name: debugPrint
+  match_examples:
+  - name: swift debug print error details
+    code: |
+      func test(error: Error) { debugPrint("error: \(error.localizedDescription)") }
+    expect_match_text: [debugPrint]
+  description: "debugPrint(error/stack) — debug diagnostics can disclose internals in production logs."

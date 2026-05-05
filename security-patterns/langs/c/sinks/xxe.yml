@@ -1,0 +1,165 @@
+- id: c.xxe.libxml2_xml_read_file
+  enabled: true
+  language: c
+  tag: xxe
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        xmlReadFile(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        xmlReadFile("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlReadFile — disable external entities."
+- id: c.xxe.libxml2_xml_read_memory
+  enabled: true
+  language: c
+  tag: xxe
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadMemory
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        xmlReadMemory(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        xmlReadMemory("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlReadMemory — parses an in-memory XML buffer; enables XXE unless XML_PARSE_NOENT / XML_PARSE_DTDLOAD are off."
+- id: c.xxe.libxml2_xml_parse_file
+  enabled: true
+  language: c
+  tag: xxe
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlParseFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        xmlParseFile(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        xmlParseFile("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlParseFile — deprecated parser with entity expansion on by default; vulnerable to XXE and billion-laughs."
+
+- id: c.xxe.expat_set_entity_decl_handler
+  enabled: true
+  language: c
+  tag: xxe
+  severity: high
+  packages: [expat]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: XML_SetEntityDeclHandler
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <expat.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        XML_SetEntityDeclHandler(arg);
+      }
+  description: "libexpat XML_SetEntityDeclHandler — registering an entity-decl handler implies the parser resolves external entities; disable or reject SYSTEM/PUBLIC refs."
+
+- id: c.xxe.expat_set_external_entity_ref_handler
+  enabled: true
+  language: c
+  tag: xxe
+  severity: high
+  packages: [expat]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: XML_SetExternalEntityRefHandler
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <expat.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        XML_SetExternalEntityRefHandler(arg);
+      }
+  description: "libexpat XML_SetExternalEntityRefHandler — handler that fetches external entities; unless it refuses the fetch, this enables XXE."
+
+- id: c.xxe.libxslt_parse_file
+  enabled: true
+  language: c
+  tag: xxe
+  severity: high
+  packages: [libxslt]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xsltParseStylesheetFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxslt/transform.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        xsltParseStylesheetFile(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        xsltParseStylesheetFile("safe");
+      }
+    expect_no_match: true
+  description: "libxslt xsltParseStylesheetFile — XSLT stylesheets can pull xsl:include / document() URLs; XXE + SSRF surface."

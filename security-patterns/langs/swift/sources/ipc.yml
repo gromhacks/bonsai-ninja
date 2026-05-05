@@ -1,0 +1,14 @@
+# Swift IPC / cross-process input sources.
+- id: swift.notif.user_info
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: ipc
+  tag: ipc-input
+  payload_types: [json]
+  match:
+    kind: read
+    target:
+      name: userInfo
+  description: "Disabled — the current Swift adapter does not index property reads like `notification.userInfo`."

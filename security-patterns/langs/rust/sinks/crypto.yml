@@ -1,0 +1,199 @@
+- id: rust.crypto.md5_compute
+  enabled: true
+  language: rust
+  tag: weak-crypto
+  severity: low
+  packages: [md5]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [Md5, new]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use md_5;
+      use md_5;
+      use md_5::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Md5::new(target);
+      }
+  description: "md5 / md-5 crate — collision-broken since 2004; not suitable for signatures, password hashing, or integrity."
+  imports:
+  - md_5
+- id: rust.crypto.sha1_compute
+  enabled: true
+  language: rust
+  tag: weak-crypto
+  severity: low
+  packages: [sha1]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [Sha1, new]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use sha_1;
+      use sha_1;
+      use sha_1::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Sha1::new(target);
+      }
+  description: "sha-1 / sha1 crate — collision-demonstrated (SHAttered, 2017); use SHA-256 or better for signatures / integrity."
+  imports:
+  - sha_1
+- id: rust.crypto.md2_new
+  enabled: true
+  language: rust
+  tag: weak-crypto
+  severity: low
+  packages: [md2]
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [Md2, new]
+  match_examples:
+  - name: rustcrypto md2 constructor
+    code: |
+      use md2::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Md2::new(target);
+      }
+    expect_match_text: [Md2::new]
+  description: "RustCrypto md2::Md2::new — MD2 is obsolete and collision-broken; use SHA-256 or stronger."
+- id: rust.crypto.md4_new
+  enabled: true
+  language: rust
+  tag: weak-crypto
+  severity: low
+  packages: [md4]
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [Md4, new]
+  match_examples:
+  - name: rustcrypto md4 constructor
+    code: |
+      use md4::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Md4::new(target);
+      }
+    expect_match_text: [Md4::new]
+  description: "RustCrypto md4::Md4::new — MD4 is obsolete and collision-broken; use SHA-256 or stronger."
+- id: rust.crypto.rand_thread
+  enabled: true
+  language: rust
+  tag: weak-randomness
+  severity: medium
+  packages: [rand]
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      attribute: [rand, thread_rng]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use rand::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          rand::thread_rng(target);
+      }
+  description: "rand::thread_rng — ChaCha12-seeded-from-OS; safe for MOST uses but not guaranteed for secrets (changes without semver bump). For tokens / keys / nonces, use OsRng or ChaCha20Rng seeded from OsRng."
+- id: rust.crypto.rand_random
+  enabled: true
+  language: rust
+  tag: weak-randomness
+  severity: medium
+  packages: [rand]
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      attribute: [rand, random]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use rand::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          rand::random(target);
+      }
+  description: "rand::random — thin wrapper around thread_rng; same caveat (not a CSPRNG guarantee). Use OsRng for security-sensitive values."
+- id: rust.crypto.openssl_des_cbc
+  enabled: true
+  language: rust
+  tag: weak-crypto
+  severity: medium
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [Cipher, des_cbc]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use openssl::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Cipher::des_cbc(target);
+      }
+  description: "openssl Cipher::des_cbc — single-DES, 56-bit key; brute-forceable in hours. Use AES-GCM or ChaCha20-Poly1305."
+- id: rust.crypto.openssl_rc4
+  enabled: true
+  language: rust
+  tag: weak-crypto
+  severity: medium
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [Cipher, rc4]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use openssl::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Cipher::rc4(target);
+      }
+  description: "openssl Cipher::rc4 — biased keystream; deprecated in TLS since RFC 7465."
+- id: rust.crypto.openssl_aes_ecb
+  enabled: true
+  language: rust
+  tag: weak-crypto
+  severity: medium
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [Cipher, aes_128_ecb]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use openssl::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Cipher::aes_128_ecb(target);
+      }
+  description: "openssl Cipher::aes_128_ecb — ECB leaks plaintext structure (identical blocks → identical ciphertext). Use CBC+HMAC or GCM."

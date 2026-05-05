@@ -1,0 +1,1082 @@
+- id: dart.ssrf.http_get
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http get url
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { http.get(input); }
+
+      '
+  - name: literal http get url negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test() { http.get(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: package:http http.get.
+  imports:
+  - http/http.dart
+- id: dart.ssrf.http_post
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http post url
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { http.post(input); }
+
+      '
+  - name: literal http post url negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test(String input) { http.post(Uri.parse("https://example.com"), body:
+      input); }
+
+      '
+    expect_no_match: true
+  description: package:http http.post.
+  imports:
+  - http/http.dart
+- id: dart.ssrf.http_put
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - put
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http put url
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { http.put(input); }
+
+      '
+  - name: literal http put url negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test(String input) { http.put(Uri.parse("https://example.com"), body: input);
+      }
+
+      '
+    expect_no_match: true
+  description: package:http http.put.
+  imports:
+  - http/http.dart
+- id: dart.ssrf.http_delete
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http delete url
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { http.delete(input); }
+
+      '
+  - name: literal http delete url negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test(String input) { http.delete(Uri.parse("https://example.com"), body:
+      input); }
+
+      '
+    expect_no_match: true
+  description: package:http http.delete.
+  imports:
+  - http/http.dart
+- id: dart.ssrf.http_patch
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - patch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http patch url
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { http.patch(input); }
+
+      '
+  - name: literal http patch url negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test(String input) { http.patch(Uri.parse("https://example.com"), body:
+      input); }
+
+      '
+    expect_no_match: true
+  description: package:http http.patch.
+  imports:
+  - http/http.dart
+- id: dart.ssrf.http_head
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: medium
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - head
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http head url
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { http.head(input); }
+
+      '
+  - name: literal http head url negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test() { http.head(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: package:http http.head.
+  imports:
+  - http/http.dart
+- id: dart.ssrf.http_read
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - read
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http read url
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { http.read(input); }
+
+      '
+  - name: literal http read url negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test() { http.read(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: "package:http http.read \u2014 returns body string."
+  imports:
+  - http/http.dart
+- id: dart.ssrf.http_client_send
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - send
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http client request
+    code: 'import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'';
+
+      import ''package:http/http.dart'' as http;
+
+      void test(dynamic input) { client.send(input); }
+
+      '
+  - name: literal http client request negative
+    code: 'import ''package:http/http.dart'' as http;
+
+      void test() { client.send(http.Request("GET", Uri.parse("https://example.com")));
+      }
+
+      '
+    expect_no_match: true
+  description: http.Client.send(tainted Request).
+  imports:
+  - http/http.dart
+- id: dart.ssrf.dio_get
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - dio
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dio
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio get url
+    code: 'import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.get(input); }
+
+      '
+  - name: literal dio get url negative
+    code: 'import ''package:dio/dio.dart'';
+
+      void test() { dio.get("https://example.com"); }
+
+      '
+    expect_no_match: true
+  description: "Dio.get(url) \u2014 HTTP GET to tainted URL allows SSRF to internal\
+    \ services / cloud metadata."
+  imports:
+  - dio/dio.dart
+- id: dart.ssrf.dio_post
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - dio
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dio
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio post url
+    code: 'import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.post(input); }
+
+      '
+  - name: literal dio post url negative
+    code: 'import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.post("https://example.com", data: input); }
+
+      '
+    expect_no_match: true
+  description: "Dio.post(url) \u2014 HTTP POST to tainted URL allows SSRF with request-body\
+    \ exfiltration."
+  imports:
+  - dio/dio.dart
+- id: dart.ssrf.dio_put
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - dio
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dio
+      - put
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio put url
+    code: 'import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.put(input); }
+
+      '
+  - name: literal dio put url negative
+    code: 'import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.put("https://example.com", data: input); }
+
+      '
+    expect_no_match: true
+  description: "Dio.put(url) \u2014 HTTP PUT to tainted URL allows SSRF with write-capable\
+    \ verbs."
+  imports:
+  - dio/dio.dart
+- id: dart.ssrf.dio_delete
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - dio
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dio
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio delete url
+    code: 'import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.delete(input); }
+
+      '
+  - name: literal dio delete url negative
+    code: 'import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.delete("https://example.com", data: input); }
+
+      '
+    expect_no_match: true
+  description: Dio dio.delete.
+  imports:
+  - dio/dio.dart
+- id: dart.ssrf.dio_patch
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - dio
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dio
+      - patch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio patch url
+    code: 'import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.patch(input); }
+
+      '
+  - name: literal dio patch url negative
+    code: 'import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.patch("https://example.com", data: input); }
+
+      '
+    expect_no_match: true
+  description: "Dio.patch(url) \u2014 HTTP PATCH to tainted URL allows SSRF with write-capable\
+    \ verbs."
+  imports:
+  - dio/dio.dart
+- id: dart.ssrf.dio_request
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - dio
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dio
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio request url
+    code: 'import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.request(input); }
+
+      '
+  - name: literal dio request url negative
+    code: 'import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.request("https://example.com", data: input); }
+
+      '
+    expect_no_match: true
+  description: "Dio dio.request \u2014 generic verb."
+  imports:
+  - dio/dio.dart
+- id: dart.ssrf.dio_download
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - dio
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dio
+      - download
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio download url
+    code: 'import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.download(input); }
+
+      '
+  - name: literal dio download url negative
+    code: 'import ''package:dio/dio.dart'';
+
+      void test(String input) { dio.download("https://example.com/file", input); }
+
+      '
+    expect_no_match: true
+  description: Dio dio.download.
+  imports:
+  - dio/dio.dart
+- id: dart.ssrf.httpclient_get_url
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - getUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpclient get url
+    code: 'void test(Uri input) { HttpClient.getUrl(input); }
+
+      '
+  - name: literal httpclient get url negative
+    code: 'void test() { HttpClient.getUrl(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: dart:io HttpClient.getUrl.
+- id: dart.ssrf.httpclient_post_url
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - postUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpclient post url
+    code: 'void test(Uri input) { HttpClient.postUrl(input); }
+
+      '
+  - name: literal httpclient post url negative
+    code: 'void test() { HttpClient.postUrl(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: dart:io HttpClient.postUrl.
+- id: dart.ssrf.httpclient_put_url
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - putUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpclient put url
+    code: 'void test(Uri input) { HttpClient.putUrl(input); }
+
+      '
+  - name: literal httpclient put url negative
+    code: 'void test() { HttpClient.putUrl(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: dart:io HttpClient.putUrl.
+- id: dart.ssrf.httpclient_delete_url
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - deleteUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpclient delete url
+    code: 'void test(Uri input) { HttpClient.deleteUrl(input); }
+
+      '
+  - name: literal httpclient delete url negative
+    code: 'void test() { HttpClient.deleteUrl(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: dart:io HttpClient.deleteUrl.
+- id: dart.ssrf.httpclient_open_url
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - openUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpclient open url
+    code: 'void test(Uri input) { HttpClient.openUrl(input); }
+
+      '
+  - name: literal httpclient open url negative
+    code: 'void test() { HttpClient.openUrl(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: "dart:io HttpClient.openUrl \u2014 generic."
+- id: dart.ssrf.httpclient_head_url
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - headUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpclient head url
+    code: 'void test(Uri input) { HttpClient.headUrl(input); }
+
+      '
+  - name: literal httpclient head url negative
+    code: 'void test() { HttpClient.headUrl(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: dart:io HttpClient.headUrl.
+- id: dart.ssrf.httpclient_patch_url
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - patchUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpclient patch url
+    code: 'void test(Uri input) { HttpClient.patchUrl(input); }
+
+      '
+  - name: literal httpclient patch url negative
+    code: 'void test() { HttpClient.patchUrl(Uri.parse("https://example.com")); }
+
+      '
+    expect_no_match: true
+  description: dart:io HttpClient.patchUrl.
+- id: dart.ssrf.flutter_image_network
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: medium
+  packages:
+  - flutter
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Image
+      - network
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted image network url
+    code: 'import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/material.dart''; // flutter
+
+      // uses flutter
+
+      void test(String input) { Image.network(input); }
+
+      '
+  - name: literal image network url negative
+    code: 'import ''package:flutter/material.dart'';
+
+      void test() { Image.network("https://example.com/image.png"); }
+
+      '
+    expect_no_match: true
+  description: "Flutter Image.network(url) \u2014 SSRF via tainted URL."
+  imports:
+  - flutter/flutter.dart
+  - flutter/material.dart
+- id: dart.ssrf.flutter_networkimage
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: medium
+  packages:
+  - flutter
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: NetworkImage
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted network image url
+    code: 'import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/flutter.dart'';
+
+      import ''package:flutter/material.dart''; // flutter
+
+      class NetworkImage { NetworkImage([dynamic input, {dynamic htmlEscapeValues}]);
+      }
+
+      void test(String input) { var result = NetworkImage(input); }
+
+      '
+  - name: literal network image url negative
+    code: 'import ''package:flutter/material.dart'';
+
+      class NetworkImage { NetworkImage([dynamic input, {dynamic htmlEscapeValues}]); }
+
+      void test() { var result = NetworkImage("https://example.com/image.png"); }
+
+      '
+    expect_no_match: true
+  description: Flutter NetworkImage(tainted).
+  imports:
+  - flutter/flutter.dart
+  - flutter/material.dart
+- id: dart.ssrf.webview_load_request
+  enabled: false
+  language: dart
+  tag: ssrf
+  severity: high
+  packages:
+  - webview_flutter
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - controller
+      - loadRequest
+  match_examples:
+  - name: declared shape
+    code: 'import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      void test() { var input = "x"; var amount = 1; controller.loadRequest(input);
+      }
+
+      '
+  description: WebViewController.loadRequest(tainted URI).
+  imports:
+  - webview_flutter/webview_flutter.dart
+  disabled_reason:
+    code: over-broad
+- id: dart.ssrf.webview_load_html_string
+  enabled: false
+  language: dart
+  tag: ssrf
+  severity: medium
+  packages:
+  - webview_flutter
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - controller
+      - loadHtmlString
+  match_examples:
+  - name: declared shape
+    code: 'import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      import ''package:webview_flutter/webview_flutter.dart'';
+
+      void test() { var input = "x"; var amount = 1; controller.loadHtmlString(input);
+      }
+
+      '
+  description: "WebViewController.loadHtmlString \u2014 tainted HTML/URI."
+  imports:
+  - webview_flutter/webview_flutter.dart
+  disabled_reason:
+    code: over-broad
+- id: dart.ssrf.uri_parse_audit
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^Uri\.parse$
+  description: "Disabled audit-only \u2014 Uri.parse(tainted) by itself does not perform\
+    \ a network or filesystem call. Enable when triaging URL-construction sites; the\
+    \ dangerous sinks are the http/HttpClient/File rules that consume the parsed Uri."
+- id: dart.ssrf.uri_https_constructor
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Uri
+      - https
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted uri https host
+    code: 'void test(String input) { Uri.https(input); }
+
+      '
+  - name: literal uri https host negative
+    code: 'void test() { Uri.https("example.com"); }
+
+      '
+    expect_no_match: true
+  description: "TODO(only-when-packaged): Uri lives in dart:core which is auto-imported\
+    \ \u2014 Uri.https(tainted host or path) \u2014 host parameter is attacker-controlled,\
+    \ enabling SSRF when later fetched."
+- id: dart.ssrf.uri_http_constructor
+  enabled: true
+  language: dart
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Uri
+      - http
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted uri http host
+    code: 'void test(String input) { Uri.http(input); }
+
+      '
+  - name: literal uri http host negative
+    code: 'void test() { Uri.http("example.com"); }
+
+      '
+    expect_no_match: true
+  description: "Uri.http(tainted host or path) \u2014 host parameter is attacker-controlled,\
+    \ enabling SSRF when later fetched."

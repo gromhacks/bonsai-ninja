@@ -1,0 +1,93 @@
+- id: ruby.jwt.decode_no_verify
+  enabled: true
+  language: ruby
+  tag: jwt
+  severity: critical
+  packages:
+  - jwt
+  cwe:
+  - CWE-347
+  - CWE-345
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JWT
+      - decode
+  match_examples:
+  - name: ruby.jwt.decode_no_verify example
+    code: |
+      require "jwt"
+      def example(input, url, id, payload, request, params)
+        JWT.decode(input, input, false)
+      end
+  description: "JWT.decode(token, key, false) — signature verification disabled. Merged aliases: ruby.jwt.decode_alg_none, ruby.jwt.decode_no_keyword_verify, ruby.jwt.decode_algorithms_none_array, ruby.jwt.alg_confusion."
+  aliases:
+  - ruby.jwt.decode_alg_none
+  - ruby.jwt.decode_no_keyword_verify
+  - ruby.jwt.decode_algorithms_none_array
+  - ruby.jwt.alg_confusion
+- id: ruby.jwt.encode_alg_none
+  enabled: true
+  language: ruby
+  tag: jwt
+  severity: critical
+  packages:
+  - jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JWT
+      - encode
+  match_examples:
+  - name: ruby.jwt.encode_alg_none example
+    code: |
+      require "jwt"
+      def example(input, url, id, payload, request, params)
+        JWT.encode(input, input, "none")
+      end
+  description: JWT.encode(payload, nil, 'none').
+- id: ruby.jwt.json_jwt_decode
+  enabled: true
+  language: ruby
+  tag: jwt
+  severity: high
+  packages:
+  - json-jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JSON::JWT
+      - decode
+  match_examples:
+  - name: ruby.jwt.json_jwt_decode example
+    code: |
+      require "json-jwt"
+      def example(input, url, id, payload, request, params)
+        JSON::JWT.decode(input)
+      end
+  description: "json-jwt JSON::JWT.decode — flag if no subsequent .verify!."
+- id: ruby.jwt.devise_jwt_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: jwt
+  severity: medium
+  packages:
+  - devise-jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Devise::JWT
+      - decode
+  description: "Disabled — Devise::JWT has default config."

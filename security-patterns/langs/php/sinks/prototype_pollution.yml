@@ -1,0 +1,81 @@
+- id: php.proto_pollution.array_merge_recursive_body
+  enabled: true
+  language: php
+  tag: prototype-pollution
+  severity: medium
+  cwe:
+  - CWE-1321
+  match:
+    kind: call
+    callee:
+      name: array_merge_recursive
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.proto_pollution.array_merge_recursive_body example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  array_merge_recursive($_POST, []);\n}\n"
+  - name: literal array merge recursive body negative
+    code: "<?php\nfunction example($input) {\n  array_merge_recursive([\"safe\" => true], []);\n}\n"
+    expect_no_match: true
+  description: array_merge_recursive(target, request_body) — recursive merge that doesn''t drop class-level attribute keys; attacker JSON can shadow internal config.
+- id: php.proto_pollution.array_merge_recursive_body_source
+  enabled: true
+  language: php
+  tag: prototype-pollution
+  severity: medium
+  cwe:
+  - CWE-1321
+  match:
+    kind: call
+    callee:
+      name: array_merge_recursive
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.proto_pollution.array_merge_recursive source body example
+    code: "<?php\nfunction example($input) {\n  array_merge_recursive([], $input);\n}\n"
+  - name: array merge recursive literal source negative
+    code: "<?php\nfunction example($input) {\n  array_merge_recursive([], [\"safe\" => true]);\n}\n"
+    expect_no_match: true
+  description: array_merge_recursive(target, tainted_request_body) — recursive merge can shadow internal config keys.
+- id: php.proto_pollution.laravel_arr_set
+  enabled: true
+  language: php
+  tag: prototype-pollution
+  severity: medium
+  packages:
+  - laravel/framework
+  cwe:
+  - CWE-1321
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Arr
+      - set
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.proto_pollution.laravel_arr_set example
+    code: |
+      <?php
+      use laravel\framework;
+      use laravel\framework;
+      function example($input, $url, $id, $payload, $request) {
+        Arr::set($store, $input, true);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use laravel\framework;
+      function example($input, $url, $id, $payload, $request) {
+        Arr::set($store, "profile.name", true);
+      }
+    expect_no_match: true
+  description: Illuminate\Support\Arr::set(target, attacker_path, value) — path-based set lets attacker reach nested keys.
+  imports:
+  - laravel\framework
+  - laravel

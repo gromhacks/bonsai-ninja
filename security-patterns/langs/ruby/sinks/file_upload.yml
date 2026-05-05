@@ -1,0 +1,106 @@
+# Ruby file-upload sinks. (Note: UploadedFile#original_filename is a SOURCE
+# and lives in sources/remote.yml, not here.)
+- id: ruby.upload.carrierwave_store
+  enabled: true
+  language: ruby
+  tag: file-upload
+  severity: high
+  packages: [carrierwave]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: "store!"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.upload.carrierwave_store example
+    code: |
+      require "carrierwave"
+      def example(input, url, id, payload, request, params)
+        store!(input)
+      end
+  - name: ruby.upload.carrierwave_store literal negative
+    code: |
+      require "carrierwave"
+      def example(input, url, id, payload, request, params)
+        store!("avatar.png")
+      end
+    expect_no_match: true
+  description: "CarrierWave Uploader#store! — flag when dest filename is tainted."
+
+- id: ruby.upload.shrine_upload
+  enabled: true
+  language: ruby
+  tag: file-upload
+  severity: high
+  packages: [shrine]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Shrine, upload]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.upload.shrine_upload example
+    code: |
+      require "shrine"
+      def example(input, url, id, payload, request, params)
+        Shrine.upload(input)
+      end
+  - name: ruby.upload.shrine_upload literal negative
+    code: |
+      require "shrine"
+      def example(input, url, id, payload, request, params)
+        Shrine.upload("avatar.png")
+      end
+    expect_no_match: true
+  description: "Shrine upload with tainted storage path / filename — attacker-controlled uploads can escape the storage root."
+
+- id: ruby.upload.activestorage_attach
+  enabled: true
+  language: ruby
+  tag: file-upload
+  severity: medium
+  packages: [activestorage]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      name: attach
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.upload.activestorage_attach example
+    code: |
+      require "activestorage"
+      def example(input, url, id, payload, request, params)
+        attach(input)
+      end
+  - name: ruby.upload.activestorage_attach literal negative
+    code: |
+      require "activestorage"
+      def example(input, url, id, payload, request, params)
+        attach("avatar.png")
+      end
+    expect_no_match: true
+  description: "ActiveStorage attach — user-controlled attachment metadata."
+
+- id: ruby.upload.paperclip_assign
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: file-upload
+  severity: medium
+  packages: [paperclip]
+  cwe: [CWE-434]
+  match:
+    kind: write
+    target:
+      name: avatar
+  description: "Disabled — Paperclip has-attached-file assignment requires per-model shape to avoid noise."

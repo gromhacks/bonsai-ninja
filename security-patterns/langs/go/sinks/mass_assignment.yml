@@ -1,0 +1,28 @@
+# go mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: go.mass_assign.mergo_merge_body
+  enabled: true
+  language: go
+  tag: mass-assignment
+  severity: medium
+  packages: [github.com/imdario/mergo]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [mergo, Merge]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/imdario/mergo"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        mergo.Merge(target)
+      }
+  description: "mergo.Merge(target, src) — bulk struct merge; combine with explicit allowlist for admin fields."

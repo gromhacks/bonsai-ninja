@@ -1,0 +1,15 @@
+[package]
+name = "bonsai_testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared test fixture helpers."
+
+[dependencies]
+bonsai_lang_api = { workspace = true }
+bonsai_workspace = { workspace = true }
+
+[lints]
+workspace = true

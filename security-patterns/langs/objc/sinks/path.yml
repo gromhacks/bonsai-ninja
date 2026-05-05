@@ -1,0 +1,366 @@
+# Objective-C path-traversal sinks (NSFileManager, NSData, NSInputStream, NSFileHandle, libc).
+- id: objc.path.contents_at_path
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: contentsAtPath
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; contentsAtPath(input); }
+    - name: literal path negative
+      code: |
+        void test(void) { contentsAtPath(@"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileManager -contentsAtPath: — reads arbitrary file; tainted path allows reading outside intended directory."
+
+- id: objc.path.remove_item_at_path
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(removeItemAtPath|removeItemAtURL)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; removeItemAtPath(input); }
+    - name: literal remove path negative
+      code: |
+        void test(void) { removeItemAtPath(@"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileManager -removeItemAtPath: / -removeItemAtURL: — deletes arbitrary file when path is tainted."
+
+- id: objc.path.move_item_at_path
+  aliases:
+    - objc.upload_gcdwebserver_uploaded_file_path
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22, CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "^(moveItemAtPath|moveItemAtURL)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; moveItemAtPath(input, @"/tmp/safe.txt"); }
+    - name: literal move source negative
+      code: |
+        void test(void) { moveItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: — relocates files; tainted src/dst permits arbitrary overwrite. Also covers merged aliases: objc.upload_gcdwebserver_uploaded_file_path."
+- id: objc.path.move_item_at_path_dest
+  aliases:
+    - objc.upload_gcdwebserver_uploaded_file_path_dest
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22, CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "^(moveItemAtPath|moveItemAtURL)$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted move destination
+      code: |
+        void test(id input) { moveItemAtPath(@"/tmp/input.txt", input); }
+    - name: literal move destination negative
+      code: |
+        void test(void) { moveItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileManager -moveItemAtPath:toPath: / -moveItemAtURL:toURL: — tainted destination permits arbitrary overwrite."
+
+- id: objc.path.copy_item_at_path
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(copyItemAtPath|copyItemAtURL)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; copyItemAtPath(input, @"/tmp/safe.txt"); }
+    - name: literal copy source negative
+      code: |
+        void test(void) { copyItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileManager -copyItemAtPath:toPath: / -copyItemAtURL:toURL: — tainted path lets attacker read/write across directories."
+- id: objc.path.copy_item_at_path_dest
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(copyItemAtPath|copyItemAtURL)$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted copy destination
+      code: |
+        void test(id input) { copyItemAtPath(@"/tmp/input.txt", input); }
+    - name: literal copy destination negative
+      code: |
+        void test(void) { copyItemAtPath(@"/tmp/input.txt", @"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileManager -copyItemAtPath:toPath: / -copyItemAtURL:toURL: — tainted destination permits arbitrary overwrite."
+
+- id: objc.path.create_file_at_path
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: createFileAtPath
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; createFileAtPath(input); }
+    - name: literal create path negative
+      code: |
+        void test(void) { createFileAtPath(@"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileManager -createFileAtPath:contents:attributes: — writes arbitrary bytes to tainted path."
+
+- id: objc.path.create_directory
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(createDirectoryAtPath|createDirectoryAtURL)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; createDirectoryAtPath(input); }
+    - name: literal directory negative
+      code: |
+        void test(void) { createDirectoryAtPath(@"/tmp/safe"); }
+      expect_no_match: true
+  description: "NSFileManager -createDirectoryAtPath: / -createDirectoryAtURL: — tainted path allows mkdir outside sandbox."
+
+- id: objc.path.contents_of_directory
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(contentsOfDirectoryAtPath|contentsOfDirectoryAtURL)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; contentsOfDirectoryAtPath(input); }
+    - name: literal directory listing negative
+      code: |
+        void test(void) { contentsOfDirectoryAtPath(@"/tmp/safe"); }
+      expect_no_match: true
+  description: "NSFileManager -contentsOfDirectoryAtPath: / -contentsOfDirectoryAtURL: — directory enumeration leak."
+
+- id: objc.path.data_with_contents_of_file
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(dataWithContentsOfFile|dataWithContentsOfMappedFile)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; dataWithContentsOfFile(input); }
+    - name: literal data file negative
+      code: |
+        void test(void) { dataWithContentsOfFile(@"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSData +dataWithContentsOfFile: / +dataWithContentsOfMappedFile: — reads arbitrary file into memory when path is tainted."
+
+- id: objc.path.string_with_contents_of_file
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: stringWithContentsOfFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; stringWithContentsOfFile(input); }
+    - name: literal string file negative
+      code: |
+        void test(void) { stringWithContentsOfFile(@"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSString +stringWithContentsOfFile:encoding:error: — arbitrary file read via tainted path."
+
+- id: objc.path.nsinputstream_filepath
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(inputStreamWithFileAtPath|initWithFileAtPath)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [NSInputStream inputStreamWithFileAtPath:input]; }
+    - name: literal input stream path negative
+      code: |
+        void test(void) { [NSInputStream inputStreamWithFileAtPath:@"/tmp/safe.txt"]; }
+      expect_no_match: true
+  description: "NSInputStream/NSOutputStream +inputStreamWithFileAtPath: / -initWithFileAtPath: — opens arbitrary file. Constrained to stream receivers to avoid collisions with other initWithFileAtPath: consumers."
+
+- id: objc.path.nsfilehandle_for_path
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(fileHandleForReadingAtPath|fileHandleForWritingAtPath|fileHandleForUpdatingAtPath|fileHandleForReadingFromURL|fileHandleForWritingToURL)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; fileHandleForReadingAtPath(input); }
+    - name: literal file handle path negative
+      code: |
+        void test(void) { fileHandleForReadingAtPath(@"/tmp/safe.txt"); }
+      expect_no_match: true
+  description: "NSFileHandle +fileHandleForReadingAtPath: / +fileHandleForWritingAtPath: / +fileHandleForUpdatingAtPath: — opens tainted path for I/O."
+
+- id: objc.path.fopen
+  enabled: true
+  language: objc
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(fopen|freopen)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; fopen(input, "r"); }
+    - name: literal fopen path negative
+      code: |
+        void test(void) { fopen("safe.txt", "r"); }
+      expect_no_match: true
+  description: "libc fopen/freopen — opens arbitrary file when path is tainted (C bridging). Bare `open` excluded as too ubiquitous."
+
+# Archive extraction (Zip Slip class). SSZipArchive is the canonical
+# iOS archive library; trusts entry names from the archive.
+- id: objc.path.sszip_unzip_file_at_path
+  enabled: true
+  language: objc
+  tag: zip-slip
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: unzipFileAtPath
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; unzipFileAtPath(input); }
+    - name: literal archive path negative
+      code: |
+        void test(void) { [SSZipArchive unzipFileAtPath:@"bundle.zip" toDestination:@"/tmp/out"]; }
+      expect_no_match: true
+  description: "SSZipArchive unzipFileAtPath:toDestination: — extracts archive entries; entry names are attacker-controlled, so any name with `..` escapes the destination dir."
+- id: objc.path.sszip_unzip_with_password
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  tag: zip-slip
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: unzipFileAtPath
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [SSZipArchive unzipFileAtPath:input toDestination:input overwrite:YES password:input error:nil]; }
+  description: "Disabled duplicate — Objective-C selector facts expose the same `unzipFileAtPath` call shape as objc.path.sszip_unzip_file_at_path, which is the canonical SSZipArchive Zip Slip rule."

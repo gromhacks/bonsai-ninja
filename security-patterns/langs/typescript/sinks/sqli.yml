@@ -1,0 +1,492 @@
+- id: typescript.sqli.knex_raw
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: high
+  packages:
+  - knex
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - knex
+      - raw
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: knex raw
+    code: |
+      const _u = require("knex");
+      function demo(input, req, obj) {
+        return knex.raw(input, "SELECT * FROM users WHERE id = " + input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("knex");
+      function demo(input, req, obj) {
+        return knex.raw("SELECT 1", "SELECT * FROM users WHERE id = " + input);
+      }
+    expect_no_match: true
+  description: "knex.raw(tainted) — template-interpolated SQL."
+- id: typescript.sqli.prisma_query_raw_unsafe
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$queryRawUnsafe$
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: prisma query raw unsafe
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input, req, obj) {
+        return prisma.$queryRawUnsafe(input, "SELECT * FROM users WHERE id = " + input);
+      }
+    expect_match_text:
+    - prisma.$queryRawUnsafe
+  - name: prisma query raw unsafe sql variable concat
+    code: |
+      const _u = require("@prisma/client");
+      function demo(prisma: any, sql: string, id: string) {
+        return prisma.$queryRawUnsafe(sql + id);
+      }
+    expect_match_text:
+    - prisma.$queryRawUnsafe
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input, req, obj) {
+        return prisma.$queryRawUnsafe("SELECT 1", "SELECT * FROM users WHERE id = " + input);
+      }
+    expect_no_match: true
+  description: "Prisma prisma.$queryRawUnsafe — string-built SQL."
+- id: typescript.sqli.prisma_executerawunsafe
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$executeRawUnsafe$
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: prisma executerawunsafe
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input, req, obj) {
+        return prisma.$executeRawUnsafe(input, "SELECT * FROM users WHERE id = " + input);
+      }
+    expect_match_text:
+    - prisma.$executeRawUnsafe
+  - name: prisma executerawunsafe sql variable concat
+    code: |
+      const _u = require("@prisma/client");
+      function demo(prisma: any, sql: string, id: string) {
+        return prisma.$executeRawUnsafe(sql + id);
+      }
+    expect_match_text:
+    - prisma.$executeRawUnsafe
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input, req, obj) {
+        return prisma.$executeRawUnsafe("SELECT 1", "SELECT * FROM users WHERE id = " + input);
+      }
+    expect_no_match: true
+  description: "Prisma prisma.$executeRawUnsafe — string-built SQL."
+- id: typescript.sqli.prisma_query_raw
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: sql-injection
+  severity: medium
+  packages:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - prisma
+      - $queryRaw
+  description: "Disabled — prisma.$queryRaw uses tagged templates (parameterised); only dangerous if tainted Prisma.sql is spliced as raw."
+- id: typescript.sqli.better_sqlite3_prepare
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: sql-injection
+  severity: medium
+  packages:
+  - better-sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - prepare
+  description: "Disabled — db.prepare is parameterised; only dangerous if tainted string interpolation forms the SQL."
+- id: typescript.sqli.sqlite3_run
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: high
+  packages:
+  - sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - run
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: sqlite3 run
+    code: |
+      const _u = require("sqlite3");
+      function demo(input, req, obj) {
+        return db.run("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("sqlite3");
+      function demo(input, req, obj) {
+        return db.run("SELECT 1");
+      }
+    expect_no_match: true
+  description: "sqlite3 db.run with a concatenated SQL string — use the param-array form."
+- id: typescript.sqli.sqlite3_exec
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: high
+  packages:
+  - sqlite3
+  - better-sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - exec
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: sqlite3 exec
+    code: |
+      const _u = require("sqlite3");
+      function demo(input, req, obj) {
+        return db.exec("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("sqlite3");
+      function demo(input, req, obj) {
+        return db.exec("SELECT 1");
+      }
+    expect_no_match: true
+  description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string — no binding support."
+- id: typescript.sqli.better_sqlite3_exec
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: typescript
+  tag: sql-injection
+  severity: high
+  packages:
+  - better-sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - exec
+  description: "Disabled duplicate — same db.exec shape is covered by typescript.sqli.sqlite3_exec with both package names."
+- id: typescript.sqli.method_query_concat
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: method query concat
+    code: |
+      const _u = require("typeorm");
+      function demo(input, req, obj) {
+        return conn.query("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("typeorm");
+      function demo(input, req, obj) {
+        return conn.query("SELECT 1");
+      }
+    expect_no_match: true
+  description: "<recv>.query(sql) — driver-agnostic SQL-injection sink for receiver names the package-anchored rules miss. Merged aliases: typescript.sqli.method_query_sql_variable."
+  aliases:
+  - typescript.sqli.method_query_sql_variable
+  - typescript.nosql.typeorm_query
+  - typescript.sqli.typeorm_entitymanager_query
+  - typescript.sqli.typeorm_repository_query
+  - typescript.sqli.typeorm_connection_query
+  - typescript.sqli.pg_pool_query
+  - typescript.sqli.pg_client_query
+  - typescript.sqli.mssql_request_query
+  - typescript.sqli.mysql_query
+  - typescript.sqli.mysql_query_db
+  - typescript.sqli.sequelize_query
+  - typescript.sqli.typeorm_datasource_query
+  packages:
+  - typeorm
+  - pg
+  - mssql
+  - mysql
+  - mysql2
+  - sequelize
+  imports:
+  - pg
+  - mssql
+- id: typescript.sqli.method_execute_concat
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: execute
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: method execute concat
+    code: |
+      const _u = require("graphql");
+      function demo(input, req, obj) {
+        return conn.execute("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("graphql");
+      function demo(input, req, obj) {
+        return conn.execute("SELECT 1");
+      }
+    expect_no_match: true
+  description: "<recv>.execute(sql) — same shape as `query`. Merged collision aliases: typescript.graphql.schema_execute, typescript.nosql.cassandra_execute, typescript.sqli.mysql_execute, typescript.sqli.mysql_execute_db."
+  aliases:
+  - typescript.graphql.schema_execute
+  - typescript.nosql.cassandra_execute
+  - typescript.sqli.mysql_execute
+  - typescript.sqli.mysql_execute_db
+  packages:
+  - graphql
+  - cassandra-driver
+  - mysql2
+- id: typescript.sqli.prisma_client_query_raw_unsafe
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  imports:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^PrismaClient\.\$queryRawUnsafe$
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: prisma client queryRawUnsafe concat
+    code: |
+      const _u = require("@prisma/client");
+      function byId(PrismaClient: any, id: string) {
+        return PrismaClient.$queryRawUnsafe("SELECT * FROM users WHERE id = " + id);
+      }
+    expect_match_text:
+    - PrismaClient.$queryRawUnsafe
+  - name: prisma client queryRawUnsafe sql variable concat
+    code: |
+      const _u = require("@prisma/client");
+      function byId(PrismaClient: any, sql: string, id: string) {
+        return PrismaClient.$queryRawUnsafe(sql + id);
+      }
+    expect_match_text:
+    - PrismaClient.$queryRawUnsafe
+  - name: prisma client queryRawUnsafe template
+    code: |
+      const _u = require("@prisma/client");
+      function byName(PrismaClient: any, name: string) {
+        return PrismaClient.$queryRawUnsafe(`SELECT * FROM users WHERE name = '${name}'`);
+      }
+    expect_match_text:
+    - PrismaClient.$queryRawUnsafe
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@prisma/client");
+      function byId(PrismaClient: any, id: string) {
+        return PrismaClient.$queryRawUnsafe("SELECT 1");
+      }
+    expect_no_match: true
+  description: "PrismaClient.$queryRawUnsafe — static/typed client shape for unsafe raw SQL strings."
+- id: typescript.sqli.prisma_client_execute_raw_unsafe
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  imports:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^PrismaClient\.\$executeRawUnsafe$
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: prisma client executeRawUnsafe concat
+    code: |
+      const _u = require("@prisma/client");
+      function update(PrismaClient: any, role: string, id: string) {
+        return PrismaClient.$executeRawUnsafe("UPDATE users SET role = '" + role + "' WHERE id = " + id);
+      }
+    expect_match_text:
+    - PrismaClient.$executeRawUnsafe
+  - name: prisma client executeRawUnsafe sql variable concat
+    code: |
+      const _u = require("@prisma/client");
+      function update(PrismaClient: any, sql: string, role: string) {
+        return PrismaClient.$executeRawUnsafe(sql + role);
+      }
+    expect_match_text:
+    - PrismaClient.$executeRawUnsafe
+  - name: prisma client executeRawUnsafe template
+    code: |
+      const _u = require("@prisma/client");
+      function remove(PrismaClient: any, id: string) {
+        return PrismaClient.$executeRawUnsafe(`DELETE FROM users WHERE id = ${id}`);
+      }
+    expect_match_text:
+    - PrismaClient.$executeRawUnsafe
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@prisma/client");
+      function update(PrismaClient: any, role: string, id: string) {
+        return PrismaClient.$executeRawUnsafe("SELECT 1");
+      }
+    expect_no_match: true
+  description: "PrismaClient.$executeRawUnsafe — unsafe raw SQL execution path."
+- id: typescript.sqli.prisma_raw_fragment
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: high
+  packages:
+  - '@prisma/client'
+  imports:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Prisma
+      - raw
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: prisma raw order by
+    code: "import { Prisma } from \"@prisma/client\";\nfunction orderBy(column: string) {\n  return Prisma.raw(\"ORDER BY \" + column);\n}\n"
+    expect_match_text:
+    - Prisma.raw
+  - name: prisma raw where template
+    code: |
+      const _u = require("@prisma/client");
+      function where(Prisma: any, name: string) {
+        return Prisma.raw(`WHERE name = '${name}'`);
+      }
+    expect_match_text:
+    - Prisma.raw
+  - name: arg tainted literal negative
+    code: |
+      import { Prisma } from "@prisma/client";
+      function orderBy(column: string) {
+        return Prisma.raw("SELECT 1");
+      }
+    expect_no_match: true
+  description: Prisma.raw creates an unescaped SQL fragment; tainted strings bypass Prisma.sql tagged-template binding.
+- id: typescript.sqli.database_rawquery
+  enabled: true
+  language: typescript
+  tag: sql-injection
+  severity: high
+  category: sql-exec
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - rawQuery
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: database rawQuery concat
+    code: "function byId(Database: any, id: string) {\n  return Database.rawQuery(\"SELECT * FROM users WHERE id = \" + id);\n}\n"
+    expect_match_text:
+    - Database.rawQuery
+  - name: database rawQuery sql variable
+    code: "function byId(Database: any, sql: string) {\n  return Database.rawQuery(sql);\n}\n"
+    expect_match_text:
+    - Database.rawQuery
+  - name: arg tainted literal negative
+    code: |
+      function byId(Database: any, id: string) {
+        return Database.rawQuery("SELECT 1");
+      }
+    expect_no_match: true
+  description: "Database.rawQuery(sql) — framework database facade raw SQL execution with string-built SQL."

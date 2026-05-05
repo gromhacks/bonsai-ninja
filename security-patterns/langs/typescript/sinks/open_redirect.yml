@@ -1,0 +1,272 @@
+- id: typescript.open_redirect.express_res_redirect
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages:
+  - express
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express res redirect
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.redirect(input);
+      }
+    expect_match_text: [res.redirect]
+  - name: literal express redirect negative
+    code: |
+      const _u = require("express");
+      function demo(res: any) {
+        return res.redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: "Express res.redirect(tainted URL) - sends user-controlled Location header."
+- id: typescript.open_redirect.express_res_location
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages:
+  - express
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - location
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express res location
+    code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return\
+      \ res.location(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return\
+      \ res.location(\"/account\");\n}\n"
+    expect_no_match: true
+  description: "Express res.location(tainted) \u2014 sets Location header."
+- id: typescript.open_redirect.koa_redirect
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages:
+  - koa
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ctx
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: koa redirect
+    code: "const _u = require(\"koa\");\nfunction demo(input, req, obj) {\n  return\
+      \ ctx.redirect(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"koa\");\nfunction demo(input, req, obj) {\n  return\
+      \ ctx.redirect(\"/account\");\n}\n"
+    expect_no_match: true
+  description: Koa ctx.redirect(tainted).
+- id: typescript.open_redirect.fastify_redirect
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages:
+  - fastify
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - reply
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fastify redirect
+    code: |
+      const _u = require("fastify");
+      function demo(input, req, obj) {
+        return reply.redirect(input);
+      }
+    expect_match_text: [reply.redirect]
+  - name: literal fastify redirect negative
+    code: |
+      const _u = require("fastify");
+      function demo(reply: any) {
+        return reply.redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: "Fastify reply.redirect(tainted URL) - sends user-controlled redirect target."
+- id: typescript.open_redirect.hapi_redirect
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages:
+  - '@hapi/hapi'
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - h
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: hapi redirect
+    code: "const _u = require(\"@hapi/hapi\");\nfunction demo(input, req, obj) {\n\
+      \  return h.redirect(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"@hapi/hapi\");\nfunction demo(input, req, obj) {\n\
+      \  return h.redirect(\"/account\");\n}\n"
+    expect_no_match: true
+  description: Hapi h.redirect(tainted).
+- id: typescript.open_redirect.next_response_redirect
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages:
+  - next
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NextResponse
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: next response redirect
+    code: "const _u = require(\"next\");\nfunction demo(input, req, obj) {\n  return\
+      \ NextResponse.redirect(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "const _u = require(\"next\");\nfunction demo(input, req, obj) {\n  return\
+      \ NextResponse.redirect(\"https://example.com/account\");\n}\n"
+    expect_no_match: true
+  description: Next.js NextResponse.redirect(tainted).
+- id: typescript.open_redirect.window_location_assign
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - location
+      - assign
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: window location assign
+    code: "function demo(input, req, obj) {\n  return location.assign(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "function demo(input, req, obj) {\n  return location.assign(\"/account\"\
+      );\n}\n"
+    expect_no_match: true
+  description: window.location.assign(tainted).
+- id: typescript.open_redirect.window_location_replace
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - location
+      - replace
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: window location replace
+    code: "function demo(input, req, obj) {\n  return location.replace(input);\n}\n"
+  - name: arg tainted literal negative
+    code: "function demo(input, req, obj) {\n  return location.replace(\"/account\"\
+      );\n}\n"
+    expect_no_match: true
+  description: window.location.replace(tainted).
+- id: typescript.open_redirect.window_location_href_assign
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: typescript
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: write
+    target:
+      name: location
+  description: "Disabled \u2014 `target.name: location` matches any `x.location =\
+    \ y` assignment (too broad); flag `location.href = tainted` downstream via href\
+    \ target once receiver narrowing is supported."
+
+- id: typescript.open_redirect.simple_oauth2_redirect_tainted
+  enabled: true
+  language: typescript
+  tag: open-redirect
+  severity: high
+  packages: [simple-oauth2]
+  imports: [simple-oauth2]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.authorizeURL$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: simple-oauth2 authorizeURL tainted redirect_uri
+    code: |
+      const _u = require("simple-oauth2");
+      function login(client: any, input: string) {
+        return client.authorizeURL({ redirect_uri: input, scope: "read" });
+      }
+    expect_match_text: [client.authorizeURL]
+  - name: simple-oauth2 authorizeURL literal negative
+    code: |
+      const _u = require("simple-oauth2");
+      function login(client: any) {
+        return client.authorizeURL({ redirect_uri: "https://app.example.com/cb", scope: "read" });
+      }
+    expect_no_match: true
+  description: "simple-oauth2 client.authorizeURL({redirect_uri: tainted}) — attacker-controlled redirect_uri leaks the auth code or token to a malicious endpoint."

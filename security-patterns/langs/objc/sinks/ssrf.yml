@@ -1,0 +1,182 @@
+# Objective-C SSRF sinks (NSURL, NSURLConnection, NSURLSession, AFNetworking).
+- id: objc.ssrf.nsurl_url_with_string
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^(URLWithString|URLWithString:relativeToURL:)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; URLWithString(input); }
+  - name: literal url string negative
+    code: |
+      void test(void) { URLWithString(@"https://safe.example"); }
+    expect_no_match: true
+  description: "NSURL +URLWithString: with tainted string — any subsequent HTTP fetch hits attacker-chosen host."
+
+- id: objc.ssrf.nsurlsession_data_task
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^(dataTaskWithRequest|dataTaskWithURL|downloadTaskWithURL|downloadTaskWithRequest|streamTaskWithHostName)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; dataTaskWithRequest(input); }
+  - name: literal session request negative
+    code: |
+      void test(void) { dataTaskWithRequest(@"https://safe.example"); }
+    expect_no_match: true
+  description: "NSURLSession -dataTask/-downloadTask/-streamTask — outbound HTTP(S) to tainted URL."
+
+- id: objc.ssrf.nsurlconnection
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^(sendSynchronousRequest|sendAsynchronousRequest|connectionWithRequest)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; sendSynchronousRequest(input); }
+  - name: literal connection request negative
+    code: |
+      void test(void) { sendSynchronousRequest(@"https://safe.example"); }
+    expect_no_match: true
+  description: "NSURLConnection (deprecated) +sendSynchronousRequest: / +sendAsynchronousRequest: / +connectionWithRequest: — outbound HTTP to tainted request."
+
+- id: objc.ssrf.afnetworking_http
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  packages: [AFNetworking]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(GET|POST|PUT|DELETE|PATCH|HEAD)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(id input) { id target = input; int amount = 1; [AFHTTPSessionManager GET:input]; }
+  - name: literal afnetworking url negative
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(void) { [AFHTTPSessionManager GET:@"/health"]; }
+    expect_no_match: true
+  description: "AFNetworking AFHTTPSessionManager -GET:/-POST:/... with tainted URL. Constrained to AFNetworking manager receivers to avoid collisions with unrelated uppercase selectors."
+
+- id: objc.ssrf.cfurl_create_with_string
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918, CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^(CFURLCreateWithString|CFURLCreateWithBytes|CFURLCreateAbsoluteURLWithBytes)$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(CFStringRef input) { id target = input; int amount = 1; CFURLCreateWithString(NULL, input, NULL); }
+  - name: literal cfurl string negative
+    code: |
+      void test(void) { CFURLCreateWithString(NULL, CFSTR("https://safe.example"), NULL); }
+    expect_no_match: true
+  description: "CoreFoundation CFURLCreateWithString / CFURLCreateWithBytes — tainted string yields attacker-chosen URL (SSRF) or file:// path (path injection). Pair with downstream URL-load sinks."
+
+- id: objc.ssrf.nsmutableurlrequest_set_url
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918]
+  match:
+    kind: write
+    target:
+      regex: "^(?:.*\\.)?(URL|HTTPBody|HTTPBodyStream)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; NSMutableURLRequest.URL = input; }
+  description: "NSMutableURLRequest .URL / .HTTPBody / .HTTPBodyStream assignment with tainted value — controls outbound request target/body. Constrained to URL-request receivers."
+
+- id: objc.ssrf.webview_load_request
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918, CWE-601]
+  match:
+    kind: call
+    callee:
+      name: loadRequest
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [UIWebView loadRequest:input]; }
+  - name: literal webview request negative
+    code: |
+      void test(void) { [UIWebView loadRequest:@"https://safe.example"]; }
+    expect_no_match: true
+  description: "UIWebView / WKWebView -loadRequest: — navigates the webview to a tainted URL request (SSRF on file:// / https:// / about:blank). Constrained to webview receivers."
+
+- id: objc.ssrf.webview_load_file_url
+  enabled: true
+  language: objc
+  tag: ssrf
+  severity: high
+  cwe: [CWE-22, CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(loadFileURL|loadFileRequest)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [WKWebView loadFileURL:input]; }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        webview_load_file_url("safe");
+      }
+    expect_no_match: true
+  description: "WKWebView -loadFileURL:allowingReadAccessToURL: — file:// load with tainted path can read arbitrary sandbox files when allowingReadAccessToURL is broad. Constrained to webview receivers."

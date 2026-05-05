@@ -1,0 +1,692 @@
+# C++ sanitizers / validators — reduce severity or suppress when in-path.
+- id: cpp.sanitizer.strncpy_bounded
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: strncpy
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        strncpy(arg);
+      }
+    expect_match_text: [strncpy]
+  description: "Disabled — strncpy bounds the write count but does not guarantee NUL-termination when the source length reaches the bound; it is not a reliable sanitizer for buffer-overflow/string-safety taint."
+
+- id: cpp.sanitizer.strlcpy_bounded
+  enabled: true
+  language: cpp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: strlcpy
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        strlcpy(arg);
+      }
+    expect_match_text: [strlcpy]
+  description: "strlcpy — bounded copy with guaranteed NUL-termination."
+
+- id: cpp.sanitizer.strlcat_bounded
+  enabled: true
+  language: cpp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: strlcat
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        strlcat(arg);
+      }
+    expect_match_text: [strlcat]
+  description: "strlcat — bounded concat with guaranteed NUL-termination."
+
+- id: cpp.sanitizer.snprintf_bounded
+  enabled: true
+  language: cpp
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: snprintf
+  taint_semantics:
+    clean_output_overwrite:
+      output_arg_index: 0
+      value_start_arg_index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        snprintf(arg);
+      }
+    expect_match_text: [snprintf]
+  description: "snprintf — bounded format; length-limited output."
+
+- id: cpp.sanitizer.std_filesystem_canonical
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [filesystem, canonical]
+  description: "Disabled — std::filesystem::canonical resolves symlinks but still requires trusted-root containment checking."
+
+- id: cpp.sanitizer.std_filesystem_weakly_canonical
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [filesystem, weakly_canonical]
+  description: "Disabled — std::filesystem::weakly_canonical normalizes relative segments but still requires trusted-root containment checking."
+
+- id: cpp.sanitizer.openssl_constant_time_memcmp
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: CRYPTO_memcmp
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        CRYPTO_memcmp(arg);
+      }
+    expect_match_text: [CRYPTO_memcmp]
+  description: "OpenSSL CRYPTO_memcmp — constant-time comparison."
+
+- id: cpp.sanitizer.std_random_device
+  enabled: true
+  language: cpp
+  tag: validation
+  match:
+    kind: new
+    callee:
+      name: random_device
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new random_device(arg);
+      }
+    expect_match_text: [random_device]
+  description: "std::random_device — crypto-quality on most platforms (libc++, libstdc++ on Linux)."
+
+- id: cpp.sanitizer.sqlite3_bind_text
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: sqlite3_bind_text
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        sqlite3_bind_text(arg);
+      }
+    expect_match_text: [sqlite3_bind_text]
+  description: "sqlite3_bind_text — binds placeholder value safely."
+
+- id: cpp.sanitizer.sqlite3_bind_int
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: sqlite3_bind_int
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        sqlite3_bind_int(arg);
+      }
+    expect_match_text: [sqlite3_bind_int]
+  description: "sqlite3_bind_int — binds integer placeholder."
+
+- id: cpp.sanitizer.libpqxx_exec_params
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      attribute: [work, exec_params]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        work::exec_params(arg);
+      }
+    expect_match_text: ["work::exec_params"]
+  description: "libpqxx work::exec_params — $N parameterised query."
+
+- id: cpp.sanitizer.qt_bindvalue
+  enabled: true
+  language: cpp
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      attribute: [QSqlQuery, bindValue]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QSqlQuery::bindValue(arg);
+      }
+    expect_match_text: ["QSqlQuery::bindValue"]
+  description: "Qt QSqlQuery::bindValue — parameter binding after prepare()."
+
+- id: cpp.sanitizer.qt_tohtmlescaped
+  enabled: true
+  language: cpp
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [QString, toHtmlEscaped]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QString::toHtmlEscaped(arg);
+      }
+    expect_match_text: ["QString::toHtmlEscaped"]
+  description: "QString::toHtmlEscaped — HTML-escapes special characters."
+
+- id: cpp.sanitizer.poco_uri_encode
+  enabled: true
+  language: cpp
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^URI\\.encode$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        URI.encode(arg);
+      }
+    expect_match_text: [URI.encode]
+  description: "Poco::URI::encode — percent-encodes reserved characters."
+
+- id: cpp.sanitizer.qt_qurl_toencoded
+  enabled: true
+  language: cpp
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [QUrl, toEncoded]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QUrl::toEncoded(arg);
+      }
+    expect_match_text: ["QUrl::toEncoded"]
+  description: "QUrl::toEncoded — produces percent-encoded representation."
+
+- id: cpp.sanitizer.std_stoi
+  enabled: true
+  language: cpp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [std, stoi]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::stoi(arg);
+      }
+    expect_match_text: ["std::stoi"]
+  description: "std::stoi — throws on non-numeric input; narrows to int."
+
+- id: cpp.sanitizer.std_stol
+  enabled: true
+  language: cpp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [std, stol]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::stol(arg);
+      }
+    expect_match_text: ["std::stol"]
+  description: "std::stol — throws on non-numeric input; narrows to long."
+
+- id: cpp.sanitizer.std_stod
+  enabled: true
+  language: cpp
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [std, stod]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::stod(arg);
+      }
+    expect_match_text: ["std::stod"]
+  description: "std::stod — throws on non-numeric input; narrows to double."
+
+- id: cpp.sanitizer.ldap_escape_filter
+  enabled: true
+  language: cpp
+  tag: ldap-escape
+  match:
+    kind: call
+    callee:
+      name: ldap_escape_filter
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        ldap_escape_filter(arg);
+      }
+    expect_match_text: [ldap_escape_filter]
+  description: "ldap_escape_filter — escapes LDAP filter metacharacters before filter construction."
+
+- id: cpp.sanitizer.std_filesystem_canonical_strict
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [filesystem, canonical]
+  description: "Disabled — std::filesystem::canonical(path) normalizes and resolves symlinks but does not prove the result remains under a trusted root. Re-enable only with a containment check such as starts_with(root) / equivalent prefix validation."
+
+- id: cpp.sanitizer.std_string_view_substr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: bounds-check
+  match:
+    kind: call
+    callee:
+      attribute: [string_view, substr]
+  description: "Disabled — std::string_view::substr enforces bounds and throws std::out_of_range; only relevant in length-controlled flows (audit only)."
+
+- id: cpp.sanitizer.absl_strformat
+  enabled: true
+  language: cpp
+  tag: format-string
+  match:
+    kind: call
+    callee:
+      attribute: [absl, StrFormat]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"[^"]*"$'
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        absl::StrFormat("%s", arg);
+      }
+    expect_match_text: ["absl::StrFormat"]
+  - name: nonliteral format negative constraint boundary
+    code: |
+      void example(const char *fmt, const char *arg) {
+        absl::StrFormat(fmt, arg);
+      }
+    expect_no_match: true
+  description: "absl::StrFormat with a literal format string — user data is bound as arguments rather than interpreted as format syntax."
+
+- id: cpp.sanitizer.fmt_format_literal
+  enabled: true
+  language: cpp
+  tag: format-string
+  match:
+    kind: call
+    callee:
+      attribute: [fmt, format]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"[^"]*"$|^FMT_STRING\('
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        fmt::format("{}", arg);
+      }
+    expect_match_text: ["fmt::format"]
+  - name: nonliteral format negative constraint boundary
+    code: |
+      void example(const char *fmt, const char *arg) {
+        fmt::format(fmt, arg);
+      }
+    expect_no_match: true
+  description: "fmt::format with a literal or FMT_STRING format — attacker data is passed as a value argument, not as format syntax."
+
+- id: cpp.sanitizer.botan_constant_time_compare
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      attribute: [Botan, constant_time_compare]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        Botan::constant_time_compare(arg);
+      }
+    expect_match_text: ["Botan::constant_time_compare"]
+  description: "Botan::constant_time_compare — timing-safe equality."
+
+- id: cpp.sanitizer.cryptopp_verify_bufs_equal
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      attribute: [CryptoPP, VerifyBufsEqual]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        CryptoPP::VerifyBufsEqual(arg);
+      }
+    expect_match_text: ["CryptoPP::VerifyBufsEqual"]
+  description: "CryptoPP::VerifyBufsEqual — constant-time buffer comparison."
+
+- id: cpp.sanitizer.libsodium_memcmp
+  enabled: true
+  language: cpp
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      name: sodium_memcmp
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        sodium_memcmp(arg);
+      }
+    expect_match_text: [sodium_memcmp]
+  description: "libsodium sodium_memcmp — constant-time memory comparison."
+
+- id: cpp.sanitizer.string_starts_with_same_origin
+  enabled: true
+  language: cpp
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      regex: "(^|\\.)starts_with$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"/[^"]*"$'
+  match_examples:
+  - name: string starts_with slash prefix
+    code: |
+      void example() {
+        std::string target = "/next";
+        target.starts_with("/app/");
+      }
+    expect_match_text: [target.starts_with]
+  - name: string starts_with slash prefix negative constraint boundary
+    code: "void example() {\n  std::string target = \"/next\";\n  target.starts_with();\n}\n"
+    expect_no_match: true
+  description: "std::string/std::string_view starts_with(\"/...\") — same-origin redirect/path guard when the accepted prefix is a slash-rooted local path."
+
+- id: cpp.sanitizer.container_contains_allowlist
+  enabled: true
+  language: cpp
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(allowed|allowlist|whitelist|safe_values|safe_paths)\\.(contains|find|count)$"
+  match_examples:
+  - name: finite set contains
+    code: |
+      void example(std::string input) {
+        allowed.contains(input);
+      }
+    expect_match_text: [allowed.contains]
+  description: "Finite allowlist container membership (contains/find/count) on allowlist-named sets/maps before using a tainted selector, path, or redirect target."
+
+- id: cpp.sanitizer.std_regex_match_full
+  enabled: true
+  language: cpp
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      attribute: [std, regex_match]
+  match_examples:
+  - name: full string regex validation
+    code: |
+      void example(std::string input) {
+        std::regex_match(input);
+      }
+    expect_match_text: ["std::regex_match"]
+  description: "std::regex_match validates the whole input string, unlike regex_search; use with strict UUID/slug allowlist patterns."
+
+- id: cpp.sanitizer.regex_replace_char_allowlist
+  enabled: true
+  language: cpp
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      attribute: [std, regex_replace]
+  constraints:
+  - any_arg_matches_regex: "\\[\\^[^\\]]+\\]"
+  - any_arg_matches_regex: '^""$'
+  match_examples:
+  - name: strip non slug chars
+    code: |
+      void example(std::string input) {
+        std::regex_replace(input, std::regex("[^A-Za-z0-9_-]"), "");
+      }
+    expect_match_text: ["std::regex_replace"]
+  - name: strip non slug chars negative constraint boundary
+    code: "void example(std::string input) {\n  std::regex_replace();\n}\n"
+    expect_no_match: true
+  description: "std::regex_replace with a `[^safe]` allowlist pattern and empty replacement — strips unsafe characters before downstream use."
+
+- id: cpp.sanitizer.soci_use_bind
+  enabled: true
+  language: cpp
+  tag: db-bind-parameter
+  packages: [soci]
+  match:
+    kind: call
+    callee:
+      attribute: [soci, use]
+  match_examples:
+  - name: soci bind parameter
+    code: |
+      #include <soci/soci.h>
+      void example(std::string input) {
+        soci::use(input);
+      }
+    expect_match_text: ["soci::use"]
+  description: "SOCI soci::use(value) — binds a C++ value into a prepared SQL statement placeholder."
+
+- id: cpp.sanitizer.std_span_subspan
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: bounds-check
+  match:
+    kind: call
+    callee:
+      attribute: [span, subspan]
+  description: "Disabled — std::span::subspan enforces bounds (throws on overflow), but most callers use unchecked subscripts; only flag in size-validated flows (audit only)."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: cpp.passthrough.curl_easy_unescape
+  enabled: true
+  language: cpp
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: curl_easy_unescape
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        curl_easy_unescape(arg);
+      }
+    expect_match_text: [curl_easy_unescape]
+  description: "libcurl curl_easy_unescape — preserves taint (C++ via libcurl)."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: cpp.lock.std_lock_guard
+  enabled: true
+  language: cpp
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [std, lock_guard]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::lock_guard(arg);
+      }
+    expect_match_text: ["std::lock_guard"]
+  description: "std::lock_guard<std::mutex>(m) — RAII lock guard."
+- id: cpp.lock.std_unique_lock
+  enabled: true
+  language: cpp
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [std, unique_lock]
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        std::unique_lock(arg);
+      }
+    expect_match_text: ["std::unique_lock"]
+  description: "std::unique_lock<std::mutex>(m) — RAII unique lock."

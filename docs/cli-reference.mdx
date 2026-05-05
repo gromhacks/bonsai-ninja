@@ -1,0 +1,181 @@
+---
+title: "CLI Reference"
+description: "Command and flag reference for security analysis, flow inspection, trace, and export."
+---
+
+# CLI Reference
+
+Global options accepted before the command include `--no-color`, `--theme`, `--no-cache`, `--no-progress`, `--parse-timeout`, `--help`, and `--version`.
+
+## security
+
+`security` is the rulepack-driven command family. It takes a workspace and a subcommand.
+
+```bash
+bonsai-ninja security ./src taint-analysis --severity high
+bonsai-ninja security ./src pack --audit --rules-dir ./security-patterns
+```
+
+| Flag or subcommand | Default | Description |
+|---|---:|---|
+| `<WORKSPACE>` | Required | Workspace root to analyze. |
+| `sources` | None | Enumerate source-rule matches. |
+| `sinks` | None | Enumerate sink-rule matches. |
+| `sanitizers` | None | Enumerate sanitizer-rule matches. |
+| `deps` | None | Show package imports referenced by the rulepack. |
+| `taint-analysis` | None | Run source-to-sink taint analysis. |
+| `source-analysis` | None | Map downstream paths from sources without requiring sinks. |
+| `pack` | None | Audit, list, tree, or validate the rulepack. |
+
+Common inventory flags for `sources`, `sinks`, `sanitizers`, and `deps`:
+
+| Flag | Default | Description |
+|---|---:|---|
+| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. Also reads `BONSAI_RULES_DIR`. |
+| `--rule <RULE>` | None | Exact rule ID filter. |
+| `--rule-regex <REGEX>` | None | Regex rule ID filter. |
+| `--trust <TRUST>` | None | Source trust filter such as `remote`, `local`, `service`, `ipc`, `database`, `library`, `config`, or `physical`. |
+| `--category <CATEGORY>` | None | Source category filter. |
+| `--tag <TAG>` | None | Source or sink tag filter. |
+| `--severity <LEVEL>` | None | Severity floor where supported: `info`, `low`, `medium`, `high`, `critical`. |
+| `--file <TEXT>` | None | Include only paths containing this text. Repeatable. |
+| `--exclude-file <TEXT>` | None | Exclude paths containing this text. Repeatable. |
+| `--limit <N>` | 50 or 200 | Rendered row cap for text output. `0` is uncapped. |
+| `--context <BUDGET>` | 32k text | Token budget for text output. |
+| `--page <PAGE>` | 1 | Page number, `P:xxxxxxxx` cursor, or `next`. |
+| `--all` | false | Emit all rows or findings without paging. |
+| `--format <FORMAT>` | text | `text`, `json`, or `sarif` where supported. |
+
+## taint
+
+The taint command surface is `security <workspace> taint-analysis`.
+
+```bash
+bonsai-ninja security ./src taint-analysis --trust remote --tag command-injection
+bonsai-ninja security ./src taint-analysis --format sarif --all > findings.sarif.json
+```
+
+| Flag | Default | Description |
+|---|---:|---|
+| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
+| `--profile <PROFILE>` | None | Preset bundle. `production` applies production excludes, remote trust, high severity, and 16k context unless overridden. |
+| `--source <REGEX>` | None | Source rule ID regex. |
+| `--trust <TRUST>` | None | Source trust filter. |
+| `--category <CATEGORY>` | None | Source category filter. Use `inferred` for inferred sources. |
+| `--sink <REGEX>` | None | Sink rule ID regex. |
+| `--severity <LEVEL>` | None | Severity floor. |
+| `--tag <TAG>` | None | Sink tag filter. |
+| `--file <TEXT>` | None | Include only findings whose sink path contains this text. Repeatable. |
+| `--exclude-file <TEXT>` | None | Exclude findings whose sink path contains this text. Repeatable. |
+| `--inferred-sources` | false | Add synthetic entry-point parameter sources. |
+| `--exclude-tests` | false | Drop findings whose source or sink is in a test path. |
+| `--show-sanitized` | Compatibility | Sanitized reachable paths are already included with sanitizer evidence. |
+| `--taint-budget <N>` | 256 | Interprocedural function/seed analysis budget. |
+| `--intra-worklist-cap <N>` | CFG-derived | Intraprocedural worklist cap per function. |
+| `--precision <LEVEL>` | None | Keep only `exact`, `narrowed`, `over-approximate`, or `unknown` precision. |
+| `--strict-flow` | false | Equivalent to keeping exact and narrowed paths. |
+| `--context <BUDGET>` | 32k text | Token budget. |
+| `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
+| `--all` | false | Emit every finding. |
+| `--no-compact` | false | Expand every flow body. |
+| `--format <FORMAT>` | text | `text`, `json`, or `sarif`. |
+
+## inspect
+
+`inspect` queries facts and renders flows that reach the match.
+
+```bash
+bonsai-ninja inspect ./src --query os.system --kind call
+bonsai-ninja inspect ./src --from handle_request --to os.system --view grouped
+```
+
+| Flag | Default | Description |
+|---|---:|---|
+| `<WORKSPACE>` | Required | Workspace root. |
+| `[SYMBOL_POS]` | None | Positional query string. |
+| `--query <QUERY>` | None | Preferred query flag. |
+| `--regex` | false | Treat query as regex. |
+| `--kind <KIND>` | All | Restrict to `decl`, `call`, `import`, `var`, `string`, `arg`, `ref`, or `decorator`. Repeatable. |
+| `--from <TEXT>` | None | Keep flows passing through this text. |
+| `--from-kind <KIND>` | None | Narrow `--from` to `decl`, `call`, `read`, `write`, `arg`, `string`, `import`, or `class`. |
+| `--to <TEXT>` | None | Keep flows reaching this text. |
+| `--to-kind <KIND>` | None | Narrow `--to` to a browse-fact kind. |
+| `--file <TEXT>` | None | Hit file path substring filter. |
+| `--in-fn <TEXT>` | None | Enclosing-function filter for non-decl hits. |
+| `--max-flows <N>` | 50 | Max flows per decl hit. |
+| `--max-entry-probes <N>` | 500 | DFS probe budget. |
+| `--max-hits <N>` | 200 | Max non-decl hits. |
+| `--all` | false | Remove flow, probe, and hit caps. |
+| `--compact` | false | Omit inlined source bodies from text output. |
+| `--flow <F:ID>` | None | Re-render one stable flow. |
+| `--view <VIEW>` | trace | `trace`, `grouped`, or `auto`. |
+| `--group <G:ID>` | None | Re-render one stable flow group. |
+| `--context <BUDGET>` | 32k text | Token budget. |
+| `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
+| `--format <FORMAT>` | text | `text` or `json`. |
+
+## trace
+
+`trace` expands a function's call tree and can bracket paths with `--from` and `--to`.
+
+```bash
+bonsai-ninja trace ./src handle_request
+bonsai-ninja trace ./src --from handle_request --to os.system --format dot > flow.dot
+```
+
+| Flag | Default | Description |
+|---|---:|---|
+| `<WORKSPACE>` | Required | Workspace root. |
+| `[SYMBOL]` | None | Positional function to trace. |
+| `--function <NAME>` | None | Function name; takes precedence over positional symbol. |
+| `--from <TEXT>` | None | Restrict to flows starting at or passing through this text. |
+| `--to <TEXT>` | None | Restrict to flows reaching this text. Requires `--from`. |
+| `--context <BUDGET>` | 32k | Token budget for text. |
+| `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
+| `--all` | false | Emit full trace. |
+| `--max-depth <N>` | 12 | Max cross-module call depth. |
+| `--max-steps <N>` | 8192 | Max emitted trace steps. |
+| `--max-branch-fanout <N>` | 4 | Branch fanout used to derive path budget. |
+| `--max-loop-iters <N>` | 1 | Loop iterations represented in metadata. |
+| `--format <FORMAT>` | text | `text`, `json`, or `dot`. |
+
+## export
+
+`export` writes the analyzed workspace graph to stdout.
+
+```bash
+bonsai-ninja export ./src > index.json
+bonsai-ninja export ./src --format graphml > graph.graphml
+```
+
+| Flag | Default | Description |
+|---|---:|---|
+| `<WORKSPACE>` | Required | Workspace root. |
+| `--full-propagations` | false | Force exhaustive interprocedural propagation records. |
+| `--format <FORMAT>` | json | `json`, `networkx`, `graphml`, or `cypher`. |
+
+## source-analysis
+
+The source-analysis surface is `security <workspace> source-analysis`.
+
+```bash
+bonsai-ninja security ./src source-analysis --trust remote
+bonsai-ninja security ./src source-analysis --format json --all
+```
+
+| Flag | Default | Description |
+|---|---:|---|
+| `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
+| `--profile <PROFILE>` | None | Preset bundle. `production` applies production excludes, remote trust, and 16k context unless overridden. |
+| `--source <REGEX>` | None | Source rule ID regex. |
+| `--trust <TRUST>` | None | Source trust filter. |
+| `--tag <TAG>` | None | Source tag filter. |
+| `--category <CATEGORY>` | None | Source category filter. |
+| `--file <TEXT>` | None | Include only source paths containing this text. Repeatable. |
+| `--exclude-file <TEXT>` | None | Exclude source paths containing this text. Repeatable. |
+| `--inferred-sources` | false | Include synthetic entry-point parameter sources. |
+| `--context <BUDGET>` | 32k text | Token budget. |
+| `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
+| `--all` | false | Emit every source flow. |
+| `--no-compact` | false | Expand every flow body. |
+| `--format <FORMAT>` | text | `text`, `json`, or `sarif`. |

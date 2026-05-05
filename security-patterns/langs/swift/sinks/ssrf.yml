@@ -1,0 +1,274 @@
+- id: swift.ssrf.urlsession_data_task
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: dataTask
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'func test(input: String) { dataTask(input) }
+
+      '
+  - name: literal data task negative
+    code: 'func test() { dataTask("https://safe.example") }
+
+      '
+    expect_no_match: true
+  description: URLSession dataTask(with:) with tainted URL.
+- id: swift.ssrf.urlsession_data_task_with_request
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: dataTaskWithRequest
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'func test(input: String) { dataTaskWithRequest(input) }
+
+      '
+  - name: literal data task request negative
+    code: 'func test() { dataTaskWithRequest("https://safe.example") }
+
+      '
+    expect_no_match: true
+  description: URLSession dataTaskWithRequest (Obj-C bridge).
+- id: swift.ssrf.urlsession_download_task
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: downloadTask
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'func test(input: String) { downloadTask(input) }
+
+      '
+  - name: literal download task negative
+    code: 'func test() { downloadTask("https://safe.example") }
+
+      '
+    expect_no_match: true
+  description: URLSession.downloadTask(with:).
+- id: swift.ssrf.urlsession_data_async
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - URLSession
+      - data
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'func test(input: String) { URLSession.data(input) }
+
+      '
+  - name: literal urlsession data negative
+    code: 'func test() { URLSession.data("https://safe.example") }
+
+      '
+    expect_no_match: true
+  description: "URLSession.data(from:) async — suffix-match via `URLSession.data`."
+- id: swift.ssrf.urlrequest_init
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: URLRequest
+  description: "Disabled — URLRequest(url:) bare init flags every URLRequest; enable with taint flow to dataTask."
+- id: swift.ssrf.alamofire_request
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  packages:
+  - Alamofire
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AF
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'import Alamofire
+
+      func test(input: String) { AF.request(input) }
+
+      '
+  - name: literal alamofire request negative
+    code: 'import Alamofire
+
+      func test() { AF.request("https://safe.example") }
+
+      '
+    expect_no_match: true
+  description: Alamofire AF.request.
+- id: swift.ssrf.alamofire_download
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  packages:
+  - Alamofire
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AF
+      - download
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'import Alamofire
+
+      func test(input: String) { AF.download(input) }
+
+      '
+  - name: literal alamofire download negative
+    code: 'import Alamofire
+
+      func test() { AF.download("https://safe.example/file") }
+
+      '
+    expect_no_match: true
+  description: Alamofire AF.download.
+- id: swift.ssrf.alamofire_upload
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  packages:
+  - Alamofire
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AF
+      - upload
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'import Alamofire
+
+      func test() { let input = "x"; let amount = 1; AF.upload(input) }
+
+      '
+  - name: literal arg 0 negative
+    code: |
+      func test() { AF.upload("safe") }
+    expect_no_match: true
+  description: Alamofire AF.upload.
+- id: swift.ssrf.async_http_client_get
+  enabled: true
+  language: swift
+  tag: ssrf
+  severity: high
+  packages:
+  - AsyncHTTPClient
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPClient
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'import asynchttpclient
+
+      func test(input: String) { HTTPClient.get(input) }
+
+      '
+  - name: literal async http client get negative
+    code: 'import asynchttpclient
+
+      func test() { HTTPClient.get("https://safe.example") }
+
+      '
+    expect_no_match: true
+  description: AsyncHTTPClient.get.
+  imports:
+  - asynchttpclient
+- id: swift.ssrf.async_http_client_execute
+  enabled: false
+  language: swift
+  tag: ssrf
+  severity: high
+  packages:
+  - AsyncHTTPClient
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPClient
+      - execute
+  match_examples:
+  - name: declared shape
+    code: 'import asynchttpclient
+
+      func test() { let input = "x"; let amount = 1; HTTPClient.execute(input) }
+
+      '
+  description: AsyncHTTPClient.execute.
+  imports:
+  - asynchttpclient
+  disabled_reason:
+    code: over-broad

@@ -1,0 +1,321 @@
+- id: elixir.sqli.ecto_repo_query
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - ecto_sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Repo
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto_sql
+      # uses ecto_sql
+      defmodule App do
+        def test(input) do
+          Repo.query(input)
+        end
+      end
+  - name: literal repo query negative
+    code: |
+      alias Ecto_sql
+      defmodule App do
+        def test(input) do
+          Repo.query("SELECT * FROM users")
+        end
+      end
+    expect_no_match: true
+  description: "Repo.query/2 — raw SQL with interpolated values bypasses Ecto's parameter binding."
+  imports:
+  - Ecto_sql
+- id: elixir.sqli.ecto_repo_query_bang
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - ecto_sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Repo
+      - query!
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto_sql
+      defmodule App do
+        def test(input) do
+          Repo.query!(input)
+        end
+      end
+  - name: literal repo query bang negative
+    code: |
+      alias Ecto_sql
+      defmodule App do
+        def test(input) do
+          Repo.query!("SELECT * FROM users")
+        end
+      end
+    expect_no_match: true
+  description: "Repo.query!/2 — raw SQL variant; same interpolation risk as query/2."
+  imports:
+  - Ecto_sql
+- id: elixir.sqli.ecto_fragment
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: high
+  packages:
+  - ecto
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^fragment$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          fragment(input)
+        end
+      end
+  - name: literal fragment negative
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          fragment("name = ?")
+        end
+      end
+    expect_no_match: true
+  description: "Ecto fragment(\"...\") — string interpolation inside fragment is spliced directly into SQL. Merged collision aliases: elixir.sqli.ecto_query_api_fragment."
+  aliases:
+  - elixir.sqli.ecto_query_api_fragment
+  imports:
+  - Ecto
+- id: elixir.sqli.ecto_adapters_sql_query
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - ecto_sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Ecto
+      - Adapters
+      - SQL
+      - query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto_sql
+      # uses ecto_sql
+      defmodule App do
+        def test(input) do
+          Ecto.Adapters.SQL.query(Repo, input, [])
+        end
+      end
+  - name: literal adapters sql query negative
+    code: |
+      alias Ecto_sql
+      defmodule App do
+        def test(input) do
+          Ecto.Adapters.SQL.query(Repo, "SELECT * FROM users", [])
+        end
+      end
+    expect_no_match: true
+  description: "Ecto.Adapters.SQL.query/3 — tainted SQL string is executed verbatim."
+  imports:
+  - Ecto_sql
+- id: elixir.sqli.ecto_adapters_sql_query_bang
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - ecto_sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Ecto
+      - Adapters
+      - SQL
+      - query!
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto_sql
+      defmodule App do
+        def test(input) do
+          Ecto.Adapters.SQL.query!(Repo, input, [])
+        end
+      end
+  - name: literal adapters sql query bang negative
+    code: |
+      alias Ecto_sql
+      defmodule App do
+        def test(input) do
+          Ecto.Adapters.SQL.query!(Repo, "SELECT * FROM users", [])
+        end
+      end
+    expect_no_match: true
+  description: "Ecto.Adapters.SQL.query!/3 — raw SQL variant with exception on error."
+  imports:
+  - Ecto_sql
+- id: elixir.sqli.postgrex_query
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - postgrex
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Postgrex
+      - query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Postgrex
+      # uses postgrex
+      defmodule App do
+        def test(conn, input) do
+          Postgrex.query(conn, input, [])
+        end
+      end
+  - name: literal postgrex query negative
+    code: |
+      alias Postgrex
+      defmodule App do
+        def test(conn, input) do
+          Postgrex.query(conn, "SELECT * FROM users", [])
+        end
+      end
+    expect_no_match: true
+  description: "Postgrex.query/3 — raw SQL; $n placeholders only if the caller uses them."
+  imports:
+  - Postgrex
+- id: elixir.sqli.myxql_query
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - myxql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MyXQL
+      - query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Myxql
+      # uses myxql
+      defmodule App do
+        def test(conn, input) do
+          MyXQL.query(conn, input, [])
+        end
+      end
+  - name: literal myxql query negative
+    code: |
+      alias Myxql
+      defmodule App do
+        def test(conn, input) do
+          MyXQL.query(conn, "SELECT * FROM users", [])
+        end
+      end
+    expect_no_match: true
+  description: "MyXQL.query/3 — raw MySQL; interpolated string becomes part of the statement."
+  imports:
+  - Myxql
+- id: elixir.sqli.exqlite_query
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - exqlite
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Exqlite
+      - query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Exqlite
+      # uses exqlite
+      defmodule App do
+        def test(conn, input) do
+          Exqlite.query(conn, input)
+        end
+      end
+  - name: literal exqlite query negative
+    code: |
+      alias Exqlite
+      defmodule App do
+        def test(conn, input) do
+          Exqlite.query(conn, "SELECT * FROM users")
+        end
+      end
+    expect_no_match: true
+  description: "Exqlite.query/3 — raw SQLite; bindings are optional, caller may splice strings."
+  imports:
+  - Exqlite

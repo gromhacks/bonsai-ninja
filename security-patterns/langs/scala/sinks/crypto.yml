@@ -1,0 +1,109 @@
+- id: scala.crypto.message_digest_md5
+  enabled: true
+  language: scala
+  tag: weak-crypto
+  severity: low
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MessageDigest
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    MessageDigest.getInstance(\"MD5\")\n  }\n}\n"
+  description: "MessageDigest.getInstance(\"MD5\") — broken hash. Merged aliases: scala.crypto.message_digest_sha1."
+  aliases:
+  - scala.crypto.message_digest_sha1
+- id: scala.crypto.cipher_des
+  enabled: true
+  language: scala
+  tag: weak-crypto
+  severity: medium
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cipher
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Cipher.getInstance(\"DES\")\n  }\n}\n"
+  description: "Cipher.getInstance(\"DES\") — broken symmetric cipher. Merged aliases: scala.crypto.cipher_3des, scala.crypto.cipher_rc4, scala.crypto.cipher_ecb, scala.crypto.cipher_blowfish."
+  aliases:
+  - scala.crypto.cipher_3des
+  - scala.crypto.cipher_rc4
+  - scala.crypto.cipher_ecb
+  - scala.crypto.cipher_blowfish
+- id: scala.crypto.scala_util_random_nextint
+  enabled: true
+  language: scala
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Random
+      - nextInt
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Random.nextInt(input)\n  }\n}\n"
+  description: "scala.util.Random.nextInt — non-crypto PRNG; use SecureRandom."
+- id: scala.crypto.scala_util_random_nextbytes
+  enabled: true
+  language: scala
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Random
+      - nextBytes
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Random.nextBytes(input)\n  }\n}\n"
+  description: "scala.util.Random.nextBytes — non-crypto PRNG."
+- id: scala.crypto.scala_util_random_nextlong
+  enabled: true
+  language: scala
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Random
+      - nextLong
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Random.nextLong(input)\n  }\n}\n"
+  description: "scala.util.Random.nextLong — non-crypto PRNG."
+- id: scala.crypto.math_random
+  enabled: true
+  language: scala
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Math
+      - random
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Math.random(input)\n  }\n}\n"
+  description: "TODO(only-when-packaged): java.lang.Math / scala.math is auto-imported in Scala — java.lang.Math.random() — non-crypto."

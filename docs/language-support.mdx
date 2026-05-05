@@ -1,0 +1,32 @@
+---
+title: "Language Support"
+description: "Supported languages and the security-analysis capabilities available for each."
+---
+
+# Language Support
+
+The table summarizes bundled rule coverage and analyzer precision. "Sources" and "sinks" indicate shipped rule families. "Lifecycle" means lifecycle/state-machine rules are supported when rules exist. "Cross-procedural depth" describes the practical call-chain support. "Known limitations" lists precision gaps that may affect false positives or false negatives.
+
+| Language | Sources | Sinks | Lifecycle | Cross-procedural depth | Known limitations |
+|---|---|---|---|---|---|
+| C | Yes | Yes | Limited | Multi-file C calls and function pointers | Macro-heavy code may need normalized examples |
+| C++ | Yes | Yes | Limited | Methods, namespaces, constructors | Template-heavy receiver types may be approximate |
+| C# | Yes | Yes | Yes | Methods, classes, async-style calls | Reflection and dynamic dispatch are approximate |
+| Dart | Yes | Yes | Limited | Functions, methods, futures | Framework-specific sources depend on adapter facts |
+| Elixir | Yes | Yes | Limited | Modules, pipes, callbacks | Macro expansion is not fully modeled |
+| Erlang | Yes | Yes | Limited | Modules, functions, message-style calls | Dynamic atoms and apply forms are approximate |
+| Go | Yes | Yes | Limited | Functions, methods, interfaces, packages | Interface dispatch is narrowed when type facts exist |
+| Java | Yes | Yes | Yes | Classes, methods, imports, inheritance | Reflection and generated code remain approximate |
+| JavaScript | Yes | Yes | Limited | CommonJS, imports, callbacks, async | Dynamic property access can reduce precision |
+| Kotlin | Yes | Yes | Yes | Classes, methods, imports | Extension functions and DSLs may need targeted rules |
+| Lua | Yes | Yes | Limited | Functions, tables, colon calls | Metatable dispatch is approximate |
+| Objective-C | Yes | Yes | Limited | Methods, receivers, C bridge calls | Runtime selector indirection is approximate |
+| Perl | Yes | Yes | Limited | Subs, package calls, common imports | Keyword-like pairs are positional in adapter facts |
+| PHP | Yes | Yes | Limited | Functions, methods, includes | Variable functions and dynamic includes are approximate |
+| Python | Yes | Yes | Yes | Imports, decorators, methods, async, callbacks | Highly dynamic attribute assignment can reduce precision |
+| Ruby | Yes | Yes | Limited | Methods, blocks, common dispatch | Metaprogramming is approximate |
+| Rust | Yes | Yes | Yes | Modules, functions, methods, traits | Macro expansion and trait objects may need follow-up |
+| Scala | Yes | Yes | Limited | Objects, classes, methods | Implicits and symbolic DSLs are approximate |
+| Solidity | Yes | Yes | Yes | Contracts, modifiers, external calls | Some magic globals rely on current adapter shapes |
+| Swift | Yes | Yes | Limited | Functions, classes, protocols | Dynamic Objective-C bridging is approximate |
+| TypeScript | Yes | Yes | Limited | ES modules, classes, async, callbacks | Complex type-level behavior is not executed |

@@ -1,0 +1,69 @@
+# C++ JWT (jwt-cpp + l8w8jwt + cpp-jwt).
+- id: cpp.jwt.jwt_decode
+  enabled: true
+  language: cpp
+  tag: jwt
+  severity: high
+  packages: [jwt-cpp, cpp-jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, decode]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <jwt-cpp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        jwt::decode(arg);
+      }
+  description: "jwt::decode (jwt-cpp / cpp-jwt) — flag when verify() is not called on returned token."
+
+- id: cpp.jwt.jwtcpp_verifier_algnone
+  enabled: true
+  language: cpp
+  tag: jwt
+  severity: critical
+  packages: [jwt-cpp]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [algorithm, none]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <jwt-cpp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        algorithm::none(arg);
+      }
+  description: "jwt::algorithm::none — accepts unsigned tokens (alg=none attack)."
+
+- id: cpp.jwt.l8w8jwt_decode
+  enabled: true
+  language: cpp
+  tag: jwt
+  severity: high
+  packages: [l8w8jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: l8w8jwt_decode
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <l8w8jwt.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        l8w8jwt_decode(arg);
+      }
+  description: "l8w8jwt_decode — verify alg allow-list is supplied in params."

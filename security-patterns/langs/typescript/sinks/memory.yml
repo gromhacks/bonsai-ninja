@@ -1,0 +1,77 @@
+# TypeScript memory-safety / lifecycle audit-pair sites.
+# These rules fire on the *use-after-transition* call (write / etc.)
+# and gate on the adapter-emitted lifecycle state via the
+# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: typescript.memory.stream_destroy
+  enabled: true
+  language: typescript
+  tag: memory-safety
+  severity: medium
+  packages: [stream]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: write
+  constraints:
+  - requires_state:
+      name: s
+      expected: freed
+  match_examples:
+  - name: write after destroy
+    code: |
+      const _u = require("stream");
+      function handle(s: any) {
+        s.destroy();
+        s.write('payload');
+      }
+    expect_match_text: [s.write]
+  - name: write without preceding destroy
+    code: |
+      const _u = require("stream");
+      function handle(s: any) {
+        s.write('payload');
+      }
+    expect_no_match: true
+  description: "Use-after-destroy — `<Stream>.write()` on a stream whose preceding `.destroy()` released the underlying socket/connection. Subsequent writes emit an `error` event or are silently dropped (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `freed` lifecycle state."
+- id: typescript.memory.abort_controller_abort
+  enabled: true
+  language: typescript
+  tag: memory-safety
+  severity: medium
+  packages: [node, http, https]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.abort$
+  match_examples:
+  - name: abort controller site
+    code: |
+      const _u = require("http");
+      function handle(controller: AbortController) {
+        controller.abort();
+      }
+    expect_match_text: [controller.abort]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. AbortController.abort() / XMLHttpRequest.abort() — subsequent fetch promises tied to the same signal reject with AbortError (CWE-672). Abort signals don't have a canonical `use` callee shape (the consuming `await fetch(...)` is decoupled from the controller binding); the rule remains a transition-site audit-pair."
+- id: typescript.memory.subscription_unsubscribe
+  enabled: true
+  language: typescript
+  tag: memory-safety
+  severity: medium
+  packages: [rxjs]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.unsubscribe$
+  match_examples:
+  - name: subscription unsubscribe site
+    code: |
+      const _u = require("rxjs");
+      function handle(sub: any) {
+        sub.unsubscribe();
+      }
+    expect_match_text: [sub.unsubscribe]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. RxJS Subscription.unsubscribe() — subsequent next/error/complete on the same subscription are silently dropped; reactive-pipeline state divergence (CWE-672). Reactive observers don't have a canonical post-unsubscribe `use` callee shape, so this rule remains a transition-site audit-pair."

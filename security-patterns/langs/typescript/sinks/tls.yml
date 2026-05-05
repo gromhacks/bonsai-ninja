@@ -1,0 +1,131 @@
+# TypeScript TLS misconfiguration sinks.
+- id: typescript.tls.disable_verify_reject_unauthorized
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: rejectUnauthorized
+  match_examples:
+  - name: disable verify reject unauthorized
+    code: |
+      function demo(input, req, obj) {
+        rejectUnauthorized = input; return rejectUnauthorized;
+      }
+  description: "rejectUnauthorized: false — disables TLS certificate validation."
+
+- id: typescript.tls.node_tls_reject_unauth_env
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: NODE_TLS_REJECT_UNAUTHORIZED
+  match_examples:
+  - name: node tls reject unauth env
+    code: |
+      function demo(input, req, obj) {
+        NODE_TLS_REJECT_UNAUTHORIZED = input; return NODE_TLS_REJECT_UNAUTHORIZED;
+      }
+  description: "process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0' — disables TLS verification globally."
+
+- id: typescript.tls.https_agent_insecure
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: new
+    callee:
+      attribute: [https, Agent]
+  match_examples:
+  - name: https agent insecure
+    code: |
+      function demo(input, req, obj) {
+        return new https.Agent(input);
+      }
+  description: "new https.Agent({ rejectUnauthorized: false }) — disables cert validation per-agent."
+
+- id: typescript.tls.request_strict_ssl_false
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  severity: high
+  packages: [request]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: strictSSL
+  match_examples:
+  - name: request strict ssl false
+    code: |
+      const _u = require("request");
+      function demo(input, req, obj) {
+        strictSSL = input; return strictSSL;
+      }
+  description: "request strictSSL: false — disables TLS verification."
+
+- id: typescript.tls.grpc_create_insecure
+  enabled: true
+  language: typescript
+  tag: weak-tls
+  severity: high
+  packages: [grpc, "@grpc/grpc-js"]
+  cwe: [CWE-319]
+  match:
+    kind: call
+    callee:
+      regex: "^(grpc\\.)?credentials\\.createInsecure$"
+  match_examples:
+  - name: grpc credentials create insecure
+    code: |
+      const _u = require("grpc");
+      function demo(grpc: any) {
+        return grpc.credentials.createInsecure();
+      }
+    expect_match_text: [grpc.credentials.createInsecure]
+  - name: imported credentials create insecure
+    code: |
+      const _u = require("grpc");
+      function demo(credentials: any) {
+        return credentials.createInsecure();
+      }
+    expect_match_text: [credentials.createInsecure]
+  description: "gRPC credentials.createInsecure() creates an unencrypted client/server channel."
+
+- id: typescript.tls.got_rejectunauthorized
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: weak-tls
+  severity: high
+  packages: [got]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: rejectUnauthorized
+  description: "Disabled — overlaps with reject_unauthorized_false; kept for doc."
+
+- id: typescript.tls.fetch_insecure_http_parser
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: weak-tls
+  severity: low
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: insecureHTTPParser
+  description: "Disabled — insecureHTTPParser is request-smuggling laxity, not TLS."

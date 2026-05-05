@@ -1,0 +1,206 @@
+- id: python.jwt.pyjwt_decode_verify_false
+  enabled: true
+  language: python
+  tag: jwt
+  severity: critical
+  packages:
+  - pyjwt
+  imports:
+  - jwt
+  cwe:
+  - CWE-347
+  - CWE-327
+  - CWE-345
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jwt
+      - decode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jwt pyjwt decode verify false
+    code: |
+      import pyjwt
+      def example(user_input):
+          return jwt.decode(user_input, verify=False)
+  - name: pyjwt decode verify false literal negative
+    code: |
+      import pyjwt
+
+      def example(user_input):
+          return jwt.decode('safe', verify=False)
+    expect_no_match: true
+  description: "jwt.decode(verify=False) — accepts any token. Merged aliases: python.jwt.pyjwt_decode_algorithms_none, python.jwt.pyjwt_decode_options_verify_signature_false, python.jwt.alg_confusion."
+  aliases:
+  - python.jwt.pyjwt_decode_algorithms_none
+  - python.jwt.pyjwt_decode_options_verify_signature_false
+  - python.jwt.alg_confusion
+- id: python.jwt.pyjwt_get_unverified_header
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: jwt
+  severity: low
+  packages:
+  - pyjwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jwt
+      - get_unverified_header
+  description: "Disabled — get_unverified_header is informational; flag downstream trust of its claims."
+- id: python.jwt.python_jose_decode_no_verify
+  enabled: true
+  language: python
+  tag: jwt
+  severity: critical
+  packages:
+  - jose
+  imports:
+  - jose
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jose
+      - decode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jwt python jose decode no verify
+    code: |
+      import jose
+      def example(user_input):
+          return jose.decode(user_input, options={"verify_signature": False})
+  - name: python jose decode no verify literal negative
+    code: |
+      import jose
+
+      def example(user_input):
+          return jose.decode('safe', options={'verify_signature': False})
+    expect_no_match: true
+  description: python-jose jose.jwt.decode with verify_signature=False.
+- id: python.jwt.python_jose_get_unverified_claims
+  enabled: true
+  language: python
+  tag: jwt
+  severity: high
+  packages:
+  - jose
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jwt
+      - get_unverified_claims
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jwt python jose get unverified claims
+    code: |
+      import jose
+      def example(user_input):
+          return jwt.get_unverified_claims(user_input)
+  - name: python jose get unverified claims literal negative
+    code: |
+      import jose
+
+      def example(user_input):
+          return jwt.get_unverified_claims('safe')
+    expect_no_match: true
+  description: "python-jose get_unverified_claims — unsigned claims trusted."
+  imports:
+  - jose
+- id: python.jwt.authlib_decode
+  enabled: true
+  language: python
+  tag: jwt
+  severity: high
+  packages:
+  - authlib
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JsonWebToken
+      - decode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jwt authlib decode
+    code: |
+      import authlib
+      def example(user_input):
+          return JsonWebToken.decode(user_input)
+  - name: authlib decode literal negative
+    code: |
+      import authlib
+
+      def example(user_input):
+          return JsonWebToken.decode('safe')
+    expect_no_match: true
+  description: "authlib JsonWebToken.decode — flag if no algorithm whitelist."
+- id: python.jwt.django_simple_jwt_token_check
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: jwt
+  severity: medium
+  packages:
+  - rest_framework_simplejwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Token
+      - verify
+  description: "Disabled — DRF SimpleJWT verify is normally safe; flag config drift."
+
+- id: python.jwt.pyjwt_decode_alg_none
+  enabled: true
+  language: python
+  tag: jwt
+  severity: critical
+  packages: [pyjwt]
+  imports: [jwt]
+  cwe: [CWE-347, CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, decode]
+  constraints:
+  - keyword_arg_equals:
+      name: algorithms
+      value: '["none"]'
+  match_examples:
+  - name: pyjwt decode alg none accepted
+    code: |
+      import jwt
+      def example(token, key):
+          return jwt.decode(token, key, algorithms=["none"])
+  - name: pyjwt decode alg HS256 negative
+    code: |
+      import jwt
+      def example(token, key):
+          return jwt.decode(token, key, algorithms=["HS256"])
+    expect_no_match: true
+  description: 'jwt.decode(..., algorithms=["none"]) — accepts unsigned tokens; classic alg-none OAuth/OIDC bypass.'

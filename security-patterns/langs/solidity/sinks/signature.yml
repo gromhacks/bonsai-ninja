@@ -1,0 +1,57 @@
+# Signature / hash sinks — ecrecover and abi.encodePacked.
+- id: solidity.signature.ecrecover_no_check
+  enabled: true
+  language: solidity
+  tag: signature-replay
+  severity: high
+  cwe: [CWE-294]
+  match:
+    kind: call
+    callee:
+      name: ecrecover
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { ecrecover(input); } }
+  description: "ecrecover(hash, v, r, s) — returns 0x0 on invalid sig and is signature-malleable (low-s required). Caller must check non-zero, enforce s < secp256k1n/2, and pair with a per-signer nonce + EIP-712 domain separator for replay protection. Use OZ ECDSA.recover instead."
+- id: solidity.signature.encode_packed_dynamic
+  enabled: true
+  language: solidity
+  tag: hash-collision
+  severity: medium
+  cwe: [CWE-328]
+  match:
+    kind: call
+    callee:
+      name: encodePacked
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { encodePacked(input); } }
+  description: "abi.encodePacked(...) with two or more dynamic-typed args (string/bytes) is hash-collision-prone — `('a','bc')` and `('ab','c')` pack identically. Dangerous when the result is hashed and used as a uniqueness key, signed message, or commitment. Use abi.encode for hashing-into-signing flows."
+- id: solidity.signature.encode_with_selector
+  enabled: true
+  language: solidity
+  tag: abi-encoding
+  severity: low
+  cwe: [CWE-704]
+  match:
+    kind: call
+    callee:
+      name: encodeWithSelector
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted selector encoding
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(bytes4 selector, uint256 amount) public { abi.encodeWithSelector(selector, amount); } }
+    - name: literal selector encoding negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(uint256 amount) public { abi.encodeWithSelector(bytes4(0), amount); } }
+      expect_no_match: true
+  description: "abi.encodeWithSelector(...) does not type-check selector arguments against the target function. Prefer abi.encodeCall for compile-time ABI argument checking."

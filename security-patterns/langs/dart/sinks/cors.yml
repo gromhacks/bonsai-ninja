@@ -1,0 +1,25 @@
+# dart CORS misconfiguration sinks (T403).
+- id: dart.cors.shelf_cors_headers_wildcard
+  enabled: true
+  language: dart
+  tag: cors
+  severity: medium
+  packages: [shelf_cors_headers]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      name: corsHeaders
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
+      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
+      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
+      import 'package:shelf_cors_headers/shelf_cors_headers.dart';
+      import 'package:shelf_cors_headers/shelf_cors_headers.dart'; // shelf_cors_headers
+      void test() { var input = "x"; var amount = 1; corsHeaders("Access-Control-Allow-Origin: *"); }
+  description: |-
+    shelf_cors_headers with Access-Control-Allow-Origin: * — wildcard.
+  imports:
+  - shelf_cors_headers/shelf_cors_headers.dart

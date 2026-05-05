@@ -1,0 +1,31 @@
+# Objective-C IPC / cross-app input sources.
+- id: objc.source.notification_userinfo
+  enabled: true
+  language: objc
+  trust: ipc
+  tag: ipc-input
+  payload_types: [json]
+  match:
+    kind: read
+    target:
+      name: userInfo
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; id notification; id result = notification.userInfo; }
+  description: "NSNotification.userInfo — IPC payload from -postNotification: can cross process boundaries via Darwin notifications."
+
+- id: objc.source.pasteboard_string
+  enabled: true
+  language: objc
+  trust: ipc
+  tag: ipc-input
+  match:
+    kind: call
+    callee:
+      attribute: [UIPasteboard, generalPasteboard]
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [UIPasteboard generalPasteboard:input]; }
+  description: "UIPasteboard.generalPasteboard.string — clipboard contents are user-controlled and may originate from other apps."

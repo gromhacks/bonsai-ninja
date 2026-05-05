@@ -1,0 +1,80 @@
+# Lua HTTP response-header / CRLF injection (OpenResty).
+- id: lua.header.ngx_header_assign
+  enabled: true
+  language: lua
+  tag: header-injection
+  severity: high
+  packages: [openresty]
+  cwe: [CWE-113]
+  match:
+    kind: write
+    target:
+      name: header
+  match_examples:
+  - name: lua.header.ngx_header_assign example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        header = false
+      end
+  description: "ngx.header[name] = tainted — pre-nginx-1.0 CRLF injection; modern nginx strips \\r\\n but cookie/location splitting still possible."
+
+- id: lua.header.ngx_req_set_header
+  enabled: true
+  language: lua
+  tag: header-injection
+  severity: high
+  packages: [openresty]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, req, set_header]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: lua.header.ngx_req_set_header example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.set_header("X-User", input)
+      end
+  - name: literal header value negative
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.req.set_header("X-User", "guest")
+      end
+    expect_no_match: true
+  description: "ngx.req.set_header(name, tainted) — forwarded upstream; header-smuggling / cache-poisoning."
+
+- id: lua.header.resty_req_set_header
+  enabled: true
+  language: lua
+  tag: header-injection
+  severity: high
+  packages: [lua-resty-http]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]set_header$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: lua.header.resty_req_set_header example
+    code: |
+      local _lua_resty_http = require("lua-resty-http")
+      function example(input, url, id, payload, request, params, user)
+        httpc.set_header("X-User", input)
+      end
+  - name: literal header value negative
+    code: |
+      local _lua_resty_http = require("lua-resty-http")
+      function example(input, url, id, payload, request, params, user)
+        httpc.set_header("X-User", "guest")
+      end
+    expect_no_match: true
+  description: "lua-resty-http httpc:set_header — forwarded to upstream with tainted value."

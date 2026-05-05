@@ -1,0 +1,38 @@
+# Objective-C information-disclosure sinks (logs, debug output, error responses).
+- id: objc.info_disclosure.ddlogerror_secret
+  enabled: true
+  language: objc
+  tag: information-disclosure
+  severity: medium
+  packages: [CocoaLumberjack]
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      name: DDLogError
+  match_examples:
+  - name: objc cocoa lumberjack secret log
+    code: |
+      #import <CocoaLumberjack/CocoaLumberjack.h>
+      void test(id input) { DDLogError(@"api_key=%@", input); }
+    expect_match_text: [DDLogError]
+  description: "DDLogError with secret-shaped data — structured logs can persist credentials."
+
+- id: objc.info_disclosure.gcdwebserver_error_response
+  enabled: true
+  language: objc
+  tag: information-disclosure
+  severity: high
+  packages: [GCDWebServer]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      name: responseWithStatusCode
+  match_examples:
+  - name: objc gcdwebserver error response
+    code: |
+      #import <GCDWebServer/GCDWebServer.h>
+      void test(id input) { [GCDWebServerDataResponse responseWithStatusCode:500 text:input]; }
+    expect_match_text: [GCDWebServerDataResponse.responseWithStatusCode]
+  description: "GCDWebServer responseWithStatusCode:500 text:error — sends internal diagnostics in HTTP error pages."

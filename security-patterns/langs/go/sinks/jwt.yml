@@ -1,0 +1,222 @@
+# Go JWT sinks. golang-jwt / dgrijalva-jwt / lestrrat-go/jwx / go-jose.
+- id: go.jwt.golangjwt_parse_unverified
+  enabled: true
+  language: go
+  tag: jwt
+  severity: high
+  packages: ["github.com/golang-jwt/jwt", "github.com/dgrijalva/jwt-go"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, ParseUnverified]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/golang-jwt/jwt"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        jwt.ParseUnverified(target)
+      }
+  description: "jwt.ParseUnverified — decodes claims without signature verification; covers golang-jwt and legacy dgrijalva jwt-go."
+
+- id: go.jwt.golangjwt_parse
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: jwt
+  severity: medium
+  packages: ["github.com/golang-jwt/jwt"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, Parse]
+  description: "Disabled — jwt.Parse requires a keyfunc that must reject alg=none and pin the algorithm; enable per-project with nil/loose keyfunc constraint."
+
+- id: go.jwt.dgrijalva_parse_unverified
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: go
+  tag: jwt
+  severity: high
+  packages: ["github.com/dgrijalva/jwt-go"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, ParseUnverified]
+  description: "Disabled duplicate — same jwt.ParseUnverified shape is covered by go.jwt.golangjwt_parse_unverified with both package names."
+
+- id: go.jwt.signing_method_none
+  enabled: true
+  language: go
+  tag: jwt
+  severity: critical
+  packages: ["github.com/golang-jwt/jwt", "github.com/dgrijalva/jwt-go"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, NewWithClaims]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/golang-jwt/jwt"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        jwt.NewWithClaims(jwt.SigningMethodNone)
+      }
+  description: "jwt.NewWithClaims(jwt.SigningMethodNone, …) — issues unsigned tokens; any client can forge claims."
+
+- id: go.jwt.unsafe_allow_none
+  enabled: true
+  language: go
+  tag: jwt
+  severity: critical
+  packages: ["github.com/golang-jwt/jwt", "github.com/dgrijalva/jwt-go"]
+  cwe: [CWE-347]
+  match:
+    kind: read
+    target:
+      name: UnsafeAllowNoneSignatureType
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/golang-jwt/jwt"
+      package main
+
+      type holder struct { UnsafeAllowNoneSignatureType string }
+      func example(obj holder) {
+        _ = obj.UnsafeAllowNoneSignatureType
+      }
+  description: "Reference to jwt.UnsafeAllowNoneSignatureType — enabling alg=none verification accepts forged tokens."
+
+- id: go.jwt.skip_claims_validation
+  enabled: true
+  language: go
+  tag: jwt
+  severity: high
+  packages: ["github.com/golang-jwt/jwt", "github.com/dgrijalva/jwt-go"]
+  cwe: [CWE-347, CWE-613]
+  match:
+    kind: write
+    target:
+      name: SkipClaimsValidation
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/golang-jwt/jwt"
+      package main
+
+      func example() {
+        cfg.SkipClaimsValidation = true
+      }
+  description: "Parser.SkipClaimsValidation = true — disables exp/nbf/iat checks; accepts expired or not-yet-valid tokens."
+
+- id: go.jwt.lestrrat_parse
+  enabled: true
+  language: go
+  tag: jwt
+  severity: high
+  packages: ["github.com/lestrrat-go/jwx"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, ParseInsecure]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/lestrrat-go/jwx"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        jwt.ParseInsecure(target)
+      }
+  description: "jwx jwt.ParseInsecure — parses without signature verification."
+
+- id: go.jwt.gojose_parsesigned
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: jwt
+  severity: medium
+  packages: ["gopkg.in/square/go-jose.v2"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jose, ParseSigned]
+  description: "Disabled — go-jose ParseSigned is safe when .Verify() is called downstream; enable with a missing-Verify constraint."
+
+# JWT alg-confusion (T400). HMAC verify with an RSA public
+# key — when both HS* and RS* algorithms are allowed in the
+# verifier's algorithm list, an attacker can sign their own
+# token with the public key as the HMAC secret. Detect by
+# matching the algorithm-list shape at the verify call.
+- id: go.jwt.alg_confusion
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: untrusted-token
+  severity: high
+  packages: [github.com/golang-jwt/jwt]
+  cwe: [CWE-345]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, Parse]
+  description: "golang-jwt Parse callback that returns the wrong key type for the alleged algorithm — classic alg-confusion when verifier doesn't pin to a specific signing method family. (Audit-style — review the keyFunc.)"
+
+- id: go.jwt.golang_jwt_parse_tainted_token
+  enabled: true
+  language: go
+  tag: jwt
+  severity: critical
+  packages: [github.com/golang-jwt/jwt, github.com/dgrijalva/jwt-go]
+  cwe: [CWE-347, CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [jwt, Parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jwt.Parse tainted token
+    code: |
+      package main
+
+      import "github.com/golang-jwt/jwt"
+
+      func verify(token string, keyfn jwt.Keyfunc) (*jwt.Token, error) {
+        return jwt.Parse(token, keyfn)
+      }
+    expect_match_text: [jwt.Parse]
+  - name: jwt.Parse literal negative
+    code: |
+      package main
+
+      import "github.com/golang-jwt/jwt"
+
+      func verify(keyfn jwt.Keyfunc) (*jwt.Token, error) {
+        return jwt.Parse("fixed-static-token", keyfn)
+      }
+    expect_no_match: true
+  description: "jwt.Parse(tainted_token, keyfn) — golang-jwt; without an algorithm whitelist inside `keyfn`, attacker can mount alg-none / HS-vs-RS confusion attacks."

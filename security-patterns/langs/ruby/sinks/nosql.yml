@@ -1,0 +1,262 @@
+- id: ruby.nosql.mongo_collection_find
+  enabled: true
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mongo::Collection
+      - find
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.mongo_collection_find example
+    code: |
+      require "mongo"
+      def example(input, url, id, payload, request, params)
+        Mongo::Collection.find(payload)
+      end
+  - name: ruby.nosql.mongo_collection_find literal negative
+    code: |
+      require "mongo"
+      def example(input, url, id, payload, request, params)
+        Mongo::Collection.find({"name" => "alice"})
+      end
+    expect_no_match: true
+  description: "Mongo::Collection#find (class-qualified form) — flag tainted filter Hash with operators. Merged collision aliases: ruby.nosql.mongo_collection_find_filter_value_object."
+  aliases:
+  - ruby.nosql.mongo_collection_find_filter_value_object
+- id: ruby.nosql.mongo_aggregate
+  enabled: true
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mongo::Collection
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.mongo_aggregate example
+    code: |
+      require "mongo"
+      def example(input, url, id, payload, request, params)
+        Mongo::Collection.aggregate(payload)
+      end
+  - name: ruby.nosql.mongo_aggregate literal negative
+    code: |
+      require "mongo"
+      def example(input, url, id, payload, request, params)
+        Mongo::Collection.aggregate([{"$match" => {"name" => "alice"}}])
+      end
+    expect_no_match: true
+  description: Mongo::Collection#aggregate.
+- id: ruby.nosql.mongo_database_command
+  enabled: true
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mongo::Database
+      - command
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.mongo_database_command example
+    code: |
+      require "mongo"
+      def example(input, url, id, payload, request, params)
+        Mongo::Database.command(payload)
+      end
+  - name: ruby.nosql.mongo_database_command literal negative
+    code: |
+      require "mongo"
+      def example(input, url, id, payload, request, params)
+        Mongo::Database.command({"ping" => 1})
+      end
+    expect_no_match: true
+  description: "Mongo::Database#command — runs arbitrary command document."
+- id: ruby.nosql.mongoid_where
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoid
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: where
+  description: "Disabled duplicate — bare where collides with ActiveRecord SQLi in v1 matching; enable only when receiver typing can prove Mongoid."
+- id: ruby.nosql.mongoid_javascript
+  enabled: true
+  language: ruby
+  tag: nosql-injection
+  severity: critical
+  packages:
+  - mongoid
+  cwe:
+  - CWE-943
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: js_query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.mongoid_javascript example
+    code: |
+      require "mongoid"
+      def example(input, url, id, payload, request, params)
+        js_query(input)
+      end
+  - name: ruby.nosql.mongoid_javascript literal negative
+    code: |
+      require "mongoid"
+      def example(input, url, id, payload, request, params)
+        js_query("this.active == true")
+      end
+    expect_no_match: true
+  description: Mongoid $where JavaScript query.
+- id: ruby.nosql.redis_eval
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - redis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: eval
+  description: "Disabled — Redis#eval collides with Kernel#eval (covered by ruby.eval.builtin_eval) and tail-matches every X.eval call."
+- id: ruby.nosql.redis_evalsha
+  enabled: true
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - redis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: evalsha
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.redis_evalsha example
+    code: |
+      require "redis"
+      def example(input, url, id, payload, request, params)
+        evalsha(input)
+      end
+  - name: ruby.nosql.redis_evalsha literal negative
+    code: |
+      require "redis"
+      def example(input, url, id, payload, request, params)
+        evalsha("0123456789abcdef")
+      end
+    expect_no_match: true
+  description: "Redis#evalsha — runs cached Lua script by SHA."
+- id: ruby.nosql.elasticsearch_search
+  enabled: true
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - elasticsearch
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.elasticsearch_search example
+    code: |
+      require "elasticsearch"
+      def example(input, url, id, payload, request, params)
+        client.search(payload)
+      end
+  - name: ruby.nosql.elasticsearch_search literal negative
+    code: |
+      require "elasticsearch"
+      def example(input, url, id, payload, request, params)
+        client.search({"query" => {"match_all" => {}}})
+      end
+    expect_no_match: true
+  description: elasticsearch-ruby client.search(body:) with tainted body.
+- id: ruby.nosql.cassandra_execute
+  enabled: true
+  language: ruby
+  tag: nosql-injection
+  severity: high
+  packages:
+  - cassandra-driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - session
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.cassandra_execute example
+    code: |
+      require "cassandra-driver"
+      def example(input, url, id, payload, request, params)
+        session.execute(input)
+      end
+  - name: ruby.nosql.cassandra_execute literal negative
+    code: |
+      require "cassandra-driver"
+      def example(input, url, id, payload, request, params)
+        session.execute("SELECT * FROM users")
+      end
+    expect_no_match: true
+  description: "cassandra-driver session.execute(cql) — CQL injection."

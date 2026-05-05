@@ -1,0 +1,60 @@
+# Scala cloud / serverless event sources.
+- id: scala.aws.lambda_event
+  enabled: true
+  language: scala
+  trust: service
+  tag: event-input
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  match:
+    kind: param
+    target:
+      name: event
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(event: String): Unit = {
+          }
+        }
+  description: "AWS Lambda Scala handler `def handleRequest(event: APIGatewayProxyRequestEvent, ...)`."
+
+- id: scala.aws.lambda_input
+  enabled: true
+  language: scala
+  trust: service
+  tag: event-input
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  match:
+    kind: param
+    target:
+      name: input
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(input: String): Unit = {
+          }
+        }
+  description: "AWS Lambda handler input parameter (alternative idiom)."
+
+- id: scala.gcp.functions_request
+  enabled: true
+  language: scala
+  trust: service
+  tag: event-input
+  payload_types: [event, json]
+  frameworks: [gcp-functions]
+  match:
+    kind: param
+    target:
+      name: httpRequest
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(httpRequest: String): Unit = {
+          }
+        }
+  description: "GCP Cloud Functions HttpFunction service(HttpRequest, HttpResponse)."

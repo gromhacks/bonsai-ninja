@@ -1,0 +1,25 @@
+# elixir CORS misconfiguration sinks (T403).
+- id: elixir.cors.cors_plug_origin_wildcard
+  enabled: true
+  language: elixir
+  tag: cors
+  severity: medium
+  packages: [cors_plug]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CORSPlug, init]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Cors_plug
+      defmodule App do
+        def test(input) do
+          CORSPlug.init("*")
+        end
+      end
+  description: |-
+    Plug CORSPlug origin: '*' — wildcard CORS.
+  imports:
+  - Cors_plug

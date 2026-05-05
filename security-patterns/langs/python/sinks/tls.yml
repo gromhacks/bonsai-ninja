@@ -1,0 +1,119 @@
+- id: python.tls.session_verify_assign
+  enabled: true
+  language: python
+  tag: weak-tls
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: verify
+  match_examples:
+  - name: tls session verify assign
+    code: |
+      import requests
+      def example(value):
+          session.verify = value
+          return value
+  description: Session.verify = False.
+- id: python.tls.ssl_create_unverified_context
+  enabled: true
+  language: python
+  tag: weak-tls
+  severity: critical
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ssl
+      - _create_unverified_context
+  match_examples:
+  - name: tls ssl create unverified context
+    code: "def example(user_input):\n    return ssl._create_unverified_context(user_input)\n"
+  description: ssl._create_unverified_context().
+- id: python.tls.ssl_default_https_unverified
+  enabled: true
+  language: python
+  tag: weak-tls
+  severity: critical
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: _create_default_https_context
+  match_examples:
+  - name: tls ssl default https unverified
+    code: "def example(value):\n    _create_default_https_context = value\n    return value\n"
+  description: ssl._create_default_https_context = ssl._create_unverified_context (global override).
+- id: python.tls.sslcontext_check_hostname_off
+  enabled: true
+  language: python
+  tag: weak-tls
+  severity: high
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: check_hostname
+  match_examples:
+  - name: tls sslcontext check hostname off
+    code: "def example(value):\n    check_hostname = value\n    return value\n"
+  description: SSLContext.check_hostname = False.
+- id: python.tls.sslcontext_verify_mode_none
+  enabled: true
+  language: python
+  tag: weak-tls
+  severity: critical
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: verify_mode
+  match_examples:
+  - name: tls sslcontext verify mode none
+    code: "def example(value):\n    verify_mode = value\n    return value\n"
+  description: SSLContext.verify_mode = ssl.CERT_NONE.
+- id: python.tls.urllib3_disable_warnings
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: weak-tls
+  severity: low
+  packages:
+  - urllib3
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - urllib3
+      - disable_warnings
+  description: "Disabled — disable_warnings is a smell, not a vuln; flag manually."
+- id: python.tls.pyopenssl_verify_off
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: weak-tls
+  severity: medium
+  packages:
+  - pyOpenSSL
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Context
+      - set_verify
+  description: "Disabled — flag only when set_verify(VERIFY_NONE) (constraint TBD)."

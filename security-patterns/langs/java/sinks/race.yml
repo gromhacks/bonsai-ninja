@@ -1,0 +1,86 @@
+# java race / TOCTOU sinks (T501).
+
+# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# in source order to identify the race window.
+- id: java.toctou.files_exists
+  enabled: true
+  language: java
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [Files, exists]
+  match_examples:
+    - name: generated shape example
+      code: |
+        class App {
+          void handle(String input) throws Exception {
+            Files.exists(input);
+          }
+        }
+  description: "java.nio.file.Files.exists(path) — check site preceding Files.newBufferedReader is TOCTOU."
+- id: java.toctou.file_canread
+  enabled: true
+  language: java
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [File, canRead]
+  match_examples:
+    - name: generated shape example
+      code: |
+        class App {
+          void handle(String input) throws Exception {
+            File.canRead(input);
+          }
+        }
+  description: "java.io.File.canRead() — check site for TOCTOU."
+- id: java.race.connection_commit_audit
+  enabled: true
+  language: java
+  tag: race
+  severity: medium
+  packages: [java.sql]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.commit$
+  match_examples:
+    - name: connection commit audit
+      code: |
+        import java.sql.*;
+        class App {
+          void handle(Connection conn) throws Exception {
+            conn.commit();
+          }
+        }
+      expect_match_text: [conn.commit]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.commit() — TOCTOU / transaction-after-error race-pair; a later prepared-statement execute or read on the same connection without a fresh begin runs outside the intended transaction window."
+- id: java.race.connection_rollback_audit
+  enabled: true
+  language: java
+  tag: race
+  severity: medium
+  packages: [java.sql]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.rollback$
+  match_examples:
+    - name: connection rollback audit
+      code: |
+        import java.sql.*;
+        class App {
+          void handle(Connection conn) throws Exception {
+            conn.rollback();
+          }
+        }
+      expect_match_text: [conn.rollback]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). Connection.rollback() — transaction-after-error race-pair; subsequent statement.execute on the same connection persists writes the rollback was supposed to undo."

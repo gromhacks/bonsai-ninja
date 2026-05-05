@@ -1,0 +1,468 @@
+- id: java.template.thymeleaf_processstring
+  enabled: true
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - org.thymeleaf
+  - freemarker.template
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TemplateEngine
+      - process
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.thymeleaf.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    TemplateEngine.process(\"{{\" + input);\n  }\n}\n"
+  - name: thymeleaf fragment expression concat
+    code: "import org.thymeleaf.*;\nclass App {\n  Object handle(String fragment,\
+      \ Object ctx) {\n    return TemplateEngine.process(\"layout :: \" + fragment,\
+      \ ctx);\n  }\n}\n"
+    expect_match_text:
+    - TemplateEngine.process
+  - name: freemarker template process local
+    code: "import freemarker.template.*;\nclass App {\n  Object handle(Template template,\
+      \ Object model) throws Exception {\n    return template.process(model);\n  }\n\
+      }\nclass Template {\n  Object process(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - template.process
+  - name: arg tainted literal negative
+    code: "import org.thymeleaf.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    TemplateEngine.process(\"safe\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Thymeleaf TemplateEngine.process \u2014 flag when template source\
+    \ is tainted. Merged collision aliases: java.template.freemarker_process, java.template.freemarker_template_process_local,\
+    \ java.template.thymeleaf_fragment_concat."
+  aliases:
+  - java.template.freemarker_process
+  - java.template.freemarker_template_process_local
+  - java.template.thymeleaf_fragment_concat
+- id: java.template.thymeleaf_fragment_concat
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - org.thymeleaf
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TemplateEngine
+      - process
+  match_examples:
+  - name: thymeleaf fragment expression concat
+    code: "import org.thymeleaf.*;\nclass App {\n  Object handle(TemplateEngine engine,\
+      \ String fragment, Object ctx) {\n    return engine.process(\"layout :: \" +\
+      \ fragment, ctx);\n  }\n}\nclass TemplateEngine {\n  Object process(Object...\
+      \ args) { return null; }\n}\n"
+    expect_match_text:
+    - engine.process
+  description: "Disabled duplicate \u2014 folded into java.template.thymeleaf_processstring\
+    \ with fragment-expression examples."
+  imports:
+  - org
+- id: java.template.thymeleaf_string_resolver
+  enabled: true
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - org.thymeleaf
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: StringTemplateResolver
+  match_examples:
+  - name: generated shape example
+    code: "import org.thymeleaf.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    new StringTemplateResolver(input);\n  }\n}\nclass StringTemplateResolver\
+      \ {\n  StringTemplateResolver(Object... args) {}\n}\n"
+  description: "new StringTemplateResolver \u2014 evaluates template text directly\
+    \ from input."
+- id: java.template.freemarker_template_ctor
+  enabled: true
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - freemarker.template
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: Template
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: freemarker template tainted source
+    code: "import freemarker.template.*;\nclass App {\n  void handle(String source,\
+      \ Object cfg) throws Exception {\n    new Template(\"name\", source, cfg);\n\
+      \  }\n}\nclass Template {\n  Template(Object... args) {}\n}\n"
+  - name: arg tainted literal negative
+    code: "import freemarker.template.*;\nclass App {\n  void handle(String source,\
+      \ Object cfg) throws Exception {\n    new Template(source, \"safe\", cfg);\n\
+      \  }\n}\nclass Template {\n  Template(Object... args) {}\n}\n"
+    expect_no_match: true
+  description: "new freemarker.template.Template(name, tainted-source, cfg) \u2014\
+    \ compiles template text at runtime."
+- id: java.template.velocity_evaluate
+  enabled: true
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - org.apache.velocity
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Velocity
+      - evaluate
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: velocity evaluate tainted template
+    code: "import org.apache.velocity.app.*;\nclass App {\n  void handle(Object ctx,\
+      \ Object writer, String template) throws Exception {\n    Velocity.evaluate(ctx,\
+      \ writer, \"log\", template);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.apache.velocity.app.*;\nclass App {\n  void handle(Object ctx,\
+      \ Object writer, String template) throws Exception {\n    Velocity.evaluate(ctx,\
+      \ writer, template, \"safe\");\n  }\n}\n"
+    expect_no_match: true
+  description: Apache Velocity Velocity.evaluate(tainted template).
+  imports:
+  - org.apache.velocity
+- id: java.template.velocity_engine_evaluate
+  enabled: true
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - org.apache.velocity
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - VelocityEngine
+      - evaluate
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: velocity engine evaluate tainted template
+    code: "import org.apache.velocity.app.*;\nclass App {\n  void handle(Object ctx,\
+      \ Object writer, String template) throws Exception {\n    VelocityEngine.evaluate(ctx,\
+      \ writer, \"log\", template);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.apache.velocity.app.*;\nclass App {\n  void handle(Object ctx,\
+      \ Object writer, String template) throws Exception {\n    VelocityEngine.evaluate(ctx,\
+      \ writer, template, \"safe\");\n  }\n}\n"
+    expect_no_match: true
+  description: VelocityEngine.evaluate(tainted template).
+  imports:
+  - org.apache.velocity
+- id: java.template.velocity_merge
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - org.apache.velocity
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Template
+      - merge
+  match_examples:
+  - name: generated shape example
+    code: "import org.apache.velocity.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    Template.merge(\"{{\" + input);\n  }\n}\n"
+  description: "Disabled — Template.merge(...) executes template source held in receiver state; Velocity.evaluate/template constructors carry tainted template arguments."
+  imports:
+  - org.apache.velocity
+- id: java.template.pebble_compile
+  enabled: true
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - io.pebbletemplates
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PebbleEngine
+      - getLiteralTemplate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import io.pebbletemplates.pebble.*;\nclass App {\n  void handle(String\
+      \ input) throws Exception {\n    PebbleEngine.getLiteralTemplate(\"{{\" + input);\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import io.pebbletemplates.pebble.*;\nclass App {\n  void handle(String\
+      \ input) throws Exception {\n    PebbleEngine.getLiteralTemplate(\"safe\");\n\
+      \  }\n}\n"
+    expect_no_match: true
+  description: Pebble PebbleEngine.getLiteralTemplate(tainted).
+- id: java.template.jinjava_render
+  enabled: true
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - com.hubspot.jinjava
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jinjava
+      - render
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import com.hubspot.jinjava.*;\nclass App {\n  void handle(String input) throws Exception\
+      \ {\n    Jinjava.render(\"{{\" + input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import com.hubspot.jinjava.*;\nclass App {\n  void handle(String input) throws Exception\
+      \ {\n    Jinjava.render(\"safe\");\n  }\n}\n"
+    expect_no_match: true
+  description: Jinjava Jinjava.render(tainted).
+- id: java.template.handlebars_compile_inline
+  enabled: true
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - com.github.jknack.handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Handlebars
+      - compileInline
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import com.github.jknack.handlebars.*;\nclass App {\n  void handle(String\
+      \ input) throws Exception {\n    Handlebars.compileInline(\"{{\" + input);\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import com.github.jknack.handlebars.*;\nclass App {\n  void handle(String\
+      \ input) throws Exception {\n    Handlebars.compileInline(\"safe\");\n  }\n\
+      }\n"
+    expect_no_match: true
+  description: Handlebars (jknack) Handlebars.compileInline(tainted).
+- id: java.template.handlebars_compile
+  enabled: true
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - com.github.jknack.handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Handlebars
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import com.github.jknack.handlebars.*;\nclass App {\n  void handle(String\
+      \ input) throws Exception {\n    Handlebars.compile(\"{{\" + input);\n  }\n\
+      }\n"
+  - name: arg tainted literal negative
+    code: "import com.github.jknack.handlebars.*;\nclass App {\n  void handle(String\
+      \ input) throws Exception {\n    Handlebars.compile(\"safe\");\n  }\n}\n"
+    expect_no_match: true
+  description: Handlebars (jknack) Handlebars.compile(tainted).
+- id: java.template.jtwig_render
+  enabled: false
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - org.jtwig
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JtwigTemplate
+      - render
+  match_examples:
+  - name: generated shape example
+    code: "import org.jtwig.*;\nclass App {\n  void handle(String input) throws Exception\
+      \ {\n    JtwigTemplate.render(\"{{\" + input);\n  }\n}\n"
+  description: Jtwig JtwigTemplate.render(tainted model).
+  disabled_reason:
+    code: over-broad
+- id: java.template.mustache_compile
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: ssti
+  severity: medium
+  packages:
+  - com.github.mustachejava
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DefaultMustacheFactory
+      - compile
+  description: "Disabled \u2014 Mustache is logic-less; template injection not RCE."
+- id: java.template.spel_expressionparser_parseexpression
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - org.springframework.expression
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ExpressionParser
+      - parseExpression
+  match_examples:
+  - name: spel expression parser interface
+    code: "import org.springframework.expression.*;\nclass App {\n  Object render(String\
+      \ template) {\n    return ExpressionParser.parseExpression(template);\n  }\n\
+      }\n"
+    expect_match_text:
+    - ExpressionParser.parseExpression
+  description: "Disabled duplicate \u2014 same runtime matcher surface as canonical\
+    \ java.template.spel_parseexpression."
+  imports:
+  - org
+- id: java.template.spel_parseexpression_instance
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: java
+  tag: ssti
+  severity: critical
+  packages:
+  - org.springframework.expression
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      name: parseExpression
+  match_examples:
+  - name: spel parser instance parse expression
+    code: "import org.springframework.expression.*;\nclass App {\n  Object render(String\
+      \ template) {\n    SpelExpressionParser parser = new SpelExpressionParser();\n\
+      \    return parser.parseExpression(template);\n  }\n}\nclass SpelExpressionParser\
+      \ {\n  Object parseExpression(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - parser.parseExpression
+  description: "Disabled duplicate \u2014 parser.parseExpression(template) is covered\
+    \ by canonical java.template.spel_parseexpression."
+  imports:
+  - org
+- id: java.template.freemarker_autoesc_off
+  enabled: true
+  language: java
+  tag: ssti
+  severity: high
+  packages:
+  - freemarker.template
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Configuration
+      - setAutoEscapingPolicy
+  match_examples:
+  - name: generated shape example
+    code: "import freemarker.template.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY);\n\
+      \  }\n}\n"
+  description: "FreeMarker Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\
+    \ \u2014 turns off autoescape."
+- id: java.template.velocity_unescape
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.template.velocity_engine_evaluate
+  language: java
+  tag: xss
+  severity: high
+  packages:
+  - org.apache.velocity
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - VelocityEngine
+      - evaluate
+  match_examples:
+  - name: generated shape example
+    code: "import org.apache.velocity.app.*;\nclass App {\n  void handle(String input) throws Exception\
+      \ {\n    VelocityEngine.evaluate(\"{{\" + input);\n  }\n}\n"
+  description: "Disabled duplicate \u2014 same matcher as canonical java.template.velocity_engine_evaluate;\
+    \ template evaluation is represented once as SSTI."

@@ -1,0 +1,120 @@
+# Elixir / Erlang deserialization sinks.
+- id: elixir.deser.binary_to_term
+  aliases:
+  - elixir.deser.binary_to_term_unsafe_arity1
+  - elixir.deser.binary_to_term_unsafe_opts
+  enabled: true
+  language: elixir
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^:erlang\\.binary_to_term$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.binary_to_term(input, [:safe])
+        end
+      end
+  - name: literal binary to term negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.binary_to_term(<<131, 100, 0, 2, 111, 107>>, [:safe])
+        end
+      end
+    expect_no_match: true
+  description: ":erlang.binary_to_term/2 with [:safe] — still requires structural validation of attacker-controlled terms. Also covers merged aliases: elixir.deser.binary_to_term_unsafe_arity1, elixir.deser.binary_to_term_unsafe_opts."
+
+- id: elixir.deser.term_to_binary_untrusted
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: elixir
+  tag: insecure-deserialization
+  severity: medium
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^:erlang\\.term_to_binary$"
+  description: "Disabled — :erlang.term_to_binary is the encode direction and is not a sink on its own; kept for visibility when auditing round-trip flows that stash attacker data in caches."
+
+- id: elixir.deser.erlport_decode
+  enabled: true
+  language: elixir
+  tag: insecure-deserialization
+  severity: high
+  packages: [erlport]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^:erlport\\.decode$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Erlport
+      defmodule App do
+        def test(input) do
+          :erlport.decode(input)
+        end
+      end
+  - name: literal erlport decode negative
+    code: |
+      alias Erlport
+      defmodule App do
+        def test(input) do
+          :erlport.decode(<<128, 4, 78, 46>>)
+        end
+      end
+    expect_no_match: true
+  description: ":erlport.decode/1 — decodes Python/Ruby pickles received over the bridge; unsafe if the peer is attacker-influenced."
+
+  imports:
+  - Erlport
+- id: elixir.deser.plug_session_cookie
+  enabled: true
+  language: elixir
+  tag: insecure-deserialization
+  severity: high
+  packages: [plug]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Session, COOKIE, get]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Session.COOKIE.get(input)
+        end
+      end
+  - name: literal plug cookie negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Session.COOKIE.get("signed-safe-cookie")
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Session.COOKIE.get — when `:signing_salt` / `:encryption_salt` are weak or reused, attacker-crafted cookies get decoded into Elixir terms."
+  imports:
+  - Plug

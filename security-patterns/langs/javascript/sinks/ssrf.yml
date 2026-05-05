@@ -1,0 +1,597 @@
+- id: javascript.ssrf.fetch
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  category: network-egress
+  packages:
+  - node-fetch
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^fetch$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fetch
+    code: |
+      const _u = require("node-fetch");
+      function demo(input, req, obj) {
+        return fetch(input);
+      }
+  - name: literal fetch url negative
+    code: |
+      const _u = require("node-fetch");
+      function demo() {
+        return fetch("https://example.com");
+      }
+    expect_no_match: true
+  description: "fetch(url) — tainted URL enables SSRF to internal endpoints (metadata services, localhost)."
+- id: javascript.ssrf.axios_get
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  category: network-egress
+  packages:
+  - axios
+  imports:
+  - axios
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - axios
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: axios get
+    code: |
+      const _u = require("axios");
+      function demo(input, req, obj) {
+        return axios.get(input);
+      }
+  - name: literal axios get url negative
+    code: |
+      const _u = require("axios");
+      function demo() {
+        return axios.get("https://example.com");
+      }
+    expect_no_match: true
+  description: "axios.get with a tainted URL — SSRF to internal services."
+- id: javascript.ssrf.axios_post
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  category: network-egress
+  packages:
+  - axios
+  imports:
+  - axios
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - axios
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: axios post
+    code: |
+      const _u = require("axios");
+      function demo(input, req, obj) {
+        return axios.post(input);
+      }
+  - name: literal axios post url negative
+    code: |
+      const _u = require("axios");
+      function demo() {
+        return axios.post("https://example.com", {});
+      }
+    expect_no_match: true
+  description: "axios.post with a tainted URL — SSRF to internal services."
+- id: javascript.ssrf.axios_request
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - axios
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - axios
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: axios request
+    code: |
+      const _u = require("axios");
+      function demo(input, req, obj) {
+        return axios.request(input);
+      }
+  - name: literal axios request url negative
+    code: |
+      const _u = require("axios");
+      function demo() {
+        return axios.request({ url: "https://example.com" });
+      }
+    expect_no_match: true
+  description: "axios.request({url: tainted}) — generic SSRF path."
+- id: javascript.ssrf.got
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - got
+  imports:
+  - got
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: got
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: got
+    code: |
+      const _u = require("got");
+      function demo(input, req, obj) {
+        return got(input);
+      }
+  - name: literal got url negative
+    code: |
+      const _u = require("got");
+      function demo() {
+        return got("https://example.com");
+      }
+    expect_no_match: true
+  description: "got(url) — tainted URL enables SSRF."
+- id: javascript.ssrf.request
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - request
+  imports:
+  - request
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^request$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: request
+    code: |
+      const _u = require("request");
+      function demo(input, req, obj) {
+        return request(input);
+      }
+  - name: literal request url negative
+    code: |
+      const _u = require("request");
+      function demo() {
+        return request("https://example.com");
+      }
+    expect_no_match: true
+  description: "request(url) — legacy http client, tainted URL enables SSRF."
+- id: javascript.ssrf.http_get
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  imports:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: http get
+    code: |
+      const _u = require("http");
+      function demo(input, req, obj) {
+        return http.get(input);
+      }
+    expect_match_text:
+    - http.get
+  - name: literal http get url negative
+    code: |
+      const _u = require("http");
+      function demo() {
+        return http.get("http://example.com");
+      }
+    expect_no_match: true
+  description: "node http.get(url) — tainted URL enables SSRF."
+- id: javascript.ssrf.http_get_var
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  imports:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - get
+  description: "Disabled duplicate — same http.get min-args shape is covered by javascript.ssrf.http_get."
+- id: javascript.ssrf.http_request
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - http
+  imports:
+  - http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: http request
+    code: |
+      const _u = require("http");
+      function demo(input, req, obj) {
+        return http.request(input);
+      }
+  - name: literal http request url negative
+    code: |
+      const _u = require("http");
+      function demo() {
+        return http.request("http://example.com");
+      }
+    expect_no_match: true
+  description: "node http.request(options) — tainted host enables SSRF."
+- id: javascript.ssrf.https_get
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - https
+  imports:
+  - https
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - https
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: https get
+    code: |
+      const _u = require("https");
+      function demo(input, req, obj) {
+        return https.get(input);
+      }
+  - name: literal https get url negative
+    code: |
+      const _u = require("https");
+      function demo() {
+        return https.get("https://example.com");
+      }
+    expect_no_match: true
+  description: "node https.get(url) — tainted URL enables SSRF."
+- id: javascript.ssrf.https_request
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - https
+  imports:
+  - https
+  cwe:
+  - CWE-918
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - https
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: https request
+    code: |
+      const _u = require("https");
+      function demo(input, req, obj) {
+        return https.request(input);
+      }
+  - name: literal https request url negative
+    code: |
+      const _u = require("https");
+      function demo() {
+        return https.request("https://example.com");
+      }
+    expect_no_match: true
+  description: "node https.request(options) — tainted host enables SSRF. Merged collision aliases: javascript.tls.https_request_reject_unauth."
+  aliases:
+  - javascript.tls.https_request_reject_unauth
+- id: javascript.ssrf.undici_fetch
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - undici
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - undici
+      - fetch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: undici fetch
+    code: |
+      const _u = require("undici");
+      function demo(input, req, obj) {
+        return undici.fetch(input);
+      }
+  - name: literal undici fetch url negative
+    code: |
+      const _u = require("undici");
+      function demo() {
+        return undici.fetch("https://example.com");
+      }
+    expect_no_match: true
+  description: "undici.fetch(url) — tainted URL enables SSRF (undici is the built-in Node http client)."
+- id: javascript.ssrf.needle
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - needle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: needle
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: needle
+    code: |
+      const _u = require("needle");
+      function demo(input, req, obj) {
+        return needle("get", input);
+      }
+  - name: literal needle url negative
+    code: |
+      const _u = require("needle");
+      function demo() {
+        return needle("get", "https://example.com");
+      }
+    expect_no_match: true
+  description: "needle(method, url) — tainted URL enables SSRF."
+- id: javascript.ssrf.superagent_get
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - superagent
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - superagent
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: superagent get
+    code: |
+      const _u = require("superagent");
+      function demo(input, req, obj) {
+        return superagent.get(input);
+      }
+  - name: literal superagent get url negative
+    code: |
+      const _u = require("superagent");
+      function demo() {
+        return superagent.get("https://example.com");
+      }
+    expect_no_match: true
+  description: "superagent.get(url) — tainted URL enables SSRF."
+- id: javascript.ssrf.superagent_post
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - superagent
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - superagent
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: superagent post
+    code: |
+      const _u = require("superagent");
+      function demo(input, req, obj) {
+        return superagent.post(input);
+      }
+  - name: literal superagent post url negative
+    code: |
+      const _u = require("superagent");
+      function demo() {
+        return superagent.post("https://example.com");
+      }
+    expect_no_match: true
+  description: "superagent.post(url) — tainted URL enables SSRF."
+- id: javascript.ssrf.ky
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - ky
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ky
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ky
+    code: |
+      const _u = require("ky");
+      function demo(input, req, obj) {
+        return ky.get(input);
+      }
+  - name: literal ky url negative
+    code: |
+      const _u = require("ky");
+      function demo() {
+        return ky.get("https://example.com");
+      }
+    expect_no_match: true
+  description: "ky.get(url) — tainted URL enables SSRF (ky is a fetch-based http client)."
+- id: javascript.ssrf.ky_post
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - ky
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ky
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ky post
+    code: |
+      const _u = require("ky");
+      function demo(input, req, obj) {
+        return ky.post(input);
+      }
+  - name: literal ky post url negative
+    code: |
+      const _u = require("ky");
+      function demo() {
+        return ky.post("https://example.com");
+      }
+    expect_no_match: true
+  description: "ky.post(url) — tainted URL enables SSRF."
+- id: javascript.ssrf.undici_request
+  enabled: true
+  language: javascript
+  tag: ssrf
+  severity: high
+  packages:
+  - undici
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - undici
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: undici request
+    code: |
+      const _u = require("undici");
+      function demo(input, req, obj) {
+        return undici.request(input);
+      }
+  - name: literal undici request url negative
+    code: |
+      const _u = require("undici");
+      function demo() {
+        return undici.request("https://example.com");
+      }
+    expect_no_match: true
+  description: "undici.request(url) — tainted URL enables SSRF."

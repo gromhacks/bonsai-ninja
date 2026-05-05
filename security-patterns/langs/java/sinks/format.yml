@@ -1,0 +1,63 @@
+- id: java.format.string_format_tainted
+  enabled: true
+  language: java
+  tag: format-string
+  severity: medium
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [String, format]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      class App {
+        String handle(String input) {
+          return String.format(input);
+        }
+      }
+    expect_match_text: [String.format]
+  - name: literal format negative
+    code: |
+      class App {
+        String handle() {
+          return String.format("%s", "safe");
+        }
+      }
+    expect_no_match: true
+  description: "String.format(tainted_fmt, ...) — attacker-controlled format string; %s/%n directives read uninitialised arg slots."
+
+- id: java.format.printstream_printf_tainted
+  enabled: true
+  language: java
+  tag: format-string
+  severity: medium
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [out, printf]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      class App {
+        void handle(String input) {
+          System.out.printf(input);
+        }
+      }
+    expect_match_text: [System.out.printf]
+  - name: literal format negative
+    code: |
+      class App {
+        void handle() {
+          System.out.printf("%s", "safe");
+        }
+      }
+    expect_no_match: true
+  description: "System.out.printf(tainted_fmt, ...) — same hazard as String.format."

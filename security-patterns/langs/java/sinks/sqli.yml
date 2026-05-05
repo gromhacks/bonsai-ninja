@@ -1,0 +1,668 @@
+- id: java.sqli.statement_executequery
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeQuery(input);\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeQuery(\"\
+      select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: "JDBC Statement.executeQuery with string-built SQL \u2014 use PreparedStatement."
+- id: java.sqli.statement_executeupdate
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeUpdate(input);\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.executeUpdate(\"\
+      update users set active = true\");\n  }\n}\n"
+    expect_no_match: true
+  description: JDBC Statement.executeUpdate with string-built SQL.
+- id: java.sqli.statement_executebatch
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - addBatch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.addBatch(input);\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\n  void handle(String input) throws Exception {\n    Statement.addBatch(\"\
+      insert into audit values (1)\");\n  }\n}\n"
+    expect_no_match: true
+  description: JDBC Statement.addBatch accumulates raw SQL.
+- id: java.sqli.jdbc_create_statement
+  enabled: false
+  language: java
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - createStatement
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Connection.createStatement(input);\n\
+      \  }\n}\n"
+  description: 'JDBC Connection.createStatement returns non-parameterised Statement.
+    JDBC defines `createStatement()` and `createStatement(int, int)`/`createStatement(int,
+    int, int)`; `max_args: 2` keeps the rule on the canonical overloads (no 4+ arg
+    decoy).'
+  disabled_reason:
+    code: over-broad
+- id: java.sqli.jdbc_prepare_call
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - prepareCall
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Connection.prepareCall(input);\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\n  void handle(String input) throws Exception {\n    Connection.prepareCall(\"\
+      {call healthcheck()}\");\n  }\n}\n"
+    expect_no_match: true
+  description: "JDBC Connection.prepareCall \u2014 flag if SQL is string-built. Typed-receiver\
+    \ sqli (PATTERN_GUIDE-exempt from SQL-keyword arg shape); `min_args: 1` rejects\
+    \ 0-arg decoys."
+- id: java.sqli.spring_jdbctemplate_query
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.query(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.query(\"select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: Spring JdbcTemplate.query(sql) raw form.
+- id: java.sqli.spring_jdbctemplate_queryforlist
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - queryForList
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.queryForList(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.queryForList(\"select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: Spring JdbcTemplate.queryForList(sql) raw form.
+- id: java.sqli.spring_jdbctemplate_queryforobject
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - queryForObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.queryForObject(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.queryForObject(\"select 1\");\n  }\n\
+      }\n"
+    expect_no_match: true
+  description: Spring JdbcTemplate.queryForObject(sql) raw form.
+- id: java.sqli.spring_jdbctemplate_update
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - update
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.update(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.update(\"update users set active = true\"\
+      );\n  }\n}\n"
+    expect_no_match: true
+  description: Spring JdbcTemplate.update(sql) raw form.
+- id: java.sqli.spring_jdbctemplate_execute_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: execute
+  match_examples:
+  - name: local jdbc template execute
+    code: "import org.springframework.jdbc.*;\nclass App {\n  Object handle(JdbcTemplate\
+      \ jdbcTemplate, String sql) {\n    return jdbcTemplate.execute(sql);\n  }\n\
+      }\nclass JdbcTemplate {\n  Object execute(Object... args) { return null; }\n\
+      }\n"
+    expect_match_text:
+    - jdbcTemplate.execute
+  description: "Spring JdbcTemplate.execute(sql) on a local JdbcTemplate variable\
+    \ \u2014 raw SQL string execution."
+  imports:
+  - org
+- id: java.sqli.hibernate_create_query_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.hibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: createQuery
+  match_examples:
+  - name: local hibernate create query
+    code: "import org.hibernate.*;\nclass App {\n  Object handle(Session session,\
+      \ String hql) {\n    return session.createQuery(hql);\n  }\n}\nclass Session\
+      \ {\n  Object createQuery(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - session.createQuery
+  description: "Hibernate Session.createQuery(HQL) on a local Session variable \u2014\
+    \ string-built HQL injection."
+  imports:
+  - org
+- id: java.sqli.hibernate_create_sql_query
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: critical
+  packages:
+  - org.hibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - createSQLQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.hibernate.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    Session.createSQLQuery(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.hibernate.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    Session.createSQLQuery(\"select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Hibernate Session.createSQLQuery \u2014 raw SQL. Typed-receiver sqli;\
+    \ `min_args: 1` rejects 0-arg decoys."
+- id: java.sqli.hibernate_create_native_query
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: critical
+  packages:
+  - org.hibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^Session\.createNativeQuery$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.hibernate.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    Session.createNativeQuery(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.hibernate.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    Session.createNativeQuery(\"select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Hibernate Session.createNativeQuery \u2014 raw SQL. Typed-receiver\
+    \ sqli; `min_args: 1` rejects 0-arg decoys."
+- id: java.sqli.jpa_create_native_query
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: critical
+  frameworks:
+  - jpa
+  - hibernate
+  packages:
+  - javax.persistence
+  - jakarta.persistence
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^EntityManager\.createNativeQuery$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import javax.persistence.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    EntityManager.createNativeQuery(input);\n  }\n}\n"
+  - name: local jpa native query
+    code: "import javax.persistence.*;\nclass App {\n  Object handle(EntityManager\
+      \ em, String sql) {\n    return em.createNativeQuery(sql);\n  }\n}\nclass EntityManager\
+      \ {\n  Object createNativeQuery(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - em.createNativeQuery
+  - name: arg tainted literal negative
+    code: "import javax.persistence.*;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    EntityManager.createNativeQuery(\"select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: EntityManager.createNativeQuery with interpolated SQL.
+- id: java.sqli.jpa_create_native_query_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: sql-injection
+  severity: critical
+  frameworks:
+  - jpa
+  - hibernate
+  packages:
+  - javax.persistence
+  - jakarta.persistence
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: createNativeQuery
+  match_examples:
+  - name: local jpa native query
+    code: "import javax.persistence.*;\nclass App {\n  Object handle(EntityManager\
+      \ em, String sql) {\n    return em.createNativeQuery(sql);\n  }\n}\nclass EntityManager\
+      \ {\n  Object createNativeQuery(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - em.createNativeQuery
+  description: "JPA EntityManager.createNativeQuery(sql) on a local EntityManager\
+    \ variable \u2014 raw native SQL execution."
+  imports:
+  - javax
+- id: java.sqli.r2dbc_databaseclient_sql
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.r2dbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DatabaseClient
+      - sql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: r2dbc database client sql
+    code: "import org.springframework.r2dbc.*;\nclass App {\n  Object handle(DatabaseClient\
+      \ client, String sql) {\n    return client.sql(sql);\n  }\n}\nclass DatabaseClient\
+      \ {\n  Object sql(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - client.sql
+  - name: arg tainted literal negative
+    code: "import org.springframework.r2dbc.*;\nclass App {\n  void handle(String\
+      \ input) throws Exception {\n    DatabaseClient.sql(\"select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Spring R2DBC DatabaseClient.sql(sql) \u2014 SQL text remains injectable\
+    \ when built from tainted input; bind values separately."
+- id: java.sqli.mybatis_select_one
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: sql-injection
+  severity: medium
+  packages:
+  - org.apache.ibatis
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlSession
+      - selectOne
+  description: "Disabled \u2014 MyBatis selectOne usually safe; only dangerous with\
+    \ ${} interpolation in mapper XML."
+- id: java.sqli.spring_jdbctemplate_batchupdate
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JdbcTemplate
+      - batchUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbc template batch update raw sql
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String sql)\
+      \ {\n    JdbcTemplate.batchUpdate(sql);\n  }\n}\n"
+    expect_match_text:
+    - JdbcTemplate.batchUpdate
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    JdbcTemplate.batchUpdate(\"update users set active\
+      \ = true\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Spring JdbcTemplate.batchUpdate(sql...) \u2014 raw SQL string batch\
+    \ form; use placeholders with BatchPreparedStatementSetter or argument arrays."
+- id: java.sqli.namedparameterjdbctemplate_query
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NamedParameterJdbcTemplate
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: named parameter jdbc template query raw sql
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String sql,\
+      \ Object params) {\n    NamedParameterJdbcTemplate.query(sql, params);\n  }\n\
+      }\n"
+    expect_match_text:
+    - NamedParameterJdbcTemplate.query
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    NamedParameterJdbcTemplate.query(\"select 1\");\n\
+      \  }\n}\n"
+    expect_no_match: true
+  description: "NamedParameterJdbcTemplate.query(sql, ...) \u2014 SQL text remains\
+    \ injectable when built from tainted input; named parameters only protect values."
+- id: java.sqli.namedparameterjdbctemplate_update
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.springframework.jdbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NamedParameterJdbcTemplate
+      - update
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: named parameter jdbc template update raw sql
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String sql,\
+      \ Object params) {\n    NamedParameterJdbcTemplate.update(sql, params);\n  }\n\
+      }\n"
+    expect_match_text:
+    - NamedParameterJdbcTemplate.update
+  - name: arg tainted literal negative
+    code: "import org.springframework.jdbc.*;\nclass App {\n  void handle(String input)\
+      \ throws Exception {\n    NamedParameterJdbcTemplate.update(\"update users set\
+      \ active = true\");\n  }\n}\n"
+    expect_no_match: true
+  description: "NamedParameterJdbcTemplate.update(sql, ...) \u2014 named placeholders\
+    \ bind values but do not sanitize tainted SQL text."
+- id: java.sqli.jdbi_handle_createquery
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.jdbi
+  - org.hibernate
+  - javax.persistence
+  - jakarta.persistence
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: createQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbi handle create query raw sql
+    code: "import org.jdbi.*;\nclass App {\n  Object handle(Handle handle, String\
+      \ sql) {\n    return handle.createQuery(sql);\n  }\n}\nclass Handle {\n  Object\
+      \ createQuery(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - handle.createQuery
+  - name: arg tainted literal negative
+    code: "import org.jdbi.*;\nclass App {\n  void handle(String input) throws Exception\
+      \ {\n    createQuery(\"select 1\");\n  }\n}\n"
+    expect_no_match: true
+  description: "JDBI Handle.createQuery(sql) \u2014 raw SQL text remains injectable\
+    \ when built from attacker-controlled input. Merged collision aliases: java.sqli.hibernate_create_query,\
+    \ java.sqli.jpa_create_query."
+  aliases:
+  - java.sqli.hibernate_create_query
+  - java.sqli.jpa_create_query
+  frameworks:
+  - jpa
+  - hibernate
+- id: java.sqli.jdbi_handle_createupdate
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - org.jdbi
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: createUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbi handle create update raw sql
+    code: "import org.jdbi.*;\nclass App {\n  Object handle(Handle jdbiHandle, String\
+      \ sql) {\n    return jdbiHandle.createUpdate(sql);\n  }\n}\nclass Handle {\n\
+      \  Object createUpdate(Object... args) { return null; }\n}\n"
+    expect_match_text:
+    - jdbiHandle.createUpdate
+  - name: arg tainted literal negative
+    code: "import org.jdbi.*;\nclass App {\n  void handle(String input) throws Exception\
+      \ {\n    createUpdate(\"update users set active = true\");\n  }\n}\n"
+    expect_no_match: true
+  description: "JDBI Handle.createUpdate(sql) \u2014 raw update SQL text remains injectable\
+    \ when constructed with tainted input."
+- id: java.sqli.jdbi_handle_execute
+  enabled: false
+  language: java
+  tag: sql-injection
+  severity: critical
+  packages:
+  - org.jdbi
+  - org.apache.commons.exec
+  - graphql
+  - com.datastax.oss
+  - org.springframework.jdbc
+  - org.apache.http
+  - okhttp3
+  - com.github.mustachejava
+  cwe:
+  - CWE-89
+  - CWE-78
+  - CWE-943
+  - CWE-918
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      name: execute
+  match_examples:
+  - name: jdbi handle execute raw sql
+    code: "import org.jdbi.*;\nclass App {\n  int handle(Handle handle, String sql)\
+      \ {\n    return handle.execute(sql);\n  }\n}\nclass Handle {\n  int execute(Object...\
+      \ args) { return 0; }\n}\n"
+    expect_match_text:
+    - handle.execute
+  description: "JDBI Handle.execute(sql) \u2014 executes raw SQL built by the caller.\
+    \ Merged collision aliases: java.cmdi.commons_exec_executor, java.graphql.graphql_execute,\
+    \ java.nosql.cqlsession_execute, java.sqli.statement_execute, java.sqli.spring_jdbctemplate_execute,\
+    \ java.ssrf.httpclient_execute, java.ssrf.closeable_httpclient_execute, java.ssrf.okhttp_call_execute,\
+    \ java.template.mustache_execute."
+  aliases:
+  - java.cmdi.commons_exec_executor
+  - java.graphql.graphql_execute
+  - java.nosql.cqlsession_execute
+  - java.sqli.statement_execute
+  - java.sqli.spring_jdbctemplate_execute
+  - java.ssrf.httpclient_execute
+  - java.ssrf.closeable_httpclient_execute
+  - java.ssrf.okhttp_call_execute
+  - java.template.mustache_execute
+  disabled_reason:
+    code: over-broad

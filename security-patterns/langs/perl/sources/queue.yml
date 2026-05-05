@@ -1,0 +1,30 @@
+# Perl queue / message-broker sources.
+- id: perl.source.aws_sqs_message_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message, text]
+  packages: [Paws]
+  match:
+    kind: read
+    target:
+      attribute: [message, Body]
+  description: "Disabled — SQS message body reads are real queue input, but `message.Body` is too broad without SDK-aware receiver typing."
+
+- id: perl.source.rabbitmq_delivery_body
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: perl
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message, binary]
+  packages: [Net::AMQP::RabbitMQ]
+  match:
+    kind: read
+    target:
+      attribute: [delivery, body]
+  description: "Disabled — RabbitMQ delivery body is attacker-controlled, but bare `delivery.body` needs receiver typing to avoid over-match."

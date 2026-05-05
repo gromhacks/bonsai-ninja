@@ -1,0 +1,211 @@
+- id: kotlin.tls.set_default_hostname_verifier_allow
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: critical
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpsURLConnection
+      - setDefaultHostnameVerifier
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.net.ssl.*
+      class App {
+        fun handle(input: String) {
+          HttpsURLConnection.setDefaultHostnameVerifier(input)
+        }
+      }
+  description: "HttpsURLConnection.setDefaultHostnameVerifier((h,s) -> true) — global bypass. Merged aliases: kotlin.tls.disable_verify_hostname_verifier."
+  aliases:
+  - kotlin.tls.disable_verify_hostname_verifier
+  packages:
+  - javax.net.ssl
+- id: kotlin.tls.set_hostname_verifier_allow
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: critical
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpsURLConnection
+      - setHostnameVerifier
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    HttpsURLConnection.setHostnameVerifier(input)\n  }\n}\n"
+  description: "HttpsURLConnection.setHostnameVerifier — accepts any."
+- id: kotlin.tls.set_default_ssl_socket_factory_trustall
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: critical
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpsURLConnection
+      - setDefaultSSLSocketFactory
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    HttpsURLConnection.setDefaultSSLSocketFactory(input)\n  }\n}\n"
+  description: HttpsURLConnection.setDefaultSSLSocketFactory with TrustAll.
+- id: kotlin.tls.sslcontext_init_trustallcerts
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: critical
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SSLContext
+      - init
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    SSLContext.init(input)\n  }\n}\n"
+  description: "SSLContext.init(km, [TrustAllCerts], rng) — accept-any X509TrustManager."
+- id: kotlin.tls.okhttp_hostnameverifier_allow
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: critical
+  packages:
+  - okhttp
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Builder
+      - hostnameVerifier
+  match_examples:
+  - name: generated shape example
+    code: |
+      import okhttp.*
+      class App {
+        fun handle(input: String) {
+          Builder.hostnameVerifier(input)
+        }
+      }
+  description: OkHttp OkHttpClient.Builder.hostnameVerifier((h,s) -> true).
+- id: kotlin.tls.okhttp_socketfactory
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: critical
+  packages:
+  - okhttp
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Builder
+      - sslSocketFactory
+  match_examples:
+  - name: generated shape example
+    code: |
+      import okhttp.*
+      class App {
+        fun handle(input: String) {
+          Builder.sslSocketFactory(input)
+        }
+      }
+  description: "OkHttp Builder.sslSocketFactory(trustAll, …)."
+- id: kotlin.tls.apache_httpclient_noopverifier
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: critical
+  packages:
+  - org.apache.httpcomponents
+  cwe:
+  - CWE-295
+  match:
+    kind: new
+    callee:
+      name: NoopHostnameVerifier
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.httpcomponents.*
+      class App {
+        fun handle(input: String) {
+          NoopHostnameVerifier(input)
+        }
+      }
+      class NoopHostnameVerifier(vararg args: Any?)
+  description: Apache HttpClient new NoopHostnameVerifier().
+- id: kotlin.tls.apache_httpclient_trustself
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: high
+  packages:
+  - org.apache.httpcomponents
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SSLContextBuilder
+      - loadTrustMaterial
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.httpcomponents.*
+      class App {
+        fun handle(input: String) {
+          SSLContextBuilder.loadTrustMaterial(input)
+        }
+      }
+  description: Apache HttpClient loadTrustMaterial(TrustSelfSignedStrategy).
+- id: kotlin.tls.trust_all
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: high
+  cwe:
+  - CWE-295
+  match:
+    kind: new
+    callee:
+      name: X509TrustManager
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    X509TrustManager(input)\n  }\n}\nclass X509TrustManager(vararg args: Any?)\n"
+  description: Custom X509TrustManager may disable cert checks.
+- id: kotlin.tls.sslcontext_getinstance_ssl
+  enabled: true
+  language: kotlin
+  tag: weak-tls
+  severity: high
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SSLContext
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    SSLContext.getInstance(\"SSL\")\n  }\n}\n"
+  description: "SSLContext.getInstance(\"SSL\") — legacy SSLv3 context, vulnerable to POODLE; use \"TLSv1.2\" or \"TLSv1.3\". Merged aliases: kotlin.tls.sslcontext_getinstance_ssl_v3."
+  aliases:
+  - kotlin.tls.sslcontext_getinstance_ssl_v3

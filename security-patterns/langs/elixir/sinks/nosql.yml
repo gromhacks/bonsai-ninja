@@ -1,0 +1,328 @@
+# Elixir NoSQL injection.
+- id: elixir.nosql.mongo_find
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb_driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Mongo, find]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.find(conn, "users", input)
+        end
+      end
+  - name: literal mongo find negative
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.find(conn, "users", %{name: "alice"})
+        end
+      end
+    expect_no_match: true
+  description: "Mongo.find/4 — tainted filter map allows operator injection ($where, $ne, $regex)."
+
+  imports:
+  - Mongodb_driver
+- id: elixir.nosql.mongo_aggregate
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb_driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Mongo, aggregate]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Mongodb_driver
+      # uses mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.aggregate(conn, "users", input)
+        end
+      end
+  - name: literal mongo aggregate negative
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.aggregate(conn, "users", [%{"$match" => %{name: "alice"}}])
+        end
+      end
+    expect_no_match: true
+  description: "Mongo.aggregate/4 — tainted pipeline stages enable arbitrary query logic."
+
+  imports:
+  - Mongodb_driver
+- id: elixir.nosql.mongo_update_many
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb_driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Mongo, update_many]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted mongo update_many filter
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.update_many(conn, "users", input, %{"$set" => %{active: false}})
+        end
+      end
+  - name: literal mongo update_many filter negative
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn) do
+          Mongo.update_many(conn, "users", %{active: true}, %{"$set" => %{active: false}})
+        end
+      end
+    expect_no_match: true
+  description: "Mongo.update_many/5 — tainted filter or update doc allows mass tampering."
+
+  imports:
+  - Mongodb_driver
+- id: elixir.nosql.mongo_update_many_update
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb_driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Mongo, update_many]
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: tainted mongo update_many update doc
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.update_many(conn, "users", %{active: true}, input)
+        end
+      end
+  - name: literal mongo update_many update doc negative
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn) do
+          Mongo.update_many(conn, "users", %{active: true}, %{"$set" => %{active: false}})
+        end
+      end
+    expect_no_match: true
+  description: "Mongo.update_many/5 — tainted update documents can inject operators or alter unintended fields."
+
+  imports:
+  - Mongodb_driver
+- id: elixir.nosql.mongo_command
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb_driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Mongo, command]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Mongodb_driver
+      # uses mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.command(conn, input)
+        end
+      end
+  - name: literal mongo command negative
+    code: |
+      alias Mongodb_driver
+      defmodule App do
+        def test(conn, input) do
+          Mongo.command(conn, %{ping: 1})
+        end
+      end
+    expect_no_match: true
+  description: "Mongo.command/3 — runs an arbitrary admin command (eval, runCommand) against the database."
+
+  imports:
+  - Mongodb_driver
+- id: elixir.nosql.redix_command
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [redix]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Redix, command]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Redix
+      # uses redix
+      defmodule App do
+        def test(conn, input) do
+          Redix.command(conn, input)
+        end
+      end
+  - name: literal redix command negative
+    code: |
+      alias Redix
+      defmodule App do
+        def test(conn, input) do
+          Redix.command(conn, ["GET", "status"])
+        end
+      end
+    expect_no_match: true
+  description: "Redix.command/3 — tainted command list (EVAL, CONFIG SET, MODULE LOAD) abuses Redis."
+
+  imports:
+  - Redix
+- id: elixir.nosql.cassandra_query
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [xandra]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^Xandra\\.execute$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Xandra
+      defmodule App do
+        def test(conn, input) do
+          Xandra.execute(conn, input, [])
+        end
+      end
+  - name: literal xandra execute negative
+    code: |
+      alias Xandra
+      defmodule App do
+        def test(conn, input) do
+          Xandra.execute(conn, "SELECT * FROM users WHERE id = ?", [])
+        end
+      end
+    expect_no_match: true
+  description: "Xandra.execute/4 — raw CQL with interpolated strings enables CQL injection; use prepared statements (`Xandra.prepare!/2` + `%Xandra.Prepared{}`)."
+
+  imports:
+  - Xandra
+- id: elixir.nosql.xandra_run
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [xandra]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^Xandra\\.Cluster\\.execute$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Xandra
+      defmodule App do
+        def test(cluster, input) do
+          Xandra.Cluster.execute(cluster, input, [])
+        end
+      end
+  - name: literal xandra cluster execute negative
+    code: |
+      alias Xandra
+      defmodule App do
+        def test(cluster, input) do
+          Xandra.Cluster.execute(cluster, "SELECT * FROM users WHERE id = ?", [])
+        end
+      end
+    expect_no_match: true
+  description: "Xandra.Cluster.execute/4 — cluster variant; same raw-CQL injection risk as Xandra.execute."
+
+  imports:
+  - Xandra
+- id: elixir.nosql.redix_pipeline
+  enabled: true
+  language: elixir
+  tag: nosql-injection
+  severity: high
+  packages: [redix]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Redix, pipeline]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Redix
+      # uses redix
+      defmodule App do
+        def test(conn, input) do
+          Redix.pipeline(conn, input)
+        end
+      end
+  - name: literal redix pipeline negative
+    code: |
+      alias Redix
+      defmodule App do
+        def test(conn, input) do
+          Redix.pipeline(conn, [["GET", "status"]])
+        end
+      end
+    expect_no_match: true
+  description: "Redix.pipeline/3 — list-of-commands variant; tainted command strings (EVAL, FLUSHALL, CONFIG) abuse Redis."
+  imports:
+  - Redix

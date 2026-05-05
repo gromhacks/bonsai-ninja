@@ -1,0 +1,103 @@
+# Go file-upload sinks. multipart.FileHeader.Filename is a struct field
+# (read), not a call. Framework helpers are method calls.
+- id: go.upload.multipart_filename
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: file-upload
+  severity: medium
+  packages: ["mime/multipart"]
+  cwe: [CWE-434]
+  match:
+    kind: read
+    target:
+      name: Filename
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "mime/multipart"
+      package main
+
+      type holder struct { Filename string }
+      func example(obj holder) {
+        _ = obj.Filename
+      }
+  description: "Disabled — FileHeader.Filename is already modeled as a remote source in go.multipart.fileheader_filename. Treating the field read itself as a file-upload sink double-counts filepath.Join/upload flows; disk-write APIs and framework Save* calls remain the sinks."
+
+  imports:
+  - mime
+- id: go.upload.gin_saveuploadedfile
+  enabled: true
+  language: go
+  tag: file-upload
+  severity: high
+  packages: ["github.com/gin-gonic/gin"]
+  cwe: [CWE-434, CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "\\.SaveUploadedFile$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.SaveUploadedFile(target)
+      }
+  description: "gin Context.SaveUploadedFile(file, dst) — if dst is built from header.Filename, path-traversal + unrestricted upload."
+
+- id: go.upload.echo_formfile
+  enabled: true
+  language: go
+  tag: file-upload
+  severity: medium
+  packages: ["github.com/labstack/echo"]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      regex: "\\.FormFile$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/labstack/echo"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.FormFile(target)
+      }
+  description: "echo Context.FormFile — returns *multipart.FileHeader whose .Filename is client-controlled; sink when later written with tainted name."
+
+- id: go.upload.fiber_savefile
+  enabled: true
+  language: go
+  tag: file-upload
+  severity: high
+  packages: ["github.com/gofiber/fiber"]
+  cwe: [CWE-434, CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "\\.SaveFile$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/gofiber/fiber"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.SaveFile(target)
+      }
+  description: "fiber Ctx.SaveFile(fileheader, path) — tainted path + client filename = traversal / unrestricted upload."

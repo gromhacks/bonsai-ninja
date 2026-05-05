@@ -1,0 +1,182 @@
+- id: typescript.jwt.sign_none
+  enabled: true
+  language: typescript
+  tag: jwt
+  severity: high
+  packages:
+  - jsonwebtoken
+  imports:
+  - jsonwebtoken
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jwt
+      - sign
+  match_examples:
+  - name: sign none
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.sign(input, { algorithm: 'none' });
+      }
+  description: "jwt.sign(..., {algorithm: 'none'}) — produces unsigned tokens."
+- id: typescript.jwt.verify_ignore_expiration
+  enabled: true
+  language: typescript
+  tag: jwt
+  severity: critical
+  packages:
+  - jsonwebtoken
+  cwe:
+  - CWE-347
+  - CWE-345
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jwt
+      - verify
+  match_examples:
+  - name: verify ignore expiration
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.verify(input, { ignoreExpiration: true });
+      }
+  description: "jwt.verify(..., {ignoreExpiration: true}) — accepts expired tokens. Merged aliases: typescript.jwt.verify_none_algorithm, typescript.jwt.alg_confusion."
+  aliases:
+  - typescript.jwt.verify_none_algorithm
+  - typescript.jwt.alg_confusion
+- id: typescript.jwt.decode_unsafe
+  enabled: true
+  language: typescript
+  tag: jwt
+  severity: high
+  packages:
+  - jsonwebtoken
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jwt
+      - decode
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: decode unsafe
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.decode(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.decode("header.payload.signature");
+      }
+    expect_no_match: true
+  description: "jwt.decode — returns payload WITHOUT verifying signature; trusting it = auth bypass."
+- id: typescript.jwt.jose_decodejwt
+  enabled: true
+  language: typescript
+  tag: jwt
+  severity: high
+  packages:
+  - jose
+  imports:
+  - jose
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jose
+      - decodeJwt
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: jose decodejwt
+    code: |
+      const _u = require("jose");
+      function demo(input, req, obj) {
+        return jose.decodeJwt(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("jose");
+      function demo(input, req, obj) {
+        return jose.decodeJwt("header.payload.signature");
+      }
+    expect_no_match: true
+  description: "jose.decodeJwt — decodes payload without signature verification."
+- id: typescript.jwt.jose_unsecuredjwt_decode
+  enabled: true
+  language: typescript
+  tag: jwt
+  severity: high
+  packages:
+  - jose
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - UnsecuredJWT
+      - decode
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: jose unsecuredjwt decode
+    code: |
+      const _u = require("jose");
+      function demo(input, req, obj) {
+        return UnsecuredJWT.decode(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("jose");
+      function demo(input, req, obj) {
+        return UnsecuredJWT.decode("header.payload.signature");
+      }
+    expect_no_match: true
+  description: "jose UnsecuredJWT.decode — explicit `alg: none` handling."
+
+- id: typescript.jwt.jose_jwt_verify_alg_none
+  enabled: true
+  language: typescript
+  tag: jwt
+  severity: critical
+  packages: [jose]
+  imports: [jose]
+  cwe: [CWE-347, CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [jose, jwtVerify]
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: "(?i)\"none\""
+  match_examples:
+  - name: jose jwtVerify alg none accepted
+    code: |
+      const _u = require("jose");
+      function check(token: string, key: any) {
+        return jose.jwtVerify(token, key, { algorithms: ["none"] });
+      }
+  - name: jose jwtVerify alg HS256 negative
+    code: |
+      const _u = require("jose");
+      function check(token: string, key: any) {
+        return jose.jwtVerify(token, key, { algorithms: ["HS256"] });
+      }
+    expect_no_match: true
+  description: 'jose.jwtVerify(..., {algorithms: ["none"]}) — accepts unsigned tokens; alg-none JWT bypass.'

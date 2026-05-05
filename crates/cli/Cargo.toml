@@ -1,0 +1,48 @@
+[package]
+name = "bonsai_cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "bonsai-ninja analyzer CLI."
+
+[[bin]]
+name = "bonsai-ninja"
+path = "src/main.rs"
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_hash = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_sdk = { workspace = true }
+bonsai_adapters = { workspace = true }
+
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+indicatif = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ahash = { workspace = true }
+once_cell = { workspace = true }
+rayon = { workspace = true }
+owo-colors = "4"
+comfy-table = { version = "7", features = ["custom_styling"] }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+# bat's curated syntax set: syntect's bundled defaults miss Swift,
+# Kotlin, and TypeScript (among others). two-face ships a drop-in
+# SyntaxSet covering everything bat supports, including the three
+# we were missing — so `inspect`'s inlined source gets real
+# syntax highlighting across all 15 supported languages.
+two-face = "0.4"
+
+# tree-sitter is used at runtime by `dump-ast` to walk the parse tree;
+# other commands access trees indirectly via `bonsai_parser` /
+# `bonsai_lang_api`, but `dump-ast` drives the cursor itself so it
+# can attach stable content-hash ids to every node.
+tree-sitter = { workspace = true }
+
+[lints]
+workspace = true

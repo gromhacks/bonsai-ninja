@@ -1,0 +1,484 @@
+# Per-(lang, category) variants explicitly marked n/a — primitive
+# does not exist in the language's standard ecosystem. Consumed by
+# scripts/category_audit.py. Adding an entry here flips a `-` cell
+# to `n/a` so the matrix doesn't penalize the language for a gap
+# that isn't real.
+
+# Format:
+#   <lang>:
+#     <category>:
+#       - <variant-name>
+
+c:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  graphql:
+    - dynamic-query-execute
+    - introspection-exposed
+    - resolver-raw-filter
+    - schema-from-untrusted-source
+  llm:
+    - bedrock-openai-anthropic-invoke
+    - model-response-disclosure
+    - prompt-construction
+    - retrieval-context-injection
+    - tool-call-context
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+cpp:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  graphql:
+    - dynamic-query-execute
+    - introspection-exposed
+    - resolver-raw-filter
+    - schema-from-untrusted-source
+  llm:
+    - bedrock-openai-anthropic-invoke
+    - model-response-disclosure
+    - prompt-construction
+    - retrieval-context-injection
+    - tool-call-context
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+csharp:
+  command-injection:
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+dart:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+elixir:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+erlang:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  graphql:
+    - dynamic-query-execute
+    - introspection-exposed
+    - resolver-raw-filter
+    - schema-from-untrusted-source
+  llm:
+    - bedrock-openai-anthropic-invoke
+    - model-response-disclosure
+    - prompt-construction
+    - retrieval-context-injection
+    - tool-call-context
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+go:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+java:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+javascript:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+
+kotlin:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+lua:
+  command-injection:
+    - c-system-popen
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  graphql:
+    - dynamic-query-execute
+    - introspection-exposed
+    - resolver-raw-filter
+    - schema-from-untrusted-source
+  llm:
+    - bedrock-openai-anthropic-invoke
+    - model-response-disclosure
+    - prompt-construction
+    - retrieval-context-injection
+    - tool-call-context
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+objc:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  graphql:
+    - dynamic-query-execute
+    - introspection-exposed
+    - resolver-raw-filter
+    - schema-from-untrusted-source
+  llm:
+    - bedrock-openai-anthropic-invoke
+    - model-response-disclosure
+    - prompt-construction
+    - retrieval-context-injection
+    - tool-call-context
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+perl:
+  code-injection:
+    - dynamic-require
+    - expression-language
+    - groovy-shell
+    - lua-loadstring
+    - php-eval-create-function
+    - vm-runinthiscontext
+  graphql:
+    - dynamic-query-execute
+    - introspection-exposed
+    - resolver-raw-filter
+    - schema-from-untrusted-source
+  llm:
+    - bedrock-openai-anthropic-invoke
+    - model-response-disclosure
+    - prompt-construction
+    - retrieval-context-injection
+    - tool-call-context
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+php:
+  code-injection:
+    - dynamic-require
+    - expression-language
+    - groovy-shell
+    - lua-loadstring
+    - perl-2-arg-pipe-open
+    - vm-runinthiscontext
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+python:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+ruby:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+rust:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+scala:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+solidity:
+  command-injection:
+    - argv-meta-concat
+    - backticks
+    - c-system-popen
+    - container-exec
+    - cron-systemd-injection
+    - deserialization-to-exec
+    - eval-as-shell
+    - git-upload-pack
+    - ifs-shell-env
+    - invoke-expression
+    - ld-preload-injection
+    - leading-dash-arg
+    - path-manipulation
+    - path-precedence-binary
+    - perl-2-arg-pipe-open
+    - php-exec-family
+    - process-start-shell-form
+    - shell-true
+    - ssh-proxycommand
+    - template-substitution-as-command
+  graphql:
+    - dynamic-query-execute
+    - introspection-exposed
+    - resolver-raw-filter
+    - schema-from-untrusted-source
+  llm:
+    - bedrock-openai-anthropic-invoke
+    - model-response-disclosure
+    - prompt-construction
+    - retrieval-context-injection
+    - tool-call-context
+  cookie-misconfig:
+    - httponly-missing
+    - non-prefixed-secure-cookie
+    - persistent-session-cookie
+    - samesite-none-no-secure
+    - secure-missing
+  cors-misconfig:
+    - null-origin-allowed
+    - reflected-origin
+    - regex-substring-bug
+    - subdomain-trust-too-broad
+    - wildcard-with-credentials
+  csrf:
+    - bypass-via-content-type
+    - post-vs-get-confusion
+    - same-site-only-defense
+    - state-changing-no-token
+  jwt:
+    - alg-confusion
+    - alg-none
+    - decode-without-verify
+    - expiration-not-enforced
+    - jku-jwk-trust
+    - kid-injection
+    - weak-secret
+  ldap-injection:
+    - boolean-and-or
+    - dn-injection
+    - filter-special-chars
+    - null-byte
+    - scope-injection
+    - search-base-injection
+    - wildcard-leak
+  log-injection:
+    - format-string-as-message
+    - log4shell-jndi-lookup
+    - newline-injection
+    - structured-log-key-confusion
+    - terminal-control-chars
+  oauth-misconfig:
+    - id-token-not-verified
+    - implicit-flow-allowed
+    - pkce-missing
+    - redirect-uri-substring-match
+    - state-not-validated
+  open-redirect:
+    - back-button-redirect
+    - direct-redirect
+    - hostname-startswith-bypass
+    - html-meta-refresh
+    - scheme-confusion
+    - userinfo-trick
+  path-traversal:
+    - archive-absolute-entry
+    - case-insensitive-fs
+    - chdir-relative-open
+    - direct-concat
+    - embedded-fs-backend
+    - framework-static-serve
+    - image-library-path
+    - join-with-absolute-arg
+    - null-byte-truncation
+    - proc-self-root-escape
+    - realpath-race
+    - symlink-toctou
+    - template-path-interpolation
+    - unicode-normalization
+    - urldecode-amplifier
+    - windows-mixed-separator
+    - zip-slip
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+  rate-limit-missing:
+    - api-key-no-quota
+    - forgot-password-no-throttle
+    - login-no-throttle
+  request-smuggling:
+    - chunk-extension-smuggling
+    - dual-cl-te-headers
+    - header-name-case-confusion
+    - te-cl-confusion
+    - upgrade-smuggle
+  ssrf:
+    - cloud-metadata
+    - decimal-octal-hex-bypass
+    - direct-url
+    - dns-rebinding
+    - ipv6-bypass
+    - open-proxy
+    - redirect-chain-bypass
+    - scheme-abuse
+    - server-side-image-fetch
+    - url-parser-inconsistency
+    - userinfo-confusion
+    - webhook-callback-config
+  ssti:
+    - client-side-template-injection
+    - erb-trim-mode-exec
+    - eval-via-getattr-chain
+    - freemarker-exec
+    - render-string
+    - render-with-include
+    - smarty-php-tag
+    - velocity-runtime-exec
+  tls:
+    - all-hostname-verifier
+    - all-trust-manager
+    - cert-pinning-disabled
+    - disable-verify
+    - legacy-protocol
+    - mixed-content
+    - plain-http-for-secrets
+    - weak-cipher-suite
+  xss:
+    - autoescape-disabled
+    - css-context
+    - data-javascript-url
+    - dom-based
+    - json-in-script-tag
+    - markdown-raw-html
+    - mutation-xss
+    - reflected
+    - safe-mark-abuse
+    - stored
+    - svg-event-handler
+    - template-string-injection
+    - wrong-context-encode
+  xxe:
+    - billion-laughs
+    - default-on-entities
+    - office-xml-archive
+    - saml-xxe
+    - soap-envelope-xxe
+    - svg-upload-xxe
+    - system-file-read
+    - system-ssrf
+
+swift:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family
+  prototype-pollution:
+    - assign-deep
+    - object-merge
+    - query-string-merge
+    - schema-validator-bypass
+    - set-by-path
+
+typescript:
+  command-injection:
+    - invoke-expression
+    - perl-2-arg-pipe-open
+    - php-exec-family

@@ -1,0 +1,775 @@
+# Scala sanitizers (mostly JVM interop + a few Scala-idiomatic helpers).
+# Canonical tags only: html-encode, html-sanitize, url-encode, shell-escape,
+# sql-parameter, constant-time, jwt-verify, path-sanitize, xxe-sanitizer,
+# ldap-escape, numeric-coerce, validation.
+
+# --- URL encoding -----------------------------------------------------
+- id: scala.sanitizer.url_encoder
+  enabled: true
+  language: scala
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^URLEncoder\\.encode$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          URLEncoder.encode(input)
+        }
+      }
+    expect_match_text: [URLEncoder.encode]
+  description: "java.net.URLEncoder.encode percent-encodes user data so it cannot break out of a URL query/path component."
+
+# --- HTML encoding / sanitization ------------------------------------
+- id: scala.sanitizer.html_escape_text
+  enabled: true
+  language: scala
+  tag: html-encode
+  packages: ["org.apache.commons.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [StringEscapeUtils, escapeHtml4]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.text._
+      object App {
+        def handle(input: String): Unit = {
+          StringEscapeUtils.escapeHtml4(input)
+        }
+      }
+    expect_match_text: [StringEscapeUtils.escapeHtml4]
+  description: "Apache commons-text escapeHtml4 replaces &, <, >, \", ' with HTML entities, neutralizing XSS in HTML text context."
+
+- id: scala.sanitizer.owasp_encoder_html
+  enabled: true
+  language: scala
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forHtml]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder._
+      object App {
+        def handle(input: String): Unit = {
+          Encode.forHtml(input)
+        }
+      }
+    expect_match_text: [Encode.forHtml]
+  description: "OWASP Java Encoder Encode.forHtml — context-aware HTML body encoder; canonical XSS fix."
+
+- id: scala.sanitizer.owasp_encoder_js
+  enabled: true
+  language: scala
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forJavaScript]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder._
+      object App {
+        def handle(input: String): Unit = {
+          Encode.forJavaScript(input)
+        }
+      }
+    expect_match_text: [Encode.forJavaScript]
+  description: "OWASP Encoder Encode.forJavaScript — escapes data for inclusion inside a <script> or JS string literal."
+
+- id: scala.sanitizer.twirl_html_escape
+  enabled: true
+  language: scala
+  tag: html-encode
+  packages: ["play.twirl.api"]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlFormat, escape]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play.twirl.api._
+      object App {
+        def handle(input: String): Unit = {
+          HtmlFormat.escape(input)
+        }
+      }
+    expect_match_text: [HtmlFormat.escape]
+  description: "Play Twirl HtmlFormat.escape replaces &, <, >, \", ' with HTML entities — canonical XSS sanitiser used by @-expressions."
+
+- id: scala.sanitizer.jsoup_clean
+  enabled: true
+  language: scala
+  tag: html-sanitize
+  packages: ["org.jsoup"]
+  match:
+    kind: call
+    callee:
+      regex: "^Jsoup\\.clean$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.jsoup._
+      object App {
+        def handle(input: String): Unit = {
+          Jsoup.clean(input)
+        }
+      }
+    expect_match_text: [Jsoup.clean]
+  description: "Jsoup.clean(html, whitelist) strips tags/attributes outside the whitelist — HTML sanitization for rich-text output."
+
+# --- Constant-time comparison ----------------------------------------
+- id: scala.sanitizer.message_digest_isequal
+  enabled: true
+  language: scala
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      attribute: [MessageDigest, isEqual]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          MessageDigest.isEqual(input)
+        }
+      }
+    expect_match_text: [MessageDigest.isEqual]
+  description: "MessageDigest.isEqual performs constant-time byte[] comparison, preventing timing side-channels on MAC/hash verification."
+
+- id: scala.sanitizer.bcrypt_checkpw
+  enabled: true
+  language: scala
+  tag: constant-time
+  packages: ["org.mindrot.jbcrypt", "org.springframework.security.crypto.bcrypt"]
+  match:
+    kind: call
+    callee:
+      attribute: [BCrypt, checkpw]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.mindrot.jbcrypt._
+      object App {
+        def handle(input: String): Unit = {
+          BCrypt.checkpw(input)
+        }
+      }
+    expect_match_text: [BCrypt.checkpw]
+  description: "BCrypt.checkpw(plaintext, hash) — constant-time password verification; treats the plaintext as bounded-comparison-only, neutralising injection-style misuse."
+
+- id: scala.sanitizer.argon2_verify
+  enabled: true
+  language: scala
+  tag: constant-time
+  packages: ["de.mkammerer.argon2"]
+  match:
+    kind: call
+    callee:
+      attribute: [Argon2, verify]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import de.mkammerer.argon2._
+      object App {
+        def handle(input: String): Unit = {
+          Argon2.verify(input)
+        }
+      }
+    expect_match_text: [Argon2.verify]
+  description: "Argon2.verify(hash, plaintext) — constant-time password verification; bounded comparison sanitises plaintext side."
+
+# --- SQL parameter binding -------------------------------------------
+- id: scala.sanitizer.prepared_statement
+  enabled: true
+  language: scala
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: prepareStatement
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          prepareStatement(input)
+        }
+      }
+    expect_match_text: [prepareStatement]
+  description: "JDBC Connection.prepareStatement returns a parameterised statement; subsequent setX calls bind values safely."
+
+- id: scala.sanitizer.prepared_statement_setstring
+  enabled: true
+  language: scala
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setString]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          PreparedStatement.setString(input)
+        }
+      }
+    expect_match_text: [PreparedStatement.setString]
+  description: "PreparedStatement.setString binds a String as a typed parameter, preventing SQL literal injection."
+
+- id: scala.sanitizer.sql_on
+  enabled: true
+  language: scala
+  tag: sql-parameter
+  packages: ["com.typesafe.play.anorm"]
+  match:
+    kind: call
+    callee:
+      attribute: [SQL, on]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.typesafe.play.anorm._
+      object App {
+        def handle(input: String): Unit = {
+          SQL.on(input)
+        }
+      }
+    expect_match_text: [SQL.on]
+  description: "Anorm SQL(...).on(namedParams) binds placeholders via JDBC prepared-statement parameters — safe against SQLi."
+
+# --- Numeric coercion ------------------------------------------------
+- id: scala.sanitizer.integer_parseint
+  enabled: true
+  language: scala
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Integer, parseInt]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Integer.parseInt(input)
+        }
+      }
+    expect_match_text: [Integer.parseInt]
+  description: "Integer.parseInt throws NumberFormatException on non-digits, forcing the result to be a safe integer token."
+
+- id: scala.sanitizer.long_parselong
+  enabled: true
+  language: scala
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Long, parseLong]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Long.parseLong(input)
+        }
+      }
+    expect_match_text: [Long.parseLong]
+  description: "Long.parseLong rejects non-numeric input, neutralising SQL/command/path injection payloads."
+
+- id: scala.sanitizer.string_toint
+  enabled: true
+  language: scala
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: toInt
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          toInt(input)
+        }
+      }
+    expect_match_text: [toInt]
+  description: "Scala String.toInt implicit throws on non-numeric input — coerces attacker strings to a bounded Int."
+
+- id: scala.sanitizer.string_tolong
+  enabled: true
+  language: scala
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: toLong
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          toLong(input)
+        }
+      }
+    expect_match_text: [toLong]
+  description: "Scala String.toLong implicit throws on non-numeric input — coerces attacker strings to a bounded Long."
+
+- id: scala.sanitizer.uuid_fromstring
+  enabled: true
+  language: scala
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [UUID, fromString]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          UUID.fromString(input)
+        }
+      }
+    expect_match_text: [UUID.fromString]
+  description: "java.util.UUID.fromString rejects anything outside the canonical 36-char UUID grammar, neutralising injection payloads."
+
+# --- Path containment ------------------------------------------------
+- id: scala.sanitizer.path_normalize
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, normalize]
+  description: "Disabled — java.nio.file.Path.normalize collapses .. segments but still requires a trusted-root containment check."
+
+- id: scala.sanitizer.path_startswith
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: scala
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, startsWith]
+  description: "Disabled — startsWith is only a sanitizer on normalized Path values with a trusted-root argument; v1 matching cannot prove receiver type."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: scala.passthrough.urldecoder_decode
+  enabled: true
+  language: scala
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [URLDecoder, decode]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          URLDecoder.decode(input)
+        }
+      }
+    expect_match_text: [URLDecoder.decode]
+  description: "java.net.URLDecoder.decode(s, charset) — preserves taint (Scala via Java interop)."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: scala.csrf.play_csrf_filter
+  enabled: true
+  language: scala
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: CSRFFilter
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          CSRFFilter(input)
+        }
+      }
+    expect_match_text: [CSRFFilter]
+  description: "Play Framework CSRFFilter — global CSRF enforcement."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: scala.lock.reentrant_lock
+  enabled: true
+  language: scala
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [ReentrantLock, lock]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          ReentrantLock.lock(input)
+        }
+      }
+    expect_match_text: [ReentrantLock.lock]
+  description: "Java ReentrantLock.lock() (Scala via Java interop)."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: scala.cookie.cookie_with_httponly
+  enabled: true
+  language: scala
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      name: Cookie
+  constraints:
+  - any_arg_matches_regex: |-
+      httpOnly.*true|secure.*true
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Cookie(httpOnly = true)
+        }
+      }
+    expect_match_text: [Cookie]
+  - name: generated shape example negative constraint boundary
+    code: "object App {\n  def handle(input: String): Unit = {\n    Cookie()\n  }\n}\n"
+    expect_no_match: true
+  description: "Play Cookie(name, value, httpOnly = true, secure = true)."
+
+# False-positive audit fill: validators and parameter binding shapes.
+- id: scala.sanitizer.same_origin_path_startswith_slash
+  enabled: true
+  language: scala
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"/"'
+  - same_receiver_call_count_at_least: 2
+  match_examples:
+  - name: paired same-origin path guard
+    code: |
+      object App {
+        def allow(next: String): Boolean = {
+          next.startsWith("/") && !next.startsWith("//")
+        }
+      }
+    expect_match_text: [next.startsWith]
+  - name: paired same-origin path guard negative constraint boundary
+    code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith() && !next.startsWith(\"//\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Same-origin redirect path guard paired with a second startsWith call on the same receiver for the `!path.startsWith(\"//\")` scheme-relative rejection shape."
+
+- id: scala.sanitizer.same_origin_path_reject_scheme_relative
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"//"'
+  match_examples:
+  - name: reject scheme-relative redirect target
+    code: |
+      object App {
+        def allow(next: String): Boolean = {
+          next.startsWith("/") && !next.startsWith("//")
+        }
+      }
+    expect_match_text: [next.startsWith]
+  - name: reject scheme-relative redirect target negative constraint boundary
+    code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith(\"/\") && !next.startsWith(\"http://\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"//\") shape in scala.sanitizer.same_origin_path_startswith_slash."
+
+- id: scala.sanitizer.allowlist_contains
+  enabled: true
+  language: scala
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: contains
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 1
+  match_examples:
+  - name: set allowlist contains
+    code: |
+      object App {
+        def allow(role: String): Boolean = {
+          val allowed = Set("user", "admin")
+          allowed.contains(role)
+        }
+      }
+    expect_match_text: [allowed.contains]
+  description: "Set/List allowlist membership check on explicitly allowlist-named receivers."
+
+- id: scala.sanitizer.map_get_or_else_allowlist
+  enabled: true
+  language: scala
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: getOrElse
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 2
+  match_examples:
+  - name: map default allowlist
+    code: |
+      object App {
+        def allow(key: String): String = {
+          val allowed = Map("home" -> "/")
+          allowed.getOrElse(key, "/")
+        }
+      }
+    expect_match_text: [allowed.getOrElse]
+  description: "Map.getOrElse on an allowlist-named mapping bounds attacker input to known values or a safe default."
+
+- id: scala.sanitizer.enum_withname_allowlist
+  enabled: true
+  language: scala
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: withName
+  constraints:
+  - receiver_name_in: [AllowedRole, SafeRoute, RouteName, SortField, Status]
+  - arg_count: 1
+  match_examples:
+  - name: enum parse allowlist
+    code: |
+      object AllowedRole extends Enumeration { val User, Admin = Value }
+      object App {
+        def allow(role: String): AllowedRole.Value = {
+          AllowedRole.withName(role)
+        }
+      }
+    expect_match_text: [AllowedRole.withName]
+  description: "Scala Enumeration.withName on narrowly named allowlist enums rejects values outside the enum domain."
+
+- id: scala.sanitizer.string_matches_safe_shape
+  enabled: true
+  language: scala
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      name: matches
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^["'']\^?(\[A-Za-z0-9_|\[A-Fa-f0-9)'
+  match_examples:
+  - name: slug shape validator
+    code: |
+      object App {
+        def allow(slug: String): Boolean = {
+          slug.matches("^[A-Za-z0-9_-]{1,64}$")
+        }
+      }
+    expect_match_text: [slug.matches]
+  - name: slug shape validator negative constraint boundary
+    code: "object App {\n  def allow(slug: String): Boolean = {\n    slug.matches()\n  }\n}\n"
+    expect_no_match: true
+  description: "String.matches with a tight slug/UUID-style allowlist regex validates input shape before redirect, path, SQL, or XPath use."
+
+- id: scala.sanitizer.replaceall_char_allowlist_strip
+  enabled: true
+  language: scala
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: replaceAll
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^["'']\[\^[-A-Za-z0-9_ /]+\]["'']$'
+  - arg_matches_regex:
+      index: 1
+      regex: '^["'']["'']$'
+  match_examples:
+  - name: strip to safe slug chars
+    code: |
+      object App {
+        def clean(input: String): String = {
+          input.replaceAll("[^A-Za-z0-9_-]", "")
+        }
+      }
+    expect_match_text: [input.replaceAll]
+  - name: strip to safe slug chars negative constraint boundary
+    code: "object App {\n  def clean(input: String): String = {\n    input.replaceAll()\n  }\n}\n"
+    expect_no_match: true
+  description: "replaceAll with a negated safe character class and empty replacement strips characters outside the allowlist."
+
+- id: scala.sanitizer.prepared_statement_setobject
+  enabled: true
+  language: scala
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setObject]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: prepared statement object bind
+    code: |
+      import java.sql._
+      object App {
+        def bind(ps: PreparedStatement, input: Any): Unit = {
+          ps.setObject(1, input)
+        }
+      }
+    expect_match_text: [ps.setObject]
+  description: "PreparedStatement.setObject binds a value as a JDBC parameter rather than SQL text."
+
+- id: scala.sanitizer.jdbctemplate_query_rowmapper_params
+  enabled: true
+  language: scala
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, query]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 3
+  match_examples:
+  - name: jdbc template rowmapper varargs
+    code: |
+      import org.springframework.jdbc.core._
+      object App {
+        def load(jdbcTemplate: JdbcTemplate, sql: String, mapper: RowMapper, input: String): Unit = {
+          jdbcTemplate.query(sql, mapper, input)
+        }
+      }
+    expect_match_text: [jdbcTemplate.query]
+  description: "JdbcTemplate.query(sql, RowMapper, params...) binds trailing arguments as JDBC parameters."
+
+- id: scala.sanitizer.jdbctemplate_update_params
+  enabled: true
+  language: scala
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, update]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 2
+  match_examples:
+  - name: jdbc template update varargs
+    code: |
+      import org.springframework.jdbc.core._
+      object App {
+        def update(jdbcTemplate: JdbcTemplate, sql: String, input: String): Unit = {
+          jdbcTemplate.update(sql, input)
+        }
+      }
+    expect_match_text: [jdbcTemplate.update]
+  description: "JdbcTemplate.update(sql, params...) binds arguments after the SQL string as JDBC parameters."
+
+- id: scala.sanitizer.xpath_variable_resolver
+  enabled: true
+  language: scala
+  tag: xpath-parameter
+  packages: ["javax.xml.xpath"]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, setXPathVariableResolver]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: xpath variable resolver
+    code: |
+      import javax.xml.xpath._
+      object App {
+        def configure(xpath: XPath, resolver: XPathVariableResolver): Unit = {
+          xpath.setXPathVariableResolver(resolver)
+        }
+      }
+    expect_match_text: [xpath.setXPathVariableResolver]
+  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath text."
+
+- id: scala.sanitizer.xpath_evaluate_variable_placeholder
+  enabled: true
+  language: scala
+  tag: xpath-parameter
+  packages: ["javax.xml.xpath"]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, evaluate]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '\$[A-Za-z_][A-Za-z0-9_]*'
+  - min_args: 2
+  match_examples:
+  - name: xpath evaluate placeholder
+    code: |
+      import javax.xml.xpath._
+      object App {
+        def find(xpath: XPath, doc: Any): Any = {
+          xpath.evaluate("/users/user[@id=$id]", doc)
+        }
+      }
+    expect_match_text: [xpath.evaluate]
+  - name: xpath evaluate placeholder negative constraint boundary
+    code: "import javax.xml.xpath._\nobject App {\n  def find(xpath: XPath, doc: Any): Any = {\n    xpath.evaluate()\n  }\n}\n"
+    expect_no_match: true
+  description: "XPath.evaluate with `$name` placeholders is the parameterized side of XPath variable binding."

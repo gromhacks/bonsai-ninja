@@ -1,0 +1,261 @@
+# Scala code-evaluation sinks.
+- id: scala.eval.scala_reflect_toolbox
+  enabled: true
+  language: scala
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ToolBox, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          ToolBox.eval(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          ToolBox.eval("safe")
+        }
+      }
+    expect_no_match: true
+  description: "scala.tools.reflect.ToolBox.eval — runtime Scala compile + execute."
+
+- id: scala.eval.scala_reflect_toolbox_compile
+  enabled: true
+  language: scala
+  tag: code-injection
+  severity: critical
+  packages: [scala.tools.reflect]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ToolBox, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scala.tools.reflect._
+      // uses scala.tools.reflect
+      object App {
+        def handle(input: String): Unit = {
+          ToolBox.compile(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import scala.tools.reflect._
+      // uses scala.tools.reflect
+      object App {
+        def handle(input: String): Unit = {
+          ToolBox.compile("safe")
+        }
+      }
+    expect_no_match: true
+  description: "ToolBox.compile — compiles attacker-provided Scala source."
+
+- id: scala.eval.scala_reflect_toolbox_parse
+  enabled: true
+  language: scala
+  tag: code-injection
+  severity: high
+  packages: [scala.tools.reflect]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ToolBox, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scala.tools.reflect._
+      // uses scala.tools.reflect
+      object App {
+        def handle(input: String): Unit = {
+          ToolBox.parse(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import scala.tools.reflect._
+      // uses scala.tools.reflect
+      object App {
+        def handle(input: String): Unit = {
+          ToolBox.parse("safe")
+        }
+      }
+    expect_no_match: true
+  description: "ToolBox.parse on tainted Scala source."
+
+- id: scala.eval.scriptengine_eval
+  enabled: true
+  language: scala
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ScriptEngine, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          ScriptEngine.eval(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    ScriptEngine.eval(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "javax.script ScriptEngine.eval — Nashorn / Rhino / JEP RCE."
+
+- id: scala.eval.groovy_shell_evaluate
+  enabled: true
+  language: scala
+  tag: code-injection
+  severity: critical
+  packages: ["org.codehaus.groovy"]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [GroovyShell, evaluate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.codehaus.groovy._
+      // uses org.codehaus.groovy
+      object App {
+        def handle(input: String): Unit = {
+          GroovyShell.evaluate(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.codehaus.groovy._
+      // uses org.codehaus.groovy
+      object App {
+        def handle(input: String): Unit = {
+          GroovyShell.evaluate("safe")
+        }
+      }
+    expect_no_match: true
+  description: "GroovyShell.evaluate(tainted) — Groovy RCE."
+
+# Reflection-based dynamic invocation (T406). Tag
+# code-injection so reviewer enumerates with `security sinks
+# --tag code-injection`. Treats reflection as eval-equivalent
+# when the dispatched name comes from attacker input.
+- id: scala.eval.method_invoke
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: code-injection
+  severity: high
+  packages: [java.lang.reflect]
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Method, invoke]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.lang.reflect._
+      // uses java.lang.reflect
+      object App {
+        def handle(input: String): Unit = {
+          Method.invoke(input)
+        }
+      }
+  description: "Disabled — Method.invoke() executes the reflected receiver Method; needs state linking the Method object to a tainted lookup/name."
+
+# IMain interpreter — evaluates Scala source at runtime. Used by REPL
+# tooling and by some script-eval libraries. Tainted source = RCE.
+- id: scala.eval.imain_interpret
+  enabled: true
+  language: scala
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [main, interpret]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          main.interpret(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          main.interpret("safe")
+        }
+      }
+    expect_no_match: true
+  description: "scala.tools.nsc.interpreter.IMain.interpret(src) — runtime Scala compile+execute; tainted src = RCE."
+
+- id: scala.eval.jexl_create_expression
+  enabled: true
+  language: scala
+  tag: code-injection
+  severity: critical
+  packages: ["org.apache.commons.jexl3"]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [JexlEngine, createExpression]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jexl create expression
+    code: |
+      import org.apache.commons.jexl3._
+      object App {
+        def handle(input: String): Unit = {
+          JexlEngine.createExpression(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.jexl3._
+      object App {
+        def handle(input: String): Unit = {
+          JexlEngine.createExpression("safe")
+        }
+      }
+    expect_no_match: true
+  description: "JEXL JexlEngine.createExpression(tainted) — expression language code injection."

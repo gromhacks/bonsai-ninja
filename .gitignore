@@ -1,0 +1,55 @@
+/target
+**/*.rs.bk
+.vscode/
+.idea/
+.claude/worktrees/
+*.swp
+.DS_Store
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+.env
+.env.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Release/package output.
+/dist/
+*.tar.gz
+*.tar.gz.sha256
+*.zip
+*.zip.sha256
+
+# Scratch output from running the CLI at the repo root.
+/export.json
+
+# Real-world benchmark fixtures cloned on demand. They're large (Redis
+# is 28MB alone) and the repos themselves are authoritative on GitHub —
+# we don't want to re-check-in a copy.
+/examples/realworld/
+
+# CTF / pentest fixtures cloned on demand (NodeGoat, CTFd, etc).
+# Multi-MB OSS repos; clone with: git clone --depth 1 <url> examples/ctfs/<name>
+/examples/ctfs/
+
+# Local pack-audit reports (regenerable via scripts/pack_audit.py).
+/build/
+
+# Workspace-local dataflow sidecar (written by `Workspace::open` /
+# `cache rebuild` — content-addressed, regenerable, user-specific).
+.bonsai/
+**/.bonsai/
+
+# Runtime scratch from agent tooling (SQLite notes etc., regenerable).
+.bonsai-agent/
+**/.bonsai-agent/
+scripts/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+scripts/.ruff_cache/

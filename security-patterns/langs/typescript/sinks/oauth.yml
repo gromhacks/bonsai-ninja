@@ -1,0 +1,70 @@
+# typescript oauth sinks.
+
+# OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
+# id_token verify off, redirect_uri substring match.
+- id: typescript.oauth.passport_state_disabled
+  enabled: true
+  language: typescript
+  tag: oauth
+  severity: high
+  packages: [passport]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [passport, authenticate]
+  match_examples:
+  - name: passport state disabled
+    code: |
+      const _u = require("passport");
+      function demo(input, req, obj) {
+        return passport.authenticate(input, { state: false });
+      }
+  description: "passport.authenticate({state: false})."
+
+- id: typescript.oauth.openid_client_callback_no_state
+  enabled: true
+  language: typescript
+  tag: oauth
+  severity: high
+  packages: [openid-client]
+  imports: [openid-client]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.callback$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: openid-client callback tainted params
+    code: |
+      const _u = require("openid-client");
+      function done(client: any, redirectUri: string, input: any) {
+        return client.callback(redirectUri, input);
+      }
+    expect_match_text: [client.callback]
+  - name: openid-client callback literal negative
+    code: |
+      const _u = require("openid-client");
+      function done(client: any, redirectUri: string) {
+        return client.callback(redirectUri, { state: "fixed-csrf-token", code: "fixed" });
+      }
+    expect_no_match: true
+  description: "openid-client client.callback(redirect_uri, tainted_params) — attacker-controlled callback parameters bypass state/nonce binding when not validated against a server-bound expectedState."
+
+- id: typescript.oauth.nextauth_redirect_callback
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: oauth
+  severity: medium
+  packages: [next-auth]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [redirect, callback]
+  description: "Disabled — NextAuth redirect callback shape needs same-origin check; flag with constraint when adapter exposes URL host comparison fact."

@@ -1,0 +1,198 @@
+---
+title: "Rule Authoring Tutorial"
+description: "Write a source, sink, sanitizer, constraint, and test for a new rule family."
+---
+
+# Rule Authoring Tutorial
+
+This walkthrough creates a small Python command-injection rule set. The same structure applies to every language: sources introduce taint, sinks require tainted arguments, sanitizers attach evidence, and constraints keep matches precise.
+
+<Steps>
+
+1. Write a source rule.
+2. Write a sink rule.
+3. Write a sanitizer rule.
+4. Add a constraint.
+5. Test the pack and run a fixture scan.
+
+</Steps>
+
+## 1. Write Source
+
+### Rule YAML
+
+```yaml
+- id: python.flask.request_args_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [flask]
+  match:
+    kind: call
+    callee:
+      attribute: [request, args, get]
+  match_examples:
+    - name: flask query get
+      code: |
+        from flask import request
+        def handler():
+          return request.args.get("cmd")
+      expect_match_text: [request.args.get]
+  description: "Flask request.args.get(name) returns attacker-controlled query input."
+```
+
+### Code that triggers it
+
+```python
+from flask import request
+
+def handler():
+    cmd = request.args.get("cmd", "")
+    return cmd
+```
+
+## 2. Write Sink
+
+### Rule YAML
+
+```yaml
+- id: python.cmdi.os_system
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [os, system]
+  constraints:
+    - arg_tainted:
+        index: 0
+  match_examples:
+    - name: tainted command
+      code: |
+        import os
+        def run(cmd):
+          os.system(cmd)
+    - name: literal command negative
+      code: |
+        import os
+        def run():
+          os.system("echo safe")
+      expect_no_match: true
+  description: "os.system(command) executes through the shell; tainted arg 0 is command injection."
+```
+
+### Code that triggers it
+
+```python
+import os
+
+def run(cmd):
+    return os.system(cmd)
+```
+
+## 3. Write Sanitizer
+
+### Rule YAML
+
+```yaml
+- id: python.sanitizer.shlex_quote
+  enabled: true
+  language: python
+  tag: shell-escape
+  match:
+    kind: call
+    callee:
+      attribute: [shlex, quote]
+  match_examples:
+    - name: shlex quote
+      code: |
+        import shlex
+        def clean(value):
+          return shlex.quote(value)
+      expect_match_text: [shlex.quote]
+  description: "shlex.quote escapes a single shell token; review context before crediting it."
+```
+
+### Code that triggers it
+
+```python
+import shlex
+
+def clean(value):
+    return shlex.quote(value)
+```
+
+## 4. Add Constraint
+
+### Rule YAML
+
+```yaml
+- id: python.cmdi.subprocess_shell_true
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [subprocess, run]
+  constraints:
+    - keyword_arg_equals:
+        name: shell
+        value: "True"
+    - arg_tainted:
+        index: 0
+  match_examples:
+    - name: shell true command
+      code: |
+        import subprocess
+        def run(cmd):
+          subprocess.run(cmd, shell=True)
+    - name: shell false negative
+      code: |
+        import subprocess
+        def run(cmd):
+          subprocess.run(cmd, shell=False)
+      expect_no_match: true
+  description: "subprocess.run(command, shell=True) interprets the command string through a shell."
+```
+
+### Code that triggers it
+
+```python
+import subprocess
+
+def run(cmd):
+    subprocess.run(cmd, shell=True)
+```
+
+## 5. Test
+
+### Rule YAML
+
+```bash
+./target/release/bonsai-ninja security ./examples/python/mega_flow pack \
+  --rules-dir ./security-patterns \
+  --validate
+```
+
+### Code that triggers it
+
+```bash
+./target/release/bonsai-ninja security ./examples/python/mega_flow taint-analysis \
+  --rules-dir ./security-patterns \
+  --source python.flask.request_args_get \
+  --sink python.cmdi.os_system \
+  --no-compact
+```
+
+<Tip>
+Every enabled discriminating constraint should have a positive example and a negative example. This keeps rulepack drift visible during validation.
+</Tip>

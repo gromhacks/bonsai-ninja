@@ -1,0 +1,279 @@
+# C local / CLI / environment sources.
+- id: c.input.argv_param
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: param
+    target:
+      name: argv
+      in_method: [main]
+  match_examples:
+  - name: main argv
+    code: |
+      int main(int argc, char **argv) {
+        return argc;
+      }
+  - name: helper argv is not process argv
+    code: |
+      int helper(int argc, char **argv) {
+        return argc;
+      }
+    expect_no_match: true
+  description: "argv parameter of main()."
+- id: c.input.environ
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: environ
+  match_examples:
+  - name: generated direct match
+    code: |
+      struct env_holder { char *environ; } env;
+      void example(void) {
+        char *x = env.environ;
+      }
+  description: "environ global — process environment."
+- id: c.input.getenv
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getenv
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        getenv(arg);
+      }
+  description: "libc getenv — environment lookup including CGI variables (HTTP_*, QUERY_STRING)."
+- id: c.input.fgets
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: fgets
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        fgets(arg);
+      }
+  description: "fgets — reads a line from stdin or file."
+- id: c.input.gets_unsafe
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: gets
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        gets(arg);
+      }
+  description: "gets — unbounded stdin read (also a memory sink)."
+- id: c.input.read
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      name: read
+  description: "Disabled — bare read(2) is ambiguous (matches C++ stream::read too); use recv/SSL_read for network."
+- id: c.input.sscanf
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: sscanf
+  description: "Disabled — sscanf parses an in-memory buffer; taint comes from the buffer, not sscanf itself."
+- id: c.input.scanf
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: scanf
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        scanf(arg);
+      }
+  description: "scanf — reads from stdin."
+- id: c.input.readline
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [readline]
+  match:
+    kind: call
+    callee:
+      name: readline
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <readline/readline.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        readline(arg);
+      }
+  description: "GNU readline(3) — interactive user input."
+- id: c.input.getopt
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getopt
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        getopt(arg);
+      }
+  description: "getopt(3) — parses argv option flags; return value selects option, optarg holds the user-supplied value."
+- id: c.input.getopt_long
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getopt_long
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        getopt_long(arg);
+      }
+  description: "GNU getopt_long(3) — parses long-form CLI options; the value is read from optarg / argv."
+- id: c.input.optarg
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: optarg
+  match_examples:
+  - name: generated direct match
+    code: |
+      struct env_holder { char *optarg; } env;
+      void example(void) {
+        char *x = env.optarg;
+      }
+  description: "optarg global — value of the most recent CLI option parsed by getopt; user-supplied."
+- id: c.input.secure_getenv
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: secure_getenv
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        secure_getenv(arg);
+      }
+  description: "secure_getenv(3) — like getenv but returns NULL when AT_SECURE is set; value still attacker-influenced for non-suid runs."
+- id: c.input.getline
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getline
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        getline(arg);
+      }
+  description: "POSIX getline(3) — reads a line from a stream into a heap buffer; stdin/file content is user-supplied."
+- id: c.input.getpass
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getpass
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        getpass(arg);
+      }
+  description: "getpass(3) — reads a password from the controlling tty; user-supplied secret-like input."

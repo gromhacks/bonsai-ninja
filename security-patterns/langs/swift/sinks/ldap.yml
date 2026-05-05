@@ -1,0 +1,92 @@
+# Swift LDAP-injection (OpenLDAP via C bridge).
+- id: swift.ldap.ldap_search_ext_s
+  enabled: true
+  language: swift
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_search_ext_s
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { ldap_search_ext_s(ld, "dc=example,dc=com", 0, input, nil, 0, nil, nil, nil, 0, nil) }
+  - name: literal ldap search ext filter negative
+    code: |
+      func test(input: String) { ldap_search_ext_s(ld, input, 0, "(uid=safe)", nil, 0, nil, nil, nil, 0, nil) }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search_ext_s — tainted filter."
+
+- id: swift.ldap.ldap_search_s
+  enabled: true
+  language: swift
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_search_s
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { ldap_search_s(ld, "dc=example,dc=com", 0, input, nil, 0) }
+  - name: literal ldap search filter negative
+    code: |
+      func test(input: String) { ldap_search_s(ld, input, 0, "(uid=safe)", nil, 0) }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search_s."
+
+- id: swift.ldap.ldap_modify_s
+  enabled: true
+  language: swift
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_modify_s
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; ldap_modify_s(input) }
+  - name: literal arg 1 negative
+    code: |
+      func test() { ldap_modify_s("safe", "safe") }
+    expect_no_match: true
+  description: "OpenLDAP ldap_modify_s."
+
+- id: swift.ldap.ldap_delete_s
+  enabled: true
+  language: swift
+  tag: ldap-injection
+  severity: critical
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: ldap_delete_s
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { ldap_delete_s(ld, input) }
+  - name: literal ldap delete dn negative
+    code: |
+      func test() { ldap_delete_s(ld, "uid=safe,dc=example,dc=com") }
+    expect_no_match: true
+  description: "OpenLDAP ldap_delete_s."

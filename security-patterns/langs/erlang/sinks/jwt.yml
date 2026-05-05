@@ -1,0 +1,63 @@
+# Erlang JWT sinks. jose / erljwt — unverified or weak-alg decode.
+- id: erlang.jwt.jose_jwt_verify
+  enabled: true
+  language: erlang
+  tag: jwt
+  severity: high
+  packages: [jose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      regex: "^jose_jwt:verify"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("jose/include/jose.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        jose_jwt:verify(Input).
+  description: "jose_jwt:verify — flag when caller omits alg whitelist (none/HS256 with RSA pubkey confusion)."
+
+- id: erlang.jwt.jose_jwt_peek
+  enabled: true
+  language: erlang
+  tag: jwt
+  severity: high
+  packages: [jose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      regex: "^jose_jwt:peek"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("jose/include/jose.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        jose_jwt:peek(Input).
+  description: "jose_jwt:peek — decodes payload WITHOUT verifying signature; must be followed by verify."
+
+- id: erlang.jwt.erljwt_decode
+  enabled: true
+  language: erlang
+  tag: jwt
+  severity: high
+  packages: [erljwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      regex: "^erljwt:decode"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("erljwt/include/erljwt.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erljwt:decode(Input).
+  description: "erljwt:decode — does not verify signature unless explicitly invoked; trusts attacker claims."

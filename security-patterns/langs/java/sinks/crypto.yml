@@ -1,0 +1,169 @@
+- id: java.crypto.md5_digest
+  enabled: true
+  language: java
+  tag: weak-crypto
+  severity: low
+  cwe:
+  - CWE-327
+  - CWE-328
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MessageDigest
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    MessageDigest.getInstance(\"MD5\");\n  }\n}\n"
+  description: 'MessageDigest.getInstance("MD5"). Merged aliases: java.crypto.sha1_digest.'
+  aliases:
+  - java.crypto.sha1_digest
+- id: java.crypto.cipher_des
+  enabled: true
+  language: java
+  tag: weak-crypto
+  severity: high
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cipher
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Cipher.getInstance(\"DES\");\n  }\n}\n"
+  description: 'Cipher.getInstance("DES"). Merged aliases: java.crypto.cipher_des_cbc, java.crypto.cipher_3des, java.crypto.cipher_rc4, java.crypto.cipher_aes_ecb, java.crypto.cipher_blowfish.'
+  aliases:
+  - java.crypto.cipher_des_cbc
+  - java.crypto.cipher_3des
+  - java.crypto.cipher_rc4
+  - java.crypto.cipher_aes_ecb
+  - java.crypto.cipher_blowfish
+- id: java.crypto.random_ctor
+  enabled: true
+  language: java
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: new
+    callee:
+      name: Random
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    new Random(input);\n  }\n}\nclass Random {\n  Random(Object... args) {}\n}\n"
+  description: "new java.util.Random — non-cryptographic."
+- id: java.crypto.math_random
+  enabled: true
+  language: java
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Math
+      - random
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Math.random(input);\n  }\n}\n"
+  description: "Math.random() — non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
+- id: java.crypto.bouncycastle_des
+  enabled: true
+  language: java
+  tag: weak-crypto
+  severity: high
+  packages:
+  - bcprov
+  cwe:
+  - CWE-327
+  match:
+    kind: new
+    callee:
+      name: DESEngine
+  match_examples:
+  - name: generated shape example
+    code: |
+      import bcprov.*;
+      class App {
+        void handle(String input) throws Exception {
+          new DESEngine(input);
+        }
+      }
+      class DESEngine {
+        DESEngine(Object... args) {}
+      }
+  description: BouncyCastle DESEngine.
+- id: java.crypto.keyfactory_dh_512
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: weak-crypto
+  severity: medium
+  cwe:
+  - CWE-326
+  match:
+    kind: call
+    callee:
+      attribute:
+      - KeyPairGenerator
+      - initialize
+  description: "Disabled — flag only on key sizes < 2048 (RSA) / < 256 (EC)."
+- id: java.crypto.mac_hmacmd5
+  enabled: true
+  language: java
+  tag: weak-crypto
+  severity: medium
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mac
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Mac.getInstance(\"HmacMD5\");\n  }\n}\n"
+  description: "Mac.getInstance(\"HmacMD5\") — MD5-based MAC."
+- id: java.crypto.pbkdf2_sha1
+  enabled: true
+  language: java
+  tag: weak-crypto
+  severity: medium
+  cwe:
+  - CWE-327
+  - CWE-916
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SecretKeyFactory
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA1\");\n  }\n}\n"
+  description: "SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA1\") — prefer SHA-256/512."
+- id: java.crypto.keygenerator_low_bits
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: weak-crypto
+  severity: medium
+  cwe:
+  - CWE-326
+  match:
+    kind: call
+    callee:
+      attribute:
+      - KeyGenerator
+      - init
+  description: "Disabled — needs numeric-arg inspection to flag key-size < 128."

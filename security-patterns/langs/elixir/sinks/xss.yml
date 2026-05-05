@@ -1,0 +1,87 @@
+- id: elixir.xss.phoenix_html_raw
+  enabled: true
+  language: elixir
+  tag: xss
+  severity: high
+  frameworks:
+  - phoenix
+  packages:
+  - phoenix_html
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Phoenix
+      - HTML
+      - raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Phoenix_html
+      defmodule App do
+        def test(input) do
+          Phoenix.HTML.raw(input)
+        end
+      end
+  - name: literal phoenix html raw negative
+    code: |
+      alias Phoenix_html
+      defmodule App do
+        def test(input) do
+          Phoenix.HTML.raw("<strong>safe</strong>")
+        end
+      end
+    expect_no_match: true
+  description: "Phoenix.HTML.raw/1 — wraps the argument in a :safe tuple, disabling EEx/HEEx auto-escape; tainted value renders as HTML/JS. Merged collision aliases: elixir.xss.phoenix_html_raw_imported."
+  aliases:
+  - elixir.xss.phoenix_html_raw_imported
+  imports:
+  - Phoenix_html
+- id: elixir.xss.phoenix_html_safe_to_iodata
+  enabled: true
+  language: elixir
+  tag: xss
+  severity: medium
+  frameworks:
+  - phoenix
+  packages:
+  - phoenix_html
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Phoenix
+      - HTML
+      - Safe
+      - to_iodata
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted safe protocol value
+    code: |
+      alias Phoenix_html
+      defmodule App do
+        def test(input) do
+          Phoenix.HTML.Safe.to_iodata(input)
+        end
+      end
+  - name: literal safe protocol value negative
+    code: |
+      alias Phoenix_html
+      defmodule App do
+        def test() do
+          Phoenix.HTML.Safe.to_iodata("safe")
+        end
+      end
+    expect_no_match: true
+  description: "Phoenix.HTML.Safe.to_iodata/1 — converts a value implementing the Safe protocol; custom impls that return raw binaries bypass escaping."
+  imports:
+  - Phoenix_html

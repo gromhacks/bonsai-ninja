@@ -1,0 +1,73 @@
+# Python config / environment sources. Deployment / operator controls
+# these values, so trust them only as far as the deployer.
+- id: python.config.os_environ_get
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.config.os_environ_read
+  language: python
+  trust: config
+  tag: config-input
+  imports: [os]
+  match:
+    kind: call
+    callee:
+      attribute: [os, environ, get]
+  match_examples:
+  - name: config os environ get
+    code: |
+      import os
+      def example(user_input):
+          return os.environ.get(user_input)
+  description: "Disabled duplicate — `os.environ.get(KEY)` is surfaced with an `os.environ` read and is covered by python.config.os_environ_read, which also preserves subscript/bare environment coverage."
+
+- id: python.config.os_getenv
+  enabled: true
+  language: python
+  trust: config
+  tag: config-input
+  imports: [os]
+  match:
+    kind: call
+    callee:
+      attribute: [os, getenv]
+  match_examples:
+  - name: config os getenv
+    code: |
+      import os
+      def example(user_input):
+          return os.getenv(user_input)
+  description: "os.getenv(KEY) — convenience wrapper for os.environ.get."
+
+- id: python.config.os_environ_read
+  enabled: true
+  language: python
+  trust: config
+  tag: config-input
+  imports: [os]
+  match:
+    kind: read
+    target:
+      attribute: [os, environ]
+  match_examples:
+  - name: config os environ read
+    code: |
+      import os
+      def example():
+          value = os.environ
+          return value
+  description: "Bare read of os.environ — covers `os.environ['KEY']` subscript uses where tree-sitter surfaces the attribute read."
+
+- id: python.config.decouple_config
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: config
+  tag: config-input
+  packages: [decouple]
+  match:
+    kind: call
+    callee:
+      name: config
+  description: "Disabled — bare `config()` callee is ambiguous; re-enable per-project."

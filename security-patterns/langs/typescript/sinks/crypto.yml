@@ -1,0 +1,275 @@
+- id: typescript.crypto.createhash_md5
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: low
+  packages:
+  - crypto
+  imports:
+  - crypto
+  cwe:
+  - CWE-327
+  - CWE-328
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createHash
+  match_examples:
+  - name: createhash md5
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createHash('md5');
+      }
+  description: "crypto.createHash('md5') — broken hash. Merged aliases: typescript.crypto.createhash_sha1."
+  aliases:
+  - typescript.crypto.createhash_sha1
+- id: typescript.crypto.createcipher_des
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createCipheriv
+  match_examples:
+  - name: createcipher des
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createCipheriv('des');
+      }
+  description: "crypto.createCipheriv('des', …). Merged aliases: typescript.crypto.createcipher_des_ede, typescript.crypto.createcipher_rc4, typescript.crypto.createcipher_aes_ecb."
+  aliases:
+  - typescript.crypto.createcipher_des_ede
+  - typescript.crypto.createcipher_rc4
+  - typescript.crypto.createcipher_aes_ecb
+- id: typescript.crypto.deprecated_createcipher
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createCipher
+  match_examples:
+  - name: deprecated createcipher
+    code: |
+      const _u = require("crypto");
+      function demo(input, req, obj) {
+        return crypto.createCipher(input);
+      }
+  description: "crypto.createCipher (no IV) — deprecated, predictable IVs."
+- id: typescript.crypto.deprecated_createdecipher
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto
+  cwe:
+  - CWE-327
+  - CWE-1204
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createDecipher
+  match_examples:
+  - name: deprecated createdecipher
+    code: |
+      const _u = require("crypto");
+      function demo(input: string) {
+        return crypto.createDecipher("aes-256-ctr", input);
+      }
+    expect_match_text:
+    - crypto.createDecipher
+  description: "crypto.createDecipher (no IV) — deprecated API derives predictable IVs from password material."
+- id: typescript.crypto.gcm_decipher_no_authtaglength
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: medium
+  packages:
+  - crypto
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - crypto
+      - createDecipheriv
+  match_examples:
+  - name: gcm decipher missing auth tag length
+    code: |
+      const _u = require("crypto");
+      function demo(key: Buffer, iv: Buffer) {
+        return crypto.createDecipheriv("aes-256-gcm", key, iv);
+      }
+    expect_match_text:
+    - crypto.createDecipheriv
+  description: crypto.createDecipheriv('*-gcm', key, iv) without authTagLength can accept unexpectedly short GCM tags.
+- id: typescript.crypto.cryptojs_md5
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: low
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CryptoJS
+      - MD5
+  match_examples:
+  - name: cryptojs md5
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.MD5(input);
+      }
+  description: crypto-js CryptoJS.MD5.
+- id: typescript.crypto.cryptojs_sha1
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: low
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CryptoJS
+      - SHA1
+  match_examples:
+  - name: cryptojs sha1
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.SHA1(input);
+      }
+  description: crypto-js CryptoJS.SHA1.
+- id: typescript.crypto.cryptojs_des
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      regex: ^CryptoJS\.DES\.encrypt$
+  match_examples:
+  - name: cryptojs des
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.DES.encrypt(input);
+      }
+  description: crypto-js CryptoJS.DES.encrypt.
+- id: typescript.crypto.cryptojs_tripledes
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: medium
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      regex: ^CryptoJS\.TripleDES\.encrypt$
+  match_examples:
+  - name: cryptojs tripledes
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.TripleDES.encrypt(input);
+      }
+  description: "crypto-js TripleDES.encrypt — deprecated."
+- id: typescript.crypto.cryptojs_rc4
+  enabled: true
+  language: typescript
+  tag: weak-crypto
+  severity: high
+  packages:
+  - crypto-js
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      regex: ^CryptoJS\.RC4\.encrypt$
+  match_examples:
+  - name: cryptojs rc4
+    code: |
+      const _u = require("crypto-js");
+      function demo(input, req, obj) {
+        return CryptoJS.RC4.encrypt(input);
+      }
+  description: "crypto-js RC4.encrypt — broken stream cipher."
+- id: typescript.crypto.math_random
+  enabled: true
+  language: typescript
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Math
+      - random
+  match_examples:
+  - name: math random
+    code: "function demo(input, req, obj) {\n  return Math.random(input);\n}\n"
+  description: "Math.random — non-cryptographic; flag in security-sensitive paths. TODO(only_when_packaged): JS Math global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Math', 'random']` match only."
+- id: typescript.crypto.bcrypt_low_rounds
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: weak-crypto
+  severity: medium
+  packages:
+  - bcrypt
+  - bcryptjs
+  cwe:
+  - CWE-916
+  match:
+    kind: call
+    callee:
+      attribute:
+      - bcrypt
+      - hash
+  description: "Disabled — flag only when rounds < 10."

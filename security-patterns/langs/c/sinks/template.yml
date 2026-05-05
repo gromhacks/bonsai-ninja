@@ -1,0 +1,135 @@
+# C template / format-string sinks.
+- id: c.template.snprintf_format
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: c
+  tag: format-string
+  severity: medium
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: snprintf
+  description: "Disabled — format index varies; covered by format.yml."
+
+- id: c.template.mustach_mem
+  enabled: true
+  language: c
+  tag: ssti
+  severity: medium
+  packages: [mustach]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: mustach_mem
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mustach.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mustach_mem(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        mustach_mem("safe");
+      }
+    expect_no_match: true
+  description: "mustach_mem with tainted template source."
+
+- id: c.template.mustach_file
+  enabled: true
+  language: c
+  tag: ssti
+  severity: medium
+  packages: [mustach]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: mustach_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mustach.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mustach_file(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        mustach_file("safe");
+      }
+    expect_no_match: true
+  description: "mustach_file — flag tainted path."
+
+- id: c.template.mustach_render
+  enabled: true
+  language: c
+  tag: ssti
+  severity: medium
+  packages: [mustach]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: mustach
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mustach render tainted template
+    code: |
+      #include <mustach.h>
+      void example(char *tmpl) {
+        mustach(tmpl);
+      }
+    expect_match_text: [mustach]
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        mustach("safe");
+      }
+    expect_no_match: true
+  description: "mustach(tainted template) — rendering attacker-controlled template source can expose SSTI-like template expansion behavior."
+
+- id: c.template.jsmn_parse
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: ssti
+  severity: low
+  packages: [jsmn]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: jsmn_parse
+  description: "Disabled — jsmn is a JSON parser, not template."
+
+- id: c.template.libcurl_escape
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: ssti
+  severity: low
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      name: curl_easy_escape
+  description: "Disabled — curl_easy_escape sanitises URL, not template."

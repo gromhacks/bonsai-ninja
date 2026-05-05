@@ -1,0 +1,32 @@
+# rust mass_assignment sinks.
+
+# Mass-assignment sinks (round 2 fill).
+- id: rust.mass_assign.serde_flatten_unverified
+  enabled: true
+  language: rust
+  tag: mass-assignment
+  severity: low
+  packages: [serde_json]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [serde, from_value]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted serde from_value input
+    code: |
+      use serde_json::dummy;
+      fn example(target: serde_json::Value) {
+          serde::from_value(target);
+      }
+  - name: safe serde from_value input negative
+    code: |
+      use serde_json::dummy;
+      fn example() {
+          serde::from_value(json!({"name": "safe"}));
+      }
+    expect_no_match: true
+  description: 'serde_json::from_value::<Model>(req.body) — fields auto-deserialised; verify allowlist with #[serde(deny_unknown_fields)] + skip admin fields.'

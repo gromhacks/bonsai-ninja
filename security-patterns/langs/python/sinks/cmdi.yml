@@ -1,0 +1,1018 @@
+- id: python.cmdi.os_system
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - system
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os system
+    code: "import os\ndef example(user_input):\n    return os.system(user_input)\n"
+  - name: arg tainted literal negative
+    code: "import os\ndef example(user_input):\n    return os.system(\"safe\")\n"
+    expect_no_match: true
+  description: "os.system \u2014 runs the whole string through /bin/sh -c; any tainted\
+    \ component is command injection."
+- id: python.cmdi.os_popen
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - popen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os popen
+    code: "import os\ndef example(user_input):\n    return os.popen(user_input)\n"
+  - name: os popen literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.popen('safe')\n"
+    expect_no_match: true
+  description: "os.popen \u2014 opens a pipe to /bin/sh -c <cmd>; tainted cmd = shell\
+    \ injection."
+- id: python.cmdi.os_execv
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execv
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execv
+    code: "import os\ndef example(user_input):\n    return os.execv(user_input)\n"
+  - name: os execv literal negative
+    code: "import os\ndef example(user_input):\n    return os.execv('/bin/echo')\n"
+    expect_no_match: true
+  description: "os.execv \u2014 replaces the current process with a tainted program\
+    \ path / argv."
+- id: python.cmdi.os_execve
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execve
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execve
+    code: "import os\ndef example(user_input):\n    return os.execve(user_input)\n"
+  - name: os execve literal negative
+    code: "import os\ndef example(user_input):\n    return os.execve('/bin/echo')\n"
+    expect_no_match: true
+  description: "os.execve \u2014 exec with tainted program path / argv / env."
+- id: python.cmdi.os_execvp
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execvp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execvp
+    code: "import os\ndef example(user_input):\n    return os.execvp(user_input)\n"
+  - name: os execvp literal negative
+    code: "import os\ndef example(user_input):\n    return os.execvp('echo')\n"
+    expect_no_match: true
+  description: "os.execvp \u2014 exec searching $PATH with tainted program name."
+- id: python.cmdi.os_execl
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execl
+    code: "import os\ndef example(user_input):\n    return os.execl(user_input)\n"
+  - name: os execl literal negative
+    code: "import os\ndef example(user_input):\n    return os.execl('/bin/echo')\n"
+    expect_no_match: true
+  description: "os.execl \u2014 exec with tainted program path; first tainted arg\
+    \ is the binary."
+- id: python.cmdi.os_execlp
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execlp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execlp
+    code: "import os\ndef example(user_input):\n    return os.execlp(user_input)\n"
+  - name: os execlp literal negative
+    code: "import os\ndef example(user_input):\n    return os.execlp('echo')\n"
+    expect_no_match: true
+  description: "os.execlp \u2014 $PATH-searching variant of execl."
+- id: python.cmdi.os_execlpe
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - execlpe
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os execlpe
+    code: "import os\ndef example(user_input):\n    return os.execlpe(user_input)\n"
+  - name: os execlpe literal negative
+    code: "import os\ndef example(user_input):\n    return os.execlpe('echo')\n"
+    expect_no_match: true
+  description: "os.execlpe \u2014 $PATH-searching execl variant with tainted env."
+- id: python.cmdi.os_spawn
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnl
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawn
+    code: "import os\ndef example(user_input):\n    return os.spawnl(os.P_NOWAIT, user_input)\n"
+  - name: os spawnl literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnl(os.P_NOWAIT, '/bin/echo')\n"
+    expect_no_match: true
+  description: "os.spawnl \u2014 spawns a tainted program path; first tainted arg\
+    \ is the binary."
+- id: python.cmdi.os_spawnv
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnv
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawnv
+    code: "import os\ndef example(user_input):\n    return os.spawnv(os.P_NOWAIT, user_input, ['echo'])\n"
+  - name: os spawnv literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnv(os.P_NOWAIT, '/bin/echo', ['echo'])\n"
+    expect_no_match: true
+  description: "os.spawnv \u2014 spawns a tainted program path / argv."
+- id: python.cmdi.os_spawnvp
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - spawnvp
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cmdi os spawnvp
+    code: "import os\ndef example(user_input):\n    return os.spawnvp(os.P_NOWAIT, user_input, ['echo'])\n"
+  - name: os spawnvp literal negative
+    code: "import os\ndef example(user_input):\n    return os.spawnvp(os.P_NOWAIT, 'echo', ['echo'])\n"
+    expect_no_match: true
+  description: "os.spawnvp \u2014 $PATH-searching spawn with tainted program name."
+- id: python.cmdi.posix_spawn
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - posix_spawn
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi posix spawn
+    code: "import os\ndef example(user_input):\n    return os.posix_spawn(user_input)\n"
+  - name: posix spawn literal negative
+    code: "import os\ndef example(user_input):\n    return os.posix_spawn('/bin/echo')\n"
+    expect_no_match: true
+  description: "os.posix_spawn \u2014 POSIX-spawn with tainted executable path / argv."
+- id: python.cmdi.posix_spawnp
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - posix_spawnp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi posix spawnp
+    code: "import os\ndef example(user_input):\n    return os.posix_spawnp(user_input)\n"
+  - name: posix spawnp literal negative
+    code: "import os\ndef example(user_input):\n    return os.posix_spawnp('echo')\n"
+    expect_no_match: true
+  description: "os.posix_spawnp \u2014 $PATH-searching posix_spawn."
+- id: python.cmdi.subprocess_run_shell
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - subprocess
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi subprocess run shell
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.run(user_input,\
+      \ shell=True)\n"
+    expect_match_text:
+    - subprocess.run
+  - name: cmdi subprocess run shell f string
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.run(f\"\
+      tar xf {user_input}\", shell=True)\n"
+    expect_match_text:
+    - subprocess.run
+  - name: cmdi subprocess run shell concat
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.run(\"\
+      tar xf \" + user_input, shell=True)\n"
+    expect_match_text:
+    - subprocess.run
+  - name: arg tainted literal negative
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.run(\"\
+      safe\", shell=True)\n"
+    expect_no_match: true
+  description: subprocess.run(shell=True) with tainted command, including f-string
+    or concatenated command strings.
+- id: python.cmdi.subprocess_call_shell
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - subprocess
+      - call
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi subprocess call shell
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.call(user_input,\
+      \ shell=True)\n"
+  - name: arg tainted literal negative
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.call(\"\
+      safe\", shell=True)\n"
+    expect_no_match: true
+  description: subprocess.call(shell=True).
+- id: python.cmdi.subprocess_check_call_shell
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - subprocess
+      - check_call
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi subprocess check call shell
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.check_call(user_input,\
+      \ shell=True)\n"
+  - name: subprocess check call shell literal negative
+    code: "import subprocess\n\ndef example(user_input):\n    return subprocess.check_call('safe',\
+      \ shell=True)\n"
+    expect_no_match: true
+  description: subprocess.check_call(shell=True).
+- id: python.cmdi.subprocess_check_output_shell
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - subprocess
+      - check_output
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi subprocess check output shell
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.check_output(user_input,\
+      \ shell=True)\n"
+  - name: arg tainted literal negative
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.check_output(\"\
+      safe\", shell=True)\n"
+    expect_no_match: true
+  description: subprocess.check_output(shell=True).
+- id: python.cmdi.subprocess_popen_shell
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      attribute:
+      - subprocess
+      - Popen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi subprocess popen shell
+    code: "import subprocess\nclass Popen:\n    pass\n\ndef example(user_input):\n\
+      \    return subprocess.Popen(user_input, shell=True)\n"
+  - name: arg tainted literal negative
+    code: "import subprocess\nclass Popen:\n    pass\n\ndef example(user_input):\n\
+      \    return subprocess.Popen(\"safe\", shell=True)\n"
+    expect_no_match: true
+  description: subprocess.Popen(shell=True).
+- id: python.cmdi.subprocess_getoutput
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - subprocess
+      - getoutput
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi subprocess getoutput
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.getoutput(user_input)\n"
+  - name: subprocess getoutput literal negative
+    code: "import subprocess\n\ndef example(user_input):\n    return subprocess.getoutput('safe')\n"
+    expect_no_match: true
+  description: "subprocess.getoutput \u2014 always runs the command string under /bin/sh\
+    \ -c; no shell=False option exists."
+- id: python.cmdi.subprocess_getstatusoutput
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  imports:
+  - subprocess
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - subprocess
+      - getstatusoutput
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi subprocess getstatusoutput
+    code: "import subprocess\ndef example(user_input):\n    return subprocess.getstatusoutput(user_input)\n"
+  - name: subprocess getstatusoutput literal negative
+    code: "import subprocess\n\ndef example(user_input):\n    return subprocess.getstatusoutput('safe')\n"
+    expect_no_match: true
+  description: "subprocess.getstatusoutput \u2014 always shell-evaluated like getoutput."
+- id: python.cmdi.asyncio_subprocess_shell
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  imports:
+  - asyncio
+  match:
+    kind: call
+    callee:
+      attribute:
+      - loop
+      - subprocess_shell
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi asyncio subprocess shell
+    code: "import asyncio\ndef example(user_input):\n    return loop.subprocess_shell(user_input)\n"
+  - name: asyncio subprocess shell literal negative
+    code: "import asyncio\ndef example(user_input):\n    return loop.subprocess_shell('safe')\n"
+    expect_no_match: true
+  description: "EventLoop.subprocess_shell \u2014 runs command string under the shell."
+- id: python.cmdi.os_startfile
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  imports:
+  - os
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - startfile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi os startfile
+    code: "import os\ndef example(user_input):\n    return os.startfile(user_input)\n"
+  - name: os startfile literal negative
+    code: "import os\n\ndef example(user_input):\n    return os.startfile('safe')\n"
+    expect_no_match: true
+  description: "os.startfile (Windows) \u2014 shell-invokes associated handler; tainted\
+    \ path can trigger arbitrary program launch."
+- id: python.cmdi.commands_getoutput
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - commands
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - commands
+      - getoutput
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi commands getoutput
+    code: "import commands\ndef example(user_input):\n    return commands.getoutput(user_input)\n"
+  - name: commands getoutput literal negative
+    code: "import commands\n\ndef example(user_input):\n    return commands.getoutput('safe')\n"
+    expect_no_match: true
+  description: Python 2 commands.getoutput.
+- id: python.cmdi.commands_getstatusoutput
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - commands
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - commands
+      - getstatusoutput
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi commands getstatusoutput
+    code: "import commands\ndef example(user_input):\n    return commands.getstatusoutput(user_input)\n"
+  - name: commands getstatusoutput literal negative
+    code: "import commands\n\ndef example(user_input):\n    return commands.getstatusoutput('safe')\n"
+    expect_no_match: true
+  description: "Python 2 commands.getstatusoutput \u2014 legacy shell wrapper."
+- id: python.cmdi.asyncio_create_subprocess_shell
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - asyncio
+      - create_subprocess_shell
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi asyncio create subprocess shell
+    code: "def example(user_input):\n    return asyncio.create_subprocess_shell(user_input)\n"
+  - name: asyncio create subprocess shell literal negative
+    code: "def example(user_input):\n    return asyncio.create_subprocess_shell('safe')\n"
+    expect_no_match: true
+  description: "asyncio.create_subprocess_shell \u2014 runs the command string via\
+    \ /bin/sh -c."
+- id: python.cmdi.fabric_run
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - fabric
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi fabric run
+    code: "import fabric\ndef example(user_input):\n    return Connection.run(user_input)\n"
+  - name: fabric run literal negative
+    code: "import fabric\n\ndef example(user_input):\n    return Connection.run('safe')\n"
+    expect_no_match: true
+  description: "Fabric Connection.run \u2014 remote shell. `min_args: 1` rejects 0-arg\
+    \ `Connection.run()` decoys (signature is `run(command, **kwargs)`)."
+- id: python.cmdi.fabric_local
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - fabric
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - fabric
+      - local
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi fabric local
+    code: "import fabric\ndef example(user_input):\n    return fabric.local(user_input)\n"
+  - name: fabric local literal negative
+    code: "import fabric\n\ndef example(user_input):\n    return fabric.local('safe')\n"
+    expect_no_match: true
+  description: "Fabric local() \u2014 runs the command locally through a shell."
+- id: python.cmdi.fabric_sudo
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - fabric
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - sudo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi fabric sudo
+    code: "import fabric\ndef example(user_input):\n    return Connection.sudo(user_input)\n"
+  - name: fabric sudo literal negative
+    code: "import fabric\n\ndef example(user_input):\n    return Connection.sudo('safe')\n"
+    expect_no_match: true
+  description: "Fabric Connection.sudo \u2014 remote shell command as root. `min_args:\
+    \ 1` rejects 0-arg decoys (signature is `sudo(command, **kwargs)`)."
+- id: python.cmdi.invoke_run
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - invoke
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - invoke
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi invoke run
+    code: "import invoke\ndef example(user_input):\n    return invoke.run(user_input)\n"
+  - name: invoke run literal negative
+    code: "import invoke\n\ndef example(user_input):\n    return invoke.run('safe')\n"
+    expect_no_match: true
+  description: "invoke.run \u2014 shell-wraps the command string."
+- id: python.cmdi.invoke_context_run
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - invoke
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Context
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi invoke context run
+    code: "import invoke\ndef example(user_input):\n    return Context.run(user_input)\n"
+  - name: invoke context run literal negative
+    code: "import invoke\n\ndef example(user_input):\n    return Context.run('safe')\n"
+    expect_no_match: true
+  description: "invoke Context.run \u2014 shell-wraps the command string inside a\
+    \ task. `min_args: 1` rejects 0-arg `Context.run()` decoys."
+- id: python.cmdi.plumbum_local
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: command-injection
+  severity: high
+  packages:
+  - plumbum
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - local
+      - __getitem__
+  description: "Disabled \u2014 plumbum local[cmd] is a subscript expression; tree-sitter\
+    \ does not surface it as an attribute call so this never fires. Re-enable once\
+    \ subscript matching lands."
+- id: python.cmdi.pexpect_spawn
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - pexpect
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pexpect
+      - spawn
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi pexpect spawn
+    code: "import pexpect\ndef example(user_input):\n    return pexpect.spawn(user_input)\n"
+  - name: pexpect spawn literal negative
+    code: "import pexpect\n\ndef example(user_input):\n    return pexpect.spawn('safe')\n"
+    expect_no_match: true
+  description: "pexpect.spawn(tainted cmd) \u2014 spawns a shell-interpreted command."
+- id: python.cmdi.pexpect_run
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - pexpect
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pexpect
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi pexpect run
+    code: "import pexpect\ndef example(user_input):\n    return pexpect.run(user_input)\n"
+  - name: pexpect run literal negative
+    code: "import pexpect\n\ndef example(user_input):\n    return pexpect.run('safe')\n"
+    expect_no_match: true
+  description: "pexpect.run \u2014 wraps pexpect.spawn + expect; tainted cmd is shell\
+    \ injection."
+- id: python.cmdi.sh_module
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: command-injection
+  severity: medium
+  packages:
+  - sh
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: sh
+  description: "Disabled \u2014 sh.<cmd>(arg) is by-arg, not shell."
+- id: python.cmdi.paramiko_exec_command
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - paramiko
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SSHClient
+      - exec_command
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi paramiko exec command
+    code: "import paramiko\ndef example(user_input):\n    return SSHClient.exec_command(user_input)\n"
+  - name: paramiko exec command literal negative
+    code: "import paramiko\n\ndef example(user_input):\n    return SSHClient.exec_command('safe')\n"
+    expect_no_match: true
+  description: "paramiko SSHClient.exec_command \u2014 remote shell."
+- id: python.cmdi.asyncssh_run
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - asyncssh
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SSHClientConnection
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi asyncssh run
+    code: "import asyncssh\ndef example(user_input):\n    return SSHClientConnection.run(user_input)\n"
+  - name: asyncssh run literal negative
+    code: "import asyncssh\n\ndef example(user_input):\n    return SSHClientConnection.run('safe')\n"
+    expect_no_match: true
+  description: "asyncssh SSHClientConnection.run \u2014 remote shell command over\
+    \ SSH."
+- id: python.cmdi.spur_run
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - spur
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SshShell
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi spur run
+    code: "import spur\ndef example(user_input):\n    return SshShell.run(user_input)\n"
+  - name: spur run literal negative
+    code: "import spur\n\ndef example(user_input):\n    return SshShell.run('safe')\n"
+    expect_no_match: true
+  description: "spur SshShell.run \u2014 remote shell command over SSH."
+- id: python.cmdi.docker_exec_run
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - docker
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Container
+      - exec_run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cmdi docker exec run
+    code: "import docker\ndef example(user_input):\n    return Container.exec_run(user_input)\n"
+  - name: docker exec run literal negative
+    code: "import docker\n\ndef example(user_input):\n    return Container.exec_run('safe')\n"
+    expect_no_match: true
+  description: "docker Container.exec_run \u2014 runs cmd inside container."
+- id: python.cmdi.kubernetes_exec
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - kubernetes
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - stream
+      - stream
+  constraints:
+  - arg_tainted:
+      kw: command
+  match_examples:
+  - name: cmdi kubernetes exec
+    code: "import kubernetes\ndef example(user_input):\n    return stream.stream(api.connect_get_namespaced_pod_exec, 'pod', 'default', command=user_input)\n"
+  - name: kubernetes exec literal command negative
+    code: "import kubernetes\ndef example(user_input):\n    return stream.stream(api.connect_get_namespaced_pod_exec, 'pod', 'default', command='id')\n"
+    expect_no_match: true
+  description: "kubernetes.stream.stream(..., command=tainted) — executes attacker-controlled command inside a pod."
+- id: python.cmdi.ansible_runner
+  enabled: false
+  language: python
+  tag: command-injection
+  severity: critical
+  packages:
+  - ansible_runner
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ansible_runner
+      - run
+  match_examples:
+  - name: cmdi ansible runner
+    code: "import ansible_runner\ndef example(user_input):\n    return ansible_runner.run(user_input)\n"
+  description: "ansible_runner.run \u2014 executes ad-hoc Ansible modules; tainted\
+    \ module / args = remote code exec across inventory."
+  disabled_reason:
+    code: over-broad

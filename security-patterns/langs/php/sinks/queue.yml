@@ -1,0 +1,56 @@
+- id: php.queue.send_message
+  enabled: true
+  language: php
+  tag: queue-injection
+  severity: high
+  packages:
+  - aws/aws-sdk-php
+  cwe:
+  - CWE-20
+  match:
+    kind: call
+    callee:
+      name: sendMessage
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.queue.send_message example
+    code: |
+      <?php
+      use aws\awssdkphp;
+      use aws\awssdkphp;
+      use aws\aws-sdk-php;
+      function example($input, $url, $id, $payload, $request) {
+        sendMessage($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use aws\awssdkphp;
+      function example($input, $url, $id, $payload, $request) {
+        sendMessage(["QueueUrl" => "https://sqs.example/queue", "MessageBody" => "safe"]);
+      }
+    expect_no_match: true
+  description: AWS SDK for PHP sendMessage — tainted queue target/body injects arbitrary broker payloads.
+  imports:
+  - aws
+  - aws/awssdkphp
+  - aws\awssdkphp
+- id: php.queue.publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: queue-injection
+  severity: high
+  packages:
+  - aws/aws-sdk-php
+  - google/cloud-pubsub
+  cwe:
+  - CWE-20
+  match:
+    kind: call
+    callee:
+      name: publish
+  description: Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across PHP clients and app code.

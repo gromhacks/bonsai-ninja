@@ -1,0 +1,611 @@
+- id: typescript.template.ejs_render
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: high
+  packages:
+  - ejs
+  imports:
+  - ejs
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ejs
+      - render
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: ejs render
+    code: |
+      const _u = require("ejs");
+      function demo(input, req, obj) {
+        return ejs.render(input, "<%= user %>");
+      }
+    expect_match_text:
+    - ejs.render
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("ejs");
+      function demo(input, req, obj) {
+        return ejs.render("Hello <%= user %>", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "ejs.render(tainted) — server-side template injection. Merged aliases: typescript.template.ejs_render_template_variable."
+  aliases:
+  - typescript.template.ejs_render_template_variable
+- id: typescript.template.ejs_compile
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - ejs
+  imports:
+  - ejs
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ejs
+      - compile
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: ejs compile
+    code: |
+      const _u = require("ejs");
+      function demo(input, req, obj) {
+        return ejs.compile(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("ejs");
+      function demo(input, req, obj) {
+        return ejs.compile("Hello <%= user %>", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "ejs.compile(tainted) — full SSTI-to-RCE in default config. Merged aliases: typescript.template.ejs_compile_template_variable."
+  aliases:
+  - typescript.template.ejs_compile_template_variable
+- id: typescript.template.ejs_renderfile
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: ssti
+  severity: medium
+  packages:
+  - ejs
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ejs
+      - renderFile
+  description: "Disabled — renderFile uses a filesystem path; flag as path-traversal, not SSTI."
+- id: typescript.template.handlebars_compile
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: high
+  packages:
+  - handlebars
+  imports:
+  - handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Handlebars
+      - compile
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: handlebars compile
+    code: |
+      const _u = require("handlebars");
+      function demo(input, req, obj) {
+        return Handlebars.compile(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("handlebars");
+      function demo(input, req, obj) {
+        return Handlebars.compile("Hello {{user}}", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "Handlebars.compile(tainted) — RCE on some helper combos. Merged aliases: typescript.template.handlebars_compile_template_variable."
+  aliases:
+  - typescript.template.handlebars_compile_template_variable
+- id: typescript.template.handlebars_lower_compile
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: typescript
+  tag: ssti
+  severity: high
+  packages:
+  - handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - handlebars
+      - compile
+  description: "Disabled - subsumed by typescript.template.handlebars_compile under OnlyWhenPackaged lax-tail policy."
+- id: typescript.template.hbs_compile
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: high
+  packages:
+  - hbs
+  - handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - hbs
+      - compile
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: hbs compile template source
+    code: "import hbs from \"hbs\";\nfunction render(input: string) {\n  return hbs.compile(input, \"{{ user }}\");\n}\n"
+    expect_match_text:
+    - hbs.compile
+  - name: arg tainted literal negative
+    code: |
+      import hbs from "hbs";
+      function render(input: string) {
+        return hbs.compile("Hello {{user}}", "{{ user }}");
+      }
+    expect_no_match: true
+  description: "hbs.compile(tainted) — hbs exposes Handlebars template compilation; attacker-controlled template source is SSTI."
+- id: typescript.template.handlebars_safestring
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - handlebars
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      attribute:
+      - Handlebars
+      - SafeString
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: handlebars safestring
+    code: |
+      const _u = require("handlebars");
+      function demo(input, req, obj) {
+        return new Handlebars.SafeString(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("handlebars");
+      function demo(input, req, obj) {
+        return new Handlebars.SafeString("<strong>safe</strong>", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "new Handlebars.SafeString(tainted) — bypasses template escape."
+- id: typescript.template.pug_compile
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - pug
+  imports:
+  - pug
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pug
+      - compile
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: pug compile
+    code: |
+      const _u = require("pug");
+      function demo(input, req, obj) {
+        return pug.compile(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("pug");
+      function demo(input, req, obj) {
+        return pug.compile("p Hello", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "pug.compile(tainted) — Jade/Pug SSTI."
+- id: typescript.template.pug_render
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - pug
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pug
+      - render
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: pug render
+    code: |
+      const _u = require("pug");
+      function demo(input, req, obj) {
+        return pug.render(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("pug");
+      function demo(input, req, obj) {
+        return pug.render("p Hello", "<%= user %>");
+      }
+    expect_no_match: true
+  description: pug.render(tainted).
+- id: typescript.template.nunjucks_renderstring
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - nunjucks
+  imports:
+  - nunjucks
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - renderString
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: nunjucks renderstring
+    code: |
+      const _u = require("nunjucks");
+      function demo(input, req, obj) {
+        return nunjucks.renderString(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("nunjucks");
+      function demo(input, req, obj) {
+        return nunjucks.renderString("Hello {{ user }}", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "nunjucks.renderString(tainted) — SSTI-to-RCE via range(). Merged aliases: typescript.template.nunjucks_renderstring_template_variable."
+  aliases:
+  - typescript.template.nunjucks_renderstring_template_variable
+- id: typescript.template.nunjucks_compile
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - nunjucks
+  imports:
+  - nunjucks
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - compile
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: nunjucks compile
+    code: "import * as nunjucks from \"nunjucks\";\nfunction demo(input: string) {\n  return nunjucks.compile(input, \"{{ user }}\");\n}\n"
+    expect_match_text:
+    - nunjucks.compile
+  - name: arg tainted literal negative
+    code: |
+      import * as nunjucks from "nunjucks";
+      function demo(input: string) {
+        return nunjucks.compile("Hello {{ user }}", "{{ user }}");
+      }
+    expect_no_match: true
+  description: "nunjucks.compile(tainted) — compiles attacker-controlled template source."
+- id: typescript.template.nunjucks_render_template_source
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: high
+  packages:
+  - nunjucks
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - render
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: nunjucks render variable template
+    code: |
+      const _u = require("nunjucks");
+      function demo(input, req, obj) {
+        return nunjucks.render(input, {});
+      }
+    expect_match_text:
+    - nunjucks.render
+  - name: nunjucks render concat template
+    code: |
+      const _u = require("nunjucks");
+      function demo(input, req, obj) {
+        return nunjucks.render("Hello {{ " + input + " }}", {});
+      }
+    expect_match_text:
+    - nunjucks.render
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("nunjucks");
+      function demo(input, req, obj) {
+        return nunjucks.render("safe-template.html", {});
+      }
+    expect_no_match: true
+  description: "nunjucks.render(templateSource, data) with variable or constructed template names/source — audit for attacker-controlled template selection or SSTI."
+- id: typescript.template.dot_template
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - dot
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - doT
+      - template
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: dot template
+    code: |
+      const _u = require("dot");
+      function demo(input, req, obj) {
+        return doT.template(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("dot");
+      function demo(input, req, obj) {
+        return doT.template("Hello {{=it.user}}", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "doT.template(tainted) — JS evaluation in template."
+- id: typescript.template.mustache_render
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: ssti
+  severity: low
+  packages:
+  - mustache
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mustache
+      - render
+  description: "Disabled — Mustache is logic-less; not SSTI-to-RCE."
+- id: typescript.template.lodash_template
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - lodash
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - _
+      - template
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: lodash template
+    code: |
+      const _u = require("lodash");
+      function demo(input, req, obj) {
+        return _.template(input, "<%= user %>");
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("lodash");
+      function demo(input, req, obj) {
+        return _.template("Hello <%= user %>", "<%= user %>");
+      }
+    expect_no_match: true
+  description: "_.template(tainted) — evaluates JS in template tags (also matches underscore.js with the `_` alias)."
+- id: typescript.template.consolidate_render
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: ssti
+  severity: medium
+  packages:
+  - consolidate
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - consolidate
+      - render
+  description: "Disabled — generic render; flag with engine-specific constraint instead."
+- id: typescript.template.swig_setdefaults_autoescape_off
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - swig
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - swig
+      - setDefaults
+  match_examples:
+  - name: swig setdefaults autoescape off
+    code: |
+      const _u = require("swig");
+      function demo(input, req, obj) {
+        return swig.setDefaults(input, { autoescape: false });
+      }
+  description: "swig.setDefaults({autoescape: false}) — TypeScript via the same swig API."
+- id: typescript.template.nunjucks_configure_autoescape_off
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - nunjucks
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - configure
+  match_examples:
+  - name: nunjucks configure autoescape off
+    code: |
+      const _u = require("nunjucks");
+      function demo(input, req, obj) {
+        return nunjucks.configure(input, { autoescape: false });
+      }
+  description: "nunjucks.configure(path, {autoescape: false}) — autoescape disabled."
+
+- id: typescript.template.nunjucks_environment_renderstring
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: critical
+  packages:
+  - nunjucks
+  imports:
+  - nunjucks
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.renderString$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nunjucks environment renderstring tainted
+    code: |
+      const _u = require("nunjucks");
+      function demo(env: any, input: string) {
+        return env.renderString(input, {});
+      }
+    expect_match_text: [env.renderString]
+  - name: nunjucks environment renderstring literal negative
+    code: |
+      const _u = require("nunjucks");
+      function demo(env: any) {
+        return env.renderString("Hello {{ user }}", {});
+      }
+    expect_no_match: true
+  description: "nunjucks Environment instance .renderString(tainted) — local nunjucks Environment receivers also reach SSTI when rendering attacker-controlled source."
+
+- id: typescript.template.pug_compile_file
+  enabled: true
+  language: typescript
+  tag: ssti
+  severity: high
+  packages:
+  - pug
+  imports:
+  - pug
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pug
+      - compileFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: pug compileFile tainted path
+    code: |
+      const _u = require("pug");
+      function demo(input: string) {
+        return pug.compileFile(input);
+      }
+    expect_match_text: [pug.compileFile]
+  - name: pug compileFile literal negative
+    code: |
+      const _u = require("pug");
+      function demo() {
+        return pug.compileFile("views/profile.pug");
+      }
+    expect_no_match: true
+  description: "pug.compileFile(taintedPath) — attacker-controlled file path lets the user pick an arbitrary template (path-traversal + SSTI compound)."

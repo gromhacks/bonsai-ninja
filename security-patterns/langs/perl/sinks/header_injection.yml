@@ -1,0 +1,62 @@
+# Perl HTTP header / CRLF injection.
+- id: perl.header.cgi_header
+  enabled: true
+  language: perl
+  tag: header-injection
+  severity: high
+  packages: [CGI, "Plack::Response", Dancer2]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: header
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.header.cgi_header example
+    code: |
+      use CGI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        header($input)
+      }
+  - name: literal cgi header negative
+    code: |
+      use CGI;
+      sub example {
+        my ($input) = @_;
+        header("Content-Type: text/plain")
+      }
+    expect_no_match: true
+  description: "header(...) — covers CGI $q->header, Plack::Response $res->header, Dancer2 header (same bare `header` name). Flag tainted -location/-status or name=>tainted."
+
+- id: perl.header.mojolicious_headers_add
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: perl
+  tag: header-injection
+  severity: high
+  packages: [Mojolicious]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: add
+  description: "Disabled — bare `name: add` collides with perl.ldap.net_ldap_add (Net::LDAP $ldap->add). Without receiver-type narrowing we cannot distinguish; the LDAP-injection finding is more severe so we keep that rule and drop this one."
+
+- id: perl.header.plack_headers_set
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  tag: header-injection
+  severity: high
+  packages: ["Plack::Response"]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: header
+  description: "Disabled — merged into perl.header.cgi_header (same bare `header` name)."

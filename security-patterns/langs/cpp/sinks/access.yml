@@ -1,0 +1,137 @@
+- id: cpp.access.aws_s3_get_object
+  enabled: true
+  language: cpp
+  tag: access-control
+  severity: high
+  packages: [aws-sdk-cpp-s3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [S3Client, GetObject]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <aws-sdk-cpp-s3.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        S3Client::GetObject(arg);
+      }
+  description: "AWS SDK C++ S3Client::GetObject — tainted bucket/key selector reads arbitrary object data."
+
+- id: cpp.access.aws_s3_put_object
+  enabled: true
+  language: cpp
+  tag: access-control
+  severity: high
+  packages: [aws-sdk-cpp-s3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [S3Client, PutObject]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <aws-sdk-cpp-s3.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        S3Client::PutObject(arg);
+      }
+  description: "AWS SDK C++ S3Client::PutObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+
+- id: cpp.access.aws_secretsmanager_get_secret_value
+  enabled: true
+  language: cpp
+  tag: access-control
+  severity: high
+  packages: [aws-sdk-cpp-secretsmanager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [SecretsManagerClient, GetSecretValue]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <aws-sdk-cpp-secretsmanager.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        SecretsManagerClient::GetSecretValue(arg);
+      }
+  description: "AWS SDK C++ SecretsManagerClient::GetSecretValue — tainted secret id reads arbitrary secret material."
+
+- id: cpp.access.azure_blob_download
+  enabled: true
+  language: cpp
+  tag: access-control
+  severity: high
+  packages: [azure-storage-blobs-cpp]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [BlobClient, DownloadTo]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <azure-storage-blobs-cpp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        BlobClient::DownloadTo(arg);
+      }
+  description: "Azure BlobClient::DownloadTo — tainted blob selector reads arbitrary object data."
+
+- id: cpp.access.azure_blob_upload
+  enabled: true
+  language: cpp
+  tag: access-control
+  severity: high
+  packages: [azure-storage-blobs-cpp]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [BlockBlobClient, UploadFrom]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <azure-storage-blobs-cpp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        BlockBlobClient::UploadFrom(arg);
+      }
+  description: "Azure BlockBlobClient::UploadFrom — tainted blob selector writes attacker-chosen storage targets."
+
+- id: cpp.access.gcp_secretmanager_access_secret_version
+  enabled: true
+  language: cpp
+  tag: access-control
+  severity: high
+  packages: [google-cloud-cpp]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [SecretManagerServiceClient, AccessSecretVersion]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <google-cloud-cpp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        SecretManagerServiceClient::AccessSecretVersion(arg);
+      }
+  description: "google-cloud-cpp SecretManagerServiceClient::AccessSecretVersion — tainted resource name reads arbitrary secret versions."

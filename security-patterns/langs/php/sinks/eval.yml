@@ -1,0 +1,317 @@
+- id: php.eval.builtin_eval
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^eval$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.builtin_eval example
+    code: |
+      <?php
+      use predis\predis;
+      use predis\predis;
+      function example($input, $url, $id, $payload, $request) {
+        eval($input);
+      }
+  - name: literal eval negative
+    code: |
+      <?php
+      use predis\predis;
+      function example() {
+        eval("return 1;");
+      }
+    expect_no_match: true
+  description: 'eval() — arbitrary PHP code. Merged collision aliases: php.nosql.redis_eval.'
+  aliases:
+  - php.nosql.redis_eval
+  packages:
+  - predis/predis
+  imports:
+  - predis\predis
+  - predis
+- id: php.eval.assert_string
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: assert
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.assert_string example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  assert($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  assert(\"1 === 1\");\n}\n"
+    expect_no_match: true
+  description: assert(string) — pre-PHP-8 evaluates as code.
+- id: php.eval.create_function
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: create_function
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.eval.create_function example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  create_function('$x', $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  create_function('$x', 'return $x;');\n}\n"
+    expect_no_match: true
+  description: create_function — removed in PHP 8 but legacy code persists.
+- id: php.eval.preg_replace_e
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: preg_replace
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.eval.preg_replace_e example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  preg_replace(\"/x/e\", $payload, \"x\");\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  preg_replace(\"/x/e\", \"safe\", \"x\");\n}\n"
+    expect_no_match: true
+  description: preg_replace() with /e (PREG_REPLACE_EVAL) modifier — replacement string is eval()'d as PHP code. Removed in PHP 7 but still appears in legacy code paths and PHP <7 deployments. Constraint matches a quoted regex literal whose trailing modifier flags include `e`.
+- id: php.eval.preg_replace_callback
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: preg_replace_callback
+  description: Disabled — callback variant is safe unless callback tainted.
+- id: php.eval.include_tainted
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  - CWE-98
+  match:
+    kind: call
+    callee:
+      name: include
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.include_tainted example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  include $input;\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  include \"safe.php\";\n}\n"
+    expect_no_match: true
+  description: 'include(tainted) — LFI/RFI = RCE. Limitation: PHP parses include/require as include_expression AST nodes, not function calls; adapter must surface these as calls for this rule to fire. `top_level: true` excludes any `$obj->include(...)` userland method decoys.'
+- id: php.eval.include_once_tainted
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  - CWE-98
+  match:
+    kind: call
+    callee:
+      name: include_once
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.include_once_tainted example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  include_once $input;\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  include_once \"safe.php\";\n}\n"
+    expect_no_match: true
+  description: 'include_once(tainted). Limitation: language construct (include_expression); adapter must normalise as call. `top_level: true` excludes method-name decoys.'
+- id: php.eval.require_tainted
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  - CWE-98
+  match:
+    kind: call
+    callee:
+      name: require
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.require_tainted example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  require $input;\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  require \"safe.php\";\n}\n"
+    expect_no_match: true
+  description: 'require(tainted). Limitation: language construct (include_expression); adapter must normalise as call. `top_level: true` excludes method-name decoys.'
+- id: php.eval.require_once_tainted
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  - CWE-98
+  match:
+    kind: call
+    callee:
+      name: require_once
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.require_once_tainted example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  require_once $input;\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  require_once \"safe.php\";\n}\n"
+    expect_no_match: true
+  description: 'require_once(tainted). Limitation: language construct (include_expression); adapter must normalise as call. `top_level: true` excludes method-name decoys.'
+- id: php.eval.call_user_func
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: call_user_func
+  description: Disabled — benign unless callable tainted.
+- id: php.eval.call_user_func_array
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: call_user_func_array
+  description: Disabled — benign unless callable tainted.
+- id: php.eval.usort_callback
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: usort
+  description: Disabled — flag only when comparator callable is tainted.
+- id: php.eval.array_map_callback
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: array_map
+  description: Disabled — flag only when callback is tainted.
+- id: php.eval.array_filter_callback
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: array_filter
+  description: Disabled — flag only when callback tainted.
+- id: php.eval.call_user_func_dynamic
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: high
+  cwe:
+  - CWE-470
+  match:
+    kind: call
+    callee:
+      name: call_user_func
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.call_user_func_dynamic example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  call_user_func($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  call_user_func('strlen', 'safe');\n}\n"
+    expect_no_match: true
+  description: call_user_func($callback, $args) — when $callback is attacker-controlled, arbitrary function invoke.
+- id: php.eval.call_user_func_array_dynamic
+  enabled: true
+  language: php
+  tag: code-injection
+  severity: high
+  cwe:
+  - CWE-470
+  match:
+    kind: call
+    callee:
+      name: call_user_func_array
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.eval.call_user_func_array_dynamic example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  call_user_func_array($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  call_user_func_array('strlen', ['safe']);\n}\n"
+    expect_no_match: true
+  description: call_user_func_array — same as call_user_func with array args.

@@ -1,0 +1,27 @@
+# rust CORS misconfiguration sinks (T403).
+- id: rust.cors.tower_http_cors_allow_origin_any
+  enabled: true
+  language: rust
+  tag: cors
+  severity: medium
+  packages: [tower_http]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CorsLayer, allow_origin]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use tower_http;
+      use tower_http;
+      use tower_http::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          CorsLayer::allow_origin(Any);
+      }
+  description: |-
+    tower-http CorsLayer::allow_origin(Any) — wildcard CORS.
+  imports:
+  - tower_http

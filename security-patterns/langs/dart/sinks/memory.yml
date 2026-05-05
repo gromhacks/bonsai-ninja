@@ -1,0 +1,69 @@
+# Dart memory-safety / lifecycle audit-pair sites.
+# These rules fire on the *use-after-transition* call (write / read /
+# etc.) and gate on the adapter-emitted lifecycle state via the
+# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: dart.memory.iosink_close
+  enabled: true
+  language: dart
+  tag: memory-safety
+  severity: medium
+  packages: ["dart:io"]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: write
+  constraints:
+  - requires_state:
+      name: sink
+      expected: closed
+  match_examples:
+  - name: write after close
+    code: |
+      import 'dart:io';
+      void handle(IOSink sink) {
+        sink.close();
+        sink.write('payload');
+      }
+    expect_match_text: [sink.write]
+  - name: write without preceding close
+    code: |
+      import 'dart:io';
+      void handle(IOSink sink) {
+        sink.write('payload');
+      }
+    expect_no_match: true
+  description: "Use-after-close — `IOSink.write()` / `File.write*()` / `HttpClient.<op>()` on a sink whose preceding `.close()` released the underlying stream. Subsequent writes throw StateError at runtime (CWE-416). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
+- id: dart.memory.stream_subscription_cancel
+  enabled: true
+  language: dart
+  tag: memory-safety
+  severity: medium
+  packages: ["dart:async"]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      name: pause
+  constraints:
+  - requires_state:
+      name: sub
+      expected: cancelled
+  match_examples:
+  - name: pause after cancel
+    code: |
+      import 'dart:async';
+      void handle(StreamSubscription<int> sub) {
+        sub.cancel();
+        sub.pause();
+      }
+    expect_match_text: [sub.pause]
+  - name: pause without preceding cancel
+    code: |
+      import 'dart:async';
+      void handle(StreamSubscription<int> sub) {
+        sub.pause();
+      }
+    expect_no_match: true
+  description: "Use-after-cancel — `StreamSubscription.pause()` / `.resume()` / similar on a subscription whose preceding `.cancel()` tore down the listener. The call is silently dropped or raises StateError (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."

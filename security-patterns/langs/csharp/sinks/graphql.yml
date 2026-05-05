@@ -1,0 +1,83 @@
+# C# GraphQL injection sinks (GraphQL.NET execution and dynamic schema).
+- id: csharp.graphql.documentexecuter_executeasync
+  enabled: true
+  language: csharp
+  tag: graphql-injection
+  severity: high
+  packages: [GraphQL]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [DocumentExecuter, ExecuteAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using GraphQL;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DocumentExecuter.ExecuteAsync(input); } }
+    expect_match_text: [DocumentExecuter.ExecuteAsync]
+  - name: literal graphql execution negative
+    code: |
+      using GraphQL;
+      class App { void Test() { DocumentExecuter.ExecuteAsync("{ hello }"); } }
+    expect_no_match: true
+  description: "GraphQL.NET DocumentExecuter.ExecuteAsync with a tainted query can expose unintended fields or resolver paths."
+
+- id: csharp.graphql.schema_for
+  enabled: true
+  language: csharp
+  tag: graphql-injection
+  severity: medium
+  packages: [GraphQL]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Schema, For]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using GraphQL;
+      class App { void Test(string input) { Schema.For(input); } }
+    expect_match_text: [Schema.For]
+  - name: literal sdl negative
+    code: |
+      using GraphQL;
+      class App { void Test() { Schema.For("type Query { hello: String }"); } }
+    expect_no_match: true
+  description: "GraphQL.NET Schema.For(tainted SDL) builds a dynamic schema from untrusted input."
+
+- id: csharp.graphql.parser_parse
+  enabled: true
+  language: csharp
+  tag: graphql-injection
+  severity: high
+  packages: [GraphQL-Parser]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Parser, Parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using GraphQLParser;
+      class App { void Test(string input) { Parser.Parse(input); } }
+    expect_match_text: [Parser.Parse]
+  - name: literal document negative
+    code: |
+      using GraphQLParser;
+      class App { void Test() { Parser.Parse("{ hello }"); } }
+    expect_no_match: true
+  description: "GraphQLParser Parser.Parse of tainted documents feeds dynamic GraphQL execution."
+  imports:
+  - GraphQLParser

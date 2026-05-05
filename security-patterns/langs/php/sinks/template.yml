@@ -1,0 +1,324 @@
+- id: php.template.twig_create_template
+  enabled: true
+  language: php
+  tag: ssti
+  severity: critical
+  packages:
+  - twig/twig
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - createTemplate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.template.twig_create_template example
+    code: |
+      <?php
+      use twig\twig;
+      use twig\twig;
+      function example($input, $url, $id, $payload, $request) {
+        Environment::createTemplate($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use twig\twig;
+      function example($input, $url, $id, $payload, $request) {
+        Environment::createTemplate("Hello user");
+      }
+    expect_no_match: true
+  description: Twig Environment::createTemplate(tainted) — full SSTI.
+  imports:
+  - twig\twig
+  - twig
+- id: php.template.twig_render
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: ssti
+  severity: medium
+  packages:
+  - twig/twig
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - render
+  description: Disabled — Environment::render takes a template name, not source.
+- id: php.template.smarty_fetch
+  enabled: true
+  language: php
+  tag: ssti
+  severity: high
+  packages:
+  - smarty/smarty
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Smarty
+      - fetch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.template.smarty_fetch example
+    code: |
+      <?php
+      use smarty\smarty;
+      use smarty\smarty;
+      function example($input, $url, $id, $payload, $request) {
+        Smarty::fetch($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use smarty\smarty;
+      function example($input, $url, $id, $payload, $request) {
+        Smarty::fetch("account.tpl");
+      }
+    expect_no_match: true
+  description: Smarty fetch with tainted template path.
+  imports:
+  - smarty\smarty
+  - smarty
+- id: php.template.smarty_display
+  enabled: true
+  language: php
+  tag: ssti
+  severity: high
+  packages:
+  - smarty/smarty
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Smarty
+      - display
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.template.smarty_display example
+    code: |
+      <?php
+      use smarty\smarty;
+      use smarty\smarty;
+      function example($input, $url, $id, $payload, $request) {
+        Smarty::display($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use smarty\smarty;
+      function example($input, $url, $id, $payload, $request) {
+        Smarty::display("account.tpl");
+      }
+    expect_no_match: true
+  description: Smarty display.
+  imports:
+  - smarty\smarty
+  - smarty
+- id: php.template.latte_render
+  enabled: true
+  language: php
+  tag: ssti
+  severity: high
+  packages:
+  - latte/latte
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Engine
+      - render
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.template.latte_render example
+    code: |
+      <?php
+      use latte\latte;
+      use latte\latte;
+      function example($input, $url, $id, $payload, $request) {
+        Engine::render($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use latte\latte;
+      function example($input, $url, $id, $payload, $request) {
+        Engine::render("account.latte");
+      }
+    expect_no_match: true
+  description: Latte Engine::render with tainted source.
+  imports:
+  - latte\latte
+  - latte
+- id: php.template.blade_render
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: ssti
+  severity: medium
+  packages:
+  - illuminate/view
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Blade
+      - render
+  description: Disabled — Blade::render needs tainted-source check (constraint TBD).
+- id: php.template.twig_environment_autoescape_off
+  enabled: true
+  language: php
+  tag: xss
+  severity: high
+  packages:
+  - twig
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      attribute:
+      - Twig
+      - Environment
+  match_examples:
+  - name: php.template.twig_environment_autoescape_off example
+    code: |
+      <?php
+      use twig;
+      use twig;
+      function example($input, $url, $id, $payload, $request) {
+        new Twig\Environment(['autoescape' => false]);
+      }
+  description: new Twig\Environment($loader, ['autoescape' => false]) — global autoescape off.
+- id: php.template.smarty_escape_html_off
+  enabled: true
+  language: php
+  tag: ssti
+  severity: high
+  packages:
+  - smarty
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      attribute:
+      - smarty
+      - escape_html
+  match_examples:
+  - name: php.template.smarty_escape_html_off example
+    code: |
+      <?php
+      use smarty;
+      use smarty;
+      function example($input, $url, $id, $payload, $request) {
+        $smarty->escape_html = false;;
+      }
+  description: $smarty->escape_html = false — disables HTML autoescape on output.
+
+- id: php.template.twig_environment_array_loader
+  enabled: true
+  language: php
+  tag: ssti
+  severity: critical
+  packages:
+  - twig/twig
+  imports:
+  - twig\twig
+  - twig
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      attribute:
+      - Twig
+      - Loader
+      - ArrayLoader
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: twig array loader tainted template
+    code: |
+      <?php
+      use twig\twig;
+      function example($input) {
+        new Twig\Loader\ArrayLoader(['index' => $input]);
+      }
+    expect_match_text: ["Twig\\Loader\\ArrayLoader"]
+  - name: twig array loader literal negative
+    code: |
+      <?php
+      use twig\twig;
+      function example() {
+        new Twig\Loader\ArrayLoader(['index' => 'Hello {{ name }}']);
+      }
+    expect_no_match: true
+  description: "new Twig\\Loader\\ArrayLoader([name => tainted_source]) — registers attacker-controlled template source; downstream Environment::render(name) compiles and executes it as Twig."
+
+- id: php.template.latte_render_to_string
+  enabled: true
+  language: php
+  tag: ssti
+  severity: high
+  packages:
+  - latte/latte
+  imports:
+  - latte
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Engine
+      - renderToString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: latte renderToString tainted
+    code: |
+      <?php
+      use latte\latte;
+      function example($input) {
+        Engine::renderToString($input);
+      }
+    expect_match_text: ["Engine::renderToString"]
+  - name: latte renderToString literal negative
+    code: |
+      <?php
+      use latte\latte;
+      function example() {
+        Engine::renderToString("account.latte");
+      }
+    expect_no_match: true
+  description: "Latte Engine::renderToString(tainted) — same SSTI exposure as ::render with the result returned as a string instead of streamed."

@@ -1,0 +1,13 @@
+[package]
+name = "bonsai_hash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FNV-1a-64 stable content hashing for bonsai-ninja IDs."
+
+[dependencies]
+
+[lints]
+workspace = true

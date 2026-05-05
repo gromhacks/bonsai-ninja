@@ -1,0 +1,106 @@
+name: Hardening checks
+
+# Audit gates that lock in structural and documentation invariants.
+# See `docs/contributing/` for the current architecture and design docs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  layering:
+    name: Layering DAG audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run layering audit
+        run: bash scripts/audit-layering.sh
+
+  hardcoded:
+    name: Hardcoded-knowledge audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run hardcoded audit
+        run: |
+          bash scripts/audit-hardcoded.sh /tmp/hardcoded-audit
+          # Advisory: surface the report as a job summary; do not
+          # fail PRs (the audit is informational until per-cell
+          # baseline tracking lands).
+          {
+            echo "## Hardcoded-knowledge audit"
+            echo ""
+            echo '```'
+            for f in /tmp/hardcoded-audit/*.txt; do
+              [[ -f "$f" ]] || continue
+              echo "=== $(basename "$f" .txt) ==="
+              wc -l "$f"
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  capabilities:
+    name: Adapter capability matrix drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify capability matrix
+        run: bash scripts/audit-adapter-capabilities.sh --check
+
+  coverage-baseline:
+    name: Coverage baseline drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify per-language LanguageCapabilities snapshot
+        run: cargo test -p bonsai_conformance --test coverage_baseline
+
+  flow-event-coverage:
+    name: Adapter FlowEvent emission drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify FlowEvent emission snapshot
+        run: bash scripts/audit-adapter-flow-events.sh --check
+
+  taint-coverage-matrix:
+    name: Taint coverage matrix drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify rendered matrix doc
+        run: cargo test -p bonsai_taint --test matrix_coverage_report
+
+  engine-purity:
+    name: Engine purity invariant
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Pin empty-default InterTaintConfig
+        run: cargo test -p bonsai_taint --test engine_purity
+
+  public-api:
+    name: Public API surface drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify public API snapshot
+        run: bash scripts/audit-public-api.sh --check
+
+  golden-sarif:
+    name: Golden SARIF fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Run golden SARIF tests
+        run: cargo test -p bonsai_security --test golden_sarif

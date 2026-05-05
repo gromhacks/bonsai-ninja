@@ -1,0 +1,65 @@
+- id: rust.graphql.juniper_execute
+  enabled: true
+  language: rust
+  tag: graphql-injection
+  severity: high
+  packages: [juniper]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [juniper, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted juniper query
+    code: |
+      use juniper::dummy;
+      fn example(query: &str) {
+          juniper::execute(query);
+      }
+  - name: literal juniper query negative
+    code: |
+      use juniper::dummy;
+      fn example() {
+          juniper::execute("{ viewer { id } }");
+      }
+    expect_no_match: true
+  description: "juniper::execute(query, ...) — dynamic GraphQL document reaches resolver execution."
+
+- id: rust.graphql.async_graphql_schema_execute
+  enabled: true
+  language: rust
+  tag: graphql-injection
+  severity: high
+  packages: [async_graphql]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted async graphql request
+    code: |
+      use async_graphql;
+      use async_graphql;
+      use async_graphql::dummy;
+      fn example(schema: Schema, query: String) {
+          schema.execute(query);
+      }
+  - name: literal async graphql request negative
+    code: |
+      use async_graphql;
+      use async_graphql;
+      use async_graphql::dummy;
+      fn example(schema: Schema) {
+          schema.execute("{ viewer { id } }");
+      }
+    expect_no_match: true
+  description: "async-graphql Schema::execute(request/query) — request-provided GraphQL operation and variables enter resolver execution."
+  imports:
+  - async_graphql

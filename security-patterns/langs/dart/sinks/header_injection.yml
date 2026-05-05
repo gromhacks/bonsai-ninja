@@ -1,0 +1,92 @@
+# Dart response header / CRLF injection.
+- id: dart.header.shelf_response_change_headers
+  enabled: true
+  language: dart
+  tag: header-injection
+  severity: high
+  packages: [shelf]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, change]
+  constraints:
+  - arg_tainted:
+      kw: headers
+  match_examples:
+  - name: tainted shelf headers
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test(Map<String, String> input) { Response.change(headers: input); }
+  - name: literal shelf headers negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { Response.change(headers: {"X-Trace": "safe"}); }
+    expect_no_match: true
+  description: "shelf Response.change(headers: {…tainted…})."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.header.httpheaders_set
+  enabled: true
+  language: dart
+  tag: header-injection
+  severity: high
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [headers, set]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted header value
+    code: |
+      void test(String input) { headers.set("X-Trace", input); }
+  - name: literal header value negative
+    code: |
+      void test(String input) { headers.set(input, "safe"); }
+    expect_no_match: true
+  description: "HttpHeaders.set(name, tainted) — dart:io request/response headers."
+
+- id: dart.header.httpheaders_add
+  enabled: true
+  language: dart
+  tag: header-injection
+  severity: high
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [headers, add]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted added header value
+    code: |
+      void test(String input) { headers.add("X-Trace", input); }
+  - name: literal added header value negative
+    code: |
+      void test(String input) { headers.add(input, "safe"); }
+    expect_no_match: true
+  description: "HttpHeaders.add."
+
+- id: dart.header.httpclient_request_set_header
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: dart
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [request, headers]
+  description: "Disabled — `.headers` is a getter not a call; actual CRLF sink is covered by dart.header.httpheaders_set / httpheaders_add."

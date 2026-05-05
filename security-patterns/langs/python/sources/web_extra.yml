@@ -1,0 +1,1361 @@
+# Additional web-framework remote sources that complement
+# remote.yml. These all use attribute-chain receivers (or call
+# attribute chains) so they avoid bare-name false positives.
+
+# ---------------------------------------------------------------------------
+# Flask
+# ---------------------------------------------------------------------------
+
+- id: python.flask.request_get_json
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [flask, google-cloud-functions]
+  packages: [flask, functions_framework]
+  match:
+    kind: call
+    callee:
+      attribute: [request, get_json]
+  constraints:
+  - max_args: 3
+  match_examples:
+  - name: flask request get json
+    code: |
+      import flask
+      def example(user_input):
+          return request.get_json(user_input)
+    expect_match_text: [request.get_json]
+  - name: google cloud functions flask request json
+    code: |
+      import flask
+      def gcf_handler(request):
+          return request.get_json(silent=True)
+    expect_match_text: [request.get_json]
+  description: "Flask / Google Cloud Functions request.get_json() — JSON request body parsed from a remote client. Signature `get_json(force=False, silent=False, cache=True)`; `max_args: 3` rejects unrelated overloads."
+
+- id: python.flask.request_get_data
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [flask]
+  packages: [flask]
+  match:
+    kind: call
+    callee:
+      attribute: [request, get_data]
+  constraints:
+  - max_args: 3
+  match_examples:
+  - name: flask request get data
+    code: |
+      import flask
+      def example(user_input):
+          return request.get_data(user_input)
+  description: "Flask request.get_data() — raw request body bytes. Signature `get_data(cache=True, as_text=False, parse_form_data=False)`; `max_args: 3` rejects unrelated overloads."
+
+- id: python.web.request_headers_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [aiohttp, bottle, fastapi, flask, pyramid, sanic, starlette, tornado]
+  packages: [aiohttp, bottle, fastapi, flask, pyramid, sanic, starlette, tornado]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: request headers get
+    code: |
+      import aiohttp
+      def example(name):
+          return request.headers.get(name)
+    expect_match_text: [request.headers.get]
+  description: "request.headers.get(name), including Tornado's self.request.headers.get suffix fact — attacker-controlled HTTP request header value."
+
+- id: python.web.request_cookies_get
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [aiohttp, fastapi, flask, starlette]
+  packages: [aiohttp, fastapi, flask, starlette]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.cookies\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  description: "Disabled duplicate — current matching also emits `request.cookies`; python.pyramid.request_cookies carries the merged web cookie metadata for this adapter fact."
+
+- id: python.flask.request_files_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [file, multipart]
+  frameworks: [flask, sanic]
+  packages: [flask, sanic]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.files\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: flask request files get
+    code: |
+      import flask
+      def example(name):
+          return request.files.get(name)
+    expect_match_text: [request.files.get]
+  description: "Flask/Sanic request.files.get(name) — multipart upload part controlled by the client."
+
+# ---------------------------------------------------------------------------
+# aiohttp
+# ---------------------------------------------------------------------------
+
+- id: python.aiohttp.request_query_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [aiohttp, falcon]
+  packages: [aiohttp, falcon]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: aiohttp request query get
+    code: |
+      import aiohttp
+      async def example(name):
+          return request.query.get(name)
+    expect_match_text: [request.query.get]
+  description: "Disabled duplicate — current matching also emits `request.query` for `.get(...)`; python.aiohttp.request_query covers the same query source."
+
+- id: python.aiohttp.request_json
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [aiohttp, fastapi, starlette]
+  packages: [aiohttp, fastapi, starlette]
+  match:
+    kind: call
+    callee:
+      attribute: [request, json]
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: aiohttp request json
+    code: |
+      import aiohttp
+      def example(user_input):
+          return request.json(user_input)
+  description: "aiohttp/FastAPI/Starlette await request.json() — parsed JSON body. Signature accepts 0 or 1 args across frameworks; `max_args: 1` rejects unrelated overloads."
+
+- id: python.aiohttp.request_text
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [aiohttp]
+  packages: [aiohttp]
+  match:
+    kind: call
+    callee:
+      attribute: [request, text]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: aiohttp request text
+    code: |
+      import aiohttp
+      def example(user_input):
+          return request.text()
+  description: "aiohttp await request.text() — full request body decoded as text. `text()` takes 0 args; `max_args: 0` rejects unrelated overloads."
+
+- id: python.aiohttp.request_post
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [form, multipart]
+  frameworks: [aiohttp]
+  packages: [aiohttp]
+  match:
+    kind: call
+    callee:
+      attribute: [request, post]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: aiohttp request post
+    code: |
+      import aiohttp
+      def example(user_input):
+          return request.post()
+  description: "aiohttp await request.post() — URL-encoded / multipart form body. `post()` takes 0 args (it's the body accessor, not the HTTP-client `.post(url, ...)`); `max_args: 0` filters HTTP-client `request.post(url)` decoys that share the verb."
+
+- id: python.aiohttp.bounded_stream_read
+  enabled: true
+  language: python
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [aiohttp, falcon]
+  packages: [aiohttp, falcon]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.bounded_stream\\.read$"
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: aiohttp bounded stream read
+    code: |
+      import aiohttp
+      async def example(size):
+          return await request.bounded_stream.read(size)
+    expect_match_text: [request.bounded_stream.read]
+  - name: falcon bounded stream read
+    code: |
+      import falcon
+      def example(size):
+          return req.bounded_stream.read(size)
+    expect_match_text: [req.bounded_stream.read]
+  description: "aiohttp/Falcon bounded_stream.read(...) - raw request-body bytes read from the client stream. Both `request.` (aiohttp) and `req.` (falcon convention) prefixes accepted; per-file package gate keeps the regex scoped to those frameworks."
+
+- id: python.aiohttp.request_content_iter_chunked
+  enabled: true
+  language: python
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [aiohttp]
+  packages: [aiohttp]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.content\\.iter_chunked$"
+  match_examples:
+  - name: aiohttp content iter_chunked
+    code: |
+      import aiohttp
+      async def example():
+          async for chunk in request.content.iter_chunked(1024):
+              yield chunk
+    expect_match_text: [request.content.iter_chunked]
+  description: "aiohttp `request.content.iter_chunked(N)` — chunked async-iterator over raw client body bytes. The yielded chunk is attacker-controlled. (G2)"
+
+- id: python.starlette.request_stream
+  enabled: true
+  language: python
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [starlette, fastapi]
+  packages: [starlette, fastapi]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.stream$"
+  match_examples:
+  - name: starlette request stream
+    code: |
+      from starlette.requests import Request
+      async def example(request: Request):
+          async for chunk in request.stream():
+              yield chunk
+    expect_match_text: [request.stream]
+  description: "Starlette / FastAPI `request.stream()` — async iterator over the raw request-body bytes. Each chunk is attacker-controlled. (G2)"
+
+- id: python.aiohttp.request_match_info
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [aiohttp]
+  packages: [aiohttp]
+  match:
+    kind: read
+    target:
+      attribute: [request, match_info]
+  match_examples:
+  - name: aiohttp request match info
+    code: |
+      import aiohttp
+      def example():
+          value = request.match_info
+          return value
+  description: aiohttp request.match_info — URL path params bound by the router.
+
+# ---------------------------------------------------------------------------
+# Sanic
+# ---------------------------------------------------------------------------
+
+- id: python.sanic.request_json
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [sanic]
+  packages: [sanic]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.json$"
+  match_examples:
+  - name: sanic request json
+    code: |
+      import sanic
+      async def example():
+          value = request.json
+          return value
+    expect_match_text: [request.json]
+  description: "Sanic request.json - parsed JSON body supplied by the remote client."
+
+- id: python.sanic.websocket_recv
+  enabled: true
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [text, binary]
+  frameworks: [sanic]
+  packages: [sanic]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.recv$"
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: sanic websocket recv
+    code: |
+      import sanic
+      async def example(ws):
+          return await ws.recv()
+    expect_match_text: [ws.recv]
+  description: "Sanic await ws.recv() - WebSocket frame received from a remote peer."
+
+- id: python.aiohttp.websocket_receive_str
+  enabled: true
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [text]
+  frameworks: [aiohttp]
+  packages: [aiohttp]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.receive_str$"
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: aiohttp websocket receive_str
+    code: |
+      import aiohttp
+      async def example(ws):
+          return await ws.receive_str()
+    expect_match_text: [ws.receive_str]
+  description: "aiohttp WebSocketResponse.receive_str() — text frame received from a remote peer."
+
+- id: python.quart.websocket_receive
+  enabled: true
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [text, json]
+  frameworks: [quart]
+  packages: [quart]
+  match:
+    kind: call
+    callee:
+      attribute: [websocket, receive]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: quart websocket receive
+    code: |
+      import quart
+      async def example(websocket):
+          return await websocket.receive()
+    expect_match_text: [websocket.receive]
+  description: "Quart websocket.receive() — Quart's WebSocket message-receive coroutine; payload originates from the remote peer."
+
+# ---------------------------------------------------------------------------
+# Pyramid
+# ---------------------------------------------------------------------------
+
+- id: python.pyramid.request_params
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query, form]
+  frameworks: [pyramid, bottle]
+  packages: [pyramid, bottle]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.params$"
+  match_examples:
+  - name: pyramid request params
+    code: |
+      import pyramid
+      def example():
+          value = request.params
+          return value
+    expect_match_text: [request.params]
+  description: "Pyramid request.params - combined request parameters supplied by the remote client."
+
+- id: python.pyramid.request_json_body
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [pyramid]
+  packages: [pyramid]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.json_body$"
+  match_examples:
+  - name: pyramid request json body
+    code: |
+      import pyramid
+      def example():
+          value = request.json_body
+          return value
+    expect_match_text: [request.json_body]
+  description: "Pyramid request.json_body - parsed JSON request body."
+
+- id: python.pyramid.request_cookies
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [pyramid, aiohttp, fastapi, flask, sanic, starlette]
+  packages: [pyramid, aiohttp, fastapi, flask, sanic, starlette]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.cookies$"
+  match_examples:
+  - name: pyramid request cookies
+    code: |
+      import pyramid
+      def example():
+          value = request.cookies
+          return value
+    expect_match_text: [request.cookies]
+  description: "Pyramid/aiohttp/FastAPI/Flask/Sanic/Starlette request.cookies - attacker-controlled cookie mapping."
+
+- id: python.pyramid.request_matchdict
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [pyramid]
+  packages: [pyramid]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.matchdict$"
+  match_examples:
+  - name: pyramid request matchdict
+    code: |
+      import pyramid
+      def example():
+          value = request.matchdict
+          return value
+    expect_match_text: [request.matchdict]
+  description: "Pyramid request.matchdict - route path variables supplied by the remote client."
+
+- id: python.pyramid.request_body
+  enabled: true
+  language: python
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [pyramid, bottle]
+  packages: [pyramid, bottle]
+  match:
+    kind: read
+    target:
+      regex: "^(request|req|self_request|http_request)\\.body$"
+  match_examples:
+  - name: pyramid request body
+    code: |
+      import pyramid
+      def example():
+          value = request.body
+          return value
+    expect_match_text: [request.body]
+  description: "Pyramid/Bottle request.body - raw request body bytes. Same adapter fact is canonicalized here to avoid duplicate body-read sources."
+
+# ---------------------------------------------------------------------------
+# Falcon
+# ---------------------------------------------------------------------------
+
+- id: python.falcon.bounded_stream_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [falcon]
+  packages: [falcon]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.bounded_stream\\.read$"
+  constraints:
+  - max_args: 1
+  description: "Disabled duplicate — same `bounded_stream.read(...)` adapter fact as python.aiohttp.bounded_stream_read; package metadata is merged there."
+
+- id: python.falcon.get_param
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [falcon]
+  packages: [falcon]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.get_param$"
+  constraints:
+  - min_args: 1
+  - max_args: 4
+  match_examples:
+  - name: falcon get param
+    code: |
+      import falcon
+      def example(req, name):
+          return req.get_param(name)
+    expect_match_text: [req.get_param]
+  description: "Falcon req.get_param(name, ...) - attacker-controlled query parameter value."
+
+- id: python.falcon.get_param_typed
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [falcon]
+  packages: [falcon]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.get_param_as_(bool|date|datetime|dict|int|list|uuid)$"
+  constraints:
+  - min_args: 1
+  - max_args: 5
+  match_examples:
+  - name: falcon get param as int
+    code: |
+      import falcon
+      def example(req, name):
+          return req.get_param_as_int(name)
+    expect_match_text: [req.get_param_as_int]
+  - name: falcon get param as list
+    code: |
+      import falcon
+      def example(req, name):
+          return req.get_param_as_list(name, transform=str)
+    expect_match_text: [req.get_param_as_list]
+  description: "Falcon typed query helpers req.get_param_as_* return attacker-controlled query values after type coercion."
+
+- id: python.falcon.get_header
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [falcon]
+  packages: [falcon]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.get_header$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: falcon get header
+    code: |
+      import falcon
+      def example(req):
+          return req.get_header("X-Forwarded-Host")
+    expect_match_text: [req.get_header]
+  description: "Falcon req.get_header(name) - attacker-controlled HTTP request header value."
+
+- id: python.falcon.media
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json, form, multipart]
+  frameworks: [falcon]
+  packages: [falcon]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.media$"
+  match_examples:
+  - name: falcon request media
+    code: |
+      import falcon
+      def example(req):
+          value = req.media
+          return value
+    expect_match_text: [req.media]
+  description: "Falcon req.media - parsed request media supplied by the remote client."
+
+# ---------------------------------------------------------------------------
+# Bottle
+# ---------------------------------------------------------------------------
+
+- id: python.bottle.request_body_read
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.pyramid.request_body
+    reenable_when: "Reading `request.body` is a kind:read source on its own; the .read(size) tail flows through normally via taint propagation. The pyramid rule now lists Bottle in frameworks/packages and covers this idiom."
+  language: python
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [binary]
+  frameworks: [bottle]
+  packages: [bottle]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.body\\.read$"
+  constraints:
+  - max_args: 1
+  description: "Disabled — pyramid.request_body covers Bottle via merged frameworks/packages. The .read() tail propagates through taint without needing a separate kind:call source."
+
+- id: python.bottle.request_query
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [bottle]
+  packages: [bottle]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query$"
+  description: "Disabled duplicate — same `request.query` adapter fact as python.aiohttp.request_query; package metadata is merged there."
+
+# ---------------------------------------------------------------------------
+# FastAPI / Starlette
+# ---------------------------------------------------------------------------
+
+- id: python.starlette.request_query_params_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [fastapi, starlette, django-rest-framework]
+  packages: [fastapi, starlette, djangorestframework]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query_params\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: starlette request query params get
+    code: |
+      import fastapi
+      async def example(name):
+          return request.query_params.get(name)
+    expect_match_text: [request.query_params.get]
+  description: "Disabled duplicate — current matching also emits `request.query_params` for `.get(...)`; python.fastapi.request_query_params covers the same FastAPI/Starlette/DRF query source."
+
+- id: python.starlette.request_path_params_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [fastapi, starlette]
+  packages: [fastapi, starlette]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.path_params\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: starlette request path params get
+    code: |
+      import fastapi
+      async def example(name):
+          return request.path_params.get(name)
+    expect_match_text: [request.path_params.get]
+  description: "Disabled duplicate — current matching also emits `request.path_params` for `.get(...)`; python.fastapi.request_path covers the same FastAPI/Starlette path source."
+
+- id: python.starlette.request_url
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [url, path, query]
+  frameworks: [fastapi, starlette]
+  packages: [fastapi, starlette]
+  match:
+    kind: read
+    target:
+      attribute: [request, url]
+  match_examples:
+  - name: starlette request url
+    code: |
+      import fastapi
+      def example():
+          value = request.url
+          return value
+    expect_match_text: [request.url]
+  description: "FastAPI/Starlette request.url — full client-requested URL, including path and query string."
+
+- id: python.starlette.websocket_receive_text
+  enabled: true
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [text]
+  frameworks: [fastapi, starlette]
+  packages: [fastapi, starlette]
+  match:
+    kind: call
+    callee:
+      attribute: [websocket, receive_text]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: starlette websocket receive text
+    code: |
+      import fastapi
+      async def example(websocket):
+          return await websocket.receive_text()
+    expect_match_text: [websocket.receive_text]
+  description: "FastAPI/Starlette WebSocket.receive_text() — text frame received from a remote peer."
+
+- id: python.starlette.websocket_receive_json
+  enabled: true
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [json]
+  frameworks: [fastapi, starlette]
+  packages: [fastapi, starlette]
+  match:
+    kind: call
+    callee:
+      attribute: [websocket, receive_json]
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: starlette websocket receive json
+    code: |
+      import fastapi
+      async def example(websocket):
+          return await websocket.receive_json()
+    expect_match_text: [websocket.receive_json]
+  description: "FastAPI/Starlette WebSocket.receive_json() — JSON message received from a remote peer."
+
+- id: python.starlette.websocket_receive_bytes
+  enabled: true
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [binary]
+  frameworks: [fastapi, starlette]
+  packages: [fastapi, starlette]
+  match:
+    kind: call
+    callee:
+      attribute: [websocket, receive_bytes]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: starlette websocket receive bytes
+    code: |
+      import fastapi
+      async def example(websocket):
+          return await websocket.receive_bytes()
+    expect_match_text: [websocket.receive_bytes]
+  description: "FastAPI/Starlette WebSocket.receive_bytes() — binary frame received from a remote peer."
+
+# ---------------------------------------------------------------------------
+# Django Channels (WebSocket / ASGI consumers)
+# ---------------------------------------------------------------------------
+
+- id: python.channels.consumer_receive_text_data
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [text, json]
+  frameworks: [channels, django-channels]
+  packages: [channels]
+  match:
+    kind: param
+    target:
+      name: text_data
+  description: "Disabled — Django Channels AsyncJsonWebsocketConsumer.receive(text_data=...) parameter; bare name `text_data` may match outside Channels until consumer-class matching exists."
+
+- id: python.channels.scope_read
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [event, header]
+  frameworks: [channels, django-channels]
+  packages: [channels]
+  match:
+    kind: read
+    target:
+      attribute: [self, scope]
+  description: "Disabled — Channels consumer self.scope (headers/path/query); enable per-project once consumer-class type discrimination is available."
+
+# ---------------------------------------------------------------------------
+# Django REST Framework
+# ---------------------------------------------------------------------------
+
+- id: python.drf.serializer_validated_data
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json, form]
+  frameworks: [django-rest-framework]
+  packages: [djangorestframework]
+  match:
+    kind: read
+    target:
+      attribute: [serializer, validated_data]
+  match_examples:
+  - name: drf serializer validated data
+    code: |
+      import djangorestframework
+      def example():
+          value = serializer.validated_data
+          return value
+  description: DRF serializer.validated_data — request payload after schema validation; still attacker-shaped data, only field-typed.
+
+- id: python.drf.request_data
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [json, form]
+  frameworks: [django-rest-framework]
+  packages: [djangorestframework]
+  match:
+    kind: read
+    target:
+      attribute: [request, data]
+  match_examples:
+  - name: drf request data
+    code: |
+      import djangorestframework
+      def example():
+          value = request.data
+          return value
+  description: DRF request.data — parsed request body (JSON / form / multipart).
+
+- id: python.graphene_context_get
+  enabled: true
+  language: python
+  trust: remote
+  tag: graphql-input
+  payload_types: [query]
+  frameworks: [graphene, django-graphene]
+  packages: [graphene, graphene_django]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.GET$"
+  match_examples:
+  - name: graphene context GET
+    code: |
+      import graphene
+      def resolve_user(root, info):
+          return info.context.GET
+    expect_match_text: [info.context.GET]
+  description: "Graphene resolver info.context.GET - underlying Django request query parameters."
+
+- id: python.graphene_context_post
+  enabled: true
+  language: python
+  trust: remote
+  tag: graphql-input
+  payload_types: [form]
+  frameworks: [graphene, django-graphene]
+  packages: [graphene, graphene_django]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.POST$"
+  match_examples:
+  - name: graphene context POST
+    code: |
+      import graphene
+      def resolve_user(root, info):
+          return info.context.POST
+    expect_match_text: [info.context.POST]
+  description: "Graphene resolver info.context.POST - underlying Django request form parameters."
+
+- id: python.django.request_get_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.GET\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: django request get get
+    code: |
+      import django
+      def example(name):
+          return request.GET.get(name)
+    expect_match_text: [request.GET.get]
+  description: "Disabled duplicate — current matching also emits `request.GET` for `.get(...)`; python.django.request_get covers the same query source."
+
+- id: python.django.request_post_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.POST\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: django request post get
+    code: |
+      import django
+      def example(name):
+          return request.POST.get(name)
+    expect_match_text: [request.POST.get]
+  description: "Disabled duplicate — current matching also emits `request.POST` for `.get(...)`; python.django.request_post covers the same form source."
+
+- id: python.django.request_cookies_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.COOKIES\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: django request cookies get
+    code: |
+      import django
+      def example(name):
+          return request.COOKIES.get(name)
+    expect_match_text: [request.COOKIES.get]
+  description: "Disabled duplicate — current matching also emits `request.COOKIES` for `.get(...)`; python.django.request_cookies covers the same cookie source."
+
+- id: python.django.request_meta_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.META\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: django request meta get
+    code: |
+      import django
+      def example(name):
+          return request.META.get(name)
+    expect_match_text: [request.META.get]
+  description: "Disabled duplicate — current matching also emits `request.META` for `.get(...)`; python.django.request_meta covers the same metadata/header source."
+
+- id: python.django.request_files_get
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [file, multipart]
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.FILES\\.get$"
+  constraints:
+  - min_args: 1
+  - max_args: 2
+  match_examples:
+  - name: django request files get
+    code: |
+      import django
+      def example(name):
+          return request.FILES.get(name)
+    expect_match_text: [request.FILES.get]
+  description: "Disabled duplicate — current matching also emits `request.FILES` for `.get(...)`; python.django.request_files covers the same uploaded-file source."
+
+- id: python.drf.request_query_params
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.fastapi.request_query_params
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [django-rest-framework]
+  packages: [djangorestframework]
+  match:
+    kind: read
+    target:
+      attribute: [request, query_params]
+  description: "Disabled duplicate - covered by python.fastapi.request_query_params / python.starlette.request_query_params_get, whose metadata includes DRF."
+
+- id: python.fastapi.body_param_marker
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [fastapi]
+  packages: [fastapi, pydantic]
+  cwe: [CWE-20]
+  match:
+    kind: param
+    target:
+      annotation: Body
+  match_examples:
+  - name: fastapi body marker
+    code: |
+      from fastapi import Body, FastAPI
+      app = FastAPI()
+      def handler(payload: dict = Body(...)):
+          return payload
+    expect_match_text: [payload]
+  description: "FastAPI `Body(...)` parameter binder — request-body envelope. Per the python adapter's binder-marker support, the annotation `Body` is recorded only when the parameter's default-value is a `Body(...)` call, so this rule no longer over-fires on unrelated `Body` constructors (G1, R7)."
+
+- id: python.fastapi.query_param_marker
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [fastapi]
+  packages: [fastapi, pydantic]
+  cwe: [CWE-20]
+  match:
+    kind: param
+    target:
+      annotation: Query
+  match_examples:
+  - name: fastapi query marker
+    code: |
+      from fastapi import Query, FastAPI
+      app = FastAPI()
+      def handler(q: str = Query(...)):
+          return q
+    expect_match_text: [q]
+  description: "FastAPI `Query(...)` parameter binder — URL query value. Annotation-based match via the python adapter's binder-marker support; only fires when the parameter's default-value is a `Query(...)` call (G1, R7)."
+
+- id: python.tornado.websocket_on_message_param
+  enabled: true
+  language: python
+  trust: remote
+  category: ws-input
+  tag: ws-input
+  payload_types: [text, binary]
+  frameworks: [tornado]
+  packages: [tornado]
+  match:
+    kind: param
+    target:
+      name: message
+      in_method: [on_message]
+  match_examples:
+  - name: tornado websocket on_message
+    code: |
+      from tornado.websocket import WebSocketHandler
+      class Echo(WebSocketHandler):
+          def on_message(self, message):
+              return message
+    expect_match_text: [message]
+  description: "Tornado WebSocketHandler.on_message(self, message) — remote-supplied WebSocket payload. The `in_method: [on_message]` constraint pins the framework signature so a bare `message` parameter on an unrelated helper does not match. Tighter superclass narrowing (`Decl.bases`) is pending adapter coverage; the `packages: [tornado]` per-file gate keeps over-firing scoped to tornado-importing files."
+
+# ---------------------------------------------------------------------------
+# WebSockets
+# ---------------------------------------------------------------------------
+
+- id: python.websockets_recv
+  enabled: true
+  language: python
+  trust: remote
+  tag: ws-input
+  payload_types: [text, binary]
+  frameworks: [websockets]
+  packages: [websockets]
+  imports: [websockets]
+  match:
+    kind: call
+    callee:
+      attribute: [websocket, recv]
+  match_examples:
+  - name: websockets recv
+    code: |
+      import websockets
+      def example(user_input):
+          return websocket.recv(user_input)
+  description: websockets await websocket.recv() — message received from a remote peer.
+
+# ---------------------------------------------------------------------------
+# Multipart upload filenames
+# ---------------------------------------------------------------------------
+
+- id: python.upload.filename_attr
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [file, multipart, path]
+  frameworks: [fastapi, starlette, flask, aiohttp]
+  packages: [fastapi, starlette, flask, werkzeug, aiohttp]
+  match:
+    kind: read
+    target:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.filename$"
+  match_examples:
+  - name: uploaded file filename
+    code: |
+      import fastapi
+      def example(file):
+          value = file.filename
+          return value
+    expect_match_text: [file.filename]
+  description: "file.filename / upload.filename — client-supplied multipart filename; unsafe for path construction without secure_filename/safe_join."
+
+- id: python.django.uploaded_file_name
+  enabled: true
+  language: python
+  trust: remote
+  tag: http-input
+  payload_types: [file, multipart, path]
+  frameworks: [django]
+  packages: [django]
+  match:
+    kind: read
+    target:
+      attribute: [uploaded_file, name]
+  match_examples:
+  - name: django uploaded file name
+    code: |
+      import django
+      def example(uploaded_file):
+          value = uploaded_file.name
+          return value
+    expect_match_text: [uploaded_file.name]
+  description: "Django UploadedFile.name — client-supplied upload filename; unsafe for filesystem paths without normalization and containment."
+
+# ---------------------------------------------------------------------------
+# GraphQL
+# ---------------------------------------------------------------------------
+
+- id: python.graphql.info_variable_values
+  enabled: true
+  language: python
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql, json]
+  frameworks: [graphene, strawberry, ariadne, graphql-core]
+  packages: [graphene, strawberry, ariadne, graphql]
+  match:
+    kind: read
+    target:
+      attribute: [info, variable_values]
+  match_examples:
+  - name: graphql resolver variable values
+    code: |
+      import graphene
+      def resolve_user(parent, info):
+          value = info.variable_values
+          return value
+    expect_match_text: [info.variable_values]
+  description: "GraphQL resolver info.variable_values — client-supplied operation variables shared by Graphene/Strawberry/Ariadne via graphql-core."
+
+- id: python.graphql.info_context_args
+  enabled: true
+  language: python
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql, json]
+  frameworks: [graphene, strawberry, ariadne, graphql-core]
+  packages: [graphene, strawberry, ariadne, graphql]
+  match:
+    kind: read
+    target:
+      attribute: [info, context, args]
+  match_examples:
+  - name: graphql resolver context args
+    code: |
+      import graphene
+      def resolve_user(parent, info):
+          value = info.context.args
+          return value
+    expect_match_text: [info.context.args]
+  description: "GraphQL resolver info.context.args — framework-provided client argument map exposed through the resolver context."
+
+# ---------------------------------------------------------------------------
+# AWS Lambda — additional API Gateway / event fields
+# ---------------------------------------------------------------------------
+
+- id: python.aws.lambda_event_multivalue_query
+  enabled: true
+  language: python
+  trust: service
+  tag: event-input
+  payload_types: [event, query]
+  frameworks: [aws-lambda]
+  packages: [boto3]
+  match:
+    kind: read
+    target:
+      attribute: [event, multiValueQueryStringParameters]
+  match_examples:
+  - name: aws lambda event multivalue query
+    code: |
+      import boto3
+      def example():
+          value = event.multiValueQueryStringParameters
+          return value
+  description: "AWS Lambda/APIGateway event['multiValueQueryStringParameters'] — repeated query params."
+
+- id: python.aws.lambda_event_request_context
+  enabled: true
+  language: python
+  trust: service
+  tag: event-input
+  payload_types: [event]
+  frameworks: [aws-lambda]
+  packages: [boto3]
+  match:
+    kind: read
+    target:
+      attribute: [event, requestContext]
+  match_examples:
+  - name: aws lambda event request context
+    code: |
+      import boto3
+      def example():
+          value = event.requestContext
+          return value
+  description: "AWS Lambda/APIGateway event['requestContext'] — request context including identity/authorizer claims (attacker-influenced fields)."
+
+# ---------------------------------------------------------------------------
+# Cloud workflow / queue inputs (kept disabled; param-name only would be
+# too broad without decorator/handler-class scoping)
+# ---------------------------------------------------------------------------
+
+# Modal / Prefect param sources removed — both required a bare-regex
+# placeholder (kind: param + target.regex: ".*") that fires on every
+# function parameter in the workspace, not just decorator-scoped
+# handlers. Re-add once the adapter exposes decorator/Servicer
+# scoping for `kind: param` matches.

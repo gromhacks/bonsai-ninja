@@ -1,0 +1,188 @@
+# Rust open-redirect (actix-web / axum / rocket / warp).
+- id: rust.open_redirect.actix_web_response_found
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: open-redirect
+  severity: high
+  packages: [actix_web]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpResponse, Found]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use actix_web;
+      use actix_web;
+      use actix_web::dummy;
+      fn example(target: String) {
+          let query = "user";
+          HttpResponse::Found(target);
+      }
+  description: "Disabled — HttpResponse::Found() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
+
+  imports:
+  - actix_web
+- id: rust.open_redirect.actix_web_response_temporaryredirect
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: open-redirect
+  severity: high
+  packages: [actix_web]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpResponse, TemporaryRedirect]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use actix_web;
+      use actix_web;
+      use actix_web::dummy;
+      fn example(target: String) {
+          let query = "user";
+          HttpResponse::TemporaryRedirect(target);
+      }
+  description: "Disabled — HttpResponse::TemporaryRedirect() only selects a status; the tainted Location value is added by a later header call, so this requires builder-state tracking."
+
+  imports:
+  - actix_web
+- id: rust.open_redirect.axum_redirect_to
+  enabled: true
+  language: rust
+  tag: open-redirect
+  severity: high
+  packages: [axum, rocket]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Redirect, to]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted redirect to target
+    code: |
+      use axum::dummy;
+      fn example(target: String) {
+          Redirect::to(target);
+      }
+  - name: literal redirect to target negative
+    code: |
+      use axum::dummy;
+      fn example() {
+          Redirect::to("/dashboard");
+      }
+    expect_no_match: true
+  description: "Redirect::to(tainted) — covers axum and rocket (same `[Redirect, to]` suffix). Tainted URL = open redirect."
+
+- id: rust.open_redirect.axum_redirect_temporary
+  enabled: true
+  language: rust
+  tag: open-redirect
+  severity: high
+  packages: [axum]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Redirect, temporary]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted temporary redirect target
+    code: |
+      use axum::dummy;
+      fn example(target: String) {
+          Redirect::temporary(target);
+      }
+  - name: literal temporary redirect target negative
+    code: |
+      use axum::dummy;
+      fn example() {
+          Redirect::temporary("/dashboard");
+      }
+    expect_no_match: true
+  description: "axum Redirect::temporary(tainted) — 307 redirect to attacker URL."
+- id: rust.open_redirect.axum_redirect_permanent
+  enabled: true
+  language: rust
+  tag: open-redirect
+  severity: high
+  packages: [axum]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Redirect, permanent]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted permanent redirect target
+    code: |
+      use axum::dummy;
+      fn example(target: String) {
+          Redirect::permanent(target);
+      }
+  - name: literal permanent redirect target negative
+    code: |
+      use axum::dummy;
+      fn example() {
+          Redirect::permanent("/dashboard");
+      }
+    expect_no_match: true
+  description: "axum Redirect::permanent(tainted) — 308 redirect to attacker URL."
+
+- id: rust.open_redirect.rocket_redirect_to
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: open-redirect
+  severity: high
+  packages: [rocket]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Redirect, to]
+  description: "Disabled — merged into rust.open_redirect.axum_redirect_to (same `[Redirect, to]` suffix covers both crates)."
+
+- id: rust.open_redirect.warp_redirect
+  enabled: true
+  language: rust
+  tag: open-redirect
+  severity: high
+  packages: [warp]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [redirect, found]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted warp redirect target
+    code: |
+      use warp::dummy;
+      fn example(target: String) {
+          redirect::found(target);
+      }
+  - name: literal warp redirect target negative
+    code: |
+      use warp::dummy;
+      fn example() {
+          redirect::found("/dashboard");
+      }
+    expect_no_match: true
+  description: "warp redirect::found(tainted) — 302 redirect to tainted URI; classic open-redirect sink."

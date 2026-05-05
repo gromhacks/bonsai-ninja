@@ -1,0 +1,24 @@
+# scala oauth sinks.
+
+# OAuth misconfig sinks (round 2 fill).
+- id: scala.oauth.spring_oauth2_state_disabled
+  enabled: true
+  language: scala
+  tag: oauth
+  severity: high
+  packages: [org.springframework.security.oauth2]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [OAuth2AuthorizationRequest, additionalParameters]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.oauth2._
+      object App {
+        def handle(input: String): Unit = {
+          OAuth2AuthorizationRequest.additionalParameters(input)
+        }
+      }
+  description: 'Spring OAuth2AuthorizationRequest (Scala).'

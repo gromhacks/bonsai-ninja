@@ -1,0 +1,218 @@
+# Lua SQL-injection sinks (LuaSQL / lua-resty-{mysql,postgres} / cqueues / LuaDBI).
+- id: lua.sqli.luasql_execute
+  enabled: true
+  language: lua
+  tag: sql-injection
+  severity: critical
+  packages: [luasql, luasql-mysql, luasql-postgres, luasql-sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^(conn|cur|cursor|stmt|db|env|database|connection|sql)[.:]execute$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.sqli.luasql_execute example dot form
+    code: |
+      local _luasql = require("luasql")
+      function example(input, url, id, payload, request, params, user)
+        conn.execute("SELECT * FROM users WHERE id = " .. id)
+      end
+  - name: lua.sqli.luasql_execute example colon form
+    code: |
+      local _luasql = require("luasql")
+      function example(conn, name)
+        conn:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
+      end
+    expect_match_text: ['conn:execute']
+  - name: literal sql negative
+    code: |
+      local _luasql = require("luasql")
+      function example(conn)
+        conn:execute("SELECT 1")
+      end
+    expect_no_match: true
+  description: "LuaSQL conn:execute(sql) / conn.execute(sql) — driver runs concatenated SQL; bind via ? placeholders + cursor. Receiver alternation (conn/cur/cursor/stmt/db/env/database/connection/sql) covers the documented LuaSQL convention without colliding with stdlib `os.execute(cmd)`. Both `.` and `:` call shapes are matched."
+
+- id: lua.sqli.luasql_execute_db
+  enabled: true
+  language: lua
+  tag: sql-injection
+  severity: critical
+  packages: [luasql, luadbi]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]execute$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.sqli.luasql_execute_db example
+    code: |
+      local _luasql = require("luasql")
+      function example(input, url, id, payload, request, params, user)
+        db.execute("SELECT * FROM users WHERE id = " .. id)
+      end
+  - name: literal sql negative
+    code: |
+      local _luasql = require("luasql")
+      function example(input, url, id, payload, request, params, user)
+        db.execute("SELECT 1")
+      end
+    expect_no_match: true
+  description: "LuaSQL/LuaDBI db:execute(sql) — driver runs concatenated SQL."
+
+- id: lua.sqli.luaresty_mysql_query
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: lua.sqli.luaresty_postgres_query
+  language: lua
+  tag: sql-injection
+  severity: critical
+  frameworks: [openresty]
+  packages: [lua-resty-mysql]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]query$
+  description: "Subsumed by lua.sqli.luaresty_postgres_query — same regex; merged into the canonical lua-resty SQL query rule."
+
+- id: lua.sqli.luaresty_postgres_query
+  enabled: true
+  language: lua
+  tag: sql-injection
+  severity: critical
+  packages: [lua-resty-postgres, lua-resty-mysql, pgmoon]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]query$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.sqli.luaresty_postgres_query example
+    code: |
+      local _lua_resty_postgres = require("lua-resty-postgres")
+      function example(input, url, id, payload, request, params, user)
+        postgres.query("SELECT * FROM users WHERE id = " .. id)
+      end
+  - name: literal sql negative
+    code: |
+      local _lua_resty_postgres = require("lua-resty-postgres")
+      function example(input, url, id, payload, request, params, user)
+        postgres.query("SELECT 1")
+      end
+    expect_no_match: true
+  description: "lua-resty-postgres / pgmoon db:query(sql) — no parameter binding; interpolated SQL is injectable."
+
+- id: lua.sqli.pgmoon_query
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: lua.sqli.luaresty_postgres_query
+  language: lua
+  tag: sql-injection
+  severity: critical
+  packages: [pgmoon]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]query$
+  description: "Subsumed by lua.sqli.luaresty_postgres_query — pgmoon already in canonical rule's packages."
+
+- id: lua.sqli.cqueues_sqlite3_exec
+  enabled: true
+  language: lua
+  tag: sql-injection
+  severity: critical
+  packages: [cqueues, lsqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]exec$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.sqli.cqueues_sqlite3_exec example
+    code: |
+      local _cqueues = require("cqueues")
+      function example(input, url, id, payload, request, params, user)
+        db.exec("SELECT * FROM users WHERE id = " .. id)
+      end
+  - name: literal sql negative
+    code: |
+      local _cqueues = require("cqueues")
+      function example(input, url, id, payload, request, params, user)
+        db.exec("SELECT 1")
+      end
+    expect_no_match: true
+  description: "lsqlite3/cqueues db:exec(sql) — executes multi-statement SQL without binding."
+
+- id: lua.sqli.luadbi_prepare
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: lua
+  tag: sql-injection
+  severity: medium
+  packages: [luadbi]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [dbh, prepare]
+  description: "Disabled — LuaDBI dbh:prepare is safe when placeholders are used; only dangerous if SQL is concatenated."
+# Generic Lua method-call SQL-injection sink. Lua's metatable DB
+# clients all converge on `<conn>:execute(sql)`, but the receiver
+# can be `conn`, `db`, `cur`, `cx`, ... A package-anchored rule
+# misses bare receivers; this catches the call shape via name-only
+# match + a SQL-keyword + concat constraint.
+- id: lua.sqli.method_execute_concat
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: lua
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: execute
+  match_examples:
+  - name: lua.sqli.method_execute_concat example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        execute("SELECT " .. user)
+      end
+  description: "Disabled duplicate/overbroad variant — receiver-specific LuaSQL/LuaDBI execute rules cover shipped examples; bare name `execute` collides across unrelated Lua APIs."
+
+# LuaDBI-specific complement. `dbh:execute` carries the same shape but
+# with LuaDBI's `dbh` receiver convention; named-package gate for the
+# LuaDBI ecosystem (statement-prepare-then-execute or direct execute).
+- id: lua.sqli.luadbi_execute
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: lua.sqli.luasql_execute_db
+  language: lua
+  tag: sql-injection
+  severity: critical
+  packages: [luadbi]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]execute$
+  description: "Subsumed by lua.sqli.luasql_execute_db — same regex; canonical rule should add luadbi to its packages list."

@@ -1,0 +1,81 @@
+# Elixir TLS misconfig. Most HTTP clients read `ssl: [verify:
+# :verify_none]` from a keyword list; v1 constraint engine only
+# inspects the immediate kw list, so `keyword_arg_equals` hits the
+# top-level (Tesla.client insecure: true, :ssl.connect verify:
+# :verify_none). Nested kw lists (HTTPoison `ssl: [verify: :verify_none]`)
+# cannot be inspected in v1 — those rules stay disabled to avoid
+# firing on every HTTP call.
+- id: elixir.tls.ssl_connect_verify_none
+  enabled: true
+  language: elixir
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      regex: "^:ssl\\.connect$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :ssl.connect(input, verify: :verify_none)
+        end
+      end
+  description: "Erlang :ssl.connect(_, verify: :verify_none) — peer certificate is not validated; MITM trivial."
+
+- id: elixir.tls.tesla_insecure_adapter
+  enabled: true
+  language: elixir
+  tag: weak-tls
+  severity: high
+  packages: [tesla]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [Tesla, client]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Tesla
+      # uses tesla
+      defmodule App do
+        def test(input) do
+          Tesla.client(input, insecure: true)
+        end
+      end
+  description: "Tesla.client(_, insecure: true) — Hackney adapter with cert validation disabled; MITM trivial."
+
+  imports:
+  - Tesla
+- id: elixir.tls.httpoison_ssl_verify_none
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: elixir
+  tag: weak-tls
+  severity: high
+  packages: [httpoison]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [HTTPoison, get]
+  description: "Disabled — HTTPoison.get with ssl: [verify: :verify_none] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."
+
+- id: elixir.tls.finch_no_verify
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: elixir
+  tag: weak-tls
+  severity: medium
+  packages: [finch]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [Finch, build]
+  description: "Disabled — Finch.build with conn_opts: [transport_opts: [verify: :verify_none]] disables cert validation. v1 constraints can't peek into nested kw lists; enable manually when auditing TLS posture."

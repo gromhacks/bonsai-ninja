@@ -1,0 +1,25 @@
+# swift log_injection sinks.
+
+# Log-injection sinks (round 2 fill).
+- id: swift.log_injection.print_newline
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: low
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      name: print
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        func test(input: String) { print(input) }
+    - name: literal print negative
+      code: |
+        func test() { print("line\\nnext") }
+      expect_no_match: true
+  description: 'print("... \(user) ...\n") — newline in user text — log forging.'

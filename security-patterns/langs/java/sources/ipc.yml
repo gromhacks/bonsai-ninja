@@ -1,0 +1,21 @@
+# Java IPC / cross-app input sources.
+- id: java.source.android_intent_getstringextra
+  enabled: true
+  language: java
+  trust: ipc
+  tag: ipc-input
+  packages: [android]
+  match:
+    kind: call
+    callee:
+      name: getStringExtra
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.*;
+      class App {
+        void handle(String input) throws Exception {
+          getStringExtra(input);
+        }
+      }
+  description: "Android getStringExtra(...) — tail-match across local intent variable names."

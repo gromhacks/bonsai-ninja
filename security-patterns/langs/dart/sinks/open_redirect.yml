@@ -1,0 +1,127 @@
+# Dart open-redirect.
+- id: dart.open_redirect.shelf_response_found
+  enabled: true
+  language: dart
+  tag: open-redirect
+  severity: high
+  packages: [shelf]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, found]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted found redirect url
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test(String input) { Response.found(input); }
+  - name: literal found redirect url negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { Response.found("/home"); }
+    expect_no_match: true
+  description: "Shelf Response.found(tainted URL)."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.open_redirect.shelf_response_see_other
+  enabled: true
+  language: dart
+  tag: open-redirect
+  severity: high
+  packages: [shelf]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, seeOther]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted see other redirect url
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test(String input) { Response.seeOther(input); }
+  - name: literal see other redirect url negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { Response.seeOther("/home"); }
+    expect_no_match: true
+  description: "Shelf Response.seeOther."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.open_redirect.shelf_response_movedpermanently
+  enabled: true
+  language: dart
+  tag: open-redirect
+  severity: high
+  packages: [shelf]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, movedPermanently]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted moved permanently redirect url
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test(String input) { Response.movedPermanently(input); }
+  - name: literal moved permanently redirect url negative
+    code: |
+      import 'package:shelf/shelf.dart';
+      void test() { Response.movedPermanently("/home"); }
+    expect_no_match: true
+  description: "Shelf Response.movedPermanently."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.open_redirect.window_location_href
+  enabled: true
+  language: dart
+  tag: open-redirect
+  severity: high
+  cwe: [CWE-601]
+  match:
+    kind: write
+    target:
+      name: href
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; location.href = input; }
+  description: "window.location.href = tainted."
+
+- id: dart.open_redirect.launchurl
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: open-redirect
+  severity: medium
+  packages: [url_launcher]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: launchUrl
+  description: "Disabled — url_launcher.launchUrl opens external app; flag with context."

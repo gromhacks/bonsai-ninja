@@ -1,0 +1,227 @@
+# Lua SSTI sinks (lustache / etlua / lua-resty-template / Lapis).
+- id: lua.template.lustache_render_dynamic
+  enabled: true
+  language: lua
+  tag: ssti
+  severity: high
+  packages: [lustache]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [lustache, render]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.template.lustache_render_dynamic example
+    code: |
+      local _u = require("lustache")
+      function example(input, url, id, payload, request, params, user)
+        lustache.render(payload)
+      end
+  - name: literal template negative
+    code: |
+      local _u = require("lustache")
+      function example(input, url, id, payload, request, params, user)
+        lustache.render("Hello {{name}}")
+      end
+    expect_no_match: true
+  description: "lustache.render(template, ctx) — tainted template enables Mustache expression injection."
+
+- id: lua.template.etlua_compile
+  enabled: true
+  language: lua
+  tag: ssti
+  severity: high
+  packages: [etlua]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [etlua, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.template.etlua_compile example
+    code: |
+      local _u = require("etlua")
+      function example(input, url, id, payload, request, params, user)
+        etlua.compile(payload)
+      end
+  - name: literal template negative
+    code: |
+      local _u = require("etlua")
+      function example(input, url, id, payload, request, params, user)
+        etlua.compile("Hello <%= name %>")
+      end
+    expect_no_match: true
+  description: "etlua.compile(src) — compiles tainted template containing <% lua %> which eval()s."
+
+- id: lua.template.etlua_render
+  enabled: true
+  language: lua
+  tag: ssti
+  severity: high
+  packages: [etlua]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [etlua, render]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.template.etlua_render example
+    code: |
+      local _u = require("etlua")
+      function example(input, url, id, payload, request, params, user)
+        etlua.render(payload)
+      end
+  - name: literal template negative
+    code: |
+      local _u = require("etlua")
+      function example(input, url, id, payload, request, params, user)
+        etlua.render("Hello <%= name %>")
+      end
+    expect_no_match: true
+  description: "etlua.render(src, env) — compiles and renders tainted template."
+
+- id: lua.template.resty_template_compile_string
+  enabled: true
+  language: lua
+  tag: ssti
+  severity: critical
+  packages: [lua-resty-template]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [template, compile_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.template.resty_template_compile_string example
+    code: |
+      local _lua_resty_template = require("lua-resty-template")
+      function example(input, url, id, payload, request, params, user)
+        template.compile_string(payload)
+      end
+  - name: literal template negative
+    code: |
+      local _lua_resty_template = require("lua-resty-template")
+      function example(input, url, id, payload, request, params, user)
+        template.compile_string("Hello {{name}}")
+      end
+    expect_no_match: true
+  description: "lua-resty-template template.compile_string — compiles tainted template source to Lua; RCE."
+
+- id: lua.template.resty_template_render
+  enabled: true
+  language: lua
+  tag: ssti
+  severity: high
+  packages: [lua-resty-template]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [template, render]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.template.resty_template_render example
+    code: |
+      local _lua_resty_template = require("lua-resty-template")
+      function example(input, url, id, payload, request, params, user)
+        template.render(payload)
+      end
+  - name: literal template name negative
+    code: |
+      local _lua_resty_template = require("lua-resty-template")
+      function example(input, url, id, payload, request, params, user)
+        template.render("profile.html")
+      end
+    expect_no_match: true
+  description: "lua-resty-template template.render — tainted template name path-traverses or injects."
+
+- id: lua.template.lapis_render
+  enabled: true
+  language: lua
+  tag: ssti
+  severity: high
+  packages: [lapis]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [self, render]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.template.lapis_render example
+    code: |
+      local _lapis = require("lapis")
+      function example(input, url, id, payload, request, params, user)
+        self:render(input)
+      end
+  - name: literal view negative
+    code: |
+      local _lapis = require("lapis")
+      function example(input, url, id, payload, request, params, user)
+        self:render("profile")
+      end
+    expect_no_match: true
+  description: "Lapis self:render / render_html — tainted view name enables traversal / render of attacker templates."
+
+- id: lua.template.lapis_raw
+  enabled: true
+  language: lua
+  tag: xss
+  severity: high
+  packages: [lapis]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [html, raw]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.template.lapis_raw example
+    code: |
+      local _lapis = require("lapis")
+      function example(input, url, id, payload, request, params, user)
+        html.raw(payload)
+      end
+  - name: literal html negative
+    code: |
+      local _lapis = require("lapis")
+      function example(input, url, id, payload, request, params, user)
+        html.raw("<strong>ok</strong>")
+      end
+    expect_no_match: true
+  description: "lapis.html raw(x) — emits x without HTML-escaping; tainted value = stored/reflected XSS."
+
+# Templating engine autoescape disabled (T302). Config-shape
+# sinks: when the developer explicitly turns off the engine's
+# default HTML autoescape, every subsequent render is XSS-prone.
+- id: lua.template.openresty_template_no_escape
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [template, render]
+  description: "OpenResty lua-resty-template render — values are not autoescaped by default; reviewer must verify caller escapes (this rule is informational, paired with sanitizer rules)."

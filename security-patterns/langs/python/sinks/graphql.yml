@@ -1,0 +1,189 @@
+- id: python.graphql.graphql_core_execute
+  enabled: true
+  language: python
+  tag: graphql-injection
+  severity: medium
+  packages: [graphql]
+  imports: [graphql]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      attribute: [graphql, graphql_sync]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: graphql graphql core execute
+    code: |
+      import graphql
+      def example(schema, user_input):
+          return graphql.graphql_sync(schema, user_input)
+  - name: graphql core execute literal negative
+    code: |
+      import graphql
+
+      def example(schema, user_input):
+          return graphql.graphql_sync(schema, 'safe')
+    expect_no_match: true
+  description: "graphql.graphql_sync(tainted_query) — dynamic GraphQL documents can expose introspection or resolver-side injection paths."
+
+- id: python.graphql.graphql_core_graphql
+  enabled: true
+  language: python
+  tag: graphql-injection
+  severity: medium
+  packages: [graphql]
+  imports: [graphql]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [graphql, graphql]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: graphql core graphql execute
+    code: |
+      import graphql
+      def example(schema, user_input):
+          return graphql.graphql(schema, user_input)
+    expect_match_text: [graphql.graphql]
+  - name: graphql core graphql literal negative
+    code: |
+      import graphql
+
+      def example(schema, user_input):
+          return graphql.graphql(schema, 'safe')
+    expect_no_match: true
+  description: "graphql.graphql(schema, tainted_query) — dynamic GraphQL documents reach query execution."
+
+- id: python.graphql.schema_execute
+  enabled: true
+  language: python
+  tag: graphql-injection
+  severity: medium
+  packages: [graphql, graphene]
+  imports: [graphql, graphene]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [schema, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: schema execute tainted query
+    code: |
+      import graphene
+      def example(schema, user_input):
+          return schema.execute(user_input)
+    expect_match_text: [schema.execute]
+  - name: schema execute literal negative
+    code: |
+      import graphene
+
+      def example(schema, user_input):
+          return schema.execute('safe')
+    expect_no_match: true
+  description: "schema.execute(tainted_query) — Graphene/graphql-core schema execution with attacker-controlled query text."
+
+- id: python.graphql.strawberry_schema_execute
+  enabled: true
+  language: python
+  tag: graphql-injection
+  severity: high
+  packages: [strawberry]
+  imports: [strawberry]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute_sync$"
+  constraints:
+  - receiver_name_in: [schema, graphql_schema, strawberry_schema]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: strawberry schema execute_sync tainted
+    code: |
+      import strawberry
+      def example(schema, user_input):
+          return schema.execute_sync(user_input)
+    expect_match_text: [schema.execute_sync]
+  - name: strawberry schema execute_sync literal negative
+    code: |
+      import strawberry
+      def example(schema, user_input):
+          return schema.execute_sync('{ viewer { id } }')
+    expect_no_match: true
+  description: "Strawberry GraphQL schema.execute_sync(tainted_query) — attacker-controlled query string drives resolver execution and may probe introspection."
+
+- id: python.graphql.ariadne_graphql_sync
+  enabled: true
+  language: python
+  tag: graphql-injection
+  severity: high
+  packages: [ariadne]
+  imports: [ariadne]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [ariadne, graphql_sync]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ariadne graphql_sync tainted query
+    code: |
+      import ariadne
+      def example(schema, user_input):
+          return ariadne.graphql_sync(schema, user_input)
+    expect_match_text: [ariadne.graphql_sync]
+  - name: ariadne graphql_sync literal negative
+    code: |
+      import ariadne
+      def example(schema, user_input):
+          return ariadne.graphql_sync(schema, '{ viewer { id } }')
+    expect_no_match: true
+  description: "Ariadne ariadne.graphql_sync(schema, tainted_data) — synchronous GraphQL execution with attacker-controlled query body."
+
+- id: python.graphql.gql_client_execute
+  enabled: true
+  language: python
+  tag: graphql-injection
+  severity: medium
+  packages: [gql]
+  imports: [gql]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
+  constraints:
+  - receiver_name_in: [client, gql_client, graphql_client]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: gql client execute tainted
+    code: |
+      import gql
+      def example(client, user_input):
+          return client.execute(user_input)
+    expect_match_text: [client.execute]
+  - name: gql client execute literal negative
+    code: |
+      import gql
+      def example(client, user_input):
+          return client.execute('{ viewer { id } }')
+    expect_no_match: true
+  - name: unrelated execute receiver negative
+    code: |
+      import gql
+      def example(self, cmd):
+          return self.runner.execute(cmd)
+    expect_no_match: true
+  description: "gql Client.execute(tainted_query) — sends attacker-controlled GraphQL document upstream to a remote API."

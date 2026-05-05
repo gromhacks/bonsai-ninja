@@ -1,0 +1,162 @@
+# Perl XXE sinks.
+# XML::LibXML default parser expands entities until $parser->expand_entities(0)
+# is set; XML::Parser ditto with NoExpand/no_expand.
+- id: perl.xxe.xml_libxml_parse_file
+  enabled: true
+  language: perl
+  tag: xxe
+  severity: high
+  packages: ["XML::LibXML"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: parse_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.xxe.xml_libxml_parse_file example
+    code: |
+      use XML::LibXML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parse_file($input)
+      }
+  - name: literal libxml parse file negative
+    code: |
+      use XML::LibXML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parse_file("config/trusted.xml")
+      }
+    expect_no_match: true
+  description: "XML::LibXML $parser->parse_file — disable load_ext_dtd / expand_entities."
+
+- id: perl.xxe.xml_libxml_parse_string
+  enabled: true
+  language: perl
+  tag: xxe
+  severity: high
+  packages: ["XML::LibXML"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: parse_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.xxe.xml_libxml_parse_string example
+    code: |
+      use XML::LibXML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parse_string($input)
+      }
+  - name: literal libxml parse string negative
+    code: |
+      use XML::LibXML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parse_string("<root/>")
+      }
+    expect_no_match: true
+  description: "XML::LibXML $parser->parse_string."
+
+- id: perl.xxe.xml_libxml_load_xml
+  enabled: true
+  language: perl
+  tag: xxe
+  severity: high
+  packages: ["XML::LibXML"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: load_xml
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.xxe.xml_libxml_load_xml example
+    code: |
+      use XML::LibXML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        load_xml(string => $input)
+      }
+  - name: literal libxml load xml negative
+    code: |
+      use XML::LibXML;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        load_xml(string => "<root/>")
+      }
+    expect_no_match: true
+  description: "XML::LibXML->load_xml — class-method form."
+
+- id: perl.xxe.xml_parser_parse
+  enabled: true
+  language: perl
+  tag: xxe
+  severity: high
+  packages: ["XML::Parser"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: parsefile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.xxe.xml_parser_parse example
+    code: |
+      use XML::Parser;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parsefile($input)
+      }
+  - name: literal xml parser parsefile negative
+    code: |
+      use XML::Parser;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parsefile("config/trusted.xml")
+      }
+    expect_no_match: true
+  description: "XML::Parser $p->parsefile."
+
+- id: perl.xxe.xml_simple_xmlin
+  enabled: true
+  language: perl
+  tag: xxe
+  severity: medium
+  packages: ["XML::Simple"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: XMLin
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.xxe.xml_simple_xmlin example
+    code: |
+      use XML::Simple;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        XMLin($input)
+      }
+  - name: literal xml simple xmlin negative
+    code: |
+      use XML::Simple;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        XMLin("<root/>")
+      }
+    expect_no_match: true
+  description: "XML::Simple XMLin — uses XML::SAX or XML::Parser under the hood."

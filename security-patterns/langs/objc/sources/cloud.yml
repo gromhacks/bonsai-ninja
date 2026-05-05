@@ -1,0 +1,30 @@
+# Objective-C cloud-trust sources (AWS SDK iOS).
+- id: objc.source.aws_lambda_invocation
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: service
+  tag: cloud-input
+  payload_types: [json]
+  packages: [AWSLambda]
+  match:
+    kind: param
+    target:
+      name: invocationRequest
+  description: "Disabled — AWSLambdaInvocationRequest param; enable for AWS SDK iOS Lambda handlers that deserialize payload JSON."
+
+- id: objc.source.aws_s3_getobject_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: service
+  tag: cloud-input
+  payload_types: [binary]
+  packages: [AWSS3]
+  match:
+    kind: call
+    callee:
+      name: getObject
+  description: "Disabled — AWSS3 getObject: returns bucket contents that may be attacker-controlled when bucket is user-writable."

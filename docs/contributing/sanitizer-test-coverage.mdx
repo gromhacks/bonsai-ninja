@@ -1,0 +1,88 @@
+---
+title: "Sanitizer Test Coverage"
+description: "How per-language sanitizer fixtures prove raw and sanitized source-to-sink paths."
+---
+
+# sanitizer_test — per-language fixtures exercising enabled sanitizers
+
+Each `examples/<lang>/sanitizer_test/` directory contains one or more
+handler files with parallel `<name>_raw` / `<name>_safe` pairs. The
+raw form reaches the sink directly; the safe form keeps the tainted
+value flowing to the sink with the sanitizer wrapping it so the
+engine attaches sanitizer evidence to the finding.
+
+The fixtures drive `bonsai-ninja security <ws> taint-analysis` and are the
+regression surface for sanitizer behaviour — the engine must:
+
+  1. Produce a finding for every `_raw` chain (no sanitizer in the
+     path, taint reaches the sink directly).
+  2. Attach the sanitizer as evidence on the `_safe` chain — the
+     finding's `sanitizers_seen` array lists the sanitizer rule id
+     with its source location.
+
+Every language now has BOTH raw and sanitizer-evidence coverage
+(verified by `crates/cli/tests/sanitizer_fixtures.rs`).
+
+## Per-language sanitizer coverage
+
+| Lang | Sinks exercised | Sanitizers attached |
+|---|---|---|
+| c | `strcat` (buffer), `sqlite3_prepare_v2` (SQLi via snprintf) | `strlcpy`, `sqlite3_bind_text`, `snprintf_bounded` |
+| cpp | `strcpy` (buffer), `set_content` (XSS, cpp-httplib) | `strncpy`, `toHtmlEscaped`, `bindValue` |
+| csharp | `cmd.ExecuteReader` (SQLi) | `SqlCommand.Parameters.AddWithValue`, `HtmlEncoder.Encode` |
+| dart | `Process.run(runInShell: true)` (cmdi) | `Uri.encodeComponent`, `HtmlEscape().convert` |
+| elixir | `:os.cmd` (cmdi), `Plug.Conn.send_resp` (XSS) | `URI.encode_www_form`, `Phoenix.HTML.html_escape`, `Plug.Crypto.secure_compare` |
+| erlang | `os:cmd`, raw `==` compare | `uri_string:quote`, `crypto:hash_equals` |
+| go | `exec.Command("sh", "-c", …)` (cmdi) | argv-`exec.Command`, `sql.Prepare`, `template.HTMLEscapeString`, `url.QueryEscape`, `subtle.ConstantTimeCompare` |
+| java | `stmt.executeQuery` (SQLi) | `PreparedStatement.setString`, `HtmlUtils.htmlEscape` |
+| javascript | `execSync` (cmdi), `res.redirect` (open-redirect) | `shell-quote.quote`, `encodeURIComponent` |
+| kotlin | `conn.createStatement().executeQuery` (SQLi) | `PreparedStatement.setString`, `HtmlUtils.htmlEscape` |
+| lua | `os.execute` (cmdi) | `ngx.quote_sql_str`, `lapis.html.escape`, `ngx.escape_uri` |
+| objc | `sqlite3_prepare_v2` (SQLi), `NSURLComponents` (redirect) | `sqlite3_bind_text`, `stringByAddingPercentEncodingWithAllowedCharacters` |
+| perl | `system` (cmdi), `DBI do` (SQLi) | `shell_quote`, `DBI ?-bindings`, `HTML::Entities::encode_entities`, `URI::Escape::uri_escape` |
+| php | `exec` (cmdi), `mysqli_query` (SQLi) | `escapeshellarg`, `PDO prepare + execute`, `htmlspecialchars` |
+| python | `os.system` (cmdi), `render_template_string` (XSS), `redirect` (open-redirect) | `shlex.quote`, `html.escape`, `urllib.parse.quote` |
+| ruby | `@db.execute` (SQLi), `system` (cmdi), `render inline` (XSS) | `Shellwords.escape`, `?-bindings`, `CGI.escapeHTML` |
+| rust | `Command::new("sh").arg("-c", …)` (cmdi) | `percent_encoding`, `ammonia::clean`, `constant_time_eq` |
+| scala | `stmt.executeQuery` (SQLi) | `PreparedStatement.setString`, `HtmlUtils.htmlEscape` |
+| solidity | `selfdestruct`, `mint`, `burn`, `transferOwnership` (access-control) | `require`, `onlyOwner` modifier |
+| swift | `sqlite3_prepare_v2` (SQLi), `Process.launch` (cmdi via /bin/sh) | `sqlite3_bind_text`, `addingPercentEncoding` |
+| typescript | `execSync` (cmdi), `res.redirect` (open-redirect) | `shell-quote.quote`, `encodeURIComponent` |
+
+## The taint-through-wrapper pattern
+
+The fixtures deliberately route taint THROUGH the sanitizer and
+INTO the sink so the engine attaches sanitizer evidence — e.g.
+
+```python
+def cmd_safe(cmd):
+    return os.system(shlex.quote(cmd))  # shlex.quote wraps, os.system is the sink
+```
+
+This mirrors real-world code: the sanitizer doesn't block the sink
+call, it cleanses the tainted value before it reaches the sink. The
+finding reports the sanitizer as evidence (a reviewer sees the
+cleanse and downgrades the finding). "Safe" handlers whose tainted
+data never reaches any sink (e.g. argv-form `Process.run` with no
+shell, a pure return-string function with no response sink) wouldn't
+generate a finding at all — so those handlers get rewritten to keep
+the tainted value flowing to the sink.
+
+## Running
+
+```shell
+bonsai-ninja security examples/python/sanitizer_test taint-analysis --format json | \
+    jq '.rows[] | {id: .finding_id, sanitizers: (.sanitizers_seen | length)}'
+```
+
+Findings with `sanitizers > 0` are the `_safe` paths — the engine
+threaded taint through the sanitizer and attached it as evidence.
+Findings with `sanitizers == 0` are the `_raw` paths.
+
+The paginated `security sanitizers` surface lists every enabled
+sanitizer rule's hits independently of flows:
+
+```shell
+bonsai-ninja security examples/python/sanitizer_test sanitizers
+bonsai-ninja security examples/python/sanitizer_test sanitizers --tag shell-escape
+```

@@ -1,0 +1,254 @@
+# Java JWT sinks (jjwt / nimbus-jose-jwt / auth0 java-jwt).
+- id: java.jwt.jjwt_parser_unsigned
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: jwt
+  severity: medium
+  packages: ["io.jsonwebtoken"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Jwts, parser]
+  description: "Disabled — Jwts.parser() is only dangerous without a later setSigningKey/verifyWith call; needs stateful check."
+
+- id: java.jwt.jjwt_parser_builder
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: jwt
+  severity: info
+  packages: ["io.jsonwebtoken"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Jwts, parserBuilder]
+  description: "Disabled — parserBuilder() alone is not a sink; the danger is parseClaimsJwt (unsigned) vs parseClaimsJws (signed)."
+
+- id: java.jwt.jjwt_parse_claims_jws
+  enabled: true
+  language: java
+  tag: jwt
+  severity: medium
+  packages: ["io.jsonwebtoken"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtParser, parseClaimsJws]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*;
+      class App {
+        void handle(String input) throws Exception {
+          JwtParser.parseClaimsJws(input);
+        }
+      }
+  description: "jjwt JwtParser.parseClaimsJws — safe IF a signing key was set on the builder; flag for review."
+
+- id: java.jwt.jjwt_parse_claims_jwt
+  enabled: true
+  language: java
+  tag: jwt
+  severity: critical
+  packages: ["io.jsonwebtoken"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtParser, parseClaimsJwt]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*;
+      class App {
+        void handle(String input) throws Exception {
+          JwtParser.parseClaimsJwt(input);
+        }
+      }
+  description: "jjwt JwtParser.parseClaimsJwt — parses UNSIGNED JWT (alg=none style)."
+
+- id: java.jwt.jjwt_parse
+  enabled: true
+  language: java
+  tag: jwt
+  severity: high
+  packages: ["io.jsonwebtoken"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtParser, parse]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*;
+      class App {
+        void handle(String input) throws Exception {
+          JwtParser.parse(input);
+        }
+      }
+  description: "jjwt JwtParser.parse — untyped; verify whether caller routes to signed or unsigned variant."
+
+- id: java.jwt.nimbus_signed_jwt_parse
+  enabled: true
+  language: java
+  tag: jwt
+  severity: high
+  packages: [com.nimbusds.jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [SignedJWT, parse]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.nimbusds.jwt.*;
+      class App {
+        void handle(String input) throws Exception {
+          SignedJWT.parse(input);
+        }
+      }
+  description: "Nimbus SignedJWT.parse — flag if no subsequent verify()."
+
+  imports:
+  - com.nimbusds.jwt
+- id: java.jwt.nimbus_plainjwt_parse
+  enabled: true
+  language: java
+  tag: jwt
+  severity: critical
+  packages: [com.nimbusds.jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [PlainJWT, parse]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.nimbusds.jwt.*;
+      class App {
+        void handle(String input) throws Exception {
+          PlainJWT.parse(input);
+        }
+      }
+  description: "Nimbus PlainJWT.parse — explicit unsigned token."
+
+  imports:
+  - com.nimbusds.jwt
+- id: java.jwt.auth0_jwt_decode
+  enabled: true
+  language: java
+  tag: jwt
+  severity: high
+  packages: ["com.auth0.jwt"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JWT, decode]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.auth0.jwt.*;
+      class App {
+        void handle(String input) throws Exception {
+          JWT.decode(input);
+        }
+      }
+  description: "auth0 JWT.decode — does NOT verify signature."
+
+- id: java.jwt.auth0_jwt_require_alg_none
+  enabled: true
+  language: java
+  tag: jwt
+  severity: critical
+  packages: ["com.auth0.jwt"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Algorithm, none]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.auth0.jwt.*;
+      class App {
+        void handle(String input) throws Exception {
+          Algorithm.none(input);
+        }
+      }
+  description: "auth0 Algorithm.none() — accepts unsigned tokens."
+
+- id: java.jwt.spring_security_jwt_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: jwt
+  severity: medium
+  packages: [org.springframework.security.jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtHelper, decode]
+  description: "Disabled — JwtHelper.decode is informational only."
+
+# JWT alg-confusion (T400). HMAC verify with an RSA public
+# key — when both HS* and RS* algorithms are allowed in the
+# verifier's algorithm list, an attacker can sign their own
+# token with the public key as the HMAC secret. Detect by
+# matching the algorithm-list shape at the verify call.
+- id: java.jwt.alg_confusion_jjwt
+  enabled: true
+  language: java
+  tag: untrusted-token
+  severity: high
+  packages: [io.jsonwebtoken]
+  cwe: [CWE-345]
+  match:
+    kind: call
+    callee:
+      attribute: [Jwts, parser]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*;
+      class App {
+        void handle(String input) throws Exception {
+          Jwts.parser("HS256 RS256");
+        }
+      }
+  description: "JJWT Jwts.parser() chain with mixed HMAC+RSA algorithms allowed — alg-confusion vector."
+
+- id: java.jwt.nimbus_alg_none
+  enabled: true
+  language: java
+  tag: jwt
+  severity: critical
+  packages: [com.nimbusds.jose, com.nimbusds.jwt]
+  imports: [com.nimbusds.jose]
+  cwe: [CWE-347, CWE-327]
+  match:
+    kind: new
+    callee:
+      attribute: [JWSAlgorithm, NONE]
+  match_examples:
+  - name: nimbus JOSE alg none header
+    code: |
+      import com.nimbusds.jose.*;
+      class App {
+        void handle() throws Exception {
+          new JWSAlgorithm.NONE();
+        }
+      }
+    expect_match_text: [JWSAlgorithm.NONE]
+  description: "JWSAlgorithm.NONE — explicitly accepts unsigned JWTs; classic alg-none token bypass when used at verification time."

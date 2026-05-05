@@ -1,0 +1,152 @@
+# C# TLS misconfiguration.
+- id: csharp.tls.servercertificate_bypass
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: weak-tls
+  severity: critical
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: ServerCertificateValidationCallback
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ServerCertificateValidationCallback = input; } }
+  description: "Disabled broad duplicate — use csharp.tls.disable_verify_servicepoint_callback, which requires an explicit accept-all callback shape."
+
+- id: csharp.tls.servercertificate_callback_handler
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: weak-tls
+  severity: critical
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: ServerCertificateCustomValidationCallback
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ServerCertificateCustomValidationCallback = input; } }
+  description: "Disabled broad duplicate — use csharp.tls.disable_verify_httpclienthandler, which requires an explicit accept-all callback shape."
+
+- id: csharp.tls.security_protocol_ssl3
+  enabled: true
+  language: csharp
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-326]
+  match:
+    kind: write
+    target:
+      name: SecurityProtocol
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SecurityProtocol = input; } }
+  description: "ServicePointManager.SecurityProtocol = Ssl3/Tls/Tls11 — outdated protocol."
+
+- id: csharp.tls.checkcertrevocation_off
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: weak-tls
+  severity: medium
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: CheckCertificateRevocationList
+  description: "Disabled — CheckCertificateRevocationList=false; flag with constraint."
+
+- id: csharp.tls.ssl_protocols_assign
+  enabled: true
+  language: csharp
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-326]
+  match:
+    kind: write
+    target:
+      name: SslProtocols
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SslProtocols = input; } }
+  description: "SslProtocols = Ssl3 / Tls / Tls11 — covers HttpClientHandler.SslProtocols, SslStream client opts, Kestrel HttpsConnectionAdapterOptions.SslProtocols."
+
+- id: csharp.tls.sslstream_authenticate_client
+  enabled: true
+  language: csharp
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [SslStream, AuthenticateAsClient]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SslStream.AuthenticateAsClient(input); } }
+  description: "SslStream.AuthenticateAsClient — flag when constructed with a `(_,_,_,_) => true` validation callback (no cert validation)."
+
+- id: csharp.tls.servicepoint_dangerous_accept
+  enabled: true
+  language: csharp
+  tag: weak-tls
+  severity: critical
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: DangerousAcceptAnyServerCertificateValidator
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DangerousAcceptAnyServerCertificateValidator = input; } }
+  description: "HttpClientHandler.DangerousAcceptAnyServerCertificateValidator — explicitly disables server cert validation (modern .NET)."
+
+# Disabled SSL/TLS verification (T404). Tagged weak-tls so
+# `security sinks --tag weak-tls` enumerates these alongside
+# the other transport-security sinks. Per-lang patterns:
+- id: csharp.tls.disable_verify_servicepoint_callback
+  enabled: true
+  language: csharp
+  tag: weak-tls
+  severity: high
+  packages: [System.Net]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      attribute: [ServicePointManager, ServerCertificateValidationCallback]
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.Net;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ServicePointManager.ServerCertificateValidationCallback = true; } }
+  description: "ServicePointManager.ServerCertificateValidationCallback = (s,c,ch,e) => true — disables TLS chain validation globally."
+- id: csharp.tls.disable_verify_httpclienthandler
+  enabled: true
+  language: csharp
+  tag: weak-tls
+  severity: high
+  packages: [System.Net.Http]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      attribute: [HttpClientHandler, ServerCertificateCustomValidationCallback]
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.Net.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpClientHandler.ServerCertificateCustomValidationCallback = true; } }
+  description: "HttpClientHandler.ServerCertificateCustomValidationCallback = (m,c,ch,e) => true — per-handler TLS bypass."

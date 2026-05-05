@@ -1,0 +1,141 @@
+# C XSS sinks (microhttpd / mongoose / civetweb HTTP frameworks).
+- id: c.xss.mhd_create_response_from_buffer
+  enabled: true
+  language: c
+  tag: xss
+  severity: medium
+  packages: [libmicrohttpd]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: MHD_create_response_from_buffer
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libmicrohttpd/microhttpd.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        MHD_create_response_from_buffer(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        MHD_create_response_from_buffer("safe", "safe");
+      }
+    expect_no_match: true
+  description: "MHD_create_response_from_buffer — flag with text/html Content-Type."
+
+- id: c.xss.mongoose_http_reply
+  aliases:
+  - c.info_disclosure.mongoose_error_detail
+  enabled: true
+  language: c
+  tag: xss
+  severity: medium
+  packages: [mongoose]
+  cwe: [CWE-79, CWE-209]
+  match:
+    kind: call
+    callee:
+      name: mg_http_reply
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongoose.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_http_reply(200, "Content-Type: text/html\r\n", "<p>%s</p>", arg);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        mg_http_reply("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "mongoose mg_http_reply with text/html body. Also covers merged aliases: c.info_disclosure.mongoose_error_detail."
+
+- id: c.xss.mongoose_printf
+  enabled: true
+  language: c
+  tag: xss
+  severity: medium
+  packages: [mongoose]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: mg_printf
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongoose.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_printf(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        mg_printf("safe");
+      }
+    expect_no_match: true
+  description: "mongoose mg_printf — flag with HTTP body context."
+
+- id: c.xss.civetweb_printf
+  enabled: true
+  language: c
+  tag: xss
+  severity: medium
+  packages: [civetweb]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: mg_printf_html
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <civetweb.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mg_printf_html(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        mg_printf_html("safe");
+      }
+    expect_no_match: true
+  description: "civetweb mg_printf_html with tainted body."
+
+- id: c.xss.fcgi_print
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: xss
+  severity: low
+  packages: [fcgi]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: FCGI_printf
+  description: "Disabled — FCGI_printf; flag with HTTP body context."

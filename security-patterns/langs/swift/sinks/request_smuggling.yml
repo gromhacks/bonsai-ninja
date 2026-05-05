@@ -1,0 +1,18 @@
+# swift request_smuggling sinks.
+
+# Request-smuggling marker sinks (round 3).
+- id: swift.smuggle.set_dual_cl_te_headers
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-444]
+  match:
+    kind: call
+    callee:
+      attribute: [response, headers]
+  match_examples:
+    - name: declared shape
+      code: |
+        func test() { let input = "x"; let amount = 1; response.headers("Transfer-Encoding") }
+  description: 'Vapor response.headers manual Transfer-Encoding / Content-Length override.'

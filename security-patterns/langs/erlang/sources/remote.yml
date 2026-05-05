@@ -1,0 +1,378 @@
+# Erlang HTTP sources (Cowboy + Mochiweb + Webmachine + Yaws).
+- id: erlang.source.cowboy_handler_req
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [cowboy]
+  match:
+    kind: param
+    target:
+      name: Req
+  description: "Disabled — whole Cowboy Req container is too broad without field-sensitive request access tracking; specific cowboy_req accessors stay enabled."
+
+- id: erlang.source.cowboy_parse_qs
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:parse_qs"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:parse_qs(Input).
+  description: "cowboy_req:parse_qs — parsed query string key/value list from the URL."
+
+- id: erlang.source.cowboy_read_body
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:read_body"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:read_body(Input).
+  description: "cowboy_req:read_body — raw request body bytes from the client."
+
+- id: erlang.source.cowboy_read_urlencoded
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:read_urlencoded_body"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:read_urlencoded_body(Input).
+  description: "cowboy_req:read_urlencoded_body — form POST body parsed into kv list."
+
+- id: erlang.source.cowboy_read_part
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [multipart]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:read_part$"
+  match_examples:
+  - name: erlang.source.cowboy_read_part example
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:read_part(Input).
+  description: "cowboy_req:read_part — multipart headers including Content-Disposition filename are client-controlled."
+
+- id: erlang.source.cowboy_read_part_body
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [multipart]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:read_part_body$"
+  match_examples:
+  - name: erlang.source.cowboy_read_part_body example
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:read_part_body(Input).
+  description: "cowboy_req:read_part_body — multipart upload bytes from the client."
+
+- id: erlang.source.cowboy_match_qs
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:match_qs"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:match_qs(Input).
+  description: "cowboy_req:match_qs — extracts query params by spec; values remain attacker-controlled."
+
+- id: erlang.source.cowboy_header
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:header"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:header(Input).
+  description: "cowboy_req:header — individual request header value sent by the client."
+
+- id: erlang.source.cowboy_binding
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:binding$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:binding(Input).
+  description: "cowboy_req:binding — router path parameter (e.g. /users/:id)."
+
+- id: erlang.source.cowboy_bindings
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:bindings$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:bindings(Input).
+  description: "cowboy_req:bindings — all router path parameters as a map."
+
+- id: erlang.source.cowboy_cookie
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:parse_cookies"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:parse_cookies(Input).
+  description: "cowboy_req:parse_cookies — client-supplied cookie values."
+
+- id: erlang.source.mochiweb_request_parse_qs
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  packages: [mochiweb]
+  match:
+    kind: call
+    callee:
+      regex: "^mochiweb_request:parse_qs"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("mochiweb/include/mochiweb.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mochiweb_request:parse_qs(Input).
+  description: "mochiweb_request:parse_qs — URL query string kv list."
+
+- id: erlang.source.mochiweb_parse_post
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  packages: [mochiweb]
+  match:
+    kind: call
+    callee:
+      regex: "^mochiweb_request:parse_post"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("mochiweb/include/mochiweb.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mochiweb_request:parse_post(Input).
+  description: "mochiweb_request:parse_post — form POST body kv list."
+
+- id: erlang.source.yaws_arg_querydata
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  packages: [yaws]
+  match:
+    kind: call
+    callee:
+      regex: "^yaws_api:parse_query"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("yaws/include/yaws.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        yaws_api:parse_query(Input).
+  description: "yaws_api:parse_query — Yaws query-string parser output."
+
+- id: erlang.source.yaws_arg_postdata
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  packages: [yaws]
+  match:
+    kind: call
+    callee:
+      regex: "^yaws_api:parse_post"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("yaws/include/yaws.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        yaws_api:parse_post(Input).
+  description: "yaws_api:parse_post — Yaws form POST body parser output."
+
+- id: erlang.source.inets_httpd_parse_query
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [inets]
+  match:
+    kind: call
+    callee:
+      regex: "^httpd:parse_query$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("inets/include/inets.hrl").
+      -export([test/1]).
+      test(Input) ->
+        httpd:parse_query(Input).
+  description: "inets httpd:parse_query — query string from a client request."
+
+- id: erlang.source.gen_tcp_recv
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: socket-input
+  match:
+    kind: call
+    callee:
+      regex: "^gen_tcp:recv$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        gen_tcp:recv(Input).
+  description: "gen_tcp:recv — raw TCP bytes from peer; protocol-level attacker input."
+
+- id: erlang.source.gen_udp_recv
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: socket-input
+  match:
+    kind: call
+    callee:
+      regex: "^gen_udp:recv$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        gen_udp:recv(Input).
+  description: "gen_udp:recv — raw UDP datagram bytes from peer; spoofable origin."
+
+- id: erlang.source.ssl_recv
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: socket-input
+  match:
+    kind: call
+    callee:
+      regex: "^ssl:recv$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        ssl:recv(Input).
+  description: "ssl:recv — TLS-decrypted bytes from peer; cleartext is still attacker-controlled."

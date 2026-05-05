@@ -1,0 +1,190 @@
+# TypeScript CLI / environment input sources.
+- id: typescript.source.readline_question
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  packages: [readline, readline-sync]
+  match:
+    kind: call
+    callee:
+      name: question
+  match_examples:
+  - name: readline question
+    code: |
+      const _u = require("readline");
+      function demo(input, req, obj) {
+        return question(input);
+      }
+  description: "readline.Interface.question — interactive stdin prompt; callback arg is tainted."
+
+- id: typescript.source.process_argv
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      attribute: [process, argv]
+  match_examples:
+  - name: process argv
+    code: |
+      function demo(input, req, obj) {
+        return process.argv;
+      }
+  description: "process.argv — command-line arguments."
+
+- id: typescript.source.process_env
+  enabled: true
+  language: typescript
+  trust: local
+  tag: env-input
+  match:
+    kind: read
+    target:
+      attribute: [process, env]
+  match_examples:
+  - name: process env
+    code: |
+      function demo(input, req, obj) {
+        return process.env;
+      }
+  description: "process.env — environment variables (attacker may influence via CI/CD or local malware)."
+
+- id: typescript.source.process_stdin
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      attribute: [process, stdin]
+  match_examples:
+  - name: process stdin
+    code: |
+      function demo(input, req, obj) {
+        return process.stdin;
+      }
+  description: "process.stdin — piped input."
+
+- id: typescript.source.deno_args
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      attribute: [Deno, args]
+  match_examples:
+  - name: deno args
+    code: |
+      function demo(input, req, obj) {
+        return Deno.args;
+      }
+  description: "Deno.args — command-line arguments."
+
+- id: typescript.source.deno_env_get
+  enabled: true
+  language: typescript
+  trust: local
+  tag: env-input
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, env, get]
+  match_examples:
+  - name: deno env get
+    code: |
+      function demo(input, req, obj) {
+        return Deno.env.get(input);
+      }
+  description: "Deno.env.get(name) — environment variable."
+
+- id: typescript.source.deno_stdin
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      attribute: [Deno, stdin]
+  match_examples:
+  - name: deno stdin
+    code: |
+      function demo(input, req, obj) {
+        return Deno.stdin;
+      }
+  description: "Deno.stdin — reads bytes from standard input; attacker-controllable in CLI / TTY contexts."
+
+- id: typescript.source.bun_argv
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      attribute: [Bun, argv]
+  match_examples:
+  - name: bun argv
+    code: |
+      function demo(input, req, obj) {
+        return Bun.argv;
+      }
+  description: "Bun.argv — CLI args."
+
+- id: typescript.source.yargs_argv
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  packages: [yargs]
+  match:
+    kind: read
+    target:
+      attribute: [yargs, argv]
+  match_examples:
+  - name: yargs argv
+    code: |
+      const _u = require("yargs");
+      function demo(input, req, obj) {
+        return yargs.argv;
+      }
+  description: "yargs argv — parsed CLI flags."
+
+- id: typescript.source.commander_opts
+  enabled: true
+  language: typescript
+  trust: local
+  tag: cli-input
+  packages: [commander]
+  match:
+    kind: call
+    callee:
+      attribute: [program, opts]
+  match_examples:
+  - name: commander opts
+    code: |
+      const _u = require("commander");
+      function demo(input, req, obj) {
+        return program.opts(input);
+      }
+  description: "commander program.opts() — parsed CLI flags."
+
+- id: typescript.source.localstorage_getitem
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  trust: local
+  tag: browser-input
+  match:
+    kind: call
+    callee:
+      attribute: [localStorage, getItem]
+  description: "Disabled — localStorage is local; flag only when crossing a trust boundary."

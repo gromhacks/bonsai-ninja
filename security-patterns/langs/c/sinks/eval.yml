@@ -1,0 +1,363 @@
+# C dynamic-code / dlopen / embedded interpreters.
+- id: c.eval.dlopen
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: dlopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        dlopen(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        dlopen("safe");
+      }
+    expect_no_match: true
+  description: "dlopen(tainted) — loads arbitrary shared library."
+
+- id: c.eval.dlmopen
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: dlmopen
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        dlmopen(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        dlmopen("safe", "safe");
+      }
+    expect_no_match: true
+  description: "dlmopen(lmid, tainted_path, flags) — loads a shared object into a namespace; tainted path runs arbitrary attacker code."
+
+- id: c.eval.loadlibrary
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: LoadLibraryA
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        LoadLibraryA(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        LoadLibraryA("safe");
+      }
+    expect_no_match: true
+  description: "Win32 LoadLibraryA / LoadLibraryW."
+
+- id: c.eval.loadlibraryw
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: LoadLibraryW
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        LoadLibraryW(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        LoadLibraryW("safe");
+      }
+    expect_no_match: true
+  description: "Win32 LoadLibraryW(tainted_path) — UTF-16 variant; tainted DLL path loads attacker-chosen code."
+
+- id: c.eval.dlsym
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: dlsym
+  description: "Disabled — dlsym is benign unless symbol name tainted."
+
+- id: c.eval.lua_dostring
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  packages: [lua]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: luaL_dostring
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <lua.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        luaL_dostring(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        luaL_dostring("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Lua C API luaL_dostring(L, tainted_src) — loads + executes Lua source; tainted source = arbitrary Lua exec."
+
+- id: c.eval.lua_dofile
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  packages: [lua]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: luaL_dofile
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <lua.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        luaL_dofile(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        luaL_dofile("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Lua C API luaL_dofile(L, tainted_path) — loads + executes a Lua script; tainted path = arbitrary script exec."
+
+- id: c.eval.lua_loadstring
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  packages: [lua]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: luaL_loadstring
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <lua.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        luaL_loadstring(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        luaL_loadstring("safe", "safe");
+      }
+    expect_no_match: true
+  description: "luaL_loadstring — preps code; paired with lua_pcall."
+
+- id: c.eval.python_pyrun_simplestring
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  packages: [python]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: PyRun_SimpleString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Python.h>
+      #include <Python.h>
+      #include <python3.10/Python.h>
+      #include <python3.10/Python.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        PyRun_SimpleString(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        PyRun_SimpleString("safe");
+      }
+    expect_no_match: true
+  description: "Embedded CPython PyRun_SimpleString(tainted) — executes Python source in __main__; full RCE via eval."
+
+  imports:
+  - Python
+  - Python.h
+  - python3.10
+  - python3.10/Python.h
+- id: c.eval.python_pyrun_string
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  packages: [python]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: PyRun_String
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Python.h>
+      #include <Python.h>
+      #include <python3.10/Python.h>
+      #include <python3.10/Python.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        PyRun_String(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        PyRun_String("safe");
+      }
+    expect_no_match: true
+  description: "CPython PyRun_String(tainted, start, globals, locals) — executes Python source in a caller-supplied scope; RCE if source is attacker-controlled."
+
+  imports:
+  - Python
+  - Python.h
+  - python3.10
+  - python3.10/Python.h
+- id: c.eval.tcl_eval
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  packages: [tcl]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: Tcl_Eval
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <tcl.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        Tcl_Eval(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        Tcl_Eval("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Embedded Tcl Tcl_Eval(interp, tainted_script) — runs a Tcl script; command substitution makes tainted input trivial RCE."
+
+- id: c.eval.duk_eval_string
+  enabled: true
+  language: c
+  tag: code-injection
+  severity: critical
+  packages: [duktape]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: duk_eval_string
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <duktape.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        duk_eval_string(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        duk_eval_string("safe", "safe");
+      }
+    expect_no_match: true
+  description: "duktape duk_eval_string(ctx, tainted_src) — evaluates JavaScript source in the embedded engine; RCE inside the duk sandbox."

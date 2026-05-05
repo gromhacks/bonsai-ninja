@@ -1,0 +1,98 @@
+- id: python.xpath.lxml_etree_xpath
+  enabled: true
+  language: python
+  tag: xpath-injection
+  severity: high
+  packages: [lxml]
+  imports: [lxml]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      attribute: [etree, XPath]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lxml etree XPath constructor
+    code: |
+      from lxml import etree
+      def find_user(user_input):
+          expr = "//user[name='" + user_input + "']"
+          return etree.XPath(expr)
+    expect_match_text: [etree.XPath]
+  - name: lxml etree xpath literal negative
+    code: |
+      from lxml import etree
+
+      def find_user(user_input):
+          expr = "//user[name='" + user_input + "']"
+          return etree.XPath('safe')
+    expect_no_match: true
+  description: "lxml.etree.XPath(tainted expression) — concatenated predicates allow XPath injection."
+
+- id: python.xpath.lxml_xpath_instance_call
+  enabled: true
+  language: python
+  tag: xpath-injection
+  severity: high
+  packages: [lxml]
+  imports: [lxml]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      name: xpath
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lxml element xpath method
+    code: |
+      import lxml
+      def find_user(doc, user_input):
+          expr = "//user[name='" + user_input + "']"
+          return doc.xpath(expr)
+    expect_match_text: [doc.xpath]
+  - name: lxml xpath instance call literal negative
+    code: |
+      import lxml
+
+      def find_user(doc, user_input):
+          expr = "//user[name='" + user_input + "']"
+          return doc.xpath('safe')
+    expect_no_match: true
+  description: "lxml Element.xpath(tainted expression) — method form of XPath injection."
+
+- id: python.xpath.lxml_etxpath
+  enabled: true
+  language: python
+  tag: xpath-injection
+  severity: high
+  packages: [lxml]
+  imports: [lxml]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      attribute: [etree, ETXPath]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lxml etree ETXPath constructor
+    code: |
+      from lxml import etree
+      def find_user(user_input):
+          expr = "//user[name='" + user_input + "']"
+          return etree.ETXPath(expr)
+    expect_match_text: [etree.ETXPath]
+  - name: lxml etxpath literal negative
+    code: |
+      from lxml import etree
+
+      def find_user(user_input):
+          expr = "//user[name='" + user_input + "']"
+          return etree.ETXPath('safe')
+    expect_no_match: true
+  description: "lxml.etree.ETXPath(tainted expression) — ElementTree-compatible XPath constructor with injection risk."

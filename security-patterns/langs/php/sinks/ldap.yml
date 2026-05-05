@@ -1,0 +1,200 @@
+- id: php.ldap.ldap_search
+  enabled: true
+  language: php
+  tag: ldap-injection
+  severity: high
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: ldap_search
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: php.ldap.ldap_search example
+    code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_search($ldap, $base, $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_search($ldap, $base, \"(uid=alice)\");\n}\n"
+    expect_no_match: true
+  description: ldap_search() with tainted filter.
+- id: php.ldap.ldap_list
+  enabled: true
+  language: php
+  tag: ldap-injection
+  severity: high
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: ldap_list
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: php.ldap.ldap_list example
+    code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_list($ldap, $base, $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_list($ldap, $base, \"(objectClass=person)\");\n}\n"
+    expect_no_match: true
+  description: ldap_list() — one-level LDAP search; tainted filter string allows LDAP injection and information disclosure.
+- id: php.ldap.ldap_read
+  enabled: true
+  language: php
+  tag: ldap-injection
+  severity: high
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: ldap_read
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: php.ldap.ldap_read filter example
+    code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_read($ldap, $base, $input);\n}\n"
+  - name: php.ldap.ldap_read filter literal negative
+    code: "<?php\nfunction example($ldap, $base, $input, $url, $id, $payload, $request) {\n  ldap_read($ldap, $base, \"(objectClass=*)\");\n}\n"
+    expect_no_match: true
+  description: "ldap_read($ldap, $base, tainted_filter) — tainted filter allows LDAP injection."
+- id: php.ldap.ldap_modify
+  enabled: true
+  language: php
+  tag: ldap-injection
+  severity: high
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: ldap_modify
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.ldap.ldap_modify dn example
+    code: "<?php\nfunction example($ldap, $input, $entry, $url, $id, $payload, $request) {\n  ldap_modify($ldap, $input, $entry);\n}\n"
+  - name: php.ldap.ldap_modify dn literal negative
+    code: "<?php\nfunction example($ldap, $input, $entry, $url, $id, $payload, $request) {\n  ldap_modify($ldap, \"uid=alice,dc=example,dc=com\", $entry);\n}\n"
+    expect_no_match: true
+  description: "ldap_modify($ldap, tainted_dn, entry) — tainted DN allows unauthorized directory writes."
+- id: php.ldap.ldap_add
+  enabled: true
+  language: php
+  tag: ldap-injection
+  severity: high
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: ldap_add
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.ldap.ldap_add dn example
+    code: "<?php\nfunction example($ldap, $input, $entry, $url, $id, $payload, $request) {\n  ldap_add($ldap, $input, $entry);\n}\n"
+  - name: php.ldap.ldap_add dn literal negative
+    code: "<?php\nfunction example($ldap, $input, $entry, $url, $id, $payload, $request) {\n  ldap_add($ldap, \"uid=alice,dc=example,dc=com\", $entry);\n}\n"
+    expect_no_match: true
+  description: "ldap_add($ldap, tainted_dn, entry) — unescaped user input in the DN enables arbitrary-entry creation."
+- id: php.ldap.ldap_delete
+  enabled: true
+  language: php
+  tag: ldap-injection
+  severity: critical
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: ldap_delete
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.ldap.ldap_delete example
+    code: "<?php\nfunction example($ldap, $input, $url, $id, $payload, $request) {\n  ldap_delete($ldap, $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($ldap, $input, $url, $id, $payload, $request) {\n  ldap_delete($ldap, \"uid=alice,dc=example,dc=com\");\n}\n"
+    expect_no_match: true
+  description: ldap_delete() — tainted DN lets the attacker delete arbitrary LDAP entries.
+- id: php.ldap.ldap_bind
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: ldap-injection
+  severity: medium
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: ldap_bind
+  description: Disabled — bind is auth; flag DN-injection with constraint.
+- id: php.ldap.symfony_ldap_search
+  enabled: true
+  language: php
+  tag: ldap-injection
+  severity: high
+  packages:
+  - symfony/ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Ldap
+      - query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.ldap.symfony_ldap_search example
+    code: |
+      <?php
+      use symfony\ldap;
+      use symfony\ldap;
+      function example($input, $url, $id, $payload, $request) {
+        Ldap::query("dc=example,dc=com", $input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use symfony\ldap;
+      function example($input, $url, $id, $payload, $request) {
+        Ldap::query("dc=example,dc=com", "(uid=alice)");
+      }
+    expect_no_match: true
+  description: Symfony Ldap component Ldap::query — flag tainted DSL.
+  imports:
+  - symfony\ldap
+  - symfony
+- id: php.ldap.anonymous_bind_null_password
+  enabled: true
+  language: php
+  tag: auth-bypass
+  severity: medium
+  cwe:
+  - CWE-287
+  match:
+    kind: call
+    callee:
+      name: ldap_bind
+  match_examples:
+  - name: php.ldap.anonymous_bind_null_password example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  ldap_bind($input, \"cn=admin,dc=example,dc=com\", NULL);\n}\n"
+    expect_match_text:
+    - ldap_bind
+  - name: php.ldap.anonymous_bind_empty_password example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  ldap_bind($input, \"cn=admin,dc=example,dc=com\", '');\n}\n"
+    expect_match_text:
+    - ldap_bind
+  description: ldap_bind with NULL or empty password can create an anonymous LDAP bind instead of enforcing authentication.

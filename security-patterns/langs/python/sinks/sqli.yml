@@ -1,0 +1,899 @@
+# Python SQL-injection sinks. DB-API + every popular ORM/driver.
+- id: python.sqli.cursor_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
+  match:
+    kind: call
+    callee:
+      attribute: [cursor, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli cursor execute
+    code: |
+      import sqlite3
+      def example(user_input):
+          return cursor.execute(user_input)
+  - name: cursor execute literal negative
+    code: |
+      import sqlite3
+      def example(user_input):
+          return cursor.execute('safe')
+    expect_no_match: true
+  description: "DB-API cursor.execute — flag string-built SQL. Package gate names the canonical DB-API drivers (sqlite3 stdlib + popular wheels) so the rule is constrained to files that actually load one."
+
+- id: python.sqli.cursor_executemany
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3, psycopg2, mysql.connector, pymysql, pyodbc, oracledb]
+  match:
+    kind: call
+    callee:
+      attribute: [cursor, executemany]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli cursor executemany
+    code: |
+      import sqlite3
+      def example(user_input):
+          return cursor.executemany(user_input)
+  - name: cursor executemany literal negative
+    code: |
+      import sqlite3
+      def example(user_input):
+          return cursor.executemany('safe')
+    expect_no_match: true
+  description: "DB-API cursor.executemany. Gated on the canonical DB-API driver imports."
+
+- id: python.sqli.cursor_executescript
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3]
+  match:
+    kind: call
+    callee:
+      attribute: [cursor, executescript]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli cursor executescript
+    code: |
+      import sqlite3
+      def example(user_input):
+          return cursor.executescript(user_input)
+  - name: cursor executescript literal negative
+    code: |
+      import sqlite3
+      def example(user_input):
+          return cursor.executescript('safe')
+    expect_no_match: true
+  description: "sqlite3 cursor.executescript — multi-statement. sqlite3-only DB-API extension."
+
+- id: python.sqli.connection_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3, asyncpg, aiosqlite]
+  match:
+    kind: call
+    callee:
+      attribute: [conn, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli connection execute
+    code: |
+      import sqlite3
+      def example(user_input):
+          return conn.execute(user_input)
+  - name: sqli graphene resolver args to connection execute
+    code: |
+      import sqlite3
+      def resolve_user(parent, info, **args):
+          sql = args["query"]
+          return conn.execute(sql)
+    expect_match_text: [conn.execute]
+  - name: sqli asyncpg conn execute sql variable
+    code: |
+      import asyncpg
+      async def example(conn, user_input):
+          sql_var = "select * from users where name = '" + user_input + "'"
+          return await conn.execute(sql_var)
+    expect_match_text: [conn.execute]
+  - name: connection execute literal negative
+    code: |
+      import sqlite3
+      def example(user_input):
+          return conn.execute('safe')
+    expect_no_match: true
+  description: "Connection.execute — sqlite3/asyncpg/aiosqlite. DB-API exempt from SQL-keyword arg shape (per PATTERN_GUIDE: `cursor.execute(query_var)` is canonical); `min_args: 1` rejects 0-arg `conn.execute()` decoys. Gated on those three driver imports."
+
+- id: python.sqli.psycopg2_cursor_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [psycopg2, psycopg, aiopg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Cursor, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli psycopg2 cursor execute
+    code: |
+      import psycopg2
+      def example(user_input):
+          return Cursor.execute(user_input)
+  - name: sqli psycopg cursor execute
+    code: |
+      import psycopg
+      def example(user_input):
+          return Cursor.execute(user_input)
+  - name: sqli aiopg cursor execute
+    code: |
+      import aiopg
+      def example(user_input):
+          return Cursor.execute(user_input)
+  - name: psycopg2 cursor execute literal negative
+    code: |
+      import psycopg2
+
+      def example(user_input):
+          return Cursor.execute('safe')
+    expect_no_match: true
+  description: "psycopg2/psycopg/aiopg Cursor.execute — placeholders parameterise; string-built SQL does not."
+
+- id: python.sqli.asyncpg_connection_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli asyncpg connection execute
+    code: |
+      import asyncpg
+      def example(user_input):
+          return Connection.execute(user_input)
+  - name: asyncpg connection execute literal negative
+    code: |
+      import asyncpg
+
+      def example(user_input):
+          return Connection.execute('safe')
+    expect_no_match: true
+  description: "asyncpg Connection.execute(string) — the `$1` placeholders are the sanitizer, not the executor. DB-API exempt from SQL-keyword arg shape; `min_args: 1` rejects 0-arg decoys."
+
+- id: python.sqli.asyncpg_connection_fetch
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, fetch]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli asyncpg connection fetch
+    code: |
+      import asyncpg
+      def example(user_input):
+          return Connection.fetch(user_input)
+  - name: asyncpg connection fetch literal negative
+    code: |
+      import asyncpg
+
+      def example(user_input):
+          return Connection.fetch('safe')
+    expect_no_match: true
+  description: "asyncpg Connection.fetch(string) — same risk as execute. DB-API exempt; `min_args: 1` rejects 0-arg decoys."
+
+- id: python.sqli.asyncpg_connection_fetchrow
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, fetchrow]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli asyncpg connection fetchrow
+    code: |
+      import asyncpg
+      def example(user_input):
+          return Connection.fetchrow(user_input)
+    expect_match_text: [Connection.fetchrow]
+  - name: asyncpg connection fetchrow literal negative
+    code: |
+      import asyncpg
+
+      def example(user_input):
+          return Connection.fetchrow('safe')
+    expect_no_match: true
+  description: "asyncpg Connection.fetchrow(string) - single-row query execution with the same string-built SQL risk as fetch/execute."
+
+- id: python.sqli.asyncpg_connection_fetchval
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, fetchval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli asyncpg connection fetchval
+    code: |
+      import asyncpg
+      def example(user_input):
+          return Connection.fetchval(user_input)
+    expect_match_text: [Connection.fetchval]
+  - name: asyncpg connection fetchval literal negative
+    code: |
+      import asyncpg
+
+      def example(user_input):
+          return Connection.fetchval('safe')
+    expect_no_match: true
+  description: "asyncpg Connection.fetchval(string) - scalar query execution with string-built SQL injection risk."
+
+- id: python.sqli.asyncpg_conn_fetch
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^[a-z_][A-Za-z0-9_]*\\.fetch$"
+  description: "Disabled — subsumed by python.sqli.asyncpg_connection_fetch under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, fetch]` rule lax-matches `conn.fetch(...)` directly."
+
+- id: python.sqli.asyncpg_conn_fetchrow
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^[a-z_][A-Za-z0-9_]*\\.fetchrow$"
+  description: "Disabled — subsumed by python.sqli.asyncpg_connection_fetchrow under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, fetchrow]` rule lax-matches `conn.fetchrow(...)` directly."
+
+- id: python.sqli.asyncpg_conn_fetchval
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^[a-z_][A-Za-z0-9_]*\\.fetchval$"
+  description: "Disabled — subsumed by python.sqli.asyncpg_connection_fetchval under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, fetchval]` rule lax-matches `conn.fetchval(...)` directly."
+
+- id: python.sqli.asyncpg_pool_fetch
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [asyncpg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^[a-z_][A-Za-z0-9_]*\\.(execute|fetch|fetchrow|fetchval)$"
+  description: "Disabled — subsumed by python.sqli.asyncpg_connection_{execute,fetch,fetchrow,fetchval} under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, verb]` rules lax-match `pool.<verb>(...)` directly."
+
+- id: python.sqli.aiopg_sa_connection_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [aiopg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [SAConnection, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli aiopg sa connection execute
+    code: |
+      import aiopg
+      def example(user_input):
+          return SAConnection.execute(user_input)
+    expect_match_text: [SAConnection.execute]
+  - name: aiopg sa connection execute literal negative
+    code: |
+      import aiopg
+
+      def example(user_input):
+          return SAConnection.execute('safe')
+    expect_no_match: true
+  description: "aiopg.sa SAConnection.execute(string) - raw SQL execution; bind parameters instead of string construction."
+
+- id: python.sqli.aiopg_cursor_execute_variable
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [aiopg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^[a-z_][A-Za-z0-9_]*\\.execute$"
+  description: "Disabled — subsumed by python.sqli.psycopg2_cursor_execute (`[Cursor, execute]`, packages include aiopg) under OnlyWhenPackaged lax-tail policy. When a file imports `aiopg`, the canonical PascalCase rule lax-matches `cur.execute(...)` directly."
+
+- id: python.sqli.sqlalchemy_text
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [sqlalchemy]
+  imports: [sqlalchemy]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [sqlalchemy, text]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli sqlalchemy text
+    code: |
+      import sqlalchemy
+      def example(user_input):
+          return sqlalchemy.text(user_input)
+  - name: sqlalchemy text literal negative
+    code: |
+      import sqlalchemy
+
+      def example(user_input):
+          return sqlalchemy.text('safe')
+    expect_no_match: true
+  description: "sqlalchemy.text(tainted) — wraps raw SQL without binding; only safe when the argument is a literal."
+
+- id: python.sqli.sqlalchemy_engine_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [sqlalchemy]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Engine, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli sqlalchemy engine execute
+    code: |
+      import sqlalchemy
+      def example(user_input):
+          return Engine.execute(user_input)
+  - name: sqlalchemy engine execute literal negative
+    code: |
+      import sqlalchemy
+
+      def example(user_input):
+          return Engine.execute('safe')
+    expect_no_match: true
+  description: "SQLAlchemy Engine.execute — raw SQL string."
+
+- id: python.sqli.sqlalchemy_engine_execute_variable
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [sqlalchemy]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^[a-z_][A-Za-z0-9_]*\\.execute$"
+  description: "Disabled — subsumed by python.sqli.sqlalchemy_engine_execute (`[Engine, execute]`) under OnlyWhenPackaged lax-tail policy. When a file imports `sqlalchemy`, the canonical PascalCase rule lax-matches `engine.execute(...)` directly."
+
+- id: python.sqli.sqlalchemy_session_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [sqlalchemy]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Session, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli sqlalchemy session execute
+    code: |
+      import sqlalchemy
+      def example(user_input):
+          return Session.execute(user_input)
+  - name: sqlalchemy session execute literal negative
+    code: |
+      import sqlalchemy
+
+      def example(user_input):
+          return Session.execute('safe')
+    expect_no_match: true
+  description: "SQLAlchemy Session.execute(string). DB-API exempt; `min_args: 1` rejects 0-arg decoys."
+
+- id: python.sqli.django_raw
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [django]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [objects, raw]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli django raw
+    code: |
+      import django
+      def example(user_input):
+          return objects.raw(user_input)
+  - name: django raw literal negative
+    code: |
+      import django
+
+      def example(user_input):
+          return objects.raw('safe')
+    expect_no_match: true
+  description: "Django Manager.raw(SQL)."
+
+- id: python.sqli.django_execute
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [django]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [connection, cursor]
+  description: "Disabled — connection.cursor() is setup, not a sink; the injection point is the downstream cursor.execute(string). Covered by python.sqli.cursor_execute."
+
+- id: python.sqli.django_extra
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [django]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: extra
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli django extra
+    code: |
+      import django
+      def example(user_input):
+          return QuerySet.extra(user_input)
+    expect_match_text: [QuerySet.extra]
+  - name: django extra order by variable
+    code: |
+      import django
+      def example(qs, user_input):
+          order_by = [user_input]
+          return qs.extra(order_by=order_by)
+    expect_match_text: [qs.extra]
+  - name: django extra literal negative
+    code: |
+      import django
+      def example(qs):
+          return qs.extra(where=["is_active = true"])
+    expect_no_match: true
+  description: "Django QuerySet.extra(where=…/select=…/tables=…/order_by=…). Taint reachability determines whether a caller-controlled value reaches the API. Merged aliases: python.sqli.django_queryset_extra_order_by."
+  aliases:
+  - python.sqli.django_queryset_extra_order_by
+
+- id: python.sqli.django_queryset_extra_order_by
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [django]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: extra
+  description: "Disabled duplicate — same `extra(...)` adapter fact as python.sqli.django_extra; keep the broader Django QuerySet.extra sink as canonical."
+
+- id: python.sqli.django_filter_lookup
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: sql-injection
+  severity: medium
+  packages: [django]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [objects, filter]
+  description: "Disabled — Django ORM filter is parameterised."
+
+- id: python.sqli.peewee_execute_sql
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [peewee]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [database, execute_sql]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli peewee execute sql
+    code: |
+      import peewee
+      def example(user_input):
+          return database.execute_sql(user_input)
+  - name: peewee execute sql literal negative
+    code: |
+      import peewee
+
+      def example(user_input):
+          return database.execute_sql('safe')
+    expect_no_match: true
+  description: "peewee Database.execute_sql."
+
+- id: python.sqli.peewee_raw
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [peewee]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [SqliteDatabase, execute_sql]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli peewee raw
+    code: |
+      import peewee
+      def example(user_input):
+          return SqliteDatabase.execute_sql(user_input)
+  - name: peewee raw literal negative
+    code: |
+      import peewee
+
+      def example(user_input):
+          return SqliteDatabase.execute_sql('safe')
+    expect_no_match: true
+  description: "peewee SqliteDatabase.execute_sql."
+
+- id: python.sqli.tortoise_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [tortoise]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Tortoise, execute_query]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli tortoise execute
+    code: |
+      import tortoiseorm
+      def example(user_input):
+          return Tortoise.execute_query(user_input)
+  - name: tortoise execute literal negative
+    code: |
+      import tortoiseorm
+
+      def example(user_input):
+          return Tortoise.execute_query('safe')
+    expect_no_match: true
+  description: "Tortoise ORM execute_query."
+
+  imports:
+  - tortoiseorm
+- id: python.sqli.pony_select_string
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [pony]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [db, select]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli pony select string
+    code: |
+      import pony
+      def example(user_input):
+          return db.select(user_input)
+  - name: pony select string literal negative
+    code: |
+      import pony
+
+      def example(user_input):
+          return db.select('safe')
+    expect_no_match: true
+  description: "Pony ORM Database.select(string). `min_args: 1` rejects 0-arg `db.select()` decoys; the SQL string is required."
+
+- id: python.sqli.mysqlclient_query
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [mysqlclient]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, query]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli mysqlclient query
+    code: |
+      import mysqlclient
+      def example(user_input):
+          return Connection.query(user_input)
+  - name: mysqlclient query literal negative
+    code: |
+      import mysqlclient
+
+      def example(user_input):
+          return Connection.query('safe')
+    expect_no_match: true
+  description: "mysqlclient Connection.query. DB-API exempt; `min_args: 1` rejects 0-arg decoys."
+
+- id: python.sqli.duckdb_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: high
+  packages: [duckdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [duckdb, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli duckdb execute
+    code: |
+      import duckdb
+      def example(user_input):
+          return duckdb.execute(user_input)
+  - name: duckdb execute literal negative
+    code: |
+      import duckdb
+
+      def example(user_input):
+          return duckdb.execute('safe')
+    expect_no_match: true
+  description: "duckdb.execute."
+
+- id: python.sqli.snowflake_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [snowflake.connector]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [SnowflakeCursor, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli snowflake execute
+    code: |
+      import snowflake.connector
+      def example(user_input):
+          return SnowflakeCursor.execute(user_input)
+  - name: snowflake execute literal negative
+    code: |
+      import snowflake.connector
+
+      def example(user_input):
+          return SnowflakeCursor.execute('safe')
+    expect_no_match: true
+  description: "Snowflake cursor.execute."
+
+  imports:
+  - snowflake.connector
+- id: python.sqli.databricks_sql_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [databricks.sql]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [DatabricksCursor, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli databricks sql execute
+    code: |
+      import databricks.sql
+      def example(user_input):
+          return DatabricksCursor.execute(user_input)
+  - name: databricks sql execute literal negative
+    code: |
+      import databricks.sql
+
+      def example(user_input):
+          return DatabricksCursor.execute('safe')
+    expect_no_match: true
+  description: "Databricks SQL execute."
+
+  imports:
+  - databricks.sql
+- id: python.sqli.sqlite3_connect_executescript
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  imports: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, executescript]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli sqlite3 connect executescript
+    code: |
+      import sqlite3
+      def example(user_input):
+          return Connection.executescript(user_input)
+  - name: sqlite3 connect executescript literal negative
+    code: |
+      import sqlite3
+
+      def example(user_input):
+          return Connection.executescript('safe')
+    expect_no_match: true
+  description: "sqlite3 Connection.executescript — runs the whole string as SQL; no parameter binding available. Signature: `executescript(sql_script)` — exactly 1 arg; bounds reject same-name decoys."
+
+- id: python.sqli.databases_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  packages: [databases]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Database, execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqli databases execute
+    code: |
+      import databases
+      def example(user_input):
+          return Database.execute(user_input)
+  - name: databases execute literal negative
+    code: |
+      import databases
+
+      def example(user_input):
+          return Database.execute('safe')
+    expect_no_match: true
+  description: "databases.Database.execute (Encode async DB driver)."

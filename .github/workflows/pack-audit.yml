@@ -1,0 +1,104 @@
+name: pack-audit
+
+# Rulepack health gate. Runs the three audit scripts on every PR
+# touching the rulepack or related tooling. Blocks merge on:
+#   - coverage regression (any cell goes from x/partial to -)
+#   - new bare-name fragility (fp_audit reports a new offender)
+#   - YAML parse errors (pack_audit reports any)
+#
+# See: docs/COVERAGE_BASELINE.md for the per-language matrix this gate
+# is meant to keep monotonic.
+
+on:
+  pull_request:
+    paths:
+      - "security-patterns/**"
+      - "scripts/pack_audit.py"
+      - "scripts/fp_audit.py"
+      - "scripts/category_audit.py"
+      - "scripts/validate-pattern-pack.py"
+      - "scripts/pattern_variants_na.yml"
+      - "docs/pattern-variants.mdx"
+      - ".github/workflows/pack-audit.yml"
+  push:
+    branches: [main]
+    paths:
+      - "security-patterns/**"
+      - "scripts/pack_audit.py"
+      - "scripts/fp_audit.py"
+      - "scripts/category_audit.py"
+      - "scripts/validate-pattern-pack.py"
+      - "scripts/pattern_variants_na.yml"
+      - "docs/pattern-variants.mdx"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  audit:
+    name: rulepack audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history so `category_audit.py --diff origin/main`
+          # can resolve the merge-base.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install python deps
+        run: pip install pyyaml
+
+      - name: build bonsai-ninja release binary
+        run: cargo build --release -p bonsai_cli
+
+      - name: pack_audit (rulepack health)
+        run: |
+          python3 scripts/pack_audit.py | tee build-pack-audit.log
+          # Fail if any rule failed to parse.
+          if grep -q "PARSE ERRORS" build-pack-audit.log; then
+            echo "::error::pack_audit reported YAML parse errors"
+            exit 1
+          fi
+
+      - name: pack_audit (collision checks)
+        run: |
+          python3 scripts/pack_audit.py --duplicates --fail-on-family-file-mismatch | tee build-pack-audit-duplicates.log
+
+      - name: fp_audit (false-positive risk)
+        run: |
+          python3 scripts/fp_audit.py | tee build-fp-audit.log
+          # Soft gate today: produce the report, leave hard-failure
+          # to repo policy once the pack reaches steady-state.
+
+      - name: category_audit (coverage matrix)
+        run: |
+          python3 scripts/category_audit.py
+          # On PRs only, diff against origin/main and fail on
+          # regression. On push to main, just refresh the matrix.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python3 scripts/category_audit.py --diff origin/main
+          fi
+
+      - name: pattern_pack_validator (pack health + examples + collisions)
+        run: |
+          python3 scripts/validate-pattern-pack.py --binary target/release/bonsai-ninja --json-out build/pattern-pack-validator.json
+
+      - name: upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-audit-${{ github.sha }}
+          path: |
+            build-pack-audit.log
+            build-pack-audit-duplicates.log
+            build-fp-audit.log
+            build/category_coverage.md
+            build/category_coverage.json
+            build/pattern-pack-validator.json
+          retention-days: 14

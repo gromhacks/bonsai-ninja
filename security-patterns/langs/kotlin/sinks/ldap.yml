@@ -1,0 +1,383 @@
+- id: kotlin.ldap.search_controls
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages: [javax.naming.directory]
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DirContext
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.naming.directory.*
+      // uses javax.naming.directory
+      class App {
+        fun handle(input: String) {
+          DirContext.search("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.naming.directory.*
+      // uses javax.naming.directory
+      class App {
+      fun handle(input: String) {
+        DirContext.search("safe")
+      }
+      }
+    expect_no_match: true
+  description: "JNDI DirContext.search — filter interpolation is LDAP injection; attackers bypass auth checks or enumerate directory entries."
+- id: kotlin.ldap.initial_dir_context_search
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages: [javax.naming.directory]
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - InitialDirContext
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.naming.directory.*
+      // uses javax.naming.directory
+      class App {
+        fun handle(input: String) {
+          InitialDirContext.search("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.naming.directory.*
+      // uses javax.naming.directory
+      class App {
+      fun handle(input: String) {
+        InitialDirContext.search("safe")
+      }
+      }
+    expect_no_match: true
+  description: "JNDI InitialDirContext.search — sync LDAP lookup; tainted filter allows LDAP injection."
+- id: kotlin.ldap.initial_ldap_context_search
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages: [javax.naming.ldap]
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - InitialLdapContext
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.naming.ldap.*
+      // uses javax.naming.ldap
+      class App {
+        fun handle(input: String) {
+          InitialLdapContext.search("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.naming.ldap.*
+      // uses javax.naming.ldap
+      class App {
+      fun handle(input: String) {
+        InitialLdapContext.search("safe")
+      }
+      }
+    expect_no_match: true
+  description: "JNDI InitialLdapContext.search — LDAP v3 lookup; tainted filter allows LDAP injection."
+- id: kotlin.ldap.spring_ldap_template_search
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages:
+  - org.springframework.ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LdapTemplate
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.ldap.*
+      // uses org.springframework.ldap
+      class App {
+        fun handle(input: String) {
+          LdapTemplate.search("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.ldap.*
+      // uses org.springframework.ldap
+      class App {
+      fun handle(input: String) {
+        LdapTemplate.search("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring LdapTemplate.search — framework-level LDAP search; tainted filter lets the attacker rewrite the query predicate."
+- id: kotlin.ldap.spring_ldap_template_bind
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages:
+  - org.springframework.ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LdapTemplate
+      - bind
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.ldap.*
+      class App {
+        fun handle(input: String) {
+          LdapTemplate.bind("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.ldap.*
+      class App {
+      fun handle(input: String) {
+        LdapTemplate.bind("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring LdapTemplate.bind — tainted DN writes to attacker-chosen directory entries."
+- id: kotlin.ldap.spring_ldap_template_authenticate
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: critical
+  packages:
+  - org.springframework.ldap
+  cwe:
+  - CWE-90
+  - CWE-287
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LdapTemplate
+      - authenticate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.ldap.*
+      // uses org.springframework.ldap
+      class App {
+        fun handle(input: String) {
+          LdapTemplate.authenticate("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.ldap.*
+      // uses org.springframework.ldap
+      class App {
+      fun handle(input: String) {
+        LdapTemplate.authenticate("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring LdapTemplate.authenticate — tainted filter can bypass auth by matching unintended entries (e.g. `uid=*` substring injection)."
+- id: kotlin.ldap.spring_ldap_template_modify_attributes
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages:
+  - org.springframework.ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LdapTemplate
+      - modifyAttributes
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.ldap.*
+      class App {
+        fun handle(input: String) {
+          LdapTemplate.modifyAttributes("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.ldap.*
+      class App {
+      fun handle(input: String) {
+        LdapTemplate.modifyAttributes("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring LdapTemplate.modifyAttributes — tainted DN or attribute values allow arbitrary directory writes."
+- id: kotlin.ldap.unboundid_search
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages:
+  - com.unboundid.ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LDAPConnection
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.unboundid.ldap.*
+      // uses com.unboundid.ldap
+      class App {
+        fun handle(input: String) {
+          LDAPConnection.search("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.unboundid.ldap.*
+      // uses com.unboundid.ldap
+      class App {
+      fun handle(input: String) {
+        LDAPConnection.search("safe")
+      }
+      }
+    expect_no_match: true
+  description: "UnboundID LDAPConnection.search — tainted filter parameter allows LDAP injection."
+- id: kotlin.ldap.unboundid_bind
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages:
+  - com.unboundid.ldap
+  cwe:
+  - CWE-90
+  - CWE-287
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LDAPConnection
+      - bind
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.unboundid.ldap.*
+      class App {
+        fun handle(input: String) {
+          LDAPConnection.bind("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.unboundid.ldap.*
+      class App {
+      fun handle(input: String) {
+        LDAPConnection.bind("safe")
+      }
+      }
+    expect_no_match: true
+  description: "UnboundID LDAPConnection.bind — tainted DN allows auth bypass via DN injection."
+- id: kotlin.ldap.apache_dir_search
+  enabled: true
+  language: kotlin
+  tag: ldap-injection
+  severity: high
+  packages:
+  - org.apache.directory
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LdapConnection
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.directory.*
+      // uses org.apache.directory
+      class App {
+        fun handle(input: String) {
+          LdapConnection.search("(uid=" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.directory.*
+      // uses org.apache.directory
+      class App {
+      fun handle(input: String) {
+        LdapConnection.search("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Apache Directory LdapConnection.search — tainted filter allows LDAP injection."
