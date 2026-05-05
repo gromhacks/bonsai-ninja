@@ -1,0 +1,57 @@
+# python oauth sinks.
+
+# OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
+# id_token verify off, redirect_uri substring match.
+- id: python.oauth.authlib_no_state
+  enabled: true
+  language: python
+  tag: oauth
+  severity: high
+  packages: [authlib]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [oauth, authorize_redirect]
+  match_examples:
+  - name: oauth authlib no state
+    code: |
+      import authlib
+      def example(user_input):
+          return oauth.authorize_redirect(user_input)
+  description: "Authlib OAuth.authorize_redirect without explicit `state=` is potentially vulnerable; verify state is bound to the session and round-tripped."
+- id: python.oauth.requests_oauthlib_no_state
+  enabled: true
+  language: python
+  tag: oauth
+  severity: high
+  packages: [requests_oauthlib]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [OAuth2Session, fetch_token]
+  match_examples:
+  - name: oauth requests oauthlib no state
+    code: |
+      import requestsoauthlib
+      def example(user_input):
+          return OAuth2Session.fetch_token(user_input)
+  description: "requests_oauthlib OAuth2Session.fetch_token without state parameter validation."
+  imports:
+  - requestsoauthlib
+
+- id: python.oauth.fastapi_oauth2_no_scope
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: oauth
+  severity: medium
+  packages: [fastapi]
+  cwe: [CWE-862]
+  match:
+    kind: new
+    callee:
+      name: OAuth2PasswordBearer
+  description: "Disabled — FastAPI OAuth2PasswordBearer needs missing-scopes / token-validation constraint to flag risky configurations precisely."

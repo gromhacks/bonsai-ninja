@@ -1,0 +1,142 @@
+- id: php.upload.move_uploaded_file_tainted_dest
+  enabled: true
+  language: php
+  tag: file-upload
+  severity: medium
+  cwe:
+  - CWE-434
+  match:
+    kind: call
+    callee:
+      name: move_uploaded_file
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.upload.move_uploaded_file_tainted_dest example
+    code: "<?php\nfunction example($tmp, $input, $url, $id, $payload, $request) {\n  move_uploaded_file($tmp, $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($tmp, $input, $url, $id, $payload, $request) {\n  move_uploaded_file($tmp, \"uploads/avatar.png\");\n}\n"
+    expect_no_match: true
+  description: move_uploaded_file with tainted destination — overlaps path rule.
+- id: php.upload.symfony_uploadedfile_move
+  enabled: true
+  language: php
+  tag: file-upload
+  severity: high
+  packages:
+  - symfony/http-foundation
+  cwe:
+  - CWE-434
+  match:
+    kind: call
+    callee:
+      attribute:
+      - UploadedFile
+      - move
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.upload.symfony_uploadedfile_move example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        UploadedFile::move($input);
+      }
+  - name: symfony uploaded file literal directory negative
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($input) {
+        UploadedFile::move("uploads");
+      }
+    expect_no_match: true
+  description: Symfony UploadedFile::move(directory, tainted_directory).
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.upload.symfony_uploadedfile_move_name
+  enabled: true
+  language: php
+  tag: file-upload
+  severity: high
+  packages:
+  - symfony/http-foundation
+  cwe:
+  - CWE-434
+  match:
+    kind: call
+    callee:
+      attribute:
+      - UploadedFile
+      - move
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.upload.symfony_uploadedfile_move name example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($file, $input) {
+        UploadedFile::move("uploads", $input);
+      }
+  - name: symfony uploaded file literal name negative
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($file, $input) {
+        UploadedFile::move("uploads", "avatar.png");
+      }
+    expect_no_match: true
+  description: Symfony UploadedFile::move(directory, tainted_name).
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.upload.laravel_uploadedfile_store_as
+  enabled: true
+  language: php
+  tag: file-upload
+  severity: high
+  packages:
+  - laravel/framework
+  cwe:
+  - CWE-434
+  match:
+    kind: call
+    callee:
+      attribute:
+      - file
+      - storeAs
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.upload.laravel_uploadedfile_store_as example
+    code: |
+      <?php
+      use laravel\framework;
+      use laravel\framework;
+      function example($file, $input) {
+        $file->storeAs("uploads", $input);
+      }
+    expect_match_text:
+    - $file->storeAs
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use laravel\framework;
+      function example($file, $input) {
+        $file->storeAs("uploads", "avatar.png");
+      }
+    expect_no_match: true
+  description: Laravel UploadedFile::storeAs(directory, tainted_name) — attacker-controlled upload name or path can create unsafe uploaded files.
+  imports:
+  - laravel\framework
+  - laravel

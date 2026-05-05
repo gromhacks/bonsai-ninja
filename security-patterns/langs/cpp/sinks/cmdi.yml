@@ -1,0 +1,802 @@
+- id: cpp.cmdi.system
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      regex: ^system$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted command string
+    code: "void example(const char *input) {\n  system(input);\n}\n"
+  - name: literal command negative
+    code: "void example() {\n  system(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "libc system(cmd) — shell-interpreted command."
+- id: cpp.cmdi.std_system
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - std
+      - system
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  std::system(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        std::system("safe");
+      }
+    expect_no_match: true
+  description: "std::system(cmd) — shell-interpreted command."
+- id: cpp.cmdi.popen
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: popen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted command string
+    code: "void example(const char *input) {\n  popen(input);\n}\n"
+  - name: literal command negative
+    code: "void example() {\n  popen(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "popen(cmd, mode) — shell-interpreted."
+- id: cpp.cmdi.execvp
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execvp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted program name
+    code: "void example(const char *input) {\n  execvp(input);\n}\n"
+  - name: literal program negative
+    code: "void example() {\n  execvp(\"safe\");\n}\n"
+    expect_no_match: true
+  description: "execvp — resolves program via PATH; program name taint = code-exec."
+- id: cpp.cmdi.execvp_argv
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: high
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execvp
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted execvp argv vector
+    code: "void example(char **args) {\n  execvp(\"git\", args);\n}\n"
+  - name: literal execvp argv vector negative
+    code: "void example() {\n  char *args[] = {\"git\", \"status\", 0};\n  execvp(\"git\", args);\n}\n"
+    expect_no_match: true
+  description: "execvp(file, argv) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+- id: cpp.cmdi.execve
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execve
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execve(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        execve("safe");
+      }
+    expect_no_match: true
+  description: "execve — direct exec; program path taint = code-exec."
+- id: cpp.cmdi.execve_argv
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execve
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      void example(const char *input) {
+        execve("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        execve("safe", "safe");
+      }
+    expect_no_match: true
+  description: "execve(path, argv, envp) — tainted argv can pass attacker-controlled flags or subcommands."
+- id: cpp.cmdi.execve_envp
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execve
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted arg 2
+    code: |
+      void example(const char *input) {
+        execve("safe", "safe", input);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example() {
+        execve("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "execve(path, argv, envp) — tainted envp can influence loader/search behavior."
+- id: cpp.cmdi.execl
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execl(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        execl("safe");
+      }
+    expect_no_match: true
+  description: "execl family (execl/execle/execlp/execv/execvp) — argv list executed directly; a tainted program path or argv element runs arbitrary binaries."
+- id: cpp.cmdi.execlp
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execlp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execlp(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        execlp("safe");
+      }
+    expect_no_match: true
+  description: "execlp — PATH lookup."
+- id: cpp.cmdi.boost_process_system
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - boost.process
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - process
+      - system
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  process::system(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        process::system("safe");
+      }
+    expect_no_match: true
+  description: "boost::process::system — use argv-list form, not shell string."
+  imports:
+  - boost/process.hpp
+  - boost
+- id: cpp.cmdi.boost_process_spawn
+  enabled: false
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - boost.process
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - process
+      - spawn
+  match_examples:
+  - name: generated direct match
+    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  process::spawn(arg);\n}\n"
+  description: "boost::process::spawn — flag string command-line form."
+  imports:
+  - boost/process.hpp
+  - boost
+  disabled_reason:
+    code: over-broad
+- id: cpp.cmdi.boost_process_child
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - boost.process
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      name: child
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new child(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new child("safe");
+      }
+    expect_no_match: true
+  description: "boost::process::child(cmd) — flag string command-line form."
+  imports:
+  - boost/process.hpp
+  - boost
+- id: cpp.cmdi.qt_qprocess_start
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - Qt
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QProcess
+      - start
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::start(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        QProcess::start("safe");
+      }
+    expect_no_match: true
+  description: "Qt QProcess::start(cmdString) — single-string form is parsed as shell args."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.cmdi.qt_qprocess_startcommand
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - Qt
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QProcess
+      - startCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::startCommand(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        QProcess::startCommand("safe");
+      }
+    expect_no_match: true
+  description: "Qt QProcess::startCommand — parses full command string."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.cmdi.qt_qprocess_execute
+  enabled: false
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - Qt
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QProcess
+      - execute
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::execute(arg);\n}\n"
+  description: "Qt QProcess::execute — static exec; flag string form."
+  imports:
+  - QtCore
+  - QtCore/Qt
+  disabled_reason:
+    code: over-broad
+- id: cpp.cmdi.qt_qprocess_start_detached
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - Qt
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QProcess
+      - startDetached
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QProcess::startDetached(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        QProcess::startDetached("safe");
+      }
+    expect_no_match: true
+  description: "Qt QProcess::startDetached — static spawn; flag string form."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.cmdi.poco_process_launch
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - Poco
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Process
+      - launch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <Poco/URI.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Process::launch(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Process::launch("safe");
+      }
+    expect_no_match: true
+  description: "Poco::Process::launch(cmd, args) — flag when args contain tainted tokens."
+- id: cpp.cmdi.poco_process_launch_args
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - Poco
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Process
+      - launch
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      #include <Poco/Process.h>
+      void example(const char *input) {
+        Process::launch("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        Process::launch("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Poco::Process::launch(cmd, args) — tainted args reach the child process."
+- id: cpp.cmdi.execv
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execv
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execv(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        execv("safe");
+      }
+    expect_no_match: true
+  description: "execv(path, argv) — direct exec; tainted path or argv element runs arbitrary binaries."
+- id: cpp.cmdi.execv_argv
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execv
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      void example(const char *input) {
+        execv("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        execv("safe", "safe");
+      }
+    expect_no_match: true
+  description: "execv(path, argv) — tainted argv can pass attacker-controlled flags or subcommands."
+- id: cpp.cmdi.execle
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: execle
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  execle(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        execle("safe");
+      }
+    expect_no_match: true
+  description: "execle — direct exec with custom envp; tainted path/argv = code-exec."
+- id: cpp.cmdi.posix_spawn
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: posix_spawn
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  posix_spawn(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        posix_spawn("safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawn(pid, path, ...) — tainted path/argv runs arbitrary binaries."
+- id: cpp.cmdi.posix_spawn_argv
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: posix_spawn
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: tainted arg 4
+    code: |
+      void example(const char *input) {
+        posix_spawn("safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 4 negative
+    code: |
+      void example() {
+        posix_spawn("safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted argv reaches the spawned process."
+- id: cpp.cmdi.posix_spawn_envp
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: posix_spawn
+  constraints:
+  - arg_tainted:
+      index: 5
+  match_examples:
+  - name: tainted arg 5
+    code: |
+      void example(const char *input) {
+        posix_spawn("safe", "safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 5 negative
+    code: |
+      void example() {
+        posix_spawn("safe", "safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+- id: cpp.cmdi.posix_spawnp
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: posix_spawnp
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  posix_spawnp(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        posix_spawnp("safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawnp — PATH lookup; tainted name = arbitrary binary."
+- id: cpp.cmdi.posix_spawnp_argv
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: posix_spawnp
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: tainted arg 4
+    code: |
+      void example(const char *input) {
+        posix_spawnp("safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 4 negative
+    code: |
+      void example() {
+        posix_spawnp("safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted argv reaches the spawned process."
+- id: cpp.cmdi.posix_spawnp_envp
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: posix_spawnp
+  constraints:
+  - arg_tainted:
+      index: 5
+  match_examples:
+  - name: tainted arg 5
+    code: |
+      void example(const char *input) {
+        posix_spawnp("safe", "safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 5 negative
+    code: |
+      void example() {
+        posix_spawnp("safe", "safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+- id: cpp.cmdi.boost_process_v2_process
+  enabled: false
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - boost.process
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      attribute:
+      - process_v2
+      - process
+  match_examples:
+  - name: generated direct match
+    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new process_v2::process(arg);\n}\n"
+  description: "Boost.Process v2 process(...) — modern API; tainted exe path or args = code-exec."
+  imports:
+  - boost/process.hpp
+  - boost
+  disabled_reason:
+    code: over-broad
+- id: cpp.cmdi.boost_process_shell
+  enabled: true
+  language: cpp
+  tag: command-injection
+  severity: critical
+  packages:
+  - boost.process
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - process
+      - shell
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <boost/process.hpp>\n#include <boost/process.hpp>\n#include <boost/process.hpp>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  process::shell(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        process::shell("safe");
+      }
+    expect_no_match: true
+  description: "boost::process::shell — explicit shell invocation; tainted args interpreted by /bin/sh."
+  imports:
+  - boost/process.hpp
+  - boost
+- id: cpp.cmdi.asio_io_context_post
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: code-injection
+  severity: medium
+  packages:
+  - boost.asio
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - io_context
+      - post
+  description: "Disabled — boost::asio::io_context::post(callback) is a generic dispatch; flag manually if the callback closes over tainted command/script bytes (audit only)."

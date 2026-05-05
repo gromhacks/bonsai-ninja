@@ -1,0 +1,224 @@
+- id: ruby.eval.builtin_eval
+  enabled: true
+  language: ruby
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.eval.builtin_eval example
+    code: "def example(input, url, id, payload, request, params)\n  eval(input)\nend\n"
+  - name: arg tainted literal negative
+    code: "def example(input, url, id, payload, request, params)\n  eval(\"safe\")\nend\n"
+    expect_no_match: true
+  description: "Kernel#eval — evaluates tainted Ruby source code; arbitrary code execution. Merged collision aliases: ruby.eval.binding_eval."
+  aliases:
+  - ruby.eval.binding_eval
+- id: ruby.eval.instance_eval
+  enabled: true
+  language: ruby
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: instance_eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.eval.instance_eval example
+    code: "def example(input, url, id, payload, request, params)\n  instance_eval(input)\nend\n"
+  - name: ruby.eval.instance_eval literal negative
+    code: "def example(input, url, id, payload, request, params)\n  instance_eval(\"1 + 1\")\nend\n"
+    expect_no_match: true
+  description: Object#instance_eval with tainted string.
+- id: ruby.eval.class_eval
+  enabled: true
+  language: ruby
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: class_eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.eval.class_eval example
+    code: "def example(input, url, id, payload, request, params)\n  class_eval(input)\nend\n"
+  - name: ruby.eval.class_eval literal negative
+    code: "def example(input, url, id, payload, request, params)\n  class_eval(\"def safe; end\")\nend\n"
+    expect_no_match: true
+  description: Module#class_eval with tainted string.
+- id: ruby.eval.module_eval
+  enabled: true
+  language: ruby
+  tag: code-injection
+  severity: critical
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: module_eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.eval.module_eval example
+    code: "def example(input, url, id, payload, request, params)\n  module_eval(input)\nend\n"
+  - name: ruby.eval.module_eval literal negative
+    code: "def example(input, url, id, payload, request, params)\n  module_eval(\"def safe; end\")\nend\n"
+    expect_no_match: true
+  description: Module#module_eval.
+- id: ruby.eval.send
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: send
+  description: "Disabled — send/public_send method-name flag requires per-call constraint."
+- id: ruby.eval.method_invoke
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: code-injection
+  severity: medium
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: __send__
+  description: "Disabled — same as send, ubiquitous."
+- id: ruby.eval.active_support_constantize
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: code-injection
+  severity: high
+  packages:
+  - activesupport
+  cwe:
+  - CWE-94
+  - CWE-470
+  match:
+    kind: call
+    callee:
+      name: constantize
+  match_examples:
+  - name: ruby.eval.active_support_constantize example
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        input.constantize()
+      end
+    expect_match_text:
+    - input.constantize
+  description: "Disabled — constantize resolves the receiver string; needs receiver-taint tracking for the class name."
+- id: ruby.eval.active_support_safe_constantize
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: code-injection
+  severity: high
+  packages:
+  - activesupport
+  cwe:
+  - CWE-94
+  - CWE-470
+  match:
+    kind: call
+    callee:
+      name: safe_constantize
+  match_examples:
+  - name: ruby.eval.active_support_safe_constantize example
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        input.safe_constantize()
+      end
+    expect_match_text:
+    - input.safe_constantize
+  description: "Disabled — safe_constantize resolves the receiver string; needs receiver-taint tracking for the class name."
+- id: ruby.eval.module_const_get
+  enabled: true
+  language: ruby
+  tag: code-injection
+  severity: high
+  cwe:
+  - CWE-94
+  - CWE-470
+  match:
+    kind: call
+    callee:
+      name: const_get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.eval.module_const_get example
+    code: "def example(input, url, id, payload, request, params)\n  Object.const_get(input)\nend\n"
+    expect_match_text:
+    - Object.const_get
+  - name: ruby.eval.module_const_get literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Object.const_get(\"User\")\nend\n"
+    expect_no_match: true
+  description: Module#const_get with a tainted constant name enables unsafe reflection.
+- id: ruby.eval.qualified_const_get
+  enabled: true
+  language: ruby
+  tag: code-injection
+  severity: high
+  packages:
+  - activesupport
+  cwe:
+  - CWE-94
+  - CWE-470
+  match:
+    kind: call
+    callee:
+      name: qualified_const_get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.eval.qualified_const_get example
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        ActiveSupport::Inflector.qualified_const_get(input)
+      end
+    expect_match_text:
+    - ActiveSupport::Inflector.qualified_const_get
+  - name: ruby.eval.qualified_const_get literal negative
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        ActiveSupport::Inflector.qualified_const_get("User")
+      end
+    expect_no_match: true
+  description: ActiveSupport qualified_const_get with tainted input resolves attacker-controlled constants/classes.

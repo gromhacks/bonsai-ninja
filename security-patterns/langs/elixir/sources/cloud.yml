@@ -1,0 +1,36 @@
+# Cloud runtime event sources. Lambda/CloudEvents invocation payloads
+# are `trust: service` — a cloud service forwards data that frequently
+# originated from an attacker (API Gateway → Lambda, SNS → Lambda).
+- id: elixir.aws_lambda.handler_event
+  enabled: true
+  language: elixir
+  trust: service
+  tag: cloud-input
+  payload_types: [json]
+  match:
+    kind: param
+    target:
+      name: event
+  match_examples:
+    - name: declared shape
+      code: |
+        defmodule App do
+          def handle(event) do
+            event
+          end
+        end
+  description: "AWS Lambda Elixir runtime handler(event, context) — invocation payload (API GW requests, S3 notifications, SQS batches)."
+
+- id: elixir.aws_lambda.handler_event_alt
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: elixir
+  trust: service
+  tag: cloud-input
+  payload_types: [json]
+  match:
+    kind: param
+    target:
+      name: payload
+  description: "Disabled duplicate — bare `param name: payload` is covered by elixir.phoenix.channel_handle_in; Lambda `event` remains enabled."

@@ -1,0 +1,457 @@
+- id: javascript.sqli.knex_raw
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: high
+  category: sql-exec
+  packages:
+  - knex
+  imports:
+  - knex
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - knex
+      - raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: knex raw
+    code: |
+      const _u = require("knex");
+      function demo(input, req, obj) {
+        return knex.raw(input, "SELECT * FROM users WHERE id = " + input);
+      }
+  - name: literal knex raw negative
+    code: |
+      const _u = require("knex");
+      function demo(input) {
+        return knex.raw("SELECT * FROM users WHERE id = ?", [input]);
+      }
+    expect_no_match: true
+  description: "knex.raw interpolates the string directly into the query — always unsafe on tainted input."
+- id: javascript.sqli.prisma_query_raw_unsafe
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^PrismaClient\.\$queryRawUnsafe$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prisma query raw unsafe
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input, req, obj) {
+        return PrismaClient.$queryRawUnsafe(input, "SELECT * FROM users WHERE id = " + input);
+      }
+  - name: literal prisma query raw unsafe negative
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input) {
+        return PrismaClient.$queryRawUnsafe("SELECT * FROM users WHERE id = ?", input);
+      }
+    expect_no_match: true
+  description: "Prisma $queryRawUnsafe disables the tagged-template protection — tainted input is injected."
+- id: javascript.sqli.prisma_executerawunsafe
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^PrismaClient\.\$executeRawUnsafe$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prisma executerawunsafe
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input, req, obj) {
+        return PrismaClient.$executeRawUnsafe(input, "SELECT * FROM users WHERE id = " + input);
+      }
+  - name: literal prisma execute raw unsafe negative
+    code: |
+      const _u = require("@prisma/client");
+      function demo(input) {
+        return PrismaClient.$executeRawUnsafe("UPDATE users SET seen = true WHERE id = ?", input);
+      }
+    expect_no_match: true
+  description: "Prisma $executeRawUnsafe — same unsafe raw path as $queryRawUnsafe."
+- id: javascript.sqli.sqlite3_run
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: high
+  packages:
+  - sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqlite3 run
+    code: |
+      const _u = require("sqlite3");
+      function demo(input, req, obj) {
+        return db.run("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: literal sqlite3 run negative
+    code: |
+      const _u = require("sqlite3");
+      function demo(input) {
+        return db.run("SELECT * FROM users WHERE id = ?", input);
+      }
+    expect_no_match: true
+  description: "sqlite3 db.run with a concatenated SQL string — use the param-array form."
+- id: javascript.sqli.sqlite3_exec
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: high
+  packages:
+  - sqlite3
+  - better-sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqlite3 exec
+    code: |
+      const _u = require("sqlite3");
+      function demo(input, req, obj) {
+        return db.exec("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: literal sqlite3 exec negative
+    code: |
+      const _u = require("sqlite3");
+      function demo() {
+        return db.exec("VACUUM");
+      }
+    expect_no_match: true
+  description: "sqlite3 / better-sqlite3 db.exec runs multiple statements as one raw string — no binding support."
+- id: javascript.sqli.better_sqlite3_exec
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: javascript
+  tag: sql-injection
+  severity: high
+  packages:
+  - better-sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - exec
+  description: "Disabled duplicate — same db.exec shape is covered by javascript.sqli.sqlite3_exec with both package names."
+- id: javascript.sqli.method_query_concat
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: critical
+  category: sql-exec
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: method query concat
+    code: |
+      const _u = require("mysql");
+      function demo(input, req, obj) {
+        return conn.query("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: literal method query negative
+    code: |
+      const _u = require("mysql");
+      function demo(input) {
+        return conn.query("SELECT * FROM users WHERE id = ?", [input]);
+      }
+    expect_no_match: true
+  description: "<recv>.query(sql) where arg has a SQL keyword AND concat / template-literal marker — driver-agnostic SQL-injection sink for `conn.query(...)`, `db.query(...)`, and `client.query(...)` shapes the package-anchored rules miss. Merged aliases: javascript.sqli.method_query_sql_variable."
+  aliases:
+  - javascript.sqli.method_query_sql_variable
+  - javascript.sqli.mysql_query
+  - javascript.sqli.mysql_query_db
+  - javascript.sqli.mysql2_pool_query
+  - javascript.sqli.sequelize_query
+  - javascript.sqli.typeorm_query
+  - javascript.sqli.typeorm_manager_query
+  - javascript.sqli.typeorm_datasource_query
+  - javascript.sqli.pg_query
+  - javascript.sqli.pg_client_query
+  - javascript.sqli.mssql_query
+  packages:
+  - mysql
+  - mysql2
+  - sequelize
+  - typeorm
+  - pg
+  - mssql
+  imports:
+  - mysql
+  - mysql2
+  - sequelize
+  - pg
+  - mssql
+- id: javascript.sqli.method_execute_concat
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: critical
+  category: sql-exec
+  cwe:
+  - CWE-89
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: method execute concat
+    code: |
+      const _u = require("graphql");
+      function demo(input, req, obj) {
+        return conn.execute("SELECT * FROM users WHERE id = " + input);
+      }
+  - name: literal method execute negative
+    code: |
+      const _u = require("mysql2");
+      function demo(input) {
+        return conn.execute("SELECT * FROM users WHERE id = ?", [input]);
+      }
+    expect_no_match: true
+  description: "<recv>.execute(sql) — same shape as `query`, used by mysql2 prepared statements + several ORMs. Merged collision aliases: javascript.graphql.schema_execute, javascript.nosql.cassandra_execute, javascript.sqli.mysql_execute, javascript.sqli.mysql_execute_db, javascript.sqli.mysql2_pool_execute."
+  aliases:
+  - javascript.graphql.schema_execute
+  - javascript.nosql.cassandra_execute
+  - javascript.sqli.mysql_execute
+  - javascript.sqli.mysql_execute_db
+  - javascript.sqli.mysql2_pool_execute
+  packages:
+  - graphql
+  - cassandra-driver
+  - mysql2
+  imports:
+  - mysql2
+- id: javascript.sqli.prisma_instance_query_raw_unsafe
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  imports:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$queryRawUnsafe$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prisma instance queryRawUnsafe concat
+    code: |
+      const _u = require("@prisma/client");
+      async function byId(prisma, id) {
+        return prisma.$queryRawUnsafe("SELECT * FROM users WHERE id = " + id);
+      }
+    expect_match_text:
+    - prisma.$queryRawUnsafe
+  - name: prisma instance queryRawUnsafe sql variable concat
+    code: |
+      const _u = require("@prisma/client");
+      async function byId(prisma, sql, id) {
+        return prisma.$queryRawUnsafe(sql + id);
+      }
+    expect_match_text:
+    - prisma.$queryRawUnsafe
+  - name: prisma instance queryRawUnsafe template
+    code: |
+      const _u = require("@prisma/client");
+      async function byName(prisma, name) {
+        return prisma.$queryRawUnsafe(`SELECT * FROM users WHERE name = '${name}'`);
+      }
+    expect_match_text:
+    - prisma.$queryRawUnsafe
+  - name: literal prisma instance queryRawUnsafe negative
+    code: |
+      const _u = require("@prisma/client");
+      async function byId(prisma) {
+        return prisma.$queryRawUnsafe("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: "Prisma client instance $queryRawUnsafe — raw SQL string execution with no tagged-template parameterization."
+- id: javascript.sqli.prisma_instance_execute_raw_unsafe
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: critical
+  packages:
+  - '@prisma/client'
+  imports:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.\$executeRawUnsafe$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prisma instance executeRawUnsafe concat
+    code: |
+      const _u = require("@prisma/client");
+      async function update(prisma, role, id) {
+        return prisma.$executeRawUnsafe("UPDATE users SET role = '" + role + "' WHERE id = " + id);
+      }
+    expect_match_text:
+    - prisma.$executeRawUnsafe
+  - name: prisma instance executeRawUnsafe sql variable concat
+    code: |
+      const _u = require("@prisma/client");
+      async function update(prisma, sql, role) {
+        return prisma.$executeRawUnsafe(sql + role);
+      }
+    expect_match_text:
+    - prisma.$executeRawUnsafe
+  - name: prisma instance executeRawUnsafe template
+    code: |
+      const _u = require("@prisma/client");
+      async function remove(prisma, id) {
+        return prisma.$executeRawUnsafe(`DELETE FROM users WHERE id = ${id}`);
+      }
+    expect_match_text:
+    - prisma.$executeRawUnsafe
+  - name: literal prisma instance executeRawUnsafe negative
+    code: |
+      const _u = require("@prisma/client");
+      async function update(prisma) {
+        return prisma.$executeRawUnsafe("UPDATE users SET seen = true WHERE id = 1");
+      }
+    expect_no_match: true
+  description: "Prisma client instance $executeRawUnsafe — unsafe raw SQL execution path."
+- id: javascript.sqli.prisma_raw_fragment
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: high
+  packages:
+  - '@prisma/client'
+  imports:
+  - '@prisma/client'
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Prisma
+      - raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prisma raw order by
+    code: "const { Prisma } = require(\"@prisma/client\");\nfunction orderBy(column) {\n  return Prisma.raw(\"ORDER BY \" + column);\n}\n"
+    expect_match_text:
+    - Prisma.raw
+  - name: prisma raw where template
+    code: |
+      const _u = require("@prisma/client");
+      function where(Prisma, name) {
+        return Prisma.raw(`WHERE name = '${name}'`);
+      }
+    expect_match_text:
+    - Prisma.raw
+  - name: literal prisma raw fragment negative
+    code: |
+      const _u = require("@prisma/client");
+      function orderBy(Prisma) {
+        return Prisma.raw("ORDER BY created_at");
+      }
+    expect_no_match: true
+  description: Prisma.raw creates an unescaped SQL fragment; tainted strings bypass Prisma.sql tagged-template binding.
+- id: javascript.sqli.database_rawquery
+  enabled: true
+  language: javascript
+  tag: sql-injection
+  severity: high
+  category: sql-exec
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - rawQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: database rawQuery concat
+    code: "function byId(Database, id) {\n  return Database.rawQuery(\"SELECT * FROM users WHERE id = \" + id);\n}\n"
+    expect_match_text:
+    - Database.rawQuery
+  - name: database rawQuery sql variable
+    code: "function byId(Database, sql) {\n  return Database.rawQuery(sql);\n}\n"
+    expect_match_text:
+    - Database.rawQuery
+  - name: literal database rawQuery negative
+    code: |
+      function byId(Database) {
+        return Database.rawQuery("SELECT * FROM users WHERE id = 1");
+      }
+    expect_no_match: true
+  description: "Database.rawQuery(sql) — framework database facade raw SQL execution with string-built SQL."

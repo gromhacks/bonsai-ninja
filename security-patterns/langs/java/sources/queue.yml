@@ -1,0 +1,375 @@
+# Java message-queue input sources (Kafka, JMS, RabbitMQ, AMQP, SQS, Camel, Pub/Sub).
+#
+# ── Adapter gap (audited 2026-04) ────────────────────────────────────────────
+# Spring's queue listeners bind payloads via annotations on handler methods
+# (@KafkaListener, @RabbitListener, @JmsListener, @SqsListener, AMQP
+# `handleDelivery`). The Java adapter currently surfaces parameter
+# identifiers but not their annotation decorators, so `kind: param` rules
+# on annotation names cannot fire (see remote.yml for the same gap).
+#
+# Likewise, typed receiver matching (e.g. `attribute: [ConsumerRecord, value]`)
+# under-fires because adapters key call sites by the local receiver
+# identifier, not by its declared type.
+#
+# Per docs/pattern-guide.mdx the fix lives in the adapter, not in YAML.
+# Below this header: callable-shape rules using receiver-name constraints
+# that DO work today.
+
+- id: java.source.kafka_consumer_record
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [org.apache.kafka.clients.consumer]
+  match:
+    kind: call
+    callee:
+      attribute: [ConsumerRecord, value]
+  description: "Disabled — adapters index local receivers like `record.value`, not receiver types like `ConsumerRecord.value`."
+
+- id: java.source.kafka_listener_annot
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [org.springframework.kafka.annotation]
+  match:
+    kind: param
+    target:
+      name: KafkaListener
+  description: "Disabled — matcher only sees parameter identifiers, not Spring @KafkaListener annotations."
+
+- id: java.source.rabbit_listener_annot
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [org.springframework.amqp.rabbit.annotation]
+  match:
+    kind: param
+    target:
+      name: RabbitListener
+  description: "Disabled — matcher only sees parameter identifiers, not Spring @RabbitListener annotations."
+
+- id: java.source.jms_listener_annot
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [org.springframework.jms.annotation]
+  match:
+    kind: param
+    target:
+      name: JmsListener
+  description: "Disabled — matcher only sees parameter identifiers, not Spring @JmsListener annotations."
+
+- id: java.source.sqs_listener_annot
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [io.awspring.cloud.sqs.annotation]
+  match:
+    kind: param
+    target:
+      name: SqsListener
+  description: "Disabled — matcher only sees parameter identifiers, not Spring Cloud AWS @SqsListener annotations."
+
+- id: java.source.jms_textmessage_gettext
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: service
+  tag: queue-input
+  packages: ["javax.jms", "jakarta.jms"]
+  match:
+    kind: call
+    callee:
+      attribute: [TextMessage, getText]
+  description: "Disabled — adapters index local receivers like `msg.getText`, not receiver types like `TextMessage.getText`."
+
+- id: java.source.jms_bytesmessage_readbytes
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: service
+  tag: queue-input
+  packages: ["javax.jms", "jakarta.jms"]
+  match:
+    kind: call
+    callee:
+      attribute: [BytesMessage, readBytes]
+  description: "Disabled — adapters index local receivers like `msg.readBytes`, not receiver types like `BytesMessage.readBytes`."
+
+- id: java.source.jms_message_getbody
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: service
+  tag: queue-input
+  packages: ["javax.jms", "jakarta.jms"]
+  match:
+    kind: call
+    callee:
+      attribute: [Message, getBody]
+  description: "Disabled — adapters index local receivers like `msg.getBody`, not receiver types like `Message.getBody`."
+
+- id: java.source.rabbitmq_basicdeliver_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [com.rabbitmq.client]
+  match:
+    kind: param
+    target:
+      name: handleDelivery
+  description: "Disabled — `handleDelivery` is the consumer method name; `kind: param` only matches parameter identifiers."
+
+- id: java.source.pubsub_message_getdata
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: service
+  tag: queue-input
+  packages: ["com.google.cloud.pubsub"]
+  match:
+    kind: call
+    callee:
+      attribute: [PubsubMessage, getData]
+  description: "Disabled — adapters index local receivers like `message.getData`, not receiver types like `PubsubMessage.getData`."
+
+# Callable-shape rules (work today) ----------------------------------------
+
+- id: java.source.kafka_record_value
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [org.apache.kafka.clients.consumer]
+  match:
+    kind: call
+    callee:
+      name: value
+  constraints:
+  - receiver_name_in:
+    - record
+    - consumerRecord
+    - msg
+    - message
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.kafka.clients.consumer.*;
+      class App {
+        void handle(String input) throws Exception {
+          record.value(input);
+        }
+      }
+  description: "Kafka ConsumerRecord.value() — message payload via the typical `record` receiver name."
+
+  imports:
+  - org.apache.kafka.clients.consumer
+- id: java.source.kafka_record_key
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [org.apache.kafka.clients.consumer]
+  match:
+    kind: call
+    callee:
+      name: key
+  constraints:
+  - receiver_name_in:
+    - record
+    - consumerRecord
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.kafka.clients.consumer.*;
+      class App {
+        void handle(String input) throws Exception {
+          record.key(input);
+        }
+      }
+  description: "Kafka ConsumerRecord.key() — partitioning key from the broker."
+
+  imports:
+  - org.apache.kafka.clients.consumer
+- id: java.source.kafka_consumer_poll
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  packages: [org.apache.kafka.clients.consumer]
+  match:
+    kind: call
+    callee:
+      attribute: [KafkaConsumer, poll]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.kafka.clients.consumer.*;
+      class App {
+        void handle(String input) throws Exception {
+          KafkaConsumer.poll(input);
+        }
+      }
+  description: "KafkaConsumer.poll(timeout) — returns ConsumerRecords whose payloads are broker-supplied."
+
+  imports:
+  - org.apache.kafka.clients.consumer
+- id: java.source.jms_message_gettext_local
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: ["javax.jms", "jakarta.jms"]
+  match:
+    kind: call
+    callee:
+      name: getText
+  constraints:
+  - receiver_name_in:
+    - msg
+    - message
+    - textMessage
+    - jmsMessage
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.jms.*;
+      class App {
+        void handle(String input) throws Exception {
+          msg.getText(input);
+        }
+      }
+  description: "JMS TextMessage.getText() — broker-supplied string body via local message receiver."
+
+- id: java.source.jms_message_getbody_local
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: ["javax.jms", "jakarta.jms"]
+  match:
+    kind: call
+    callee:
+      name: getBody
+  constraints:
+  - receiver_name_in:
+    - msg
+    - message
+    - jmsMessage
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.jms.*;
+      class App {
+        void handle(String input) throws Exception {
+          msg.getBody(input);
+        }
+      }
+  description: "JMS Message.getBody() — broker-supplied body via local message receiver."
+
+- id: java.source.jms_bytesmessage_readbytes_local
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: ["javax.jms", "jakarta.jms"]
+  match:
+    kind: call
+    callee:
+      name: readBytes
+  constraints:
+  - receiver_name_in:
+    - msg
+    - message
+    - bytesMessage
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.jms.*;
+      class App {
+        void handle(String input) throws Exception {
+          msg.readBytes(input);
+        }
+      }
+  description: "JMS BytesMessage.readBytes() — raw broker-supplied bytes via local receiver."
+
+- id: java.source.sqs_message_getbody_local
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: ["software.amazon.awssdk.sqs", "com.amazonaws.services.sqs"]
+  match:
+    kind: call
+    callee:
+      name: body
+  constraints:
+  - receiver_name_in:
+    - msg
+    - message
+    - sqsMessage
+  match_examples:
+  - name: generated shape example
+    code: |
+      import software.amazon.awssdk.sqs.*;
+      class App {
+        void handle(String input) throws Exception {
+          msg.body(input);
+        }
+      }
+  description: "SQS Message.body() — broker-supplied message body."
+
+  imports:
+  - software.amazon.awssdk.sqs
+- id: java.source.pubsub_message_getdata_local
+  enabled: true
+  language: java
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message]
+  packages: ["com.google.cloud.pubsub"]
+  match:
+    kind: call
+    callee:
+      name: getData
+  constraints:
+  - receiver_name_in:
+    - message
+    - msg
+    - pubsubMessage
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.google.cloud.pubsub.*;
+      class App {
+        void handle(String input) throws Exception {
+          message.getData(input);
+        }
+      }
+  description: "Google Pub/Sub PubsubMessage.getData() — broker-supplied data via local receiver."

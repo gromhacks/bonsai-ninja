@@ -1,0 +1,503 @@
+# Dart remote / network-trust sources.
+- id: dart.shelf.request_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [query, json, path, header, form]
+  frameworks: [shelf, angel, dart_frog]
+  packages: [shelf, angel_framework, dart_frog]
+  manifests: [pubspec.yaml]
+  lockfiles: [pubspec.lock]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — whole request object taints too broadly without field-sensitive Request access tracking; body-reader rules stay enabled."
+
+- id: dart.shelf.req_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: remote
+  tag: http-input
+  frameworks: [shelf]
+  packages: [shelf]
+  match:
+    kind: param
+    target:
+      name: req
+  description: "Disabled duplicate — merged into dart.shelf.request_param."
+
+- id: dart.shelf.context_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: remote
+  tag: http-input
+  frameworks: [dart_frog]
+  packages: [dart_frog]
+  match:
+    kind: param
+    target:
+      name: context
+  description: "Disabled — whole context object taints too broadly without field-sensitive Request access tracking."
+
+- id: dart.http.request_query_parameters
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  match:
+    kind: read
+    target:
+      name: queryParameters
+  description: "Disabled — the current Dart adapter does not index property reads like `uri.queryParameters`."
+
+- id: dart.http.request_query_parameters_all
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  match:
+    kind: read
+    target:
+      name: queryParametersAll
+  description: "Disabled — the current Dart adapter does not index property reads like `uri.queryParametersAll`."
+
+- id: dart.http.request_headers
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  match:
+    kind: read
+    target:
+      name: headers
+  description: "Disabled — FP-prone. Bare name 'headers' matches every .headers attribute. Re-enable with attribute chain."
+
+- id: dart.http.request_read_as_string
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  frameworks: [shelf]
+  packages: [shelf]
+  match:
+    kind: call
+    callee:
+      attribute: [request, readAsString]
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; var amount = 1; request.readAsString(input); }
+  description: "shelf Request.readAsString — body read. Signature: `readAsString([Encoding])` (0 or 1 arg); `max_args: 1` rejects same-name decoys with extra args."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.http.request_read
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  frameworks: [shelf]
+  packages: [shelf]
+  match:
+    kind: call
+    callee:
+      attribute: [request, read]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; var amount = 1; request.read(); }
+  description: "shelf Request.read — byte stream body. Signature: `read()` (0 args); `max_args: 0` rejects unrelated `read(n)` decoys (e.g. file readers)."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.http.response_body
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: dart
+  trust: remote
+  tag: network-response
+  payload_types: [form]
+  packages: [http, dio]
+  match:
+    kind: read
+    target:
+      name: body
+  description: "Disabled — FP-prone. Bare name 'body' matches every .body attribute. Re-enable with attribute chain."
+
+# --- Re-enabled / new framework-scoped HTTP request handlers ---
+
+- id: dart.shelf.request_url
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [url, query]
+  frameworks: [shelf]
+  packages: [shelf]
+  match:
+    kind: call
+    callee:
+      attribute: [request, url]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; var amount = 1; request.url(); }
+  description: "shelf Request.url — tainted Uri (path + query). Property-style getter (no args); `max_args: 0` rejects unrelated `request.url(...)` setters/builders elsewhere."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.shelf.request_requested_uri
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [url]
+  frameworks: [shelf]
+  packages: [shelf]
+  match:
+    kind: call
+    callee:
+      attribute: [request, requestedUri]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; var amount = 1; request.requestedUri(); }
+  description: "shelf Request.requestedUri — full requested URL including host. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.shelf.request_headers_chain
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [shelf]
+  packages: [shelf]
+  match:
+    kind: call
+    callee:
+      attribute: [request, headers]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      import 'package:shelf/shelf.dart';
+      void test() { var input = "x"; var amount = 1; request.headers(); }
+  description: "shelf Request.headers — tainted header map. Property-style getter (no args); `max_args: 0` rejects unrelated `headers(...)` setters."
+
+  imports:
+  - shelf/shelf.dart
+- id: dart.conduit.request_controller_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [json, query, header]
+  frameworks: [aqueduct, conduit]
+  packages: [aqueduct, conduit]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — bare `param name: request` is FP-prone; no canonical exists. Use the attribute-chain rule dart.conduit.request_body_decode for body access. Re-enable when adapter supports class-scoped Conduit Request param matching."
+
+- id: dart.conduit.request_body_decode
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [json, form]
+  frameworks: [aqueduct, conduit]
+  packages: [aqueduct, conduit]
+  match:
+    kind: call
+    callee:
+      attribute: [body, decode]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:aqueduct/aqueduct.dart';
+      import 'package:aqueduct/aqueduct.dart';
+      import 'package:aqueduct/aqueduct.dart';
+      import 'package:aqueduct/aqueduct.dart';
+      import 'package:aqueduct/aqueduct.dart'; // aqueduct
+      void test() { var input = "x"; var amount = 1; body.decode(input); }
+  description: "Aqueduct/Conduit Request.body.decode() — parsed body payload."
+
+  imports:
+  - aqueduct/aqueduct.dart
+- id: dart.dart_frog.request_uri
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [url, query]
+  frameworks: [dart_frog]
+  packages: [dart_frog]
+  match:
+    kind: call
+    callee:
+      attribute: [request, uri]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart'; // dart_frog
+      void test() { var input = "x"; var amount = 1; request.uri(); }
+  description: "Dart Frog RequestContext.request.uri — tainted Uri. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+
+  imports:
+  - dart_frog/dart_frog.dart
+- id: dart.dart_frog.request_json
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [dart_frog]
+  packages: [dart_frog]
+  match:
+    kind: call
+    callee:
+      attribute: [request, json]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart';
+      import 'package:dart_frog/dart_frog.dart'; // dart_frog
+      void test() { var input = "x"; var amount = 1; request.json(); }
+  description: "Dart Frog Request.json() — parsed body. `json()` takes no args; `max_args: 0` rejects same-name decoys (JSON serializers `json(value)` etc.)."
+
+  imports:
+  - dart_frog/dart_frog.dart
+- id: dart.flutter.method_channel_invoke
+  enabled: true
+  language: dart
+  trust: service
+  tag: ipc-input
+  payload_types: [text, json]
+  frameworks: [flutter]
+  match:
+    kind: call
+    callee:
+      attribute: [methodChannel, invokeMethod]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; methodChannel.invokeMethod(input); }
+  description: "Flutter MethodChannel.invokeMethod — return value crosses platform boundary (e.g. JS bridge, native plugin)."
+
+- id: dart.flutter.event_channel_receive
+  enabled: true
+  language: dart
+  trust: service
+  tag: ipc-input
+  payload_types: [text, json]
+  frameworks: [flutter]
+  match:
+    kind: call
+    callee:
+      attribute: [eventChannel, receiveBroadcastStream]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; eventChannel.receiveBroadcastStream(input); }
+  description: "Flutter EventChannel.receiveBroadcastStream — values arrive from native/JS over platform channel."
+
+- id: dart.cloud.firebase_oncall_data
+  enabled: true
+  language: dart
+  trust: remote
+  tag: cloud-input
+  payload_types: [json]
+  frameworks: [firebase_functions]
+  packages: [firebase_functions_interop, cloud_functions]
+  match:
+    kind: call
+    callee:
+      attribute: [data, onCall]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart';
+      import 'package:firebase_functions_interop/firebase_functions_interop.dart'; // firebase_functions_interop
+      void test() { var input = "x"; var amount = 1; data.onCall(input); }
+  description: "Firebase Cloud Functions onCall handler — `data.data` is the caller-supplied payload. `onCall(handler)` is a registration call with at least one handler arg; `min_args: 1` rejects unrelated `data.onCall()` 0-arg accessors."
+
+  imports:
+  - firebase_functions_interop/firebase_functions_interop.dart
+- id: dart.cloud.firebase_https_oncall_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: remote
+  tag: cloud-input
+  payload_types: [json]
+  frameworks: [firebase_functions]
+  packages: [firebase_functions_interop, cloud_functions]
+  match:
+    kind: param
+    target:
+      name: call
+  description: "Disabled — bare `param name: call` is FP-prone; rely on attribute-chain `data.onCall` rule above."
+
+- id: dart.grpc.service_method_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  trust: remote
+  tag: rpc-input
+  payload_types: [protobuf]
+  frameworks: [grpc]
+  packages: [grpc]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — bare `param name: request` is FP-prone; no canonical exists. Use the attribute-chain rule dart.grpc.service_call_request for `call.request`. Re-enable when adapter supports class-scoped gRPC ServiceCall param matching."
+
+- id: dart.grpc.service_call_request
+  enabled: true
+  language: dart
+  trust: remote
+  tag: rpc-input
+  payload_types: [protobuf]
+  frameworks: [grpc]
+  packages: [grpc]
+  match:
+    kind: call
+    callee:
+      attribute: [call, request]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:grpc/grpc.dart';
+      import 'package:grpc/grpc.dart';
+      import 'package:grpc/grpc.dart';
+      import 'package:grpc/grpc.dart';
+      import 'package:grpc/grpc.dart'; // grpc
+      void test() { var input = "x"; var amount = 1; call.request(input); }
+  description: "gRPC ServiceCall.request — protobuf message off the call object."
+
+  imports:
+  - grpc/grpc.dart
+- id: dart.shelf_multipart_part_filename
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [shelf]
+  packages: [shelf_multipart]
+  match:
+    kind: call
+    callee:
+      attribute: [part, filename]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: dart.shelf_multipart_part_filename example
+    code: |
+      import 'package:shelf_multipart/shelf_multipart.dart';
+      import 'package:shelf_multipart/shelf_multipart.dart';
+      import 'package:shelf_multipart/shelf_multipart.dart';
+      import 'package:shelf_multipart/shelf_multipart.dart';
+      import 'package:shelf_multipart/shelf_multipart.dart'; // shelf_multipart
+      void test(part) { part.filename(); }
+  description: "shelf_multipart form-data part filename — browser-supplied multipart filename metadata."
+
+# `comment` parameter — the canonical "user-supplied content" name for
+# blog/forum/CMS request handlers (matches the F3 dart.xss.innerhtml
+# miss case). Bare-name match: also fires on functions with unrelated
+# `comment` params; treat findings outside controller/handler context
+# as audit hints.
+  imports:
+  - shelf_multipart/shelf_multipart.dart
+- id: dart.input.comment_param
+  enabled: true
+  language: dart
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  match:
+    kind: param
+    target:
+      name: comment
+  match_examples:
+  - name: declared shape
+    code: |
+      void handle(String comment) { var seen = comment; }
+  description: "Handler `comment` parameter — user-supplied content from a blog/forum/CMS POST. Engine taint flow gates findings; broad name means non-handler usage will surface as audit hints."

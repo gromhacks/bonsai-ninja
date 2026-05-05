@@ -1,0 +1,436 @@
+- id: java.access.aws_s3_get_object
+  enabled: true
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["software.amazon.awssdk.s3"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "^S3Client\\.getObject$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import software.amazon.awssdk.s3.*;
+      class App {
+        void handle(String input) throws Exception {
+          S3Client.getObject(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import software.amazon.awssdk.s3.*;
+      class App {
+        void handle(String input) throws Exception {
+          S3Client.getObject("safe");
+        }
+      }
+    expect_no_match: true
+  description: "S3Client.getObject(bucket/key) — tainted selector can read arbitrary object data."
+
+  imports:
+  - software.amazon.awssdk.s3
+- id: java.access.aws_s3_put_object
+  enabled: true
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["software.amazon.awssdk.s3"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [S3Client, putObject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import software.amazon.awssdk.s3.*;
+      class App {
+        void handle(String input) throws Exception {
+          S3Client.putObject(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import software.amazon.awssdk.s3.*;
+      class App {
+        void handle(String input) throws Exception {
+          S3Client.putObject("safe");
+        }
+      }
+    expect_no_match: true
+  description: "S3Client.putObject(bucket/key) — tainted selector can overwrite arbitrary object keys."
+
+  imports:
+  - software.amazon.awssdk.s3
+- id: java.access.aws_secretsmanager_get_secret_value
+  enabled: true
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["software.amazon.awssdk.secretsmanager"]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [SecretsManagerClient, getSecretValue]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import software.amazon.awssdk.secretsmanager.*;
+      class App {
+        void handle(String input) throws Exception {
+          SecretsManagerClient.getSecretValue(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import software.amazon.awssdk.secretsmanager.*;
+      class App {
+        void handle(String input) throws Exception {
+          SecretsManagerClient.getSecretValue("safe");
+        }
+      }
+    expect_no_match: true
+  description: "SecretsManagerClient.getSecretValue — tainted secret id reads arbitrary secret material."
+
+  imports:
+  - software.amazon.awssdk.secretsmanager
+- id: java.access.azure_blob_download_content
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["com.azure.storage.blob"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [BlobClient, downloadContent]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.azure.storage.blob.*;
+      class App {
+        void handle(String input) throws Exception {
+          BlobClient.downloadContent(input);
+        }
+      }
+  description: "Disabled — BlobClient.downloadContent() carries the container/blob selector in receiver state, not a call argument."
+
+  imports:
+  - com.azure.storage.blob
+- id: java.access.azure_blob_upload
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["com.azure.storage.blob"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [BlobClient, upload]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.azure.storage.blob.*;
+      class App {
+        void handle(String input) throws Exception {
+          BlobClient.upload(input);
+        }
+      }
+  description: "Disabled — BlobClient.upload(...) carries the container/blob selector in receiver state; the argument is upload content/options, not the target selector."
+
+  imports:
+  - com.azure.storage.blob
+- id: java.access.azure_keyvault_get_secret
+  enabled: true
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["com.azure.security.keyvault.secrets"]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [SecretClient, getSecret]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.azure.security.keyvault.secrets.*;
+      class App {
+        void handle(String input) throws Exception {
+          SecretClient.getSecret(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.azure.security.keyvault.secrets.*;
+      class App {
+        void handle(String input) throws Exception {
+          SecretClient.getSecret("safe");
+        }
+      }
+    expect_no_match: true
+  description: "SecretClient.getSecret — tainted secret name reads arbitrary Key Vault material."
+
+  imports:
+  - com.azure.security.keyvault.secrets
+- id: java.access.gcp_storage_read_all_bytes
+  enabled: true
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["com.google.cloud.storage"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "^Storage\\.readAllBytes$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.google.cloud.storage.*;
+      class App {
+        void handle(String input) throws Exception {
+          Storage.readAllBytes(input);
+        }
+      }
+  - name: literal gcs object read negative
+    code: |
+      import com.google.cloud.storage.*;
+      class App {
+        void handle() throws Exception {
+          Storage.readAllBytes("reports/safe.json");
+        }
+      }
+    expect_no_match: true
+  description: "Storage.readAllBytes(bucket, blob) — tainted selector reads arbitrary GCS objects."
+
+  imports:
+  - com.google.cloud.storage
+- id: java.access.gcp_storage_create
+  enabled: true
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["com.google.cloud.storage"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [Storage, create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.google.cloud.storage.*;
+      class App {
+        void handle(String input) throws Exception {
+          Storage.create(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.google.cloud.storage.*;
+      class App {
+        void handle(String input) throws Exception {
+          Storage.create("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Storage.create(blobInfo, ...) — tainted bucket/blob selector writes attacker-chosen GCS objects."
+
+  imports:
+  - com.google.cloud.storage
+- id: java.access.gcp_secretmanager_access_secret_version
+  enabled: true
+  language: java
+  tag: access-control
+  severity: high
+  packages: ["com.google.cloud.secretmanager"]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [SecretManagerServiceClient, accessSecretVersion]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.google.cloud.secretmanager.*;
+      class App {
+        void handle(String input) throws Exception {
+          SecretManagerServiceClient.accessSecretVersion(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.google.cloud.secretmanager.*;
+      class App {
+        void handle(String input) throws Exception {
+          SecretManagerServiceClient.accessSecretVersion("safe");
+        }
+      }
+    expect_no_match: true
+  description: "SecretManagerServiceClient.accessSecretVersion — tainted resource name reads arbitrary secret versions."
+
+  imports:
+  - com.google.cloud.secretmanager
+- id: java.access.jndi_initialcontext_lookup
+  enabled: true
+  language: java
+  tag: jndi-injection
+  severity: critical
+  packages: ["javax.naming"]
+  cwe: [CWE-074, CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^InitialContext\\.lookup$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.naming.*;
+      class App {
+        void handle(String input) throws Exception {
+          InitialContext.lookup(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.naming.*;
+      class App {
+        void handle(String input) throws Exception {
+          InitialContext.lookup("safe");
+        }
+      }
+    expect_no_match: true
+  description: "javax.naming.InitialContext.lookup(tainted) — Log4Shell-style remote class load and deserialization (LDAP/RMI/CORBA URI). Instance-form `initialContext.lookup` is covered by the OnlyWhenPackaged lax-tail policy when the file imports javax.naming."
+
+- id: java.access.jndi_initialcontext_lookup_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: jndi-injection
+  severity: critical
+  packages: ["javax.naming"]
+  cwe: [CWE-074, CWE-502]
+  match:
+    kind: call
+    callee:
+      name: lookup
+  match_examples:
+  - name: local initial context lookup
+    code: |
+      import javax.naming.*;
+      class App {
+        Object handle(InitialContext initialContext, String name) throws Exception {
+          return initialContext.lookup(name);
+        }
+      }
+      class InitialContext {
+        Object lookup(Object... args) { return null; }
+      }
+    expect_match_text: [initialContext.lookup]
+  description: "InitialContext.lookup(name) on a local naming context — attacker-controlled JNDI name can trigger remote lookup and deserialization."
+  imports:
+  - javax.naming
+- id: java.access.jndi_context_lookup
+  enabled: true
+  language: java
+  tag: jndi-injection
+  severity: critical
+  packages: ["javax.naming"]
+  cwe: [CWE-074, CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Context, lookup]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.naming.*;
+      class App {
+        void handle(String input) throws Exception {
+          Context.lookup(input);
+        }
+      }
+  - name: local context lookup
+    code: |
+      import javax.naming.*;
+      class App {
+        Object handle(Context ctx, String name) throws Exception {
+          return ctx.lookup(name);
+        }
+      }
+      interface Context {
+        Object lookup(Object... args);
+      }
+    expect_match_text: [ctx.lookup]
+  - name: arg tainted literal negative
+    code: |
+      import javax.naming.*;
+      class App {
+        void handle(String input) throws Exception {
+          Context.lookup("safe");
+        }
+      }
+    expect_no_match: true
+  description: "javax.naming.Context.lookup(tainted) — same JNDI remote class load risk via the abstract Context API. JNDI signature is `lookup(Name|String)` — exactly 1 arg; `min_args: 1` + `max_args: 1` rejects unrelated `lookup()` decoys (Map.lookup overloads etc.)."
+
+- id: java.access.jndi_initialdircontext_lookup
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: java
+  tag: jndi-injection
+  severity: critical
+  packages: ["javax.naming"]
+  cwe: [CWE-074, CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [InitialDirContext, lookup]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.naming.*;
+      class App {
+        void handle(String input) throws Exception {
+          InitialDirContext.lookup(input);
+        }
+      }
+  description: "Disabled — subsumed by java.access.jndi_context_lookup (`[Context, lookup]`) under the matcher's OnlyWhenPackaged lax-tail policy. When the file imports `javax.naming`, the Context rule already lax-matches every `*.lookup(...)` instance form including `InitialDirContext.lookup(...)`."

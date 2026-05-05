@@ -1,0 +1,20 @@
+# Erlang cloud-runtime event sources (trust: service).
+- id: erlang.source.aws_lambda_event
+  enabled: true
+  language: erlang
+  trust: service
+  tag: cloud-event
+  packages: [erlang_aws_lambda]
+  match:
+    kind: param
+    target:
+      name: Event
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("erlang_aws_lambda/include/erlang_aws_lambda.hrl").
+      -export([handle/1]).
+      handle(Event) ->
+        Event.
+  description: "AWS Lambda Erlang custom-runtime handler(Event, Context) — Event is caller-controlled."

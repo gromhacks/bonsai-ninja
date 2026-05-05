@@ -1,0 +1,559 @@
+- id: python.nosql.pymongo_find
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - pymongo
+  - motor
+  imports:
+  - pymongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: find
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql pymongo find
+    code: |
+      import pymongo
+      def example(user_input):
+          return collection.find({"$where": user_input})
+  - name: nosql pymongo nested receiver find
+    code: |
+      import pymongo
+      def example(_DB, user_input):
+          return _DB.users.find({"email": user_input})
+    expect_match_text:
+    - _DB.users.find
+  - name: pymongo find literal negative
+    code: |
+      import pymongo
+
+      def example(user_input):
+          return collection.find('safe')
+    expect_no_match: true
+  description: "pymongo collection.find — tainted filter interpolation. Merged collision aliases: python.nosql.pymongo_find_one, python.nosql.pymongo_find_filter_value_object, python.nosql.mongo_find_one_credential_object, python.nosql.motor_collection_find, python.nosql.motor_collection_find_one, python.nosql.motor_find_filter_value_object."
+  aliases:
+  - python.nosql.pymongo_find_filter_value_object
+  - python.nosql.motor_collection_find
+  - python.nosql.motor_find_filter_value_object
+- id: python.nosql.pymongo_find_one
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - pymongo
+  - motor
+  imports:
+  - pymongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: find_one
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql pymongo find one
+    code: |
+      import pymongo
+      def example(collection, user_input):
+          return collection.find_one({"email": user_input})
+  - name: nosql motor nested receiver find one
+    code: |
+      import pymongo
+      async def example(_DB, email, password):
+          return await _DB.users.find_one({"email": email, "password": password})
+    expect_match_text:
+    - _DB.users.find_one
+  - name: pymongo find one literal negative
+    code: |
+      import pymongo
+
+      def example(collection, user_input):
+          return collection.find_one('safe')
+    expect_no_match: true
+  description: "pymongo/motor find_one(filter) — tainted filter values can be operator-typed objects such as {'$ne': ''}. Merged aliases: python.nosql.mongo_find_one_credential_object, python.nosql.motor_collection_find_one."
+  aliases:
+  - python.nosql.mongo_find_one_credential_object
+  - python.nosql.motor_collection_find_one
+- id: python.nosql.pymongo_aggregate
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - pymongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql pymongo aggregate
+    code: |
+      import pymongo
+      def example(user_input):
+          return collection.aggregate([{"$match": user_input}])
+  - name: pymongo aggregate literal negative
+    code: |
+      import pymongo
+
+      def example(user_input):
+          return collection.aggregate('safe')
+    expect_no_match: true
+  description: "pymongo aggregate pipeline — flag tainted $where / $expr."
+- id: python.nosql.pymongo_update
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - pymongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - update_many
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql pymongo update tainted filter
+    code: |
+      import pymongo
+      def example(user_input):
+          return collection.update_many({"$where": user_input}, {"$set": user_input})
+  - name: pymongo update literal filter negative
+    code: |
+      import pymongo
+      def example():
+          return collection.update_many({"active": False}, {"$set": {"active": True}})
+    expect_no_match: true
+  description: "pymongo update_many(tainted filter, update)."
+- id: python.nosql.pymongo_update_document
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - pymongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - update_many
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: nosql pymongo update tainted document
+    code: |
+      import pymongo
+      def example(user_input):
+          return collection.update_many({"active": False}, user_input)
+  - name: pymongo update literal document negative
+    code: |
+      import pymongo
+      def example():
+          return collection.update_many({"active": False}, {"$set": {"active": True}})
+    expect_no_match: true
+  description: "pymongo update_many(filter, tainted update) — attacker-controlled update documents can inject operators."
+- id: python.nosql.pymongo_delete
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - pymongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - delete_many
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql pymongo delete
+    code: |
+      import pymongo
+      def example(user_input):
+          return collection.delete_many({"$where": user_input})
+  - name: pymongo delete literal negative
+    code: |
+      import pymongo
+
+      def example(user_input):
+          return collection.delete_many('safe')
+    expect_no_match: true
+  description: pymongo delete_many.
+- id: python.nosql.pymongo_database_command
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - pymongo
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - database
+      - command
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql pymongo database command
+    code: |
+      import pymongo
+      def example(user_input):
+          return database.command({"$eval": user_input})
+  - name: pymongo database command literal negative
+    code: |
+      import pymongo
+
+      def example(user_input):
+          return database.command('safe')
+    expect_no_match: true
+  description: "pymongo Database.command — arbitrary command document."
+- id: python.nosql.pymongo_eval
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: critical
+  packages:
+  - pymongo
+  cwe:
+  - CWE-943
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - database
+      - eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql pymongo eval
+    code: |
+      import pymongo
+      def example(user_input):
+          return database.eval(user_input)
+  - name: pymongo eval literal negative
+    code: |
+      import pymongo
+
+      def example(user_input):
+          return database.eval('safe')
+    expect_no_match: true
+  description: "Legacy Database.eval — server-side JS execution."
+- id: python.nosql.motor_aggregate
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - motor
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncIOMotorCollection
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql motor aggregate
+    code: |
+      import motor
+      def example(user_input):
+          return AsyncIOMotorCollection.aggregate([{"$match": user_input}])
+  - name: motor aggregate literal negative
+    code: |
+      import motor
+
+      def example(user_input):
+          return AsyncIOMotorCollection.aggregate('safe')
+    expect_no_match: true
+  description: motor aggregate.
+- id: python.nosql.mongoengine_objects_filter
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - mongoengine
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QuerySet
+      - filter
+  description: "Disabled — mongoengine filter is type-bounded; flag only with __raw__."
+- id: python.nosql.mongoengine_raw
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoengine
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QuerySet
+      - __raw__
+  description: "Disabled — MongoEngine `__raw__` is a keyword argument, not a callee; re-enable once keyword-argument presence constraints land."
+- id: python.nosql.redis_eval
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - redis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - redis
+      - eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql redis eval
+    code: |
+      import redis
+      def example(user_input):
+          return redis.eval(user_input)
+  - name: redis eval literal negative
+    code: |
+      import redis
+
+      def example(user_input):
+          return redis.eval('safe')
+    expect_no_match: true
+  description: "redis-py Redis.eval — Lua script injection."
+- id: python.nosql.redis_evalsha
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - redis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - redis
+      - evalsha
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql redis evalsha
+    code: |
+      import redis
+      def example(user_input):
+          return redis.evalsha(user_input, 1, "key")
+  - name: redis evalsha literal negative
+    code: |
+      import redis
+      def example():
+          return redis.evalsha("0123456789abcdef", 1, "key")
+    expect_no_match: true
+  description: "redis-py Redis.evalsha(tainted sha, ...) — attacker selects which cached Lua script executes."
+- id: python.nosql.redis_execute_command
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - redis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - redis
+      - execute_command
+  description: "Disabled — execute_command is generic; flag with EVAL/SCRIPT constraint."
+- id: python.nosql.cassandra_execute
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: cql-injection
+  severity: high
+  packages:
+  - cassandra
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - execute
+  description: "Disabled duplicate — Cassandra Session.execute is indistinguishable from SQLAlchemy Session.execute in v1 matching; keep cql-specific rule disabled until receiver typing exists."
+- id: python.nosql.elasticsearch_search
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - elasticsearch
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Elasticsearch
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql elasticsearch search
+    code: |
+      import elasticsearch
+      def example(user_input):
+          return Elasticsearch.search({"$query": user_input})
+  - name: elasticsearch search literal negative
+    code: |
+      import elasticsearch
+
+      def example(user_input):
+          return Elasticsearch.search('safe')
+    expect_no_match: true
+  description: elasticsearch-py search(body=tainted query DSL).
+- id: python.nosql.couchdb_query
+  enabled: true
+  language: python
+  tag: nosql-injection
+  severity: high
+  packages:
+  - couchdb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql couchdb query
+    code: |
+      import couchdb
+      def example(user_input):
+          return Database.query(user_input)
+  - name: couchdb query literal negative
+    code: |
+      import couchdb
+
+      def example(user_input):
+          return Database.query('safe')
+    expect_no_match: true
+  description: couchdb-python Database.query (tainted map/reduce).
+- id: python.nosql.neo4j_run
+  enabled: true
+  language: python
+  tag: cypher-injection
+  severity: high
+  packages:
+  - neo4j
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nosql neo4j run
+    code: |
+      import neo4j
+      def example(user_input):
+          return Session.run(user_input)
+  - name: neo4j run literal negative
+    code: |
+      import neo4j
+
+      def example(user_input):
+          return Session.run('safe')
+    expect_no_match: true
+  description: "neo4j Session.run — flag string-built Cypher."
+- id: python.nosql.boto3_dynamodb_scan
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - boto3
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Table
+      - scan
+  description: "Disabled — DynamoDB scan filter expressions are usually safe; flag only when string-built FilterExpression."

@@ -1,0 +1,139 @@
+# Rust CLI / local input sources (argv, stdin, environment).
+- id: rust.cli.argv
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [env, args]
+  match_examples:
+  - name: generated direct match
+    code: |
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          env::args(target);
+      }
+  description: "std::env::args — process argv."
+- id: rust.cli.argv_os
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [env, args_os]
+  match_examples:
+  - name: generated direct match
+    code: |
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          env::args_os(target);
+      }
+  description: "std::env::args_os — OS-flavored argv."
+- id: rust.cli.std_env_current_exe
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [std, env, current_exe]
+  match_examples:
+  - name: std env current exe
+    code: |
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          std::env::current_exe(target);
+      }
+    expect_match_text: [std::env::current_exe]
+  description: "std::env::current_exe() — executable path is not trustworthy for security decisions."
+- id: rust.cli.std_env_temp_dir
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [std, env, temp_dir]
+  match_examples:
+  - name: std env temp dir
+    code: |
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          std::env::temp_dir(target);
+      }
+    expect_match_text: [std::env::temp_dir]
+  description: "std::env::temp_dir() — shared temporary directories require safe random file creation and containment checks."
+- id: rust.cli.clap_parse
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  frameworks: [clap]
+  packages: [clap]
+  match:
+    kind: call
+    callee:
+      attribute: [Parser, parse]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use clap::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Parser::parse(target);
+      }
+  description: "clap::Parser::parse — argv-derived struct."
+- id: rust.cli.stdin_read_line
+  enabled: true
+  language: rust
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: read_line
+  match_examples:
+  - name: generated direct match
+    code: |
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          read_line(target);
+      }
+  description: "std::io::Stdin::read_line — interactive input."
+- id: rust.cli.env_var
+  enabled: true
+  language: rust
+  trust: config
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [env, var]
+  match_examples:
+  - name: generated direct match
+    code: |
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          env::var(target);
+      }
+  description: "std::env::var — process environment variable."

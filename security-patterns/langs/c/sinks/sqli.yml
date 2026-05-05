@@ -1,0 +1,192 @@
+- id: c.sqli.sqlite3_exec
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: critical
+  packages: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_exec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <sqlite3.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        sqlite3_exec(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        sqlite3_exec("safe", "safe");
+      }
+    expect_no_match: true
+  description: "sqlite3_exec(db, tainted_sql, ...) — runs raw SQL; no parameterisation, concatenating user input = SQLi."
+- id: c.sqli.sqlite3_prepare_v2
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: high
+  packages: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_prepare_v2
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <sqlite3.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        sqlite3_prepare_v2(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        sqlite3_prepare_v2("safe", "safe");
+      }
+    expect_no_match: true
+  description: "sqlite3_prepare_v2 with concatenated SQL."
+- id: c.sqli.mysql_query
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: critical
+  packages: [mysqlclient]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: mysql_query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mysqlclient/mysql.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mysql_query(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mysql_query("safe", "safe");
+      }
+    expect_no_match: true
+  description: "mysql_query(conn, tainted_sql) — no parameter binding; use mysql_stmt_prepare + mysql_stmt_bind_param."
+- id: c.sqli.mysql_real_query
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: critical
+  packages: [mysqlclient]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: mysql_real_query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mysqlclient/mysql.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        mysql_real_query(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        mysql_real_query("safe", "safe");
+      }
+    expect_no_match: true
+  description: "mysql_real_query(conn, tainted_sql, len) — length-prefixed variant of mysql_query; still no parameterisation."
+- id: c.sqli.pq_exec
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: critical
+  packages: [libpq]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: PQexec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libpq-fe.h>
+      #include <libpq-fe.h>
+      #include <libpq-fe.h>
+      #include <libpq-fe.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        PQexec(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        PQexec("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libpq PQexec — use PQexecParams."
+  imports:
+  - libpq-fe.h
+  - libpq-fe
+- id: c.sqli.pq_send_query
+  enabled: true
+  language: c
+  tag: sql-injection
+  severity: high
+  packages: [libpq]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: PQsendQuery
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libpq-fe.h>
+      #include <libpq-fe.h>
+      #include <libpq-fe.h>
+      #include <libpq-fe.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        PQsendQuery(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        PQsendQuery("safe", "safe");
+      }
+    expect_no_match: true
+  description: "PQsendQuery(conn, tainted_sql) — async variant of PQexec; same SQLi surface, use PQsendQueryParams."
+  imports:
+  - libpq-fe.h
+  - libpq-fe

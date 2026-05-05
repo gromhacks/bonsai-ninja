@@ -1,0 +1,269 @@
+- id: javascript.proto.object_assign_user
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [Object, assign]
+  description: "Disabled — Object.assign is only prototype-pollution relevant when merging untrusted keys into a sensitive target."
+
+# Prototype-pollution sinks. Object-merge / set-by-path APIs
+# that honor `__proto__` / `constructor` / `prototype` keys.
+- id: javascript.proto_pollution.object_assign_request_body
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [Object, assign]
+  match_examples:
+  - name: object assign request body
+    code: |
+      function apply(req, target) {
+        return Object.assign(target, req.body);
+      }
+    expect_match_text: [Object.assign]
+  - name: object assign prototype key object
+    code: |
+      function apply(target, value) {
+        return Object.assign(target, { "__proto__": value });
+      }
+    expect_match_text: [Object.assign]
+  description: "Object.assign(target, source) — shallow merge can still pollute when a tainted source object carries special keys. TODO(only_when_packaged): JS Object global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Object', 'assign']` match only."
+
+- id: javascript.proto_pollution.lodash_merge
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: javascript.proto_pollution.lodash_namespace_merge_variants
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [_, merge]
+  description: "Disabled — `_.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape and any local namespace alias."
+- id: javascript.proto_pollution.lodash_set
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [_, set]
+  match_examples:
+  - name: lodash set
+    code: |
+      const _u = require("lodash");
+      function demo(_, input, value) {
+        return _.set(input, "__proto__.polluted", value);
+      }
+    expect_match_text: [_.set]
+  - name: lodash set proto dot path
+    code: |
+      const _u = require("lodash");
+      function apply(_, target, value) {
+        return _.set(target, "__proto__.polluted", value);
+      }
+    expect_match_text: [_.set]
+  - name: lodash set constructor prototype dot path
+    code: |
+      const _u = require("lodash");
+      function apply(_, target, value) {
+        return _.set(target, "constructor.prototype.admin", value);
+      }
+    expect_match_text: [_.set]
+  description: "_.set(obj, attacker_path, value) — path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
+- id: javascript.proto_pollution.lodash_setwith
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [_, setWith]
+  match_examples:
+  - name: lodash setwith
+    code: |
+      const _u = require("lodash");
+      function demo(_, target, path, value) {
+        return _.setWith(target, path, value);
+      }
+    expect_match_text: [_.setWith]
+  description: "_.setWith — same prototype-pollution as _.set."
+- id: javascript.proto_pollution.deep_extend
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      name: deepExtend
+  match_examples:
+  - name: deep extend
+    code: |
+      function demo(input, req, obj) {
+        return deepExtend(input);
+      }
+  description: "deep-extend(target, attacker_src) — npm `deep-extend` was CVE-2018-3728."
+- id: javascript.proto_pollution.merge_options
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      name: merge-options
+  match_examples:
+  - name: merge options
+    code: |
+      const mergeOptions = require("merge-options");
+      function demo(input, req, obj) {
+        return mergeOptions(input);
+      }
+    expect_match_text: [mergeOptions]
+  description: "merge-options package — known prototype-pollution vector."
+
+- id: javascript.proto_pollution.recursive_merge
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: write
+    target:
+      regex: "(\\[|\\.key$)"
+  match_examples:
+  - name: recursive merge write by key
+    code: |
+      function merge(target, source) {
+        for (const key in source) {
+          target[key] = source[key];
+        }
+      }
+    expect_match_text: [target.key]
+  - name: recursive deep walk merge write
+    code: |
+      function walk(dst, src) {
+        Object.keys(src).forEach((key) => {
+          if (src[key] && typeof src[key] === "object") walk(dst[key] ||= {}, src[key]);
+          else dst[key] = src[key];
+        });
+      }
+    expect_match_text: [dst.key]
+  description: "Recursive merge target[key] = source[key] — homemade deep-merge vector when __proto__/constructor/prototype keys are not filtered."
+
+- id: javascript.proto_pollution.recursive_deep_merge
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [recursive-deep-merge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      name: recursiveDeepMerge
+  match_examples:
+  - name: recursive deep merge exported function
+    code: |
+      const recursiveDeepMerge = require("recursive-deep-merge");
+      function applyConfig(input) {
+        return recursiveDeepMerge({}, input);
+      }
+    expect_match_text: [recursiveDeepMerge]
+  description: "recursive-deep-merge(target, attacker_obj) — recursive merge APIs can honor `__proto__` / `constructor.prototype` keys and pollute Object.prototype."
+
+- id: javascript.proto_pollution.recursive_deep_merge_method
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: javascript.proto_pollution.lodash_namespace_merge_variants
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [recursive-deep-merge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [recursiveDeepMerge, merge]
+  description: "Disabled — `recursiveDeepMerge.merge` is covered by `javascript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
+
+- id: javascript.proto_pollution.deepmerge_package
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [deepmerge, deep-extend, merge-deep]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      regex: "^(deepmerge|mergeDeep)$"
+  match_examples:
+  - name: deepmerge function
+    code: |
+      const deepmerge = require("deepmerge");
+      function applyConfig(input) {
+        return deepmerge({}, input);
+      }
+    expect_match_text: [deepmerge]
+  - name: mergeDeep function
+    code: |
+      const mergeDeep = require("merge-deep");
+      function applyConfig(input) {
+        return mergeDeep({}, input);
+      }
+    expect_match_text: [mergeDeep]
+  description: "Deep recursive merge package calls — audit tainted objects for __proto__/constructor/prototype keys before merging."
+
+- id: javascript.proto_pollution.lodash_namespace_merge_variants
+  enabled: true
+  language: javascript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash, lodash.merge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$"
+  match_examples:
+  - name: lodash namespace merge
+    code: |
+      const _u = require("lodash");
+      function applyConfig(lodash, input) {
+        return lodash.merge({}, input);
+      }
+    expect_match_text: [lodash.merge]
+  - name: lodash.merge package default function
+    code: |
+      const merge = require("lodash.merge");
+      function applyConfig(input) {
+        return merge({}, input);
+      }
+    expect_match_text: [merge]
+  description: "lodash merge/defaultsDeep variants and lodash.merge package default export — recursive merge prototype-pollution sinks."

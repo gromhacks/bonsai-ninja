@@ -1,0 +1,659 @@
+- id: c.path.fopen
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: fopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  fopen(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        fopen("safe");
+      }
+    expect_no_match: true
+  description: fopen with tainted path.
+- id: c.path.open
+  enabled: false
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: open
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  open(arg);\n}\n"
+  description: "POSIX open(2) with tainted path — attacker-controlled paths can read or create arbitrary files on disk."
+  disabled_reason:
+    code: over-broad
+- id: c.path.openat
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: openat
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  openat(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        openat("safe", "safe");
+      }
+    expect_no_match: true
+  description: "openat — fdsafe but tainted path still risky."
+- id: c.path.unlink
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: unlink
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  unlink(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        unlink("safe");
+      }
+    expect_no_match: true
+  description: unlink with tainted path.
+- id: c.path.rename
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: rename
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rename source
+    code: "void example(char *path) {\n  rename(path, \"/srv/files/output.txt\");\n}\n"
+  - name: literal rename source negative
+    code: "void example(void) {\n  rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "rename(2) with tainted source or destination path — attacker-controlled paths can move files outside the intended directory or overwrite arbitrary targets."
+- id: c.path.rename_dest
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: rename
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted rename destination
+    code: "void example(char *path) {\n  rename(\"/srv/files/input.txt\", path);\n}\n"
+  - name: literal rename destination negative
+    code: "void example(void) {\n  rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "rename(2) with tainted destination path — attacker-controlled paths can overwrite arbitrary targets."
+- id: c.path.access
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: c
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: access
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  access(arg);\n}\n"
+  description: "Disabled — duplicate of c.toctou.access_check; access(2) is modeled as the TOCTOU check site."
+- id: c.path.chmod
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: chmod
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  chmod(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        chmod("safe");
+      }
+    expect_no_match: true
+  description: chmod with tainted path.
+- id: c.path.chown
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: chown
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  chown(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        chown("safe");
+      }
+    expect_no_match: true
+  description: "chown(2) with tainted path — attacker-controlled paths can change ownership of arbitrary files via TOCTOU or symlink races."
+- id: c.path.symlink
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  - CWE-59
+  match:
+    kind: call
+    callee:
+      name: symlink
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  symlink(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        symlink("safe");
+      }
+    expect_no_match: true
+  description: "symlink — link-target may be attacker-chosen."
+- id: c.path.symlink_linkpath
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  - CWE-59
+  match:
+    kind: call
+    callee:
+      name: symlink
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      void example(char *input) {
+        symlink("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        symlink("safe", "safe");
+      }
+    expect_no_match: true
+  description: "symlink(target, linkpath) — tainted link paths can create links outside the intended directory."
+- id: c.path.link
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  - CWE-59
+  match:
+    kind: call
+    callee:
+      name: link
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  link(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        link("safe");
+      }
+    expect_no_match: true
+  description: "link(2) — hardlink creation with tainted path."
+- id: c.path.link_newpath
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  - CWE-59
+  match:
+    kind: call
+    callee:
+      name: link
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      void example(char *input) {
+        link("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        link("safe", "safe");
+      }
+    expect_no_match: true
+  description: "link(oldpath, newpath) — tainted destination paths can create hard links outside the intended directory."
+- id: c.path.creat
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: creat
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  creat(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        creat("safe");
+      }
+    expect_no_match: true
+  description: "creat(2) — create file at tainted path."
+- id: c.path.mkdir
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: mkdir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  mkdir(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        mkdir("safe");
+      }
+    expect_no_match: true
+  description: mkdir with tainted path.
+- id: c.path.rmdir
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: rmdir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  rmdir(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        rmdir("safe");
+      }
+    expect_no_match: true
+  description: rmdir with tainted path.
+- id: c.path.remove
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: remove
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  remove(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        remove("safe");
+      }
+    expect_no_match: true
+  description: "remove(3) — delete tainted path."
+- id: c.path.stat
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: path-traversal
+  severity: low
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: stat
+  description: "Disabled — stat on tainted path is info-leak only; too noisy."
+- id: c.path.unlinkat
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: unlinkat
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  unlinkat(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        unlinkat("safe", "safe");
+      }
+    expect_no_match: true
+  description: "unlinkat(dirfd, tainted_path, ...) — delete relative to dirfd; tainted path can still escape via .. when dirfd is broad."
+- id: c.path.freopen
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: freopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  freopen(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        freopen("safe");
+      }
+    expect_no_match: true
+  description: "freopen(tainted_path, mode, stream) — re-binds an existing FILE* to an attacker-chosen path."
+- id: c.path.fopen64
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: fopen64
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  fopen64(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        fopen64("safe");
+      }
+    expect_no_match: true
+  description: "glibc fopen64 — large-file variant of fopen; same traversal exposure."
+- id: c.path.opendir
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: opendir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  opendir(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        opendir("safe");
+      }
+    expect_no_match: true
+  description: "opendir(tainted_path) — attacker-controlled directory enumeration."
+- id: c.path.win_create_file_a
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  packages:
+  - win32
+  match:
+    kind: call
+    callee:
+      name: CreateFileA
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  CreateFileA(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        CreateFileA("safe");
+      }
+    expect_no_match: true
+  description: "Win32 CreateFileA(tainted_path, ...) — opens or creates a file at attacker-controlled path."
+  imports:
+  - windows
+  - windows.h
+- id: c.path.win_create_file_w
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  packages:
+  - win32
+  match:
+    kind: call
+    callee:
+      name: CreateFileW
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  CreateFileW(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        CreateFileW("safe");
+      }
+    expect_no_match: true
+  description: "Win32 CreateFileW(tainted_path, ...) — UTF-16 variant; same traversal risk."
+  imports:
+  - windows
+  - windows.h
+- id: c.path.win_delete_file_a
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  packages:
+  - win32
+  match:
+    kind: call
+    callee:
+      name: DeleteFileA
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  DeleteFileA(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        DeleteFileA("safe");
+      }
+    expect_no_match: true
+  description: "Win32 DeleteFileA(tainted_path) — delete file at attacker-controlled path."
+  imports:
+  - windows
+  - windows.h
+- id: c.path.win_delete_file_w
+  enabled: true
+  language: c
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  packages:
+  - win32
+  match:
+    kind: call
+    callee:
+      name: DeleteFileW
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <windows.h>\n#include <windows.h>\n#include <windows.h> /* win32 */\n#include <windows.h> /* win32 */\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  DeleteFileW(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        DeleteFileW("safe");
+      }
+    expect_no_match: true
+  description: "Win32 DeleteFileW(tainted_path) — UTF-16 variant; delete arbitrary file."
+  imports:
+  - windows
+  - windows.h
+- id: c.path.archive_read_extract
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: zip-slip
+  severity: high
+  packages:
+  - libarchive
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: archive_read_extract
+  match_examples:
+  - name: generated direct match
+    code: "#include <libarchive/archive.h>\nvoid example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  archive_read_extract(arg);\n}\n"
+  description: "Disabled — archive_read_extract uses the pathname stored in the archive entry; accurate Zip Slip matching needs entry/receiver-state tracking, so the call-only rule is over-broad."
+- id: c.path.archive_entry_pathname
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: zip-slip
+  severity: medium
+  packages:
+  - libarchive
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: archive_entry_pathname
+  description: "Disabled — informational marker for libarchive entry pathname read; pair with archive_read_extract sink for the actual Zip Slip site."

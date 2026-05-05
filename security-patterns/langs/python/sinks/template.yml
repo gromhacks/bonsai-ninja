@@ -1,0 +1,630 @@
+- id: python.template.jinja2_environment_from_string
+  enabled: true
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - jinja2
+  imports:
+  - jinja2
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - from_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template jinja2 environment from string
+    code: |
+      import jinja2
+      def example(user_input):
+          return Environment.from_string(user_input)
+    expect_match_text:
+    - Environment.from_string
+  - name: jinja2 environment from string literal negative
+    code: |
+      import jinja2
+
+      def example(user_input):
+          return Environment.from_string('safe')
+    expect_no_match: true
+  description: "Jinja2 Environment.from_string(tainted) — SSTI to RCE in default config."
+- id: python.template.jinja2_env_from_string_instance
+  enabled: true
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - jinja2
+  imports:
+  - jinja2
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      regex: ^[a-z_][A-Za-z0-9_]*\.from_string$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jinja2 env from string instance
+    code: |
+      import jinja2
+      def render(env, template_text):
+          return env.from_string(template_text)
+    expect_match_text:
+    - env.from_string
+  - name: jinja2 named template env from string
+    code: |
+      import jinja2
+      def render(template_env, template_text):
+          return template_env.from_string(template_text)
+    expect_match_text:
+    - template_env.from_string
+  - name: jinja2 env from string instance literal negative
+    code: |
+      import jinja2
+
+      def render(env, template_text):
+          return env.from_string('safe')
+    expect_no_match: true
+  description: Jinja2 environment instance from_string(tainted) on any local receiver.
+- id: python.template.jinja2_template_ctor
+  enabled: true
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - jinja2
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jinja2
+      - Template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: qualified jinja2 template constructor
+    code: "import jinja2\ndef render(user_input):\n    return jinja2.Template(user_input)\n"
+    expect_match_text:
+    - jinja2.Template
+  - name: imported jinja2 template constructor
+    code: "from jinja2 import Template\ndef render(user_input):\n    return Template(user_input)\n"
+    expect_match_text:
+    - Template
+  - name: jinja2 template ctor literal negative
+    code: |
+      import jinja2
+
+      def render(user_template):
+          return jinja2.Template('safe')
+    expect_no_match: true
+  description: jinja2.Template(tainted).
+- id: python.template.flask_render_template_string
+  enabled: true
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - flask
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - flask
+      - render_template_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: flask render_template_string import alias expansion
+    code: "from flask import render_template_string\ndef route(template):\n    return render_template_string(template)\n"
+    expect_match_text:
+    - render_template_string
+  - name: flask namespace render_template_string
+    code: "import flask\ndef route(template):\n    return flask.render_template_string(template)\n"
+    expect_match_text:
+    - flask.render_template_string
+  - name: flask render template string literal negative
+    code: |
+      from flask import render_template_string
+
+      def route(template):
+          return render_template_string('safe')
+    expect_no_match: true
+  description: flask.render_template_string(tainted).
+- id: python.template.mako_template
+  enabled: true
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - mako
+  imports:
+  - mako
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      attribute:
+      - mako
+      - Template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template mako template
+    code: |
+      import mako
+      class Template:
+          pass
+
+      def example(user_input):
+          return mako.Template(user_input, "{{ user }}")
+  - name: mako template literal negative
+    code: |
+      import mako
+
+      class Template:
+          pass
+
+      def example(user_input):
+          return mako.Template('safe', '{{ user }}')
+    expect_no_match: true
+  description: "mako.template.Template(tainted) — RCE via Python evaluation blocks."
+- id: python.template.mako_template_lookup
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - mako
+  cwe:
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      attribute:
+      - mako
+      - TemplateLookup
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template mako template lookup
+    code: |
+      import mako
+      class TemplateLookup:
+          pass
+
+      def example(user_input):
+          return mako.TemplateLookup(user_input, "{{ user }}")
+  - name: mako template lookup literal negative
+    code: |
+      import mako
+
+      class TemplateLookup:
+          pass
+
+      def example(user_input):
+          return mako.TemplateLookup('safe', '{{ user }}')
+    expect_no_match: true
+  description: mako.lookup.TemplateLookup with tainted directories.
+- id: python.template.mako_template_render
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  packages:
+  - mako
+  imports:
+  - mako
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^[a-z_][A-Za-z0-9_]*\.render$
+  match_examples:
+  - name: mako template render user value
+    code: |
+      import mako
+      def example(template, user_input):
+          return template.render(name=user_input)
+    expect_match_text:
+    - template.render
+  description: Mako Template.render(...tainted...) on any local receiver - unescaped context values can reach rendered HTML.
+- id: python.template.chameleon_pagetemplate
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - chameleon
+  cwe:
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: PageTemplate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template chameleon pagetemplate
+    code: |
+      import chameleon
+      class PageTemplate:
+          pass
+
+      def example(user_input):
+          return PageTemplate(user_input)
+  - name: chameleon pagetemplate literal negative
+    code: |
+      import chameleon
+
+      class PageTemplate:
+          pass
+
+      def example(user_input):
+          return PageTemplate('safe')
+    expect_no_match: true
+  description: Chameleon PageTemplate(tainted).
+- id: python.template.chameleon_pagetemplatefile
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - chameleon
+  cwe:
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: PageTemplateFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template chameleon pagetemplatefile
+    code: |
+      import chameleon
+      class PageTemplateFile:
+          pass
+
+      def example(user_input):
+          return PageTemplateFile(user_input)
+  - name: chameleon pagetemplatefile literal negative
+    code: |
+      import chameleon
+
+      class PageTemplateFile:
+          pass
+
+      def example(user_input):
+          return PageTemplateFile('safe')
+    expect_no_match: true
+  description: Chameleon PageTemplateFile(tainted file path).
+- id: python.template.django_engine_from_string
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - django
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Engine
+      - from_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template django engine from string
+    code: |
+      import django
+      def example(user_input):
+          return Engine.from_string(user_input, "{{ user }}")
+  - name: django engine from string literal negative
+    code: |
+      import django
+
+      def example(user_input):
+          return Engine.from_string('safe', '{{ user }}')
+    expect_no_match: true
+  description: Django template Engine.from_string(tainted).
+- id: python.template.django_template_ctor
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - django
+  cwe:
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      attribute:
+      - template
+      - Template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template django template ctor
+    code: |
+      import django
+      class Template:
+          pass
+
+      def example(user_input):
+          return template.Template(user_input, "{{ user }}")
+  - name: django template ctor literal negative
+    code: |
+      import django
+
+      class Template:
+          pass
+
+      def example(user_input):
+          return template.Template('safe', '{{ user }}')
+    expect_no_match: true
+  description: django.template.Template(tainted).
+- id: python.template.string_template_substitute
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: ssti
+  severity: low
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Template
+      - substitute
+  description: "Disabled — string.Template only does $var substitution; not RCE."
+- id: python.template.tornado_template_string
+  enabled: true
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - tornado
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      attribute:
+      - tornado
+      - Template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template tornado template string
+    code: |
+      import tornado
+      class Template:
+          pass
+
+      def example(user_input):
+          return tornado.Template(user_input, "{{ user }}")
+  - name: tornado template string literal negative
+    code: |
+      import tornado
+
+      class Template:
+          pass
+
+      def example(user_input):
+          return tornado.Template('safe', '{{ user }}')
+    expect_no_match: true
+  description: "tornado.template.Template(tainted) — Python in template tags."
+- id: python.template.cheetah_template
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - Cheetah3
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: Template
+  description: "Disabled — bare `Template(...)` collides with jinja2.Template / mako.Template / string.Template and many app-level classes named Template. Re-enable when a qualified-name match for `Cheetah.Template.Template` is wired up."
+- id: python.template.airflow_jinja_render
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - airflow
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Template
+      - render
+  description: "Disabled — Airflow Jinja templating; flag with op_kwargs source."
+- id: python.template.jinja2_environment_ctor
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - jinja2
+  imports:
+  - jinja2
+  cwe:
+  - CWE-1336
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jinja2
+      - Environment
+  match_examples:
+  - name: template jinja2 environment ctor
+    code: |
+      import jinja2
+      def example(user_input):
+          return jinja2.Environment(user_input, "{{ user }}")
+  description: "jinja2.Environment(...) — config-shape sink; flag the call so a downstream auditor can verify autoescape=True and a non-FileSystemLoader root. Merged aliases: python.template.jinja2_environment_autoescape_off."
+  aliases:
+  - python.template.jinja2_environment_autoescape_off
+  - python.xss.jinja2_environment_autoescape_false
+  frameworks:
+  - jinja2
+- id: python.template.flask_render_template_string_msg
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - flask
+  imports:
+  - flask
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      regex: ^render_template_string$
+  description: "Disabled duplicate of python.template.flask_render_template_string — alias expansion already covers `from flask import render_template_string`."
+- id: python.template.jinja2_native_environment
+  enabled: true
+  language: python
+  tag: ssti
+  severity: critical
+  packages:
+  - jinja2
+  imports:
+  - jinja2
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NativeEnvironment
+      - from_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: template jinja2 native environment
+    code: |
+      import jinja2
+      def example(user_input):
+          return NativeEnvironment.from_string(user_input, "{{ user }}")
+  - name: jinja2 native environment literal negative
+    code: |
+      import jinja2
+
+      def example(user_input):
+          return NativeEnvironment.from_string('safe', '{{ user }}')
+    expect_no_match: true
+  description: "jinja2.nativetypes.NativeEnvironment.from_string(tainted) — evaluates Python literal expressions in the template; SSTI -> arbitrary expr."
+- id: python.template.jinja2_environment_no_autoescape
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - jinja2
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - init
+  match_examples:
+  - name: template jinja2 environment no autoescape
+    code: |
+      import jinja2
+      def example(user_input):
+          return Environment.init(user_input, "autoescape=False")
+  description: "Environment init with autoescape=False — same XSS exposure."
+
+- id: python.template.jinja2_sandboxed_environment_from_string
+  enabled: true
+  language: python
+  tag: ssti
+  severity: high
+  packages:
+  - jinja2
+  imports:
+  - jinja2
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SandboxedEnvironment
+      - from_string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jinja2 sandboxed environment from_string tainted
+    code: |
+      import jinja2
+      from jinja2.sandbox import SandboxedEnvironment
+      def example(env, user_input):
+          return SandboxedEnvironment.from_string(user_input)
+    expect_match_text: [SandboxedEnvironment.from_string]
+  - name: jinja2 sandboxed environment from_string literal negative
+    code: |
+      import jinja2
+      from jinja2.sandbox import SandboxedEnvironment
+      def example(env):
+          return SandboxedEnvironment.from_string('Hello {{ name }}')
+    expect_no_match: true
+  description: "jinja2.sandbox.SandboxedEnvironment.from_string(tainted) — sandbox raises SecurityError on most attribute access but historic bypass vectors (str.format, mro chains, magic dunders) recur; tainted templates remain untrusted code."

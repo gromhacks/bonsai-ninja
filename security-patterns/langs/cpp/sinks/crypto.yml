@@ -1,0 +1,526 @@
+# C++ weak / broken cryptography.
+- id: cpp.crypto.md5_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: low
+  packages: [openssl]
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      name: EVP_md5
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_md5(arg);
+      }
+  description: "OpenSSL EVP_md5 — MD5 is collision-broken."
+
+- id: cpp.crypto.md4_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_md4
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_md4(arg);
+      }
+  description: "OpenSSL EVP_md4 — MD4 is broken."
+
+- id: cpp.crypto.md2_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_md2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_md2(arg);
+      }
+  description: "OpenSSL EVP_md2 — MD2 is broken."
+
+- id: cpp.crypto.sha1_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: low
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_sha1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_sha1(arg);
+      }
+  description: "OpenSSL EVP_sha1 — SHA-1 is collision-broken for signatures."
+
+- id: cpp.crypto.md5_legacy
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: low
+  packages: [openssl]
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      regex: "^MD5$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        MD5(arg);
+      }
+  description: "OpenSSL MD5() legacy one-shot — broken hash."
+
+- id: cpp.crypto.sha1_legacy
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: low
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^SHA1$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        SHA1(arg);
+      }
+  description: "OpenSSL SHA1() legacy one-shot — broken for signatures."
+
+- id: cpp.crypto.des_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_des_cbc
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_des_cbc(arg);
+      }
+  description: "OpenSSL EVP_des_cbc — single-DES, 56-bit key."
+
+- id: cpp.crypto.des_ecb_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_des_ecb
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_des_ecb(arg);
+      }
+  description: "OpenSSL EVP_des_ecb — DES + ECB mode."
+
+- id: cpp.crypto.des3_ecb_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: medium
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_des_ede3_ecb
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_des_ede3_ecb(arg);
+      }
+  description: "OpenSSL EVP_des_ede3_ecb — 3DES + ECB."
+
+- id: cpp.crypto.rc4_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_rc4
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_rc4(arg);
+      }
+  description: "OpenSSL EVP_rc4 — RC4 stream cipher has biases."
+
+- id: cpp.crypto.rc2_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_rc2_cbc
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_rc2_cbc(arg);
+      }
+  description: "OpenSSL EVP_rc2_cbc — RC2 block cipher."
+
+- id: cpp.crypto.blowfish_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: medium
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_bf_cbc
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_bf_cbc(arg);
+      }
+  description: "OpenSSL EVP_bf_cbc — Blowfish with 64-bit block (birthday bound)."
+
+- id: cpp.crypto.aes_ecb_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_aes_128_ecb
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_aes_128_ecb(arg);
+      }
+  description: "OpenSSL EVP_aes_128_ecb — ECB leaks repeating plaintext blocks."
+
+- id: cpp.crypto.aes_256_ecb_evp
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: EVP_aes_256_ecb
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <openssl/evp.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        EVP_aes_256_ecb(arg);
+      }
+  description: "OpenSSL EVP_aes_256_ecb — ECB mode, not semantically secure."
+
+- id: cpp.crypto.std_rand
+  enabled: true
+  language: cpp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: call
+    callee:
+      name: rand
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        rand(arg);
+      }
+  description: "rand() — non-crypto PRNG; do not use for tokens/keys/IVs."
+
+- id: cpp.crypto.std_srand
+  enabled: true
+  language: cpp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: call
+    callee:
+      name: srand
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        srand(arg);
+      }
+  description: "srand() — seeds the insecure rand; seeding with time() is predictable."
+
+- id: cpp.crypto.std_mt19937
+  enabled: true
+  language: cpp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-338]
+  match:
+    kind: new
+    callee:
+      name: mt19937
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new mt19937(arg);
+      }
+  description: "std::mt19937 — fast PRNG but not crypto-secure; use for auth tokens = weakness."
+
+- id: cpp.crypto.std_mt19937_64
+  enabled: true
+  language: cpp
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-338]
+  match:
+    kind: new
+    callee:
+      name: mt19937_64
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new mt19937_64(arg);
+      }
+  description: "std::mt19937_64 — 64-bit Mersenne Twister; not crypto-secure."
+
+- id: cpp.crypto.qt_qrandomgenerator_global
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: weak-randomness
+  severity: medium
+  packages: [Qt]
+  cwe: [CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [QRandomGenerator, global]
+  description: "Disabled — QRandomGenerator::global() uses system CSPRNG; flag QRandomGenerator(seed) or bounded() on auth paths."
+
+- id: cpp.crypto.botan_des
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [botan]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      regex: "^DES$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <botan/botan.h>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new DES(arg);
+      }
+  description: "Botan DES block cipher — 56-bit key."
+
+- id: cpp.crypto.cryptopp_md5
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: low
+  packages: [cryptopp]
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: new
+    callee:
+      regex: "^Weak::MD5$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cryptopp/cryptlib.h>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new Weak::MD5(arg);
+      }
+  description: "Crypto++ Weak::MD5 — library explicitly flags it as weak; MD5 is collision-broken."
+
+- id: cpp.crypto.cryptopp_sha1
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: low
+  packages: [cryptopp]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      regex: "^CryptoPP::SHA1$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cryptopp/cryptlib.h>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new CryptoPP::SHA1(arg);
+      }
+  description: "Crypto++ CryptoPP::SHA1 — SHA-1 is collision-broken for signatures."
+
+- id: cpp.crypto.cryptopp_des
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: high
+  packages: [cryptopp]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      regex: "^CryptoPP::DES$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cryptopp/cryptlib.h>
+      void example() {
+        const char *arg = "tainted";
+        auto *x = new CryptoPP::DES(arg);
+      }
+  description: "Crypto++ CryptoPP::DES — 56-bit single-DES block cipher."
+
+- id: cpp.crypto.botan_hash_md5
+  aliases:
+  - cpp.crypto.botan_hash_sha1
+  enabled: true
+  language: cpp
+  tag: weak-crypto
+  severity: low
+  packages: [botan]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [HashFunction, create]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <botan/botan.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HashFunction::create("MD5");
+      }
+  description: 'Botan HashFunction::create("MD5") — instantiates broken MD5 hash. Also covers merged aliases: cpp.crypto.botan_hash_sha1.'

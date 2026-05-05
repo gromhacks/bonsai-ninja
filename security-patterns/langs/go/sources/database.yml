@@ -1,0 +1,86 @@
+# Go database-origin sources.
+- id: go.sql.rows_scan
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["database/sql"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Scan$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "database/sql"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.Scan(target)
+      }
+  description: "sql.Rows.Scan / Row.Scan — reads DB row values into destination vars."
+
+- id: go.gorm.scan
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["gorm.io/gorm"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Scan$"
+  description: "Disabled — GORM DB.Scan(&dest) reads DB row values; bare `.Scan$` already matches via go.sql.rows_scan, which has the same call shape."
+
+- id: go.gorm.first
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["gorm.io/gorm"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.First$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gorm.io/gorm"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.First(target)
+      }
+  description: "GORM DB.First(&model, …) — populates `model` from a DB row; second-order taint origin when row data was attacker-supplied."
+
+- id: go.gorm.find
+  enabled: true
+  language: go
+  trust: database
+  tag: db-input
+  packages: ["gorm.io/gorm"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Find$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gorm.io/gorm"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.Find(target)
+      }
+  description: "GORM DB.Find(&models, …) — populates a slice of models from DB rows; second-order taint origin."

@@ -1,0 +1,60 @@
+# php mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: php.mass_assign.eloquent_fill
+  enabled: true
+  language: php
+  tag: mass-assignment
+  severity: high
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [Model, fill]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.mass_assign.eloquent_fill example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          Model::fill($request);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          Model::fill(["name" => "Alice"]);
+        }
+      expect_no_match: true
+  description: "Laravel Eloquent Model::fill(request()->all()) — bulk-sets every attribute; bypasses guarded/fillable unless explicitly listed."
+- id: php.mass_assign.eloquent_forcefill
+  enabled: true
+  language: php
+  tag: mass-assignment
+  severity: critical
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [Model, forceFill]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.mass_assign.eloquent_forcefill example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          Model::forceFill($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          Model::forceFill(["name" => "Alice"]);
+        }
+      expect_no_match: true
+  description: "Eloquent Model::forceFill — explicitly bypasses fillable allowlist. `forceFill(array)` takes exactly one attribute-array arg; `min_args/max_args: 1` rejects unrelated overloads of `forceFill`."

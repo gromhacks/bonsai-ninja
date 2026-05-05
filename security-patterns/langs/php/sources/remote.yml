@@ -1,0 +1,1032 @@
+- id: php.source.superglobal_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: _GET
+  match_examples:
+  - name: php.source.superglobal_get example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_GET;;\n}\n"
+  description: $_GET — query parameters.
+- id: php.source.superglobal_post
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: _POST
+  match_examples:
+  - name: php.source.superglobal_post example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_POST;;\n}\n"
+  description: $_POST — form body.
+- id: php.source.superglobal_request
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: _REQUEST
+  match_examples:
+  - name: php.source.superglobal_request example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_REQUEST;;\n}\n"
+  description: $_REQUEST — combined GET/POST/COOKIE.
+- id: php.source.superglobal_cookie
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: _COOKIE
+  match_examples:
+  - name: php.source.superglobal_cookie example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_COOKIE;;\n}\n"
+  description: $_COOKIE superglobal — attacker-controlled cookie values sent with every request. Values are trust-boundary user input and can be spoofed via CSRF or a malicious site if SameSite isn't set.
+- id: php.source.superglobal_files
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: _FILES
+  match_examples:
+  - name: php.source.superglobal_files example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_FILES;;\n}\n"
+  description: $_FILES — uploaded file metadata; name is client-controlled.
+- id: php.source.superglobal_server
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: _SERVER
+  match_examples:
+  - name: php.source.superglobal_server example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $_SERVER;;\n}\n"
+  description: $_SERVER — many keys are client-controlled (HTTP_*, etc).
+- id: php.source.php_input_stream
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: call
+    callee:
+      name: file_get_contents
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"php://input"'
+  match_examples:
+  - name: php.source.php_input_stream example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents(\"php://input\");\n}\n"
+  - name: php.source.php_input_stream example negative constraint boundary
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents();\n}\n"
+    expect_no_match: true
+  description: file_get_contents('php://input') — raw request body.
+- id: php.source.fopen_php_input
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: call
+    callee:
+      name: fopen
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"php://input"'
+  match_examples:
+  - name: php.source.fopen_php_input example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen(\"php://input\");\n}\n"
+  - name: php.source.fopen_php_input example negative constraint boundary
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen();\n}\n"
+    expect_no_match: true
+  description: fopen('php://input', 'r').
+- id: php.source.symfony_request_get
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - get
+  description: Disabled — typed receiver matching does not work for local `$request->get(...)` calls, and bare `get` is too broad to tail-match safely.
+- id: php.source.symfony_request_query_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      attribute:
+      - query
+      - get
+  match_examples:
+  - name: php.source.symfony_request_query_get example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $query->get($input);
+      }
+  description: Symfony $request->query->get.
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.symfony_request_request_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  - yiisoft/yii2
+  match:
+    kind: call
+    callee:
+      attribute:
+      - request
+      - get
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: php.source.symfony_request_request_get example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $request->get($input);
+      }
+  description: 'Symfony/Yii request->get — request body/query accessor. Signature: `get($key, $default = null)`; `min_args: 1` rejects unrelated 0-arg `request->get()` decoys (container.get, Map.get accessors).'
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.symfony_request_headers_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      attribute:
+      - headers
+      - get
+  match_examples:
+  - name: php.source.symfony_request_headers_get example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $headers->get($input);
+      }
+  description: Symfony $request->headers->get.
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.symfony_request_cookies_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      attribute:
+      - cookies
+      - get
+  match_examples:
+  - name: php.source.symfony_request_cookies_get example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $cookies->get($input);
+      }
+  description: Symfony $request->cookies->get — ParameterBag accessor.
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.symfony_request_files_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      attribute:
+      - files
+      - get
+  match_examples:
+  - name: php.source.symfony_request_files_get example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $files->get($input);
+      }
+  description: Symfony $request->files->get — FileBag (UploadedFile with client-controlled name).
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.uploaded_file_client_original_name
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  payload_types:
+  - path
+  packages:
+  - symfony/http-foundation
+  - laravel/framework
+  match:
+    kind: call
+    callee:
+      name: getClientOriginalName
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: php.source.uploaded_file_client_original_name example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($file) {
+        return $file->getClientOriginalName();
+      }
+  description: Symfony/Laravel UploadedFile::getClientOriginalName() — browser-supplied multipart filename; preserve taint into path/file-upload sinks.
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.psr7_uploaded_file_client_filename
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  payload_types:
+  - path
+  packages:
+  - psr/http-message
+  - nyholm/psr7
+  - guzzlehttp/psr7
+  - slim/psr7
+  match:
+    kind: call
+    callee:
+      name: getClientFilename
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: php.source.psr7_uploaded_file_client_filename example
+    code: |
+      <?php
+      use psr\httpmessage;
+      use psr\httpmessage;
+      use psr\http-message;
+      function example($uploadedFile) {
+        return $uploadedFile->getClientFilename();
+      }
+  description: PSR-7 UploadedFileInterface::getClientFilename() — untrusted Content-Disposition filename from multipart upload.
+  imports:
+  - psr/httpmessage
+  - psr
+  - psr\httpmessage
+- id: php.source.symfony_request_server_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      attribute:
+      - server
+      - get
+  match_examples:
+  - name: php.source.symfony_request_server_get example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $server->get($input);
+      }
+  description: Symfony $request->server->get — wraps $_SERVER (HTTP_* is client-controlled).
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.symfony_request_attributes_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      attribute:
+      - attributes
+      - get
+  match_examples:
+  - name: php.source.symfony_request_attributes_get example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        $attributes->get($input);
+      }
+  description: Symfony $request->attributes->get — route params are URL-derived and remote.
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.symfony_request_get_content
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - symfony/http-foundation
+  match:
+    kind: call
+    callee:
+      name: getContent
+  match_examples:
+  - name: php.source.symfony_request_get_content example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        getContent($input);
+      }
+  description: Symfony getContent() — tail-match across local request variable names.
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.source.laravel_request_input
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - input
+  description: Disabled — typed receiver matching does not work for local `$request->input(...)` calls, and bare `input` is too broad to tail-match safely.
+- id: php.source.laravel_request_all
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - all
+  description: Disabled — typed receiver matching does not work for local `$request->all()` calls, and bare `all` is far too broad.
+- id: php.source.laravel_request_query
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - query
+  description: Disabled — typed receiver matching does not work for local `$request->query(...)` calls, and bare `query` is too broad.
+- id: php.source.laravel_request_get
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - get
+  description: Disabled — typed receiver matching does not work for local `$request->get(...)` calls, and bare `get` is too broad.
+- id: php.source.laravel_request_header
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - header
+  description: Disabled — typed receiver matching does not work for local `$request->header(...)` calls, and bare `header` is too broad.
+- id: php.source.laravel_request_cookie
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - cookie
+  description: Disabled — typed receiver matching does not work for local `$request->cookie(...)` calls, and bare `cookie` is too broad.
+- id: php.source.laravel_request_file
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - file
+  description: Disabled — typed receiver matching does not work for local `$request->file(...)` calls, and bare `file` is too broad.
+- id: php.source.laravel_request_post
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - post
+  description: Disabled — typed receiver matching does not work for local `$request->post(...)` calls, and bare `post` is too broad.
+- id: php.source.laravel_request_only
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - only
+  description: Disabled — typed receiver matching does not work for local `$request->only(...)` calls, and bare `only` is too broad.
+- id: php.source.laravel_request_json
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - json
+  description: Disabled — typed receiver matching does not work for local `$request->json(...)` calls, and bare `json` is too broad.
+- id: php.source.laravel_route_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - illuminate/http
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - route
+  description: Disabled — typed receiver matching does not work for local `$request->route(...)` calls, and bare `route` is too broad.
+- id: php.source.slim_request_get_params
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - slim/slim
+  match:
+    kind: call
+    callee:
+      name: getQueryParams
+  match_examples:
+  - name: php.source.slim_request_get_params example
+    code: |
+      <?php
+      use slim\slim;
+      use slim\slim;
+      function example($input, $url, $id, $payload, $request) {
+        getQueryParams($input);
+      }
+  description: Slim PSR-7 getQueryParams() — tail-match across local request variable names.
+  imports:
+  - slim\slim
+  - slim
+- id: php.source.slim_request_get_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - slim/slim
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - getBody
+  description: Disabled — typed receiver matching does not work for local `$request->getBody()` calls, and bare `getBody` is too broad.
+- id: php.source.slim_request_parsed
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - slim/slim
+  match:
+    kind: call
+    callee:
+      name: getParsedBody
+  match_examples:
+  - name: php.source.slim_request_parsed example
+    code: |
+      <?php
+      use slim\slim;
+      use slim\slim;
+      function example($input, $url, $id, $payload, $request) {
+        getParsedBody($input);
+      }
+  description: Slim PSR-7 getParsedBody() — tail-match across local request variable names.
+  imports:
+  - slim\slim
+  - slim
+- id: php.source.codeigniter_input_post
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - codeigniter4/framework
+  match:
+    kind: call
+    callee:
+      attribute:
+      - input
+      - post
+  match_examples:
+  - name: php.source.codeigniter_input_post example
+    code: |
+      <?php
+      use codeigniter4\framework;
+      use codeigniter4\framework;
+      function example($input, $url, $id, $payload, $request) {
+        $input->post($input);
+      }
+  description: CodeIgniter $this->input->post.
+  imports:
+  - codeigniter4\framework
+  - codeigniter4
+- id: php.source.codeigniter_input_get
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - codeigniter4/framework
+  match:
+    kind: call
+    callee:
+      attribute:
+      - input
+      - get
+  match_examples:
+  - name: php.source.codeigniter_input_get example
+    code: |
+      <?php
+      use codeigniter4\framework;
+      use codeigniter4\framework;
+      function example($input, $url, $id, $payload, $request) {
+        $input->get($input);
+      }
+  description: CodeIgniter $this->input->get.
+  imports:
+  - codeigniter4\framework
+  - codeigniter4
+- id: php.source.codeigniter_input_cookie
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - codeigniter4/framework
+  match:
+    kind: call
+    callee:
+      attribute:
+      - input
+      - cookie
+  match_examples:
+  - name: php.source.codeigniter_input_cookie example
+    code: |
+      <?php
+      use codeigniter4\framework;
+      use codeigniter4\framework;
+      function example($input, $url, $id, $payload, $request) {
+        $input->cookie($input);
+      }
+  description: CodeIgniter $this->input->cookie — client-supplied cookies.
+  imports:
+  - codeigniter4\framework
+  - codeigniter4
+- id: php.source.codeigniter_input_server
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - codeigniter4/framework
+  match:
+    kind: call
+    callee:
+      attribute:
+      - input
+      - server
+  match_examples:
+  - name: php.source.codeigniter_input_server example
+    code: |
+      <?php
+      use codeigniter4\framework;
+      use codeigniter4\framework;
+      function example($input, $url, $id, $payload, $request) {
+        $input->server($input);
+      }
+  description: CodeIgniter $this->input->server — HTTP_* keys are client-controlled.
+  imports:
+  - codeigniter4\framework
+  - codeigniter4
+- id: php.source.cakephp_request_data
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - cakephp/cakephp
+  match:
+    kind: call
+    callee:
+      attribute:
+      - request
+      - getData
+  constraints:
+  - max_args: 2
+  match_examples:
+  - name: php.source.cakephp_request_data example
+    code: |
+      <?php
+      use cakephp\cakephp;
+      use cakephp\cakephp;
+      function example($input, $url, $id, $payload, $request) {
+        $request->getData($input);
+      }
+  description: 'CakePHP $this->request->getData. Signature `getData(?string $name = null, $default = null)`; `max_args: 2` rejects same-name decoys with extra args.'
+  imports:
+  - cakephp\cakephp
+  - cakephp
+- id: php.source.cakephp_request_query
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - cakephp/cakephp
+  match:
+    kind: call
+    callee:
+      attribute:
+      - request
+      - getQuery
+  constraints:
+  - max_args: 2
+  match_examples:
+  - name: php.source.cakephp_request_query example
+    code: |
+      <?php
+      use cakephp\cakephp;
+      use cakephp\cakephp;
+      function example($input, $url, $id, $payload, $request) {
+        $request->getQuery($input);
+      }
+  description: 'CakePHP $this->request->getQuery. Same `getQuery(?string $name = null, $default = null)` shape as getData; `max_args: 2` rejects unrelated overloads.'
+  imports:
+  - cakephp\cakephp
+  - cakephp
+- id: php.source.yii_request_get
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - yiisoft/yii2
+  match:
+    kind: call
+    callee:
+      attribute:
+      - request
+      - get
+  description: Disabled duplicate — same `request.get` shape as php.source.symfony_request_request_get; Yii package metadata is merged there.
+- id: php.source.yii_request_post
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - yiisoft/yii2
+  match:
+    kind: call
+    callee:
+      attribute:
+      - request
+      - post
+  constraints:
+  - max_args: 2
+  match_examples:
+  - name: php.source.yii_request_post example
+    code: |
+      <?php
+      use yiisoft\yii2;
+      use yiisoft\yii2;
+      function example($input, $url, $id, $payload, $request) {
+        $request->post($input);
+      }
+  description: 'Yii request->post. Signature `post($name = null, $defaultValue = null)`; `max_args: 2` rejects same-name decoys with extra args.'
+  imports:
+  - yiisoft\yii2
+  - yiisoft
+- id: php.source.wordpress_get
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: php.source.superglobal_get
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - wordpress
+  match:
+    kind: read
+    target:
+      name: _GET
+  description: Disabled duplicate — covered by superglobal_get.
+- id: php.source.server_http_host
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: HTTP_HOST
+  match_examples:
+  - name: php.source.server_http_host example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_HOST;;\n}\n"
+  description: $_SERVER['HTTP_HOST'] — client-controlled header.
+- id: php.source.getallheaders
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: call
+    callee:
+      name: getallheaders
+  match_examples:
+  - name: php.source.getallheaders example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  getallheaders($input);\n}\n"
+  description: getallheaders() — all client request headers.
+- id: php.source.apache_request_headers
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: call
+    callee:
+      name: apache_request_headers
+  match_examples:
+  - name: php.source.apache_request_headers example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  apache_request_headers($input);\n}\n"
+  description: apache_request_headers() — same as getallheaders.
+- id: php.source.server_http_user_agent
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: HTTP_USER_AGENT
+  match_examples:
+  - name: php.source.server_http_user_agent example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_USER_AGENT;;\n}\n"
+  description: $_SERVER['HTTP_USER_AGENT'] — client-controlled User-Agent header; logged or parsed as a string and frequently flows into SQL/log/template sinks.
+- id: php.source.server_http_referer
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: HTTP_REFERER
+  match_examples:
+  - name: php.source.server_http_referer example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_REFERER;;\n}\n"
+  description: $_SERVER['HTTP_REFERER'] — client-controlled Referer header; commonly used for back-link redirects (open-redirect / SSRF risk).
+- id: php.source.server_http_x_forwarded_for
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      name: HTTP_X_FORWARDED_FOR
+  match_examples:
+  - name: php.source.server_http_x_forwarded_for example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $value = $HTTP_X_FORWARDED_FOR;;\n}\n"
+  description: $_SERVER['HTTP_X_FORWARDED_FOR'] — proxy-supplied client IP chain; spoofable when the app does not strip it at the trusted edge.
+- id: php.source.wp_unslash
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - wordpress
+  match:
+    kind: call
+    callee:
+      name: wp_unslash
+  match_examples:
+  - name: php.source.wp_unslash example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        wp_unslash($input);
+      }
+  description: WordPress wp_unslash() — strips magic-quote slashes from $_GET/$_POST/$_COOKIE values; the returned string is still client-controlled and must be re-validated.
+- id: php.source.wp_get_query_var
+  enabled: true
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - wordpress
+  match:
+    kind: call
+    callee:
+      name: get_query_var
+  match_examples:
+  - name: php.source.wp_get_query_var example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        get_query_var($input);
+      }
+  description: WordPress get_query_var() — returns a public query-var resolved from the URL/$_GET; remote input passthrough.
+- id: php.source.laravel_auth_user
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - laravel/framework
+  match:
+    kind: call
+    callee:
+      name: auth
+  description: Disabled — auth()->user() returns the authenticated identity; values are session-bound but identity fields (name, email) are user-editable. Enable in projects that treat identity as untrusted; currently off because bare `auth` would also tail-match unrelated helpers and the chain `auth()->user()->name` resolves through the typed-receiver path that the v1 adapter does not model.
+- id: php.source.lumen_request_input
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: php
+  trust: remote
+  tag: http-input
+  packages:
+  - laravel/lumen-framework
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Request
+      - input
+  description: Disabled — Lumen reuses Illuminate\Http\Request; same typed-receiver limitation as php.source.laravel_request_input. Tracked here so audits know Lumen is intentionally covered by the Laravel rules once the adapter resolves typed receivers.

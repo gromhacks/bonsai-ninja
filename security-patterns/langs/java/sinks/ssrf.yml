@@ -1,0 +1,799 @@
+- id: java.ssrf.url_ctor
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: URL
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    new URL(input);\n  }\n}\nclass URL {\n  URL(Object... args) {}\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          new URL("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: "new URL(tainted) — flag construction of URLs from user input."
+- id: java.ssrf.uri_ctor
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: low
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: URI
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    new URI(input);\n  }\n}\nclass URI {\n  URI(Object... args) {}\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          new URI("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: "new URI(tainted) — construction only; open when passed to a client."
+- id: java.ssrf.urlconnection_openconnection
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^URL\.openConnection$
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.net.*;
+      class App {
+        void handle(String input) throws Exception {
+          URL.openConnection(input);
+        }
+      }
+  description: 'Disabled — URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument. Merged collision aliases: java.ssrf.httpurlconnection_openconnection.'
+  aliases:
+  - java.ssrf.httpurlconnection_openconnection
+  packages:
+  - java.net
+- id: java.ssrf.httpurlconnection_connect
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net
+  - org.jsoup
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: connect
+  match_examples:
+  - name: httpurlconnection connect
+    code: |
+      import java.net.*;
+      class App {
+        void handle(HttpURLConnection conn) throws Exception {
+          conn.connect();
+        }
+      }
+      class HttpURLConnection {
+        void connect(Object... args) {}
+      }
+    expect_match_text:
+    - conn.connect
+  description: "Disabled — HttpURLConnection.connect() dispatches receiver URL state, not a taintable call argument. Merged collision aliases: java.ssrf.jsoup_connect."
+  aliases:
+  - java.ssrf.jsoup_connect
+- id: java.ssrf.httpurlconnection_getinputstream
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: getInputStream
+  match_examples:
+  - name: httpurlconnection get input stream
+    code: |
+      import java.net.*;
+      class App {
+        void handle(HttpURLConnection conn) throws Exception {
+          conn.getInputStream();
+        }
+      }
+      class HttpURLConnection {
+        Object getInputStream(Object... args) { return null; }
+      }
+    expect_match_text:
+    - conn.getInputStream
+  description: "Disabled — HttpURLConnection.getInputStream() dispatches receiver URL state, not a taintable call argument."
+- id: java.ssrf.urlconnection_openstream
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - URL
+      - openStream
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    URL.openStream(input);\n  }\n}\n"
+  description: "Disabled — URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+- id: java.ssrf.jdk_httpclient_send
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - send
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpClient.send(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpClient.send("safe");
+        }
+      }
+    expect_no_match: true
+  description: java.net.http.HttpClient.send(request).
+- id: java.ssrf.jdk_httpclient_sendasync
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - sendAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpClient.sendAsync(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpClient.sendAsync("safe");
+        }
+      }
+    expect_no_match: true
+  description: java.net.http.HttpClient.sendAsync(request).
+- id: java.ssrf.apache_httpget_ctor
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.apache.http
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: HttpGet
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: apache httpget constructor
+    code: |
+      import org.apache.http.client.methods.*;
+      class App {
+        Object handle(String url) {
+          return new HttpGet(url);
+        }
+      }
+      class HttpGet {
+        HttpGet(Object... args) {}
+      }
+    expect_match_text:
+    - HttpGet
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.http.client.methods.*;
+      class App {
+        void handle(String input) throws Exception {
+          new HttpGet("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: "Apache HttpClient HttpGet(url) — request target controlled by attacker input."
+- id: java.ssrf.resttemplate_getforobject
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - getForObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.getForObject(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.getForObject("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: Spring RestTemplate.getForObject.
+- id: java.ssrf.resttemplate_getforentity
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - getForEntity
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.getForEntity(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.getForEntity("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: Spring RestTemplate.getForEntity.
+- id: java.ssrf.resttemplate_postforobject
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - postForObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.postForObject(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.postForObject("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: Spring RestTemplate.postForObject.
+- id: java.ssrf.resttemplate_exchange
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^RestTemplate\.exchange$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.exchange(input);
+        }
+      }
+  - name: local rest template exchange
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        Object handle(RestTemplate restTemplate, String url) {
+          return restTemplate.exchange(url);
+        }
+      }
+      class RestTemplate {
+        Object exchange(Object... args) { return null; }
+      }
+    expect_match_text:
+    - restTemplate.exchange
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestTemplate.exchange("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: Spring RestTemplate.exchange.
+- id: java.ssrf.resttemplate_exchange_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: exchange
+  match_examples:
+  - name: local rest template exchange
+    code: |
+      import org.springframework.web.client.*;
+      class App {
+        Object handle(RestTemplate restTemplate, String url) {
+          return restTemplate.exchange(url);
+        }
+      }
+      class RestTemplate {
+        Object exchange(Object... args) { return null; }
+      }
+    expect_match_text:
+    - restTemplate.exchange
+  description: "Spring RestTemplate.exchange(url, ...) on a local RestTemplate variable — server-side request to attacker-controlled URL."
+  imports:
+  - org
+- id: java.ssrf.webclient_uri
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^WebClient\.uri$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          WebClient.uri(input);
+        }
+      }
+  - name: local webclient uri
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        Object handle(WebClient webClient, String url) {
+          return webClient.uri(url);
+        }
+      }
+      class WebClient {
+        Object uri(Object... args) { return null; }
+      }
+    expect_match_text:
+    - webClient.uri
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        void handle(String input) throws Exception {
+          WebClient.uri("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: "Spring WebClient.uri(tainted). Merged aliases: java.ssrf.webclient_uri_local."
+  aliases:
+  - java.ssrf.webclient_uri_local
+- id: java.ssrf.webclient_uri_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: uri
+  match_examples:
+  - name: local webclient uri
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        Object handle(WebClient webClient, String url) {
+          return webClient.uri(url);
+        }
+      }
+      class WebClient {
+        Object uri(Object... args) { return null; }
+      }
+    expect_match_text:
+    - webClient.uri
+  description: "Spring WebClient.uri(url) on a local request spec — reactive server-side request target controlled by attacker input."
+  imports:
+  - org
+- id: java.ssrf.webclient_retrieve
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: retrieve
+  match_examples:
+  - name: webclient retrieve request
+    code: |
+      import org.springframework.web.reactive.function.client.*;
+      class App {
+        Object handle(RequestSpec requestSpec) {
+          return requestSpec.retrieve();
+        }
+      }
+      class RequestSpec {
+        Object retrieve(Object... args) { return null; }
+      }
+    expect_match_text:
+    - requestSpec.retrieve
+  description: "Disabled — WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
+- id: java.ssrf.play_wsclient_url
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - com.typesafe.play
+  - play.libs.ws
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WSClient
+      - url
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: play wsclient url
+    code: |
+      import com.typesafe.play.*;
+      class App {
+        Object handle(WSClient ws, String url) {
+          return ws.url(url);
+        }
+      }
+      class WSClient {
+        Object url(Object... args) { return null; }
+      }
+    expect_match_text:
+    - ws.url
+  - name: arg tainted literal negative
+    code: |
+      import com.typesafe.play.*;
+      class App {
+        void handle(String input) throws Exception {
+          WSClient.url("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: "Play WSClient.url(url) — asynchronous server-side request target controlled by attacker input."
+- id: java.ssrf.okhttp_request_url
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - okhttp3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Builder
+      - url
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import okhttp3.*;
+      class App {
+        void handle(String input) throws Exception {
+          Builder.url(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import okhttp3.*;
+      class App {
+        void handle(String input) throws Exception {
+          Builder.url("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: OkHttp Request.Builder.url(tainted).
+- id: java.ssrf.async_httpclient_prepareget
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - org.asynchttpclient
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncHttpClient
+      - prepareGet
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.asynchttpclient.*;
+      class App {
+        void handle(String input) throws Exception {
+          AsyncHttpClient.prepareGet(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.asynchttpclient.*;
+      class App {
+        void handle(String input) throws Exception {
+          AsyncHttpClient.prepareGet("https://example.test/");
+        }
+      }
+    expect_no_match: true
+  description: Ning/AsyncHttpClient prepareGet(tainted URL).
+- id: java.ssrf.jdk_httprequest_builder_uri
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Builder
+      - uri
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdk http request builder uri
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          Builder.uri(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          Builder.uri("safe");
+        }
+      }
+    expect_no_match: true
+  description: "java.net.http.HttpRequest.Builder.uri(tainted URI) — request target controlled by attacker input."
+- id: java.ssrf.jdk_httprequest_newbuilder_uri
+  enabled: true
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpRequest
+      - newBuilder
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdk http request new builder uri
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpRequest.newBuilder(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.net.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          HttpRequest.newBuilder("safe");
+        }
+      }
+    expect_no_match: true
+  description: "java.net.http.HttpRequest.newBuilder(tainted URI) — constructs a request for a caller-controlled target."
+- id: java.ssrf.httpurlconnection_getresponsecode
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: getResponseCode
+  match_examples:
+  - name: httpurlconnection response code
+    code: |
+      import java.net.*;
+      class App {
+        int handle(HttpURLConnection connection) throws Exception {
+          return connection.getResponseCode();
+        }
+      }
+      class HttpURLConnection {
+        int getResponseCode(Object... args) { return 200; }
+      }
+    expect_match_text:
+    - connection.getResponseCode
+  description: "Disabled — HttpURLConnection.getResponseCode() dispatches receiver URL state, not a taintable call argument."

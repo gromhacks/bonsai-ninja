@@ -1,0 +1,32 @@
+# Rust cloud-runtime event sources (FaaS / serverless handlers).
+- id: rust.aws.lambda_event_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  trust: service
+  tag: event-input
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: [lambda_runtime]
+  manifests: [Cargo.toml]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "Disabled — `kind: param` cannot currently prove the enclosing function is a Lambda handler, so bare `event` overmatches unrelated Rust callbacks."
+- id: rust.aws.lambda_handler_event
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: rust
+  trust: service
+  tag: event-input
+  payload_types: [event]
+  frameworks: [aws-lambda]
+  packages: [lambda_runtime]
+  match:
+    kind: call
+    callee:
+      attribute: [LambdaEvent, payload]
+  description: "Disabled — adapters index local receivers like `event.payload`, not type-qualified paths like `LambdaEvent::payload`. No canonical exists; re-enable when the Rust adapter supports type-qualified attribute matching."

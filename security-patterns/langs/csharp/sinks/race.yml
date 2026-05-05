@@ -1,0 +1,68 @@
+# C# race / TOCTOU / transaction-after-error audit-pair sites.
+
+- id: csharp.toctou.file_exists
+  enabled: true
+  language: csharp
+  tag: race
+  severity: medium
+  packages: [System.IO]
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Exists]
+  match_examples:
+    - name: file exists check
+      code: |
+        using System.IO;
+        class App {
+          void Handle(string input) {
+            File.Exists(input);
+          }
+        }
+      expect_match_text: [File.Exists]
+  description: "File.Exists(path) — check site for TOCTOU; the symlink/file swap window between this and File.Open is the race."
+- id: csharp.race.sql_transaction_commit
+  enabled: true
+  language: csharp
+  tag: race
+  severity: medium
+  packages: [System.Data, System.Data.SqlClient]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Commit$
+  match_examples:
+    - name: sql transaction commit
+      code: |
+        using System.Data.SqlClient;
+        class App {
+          void Handle(SqlTransaction tx) {
+            tx.Commit();
+          }
+        }
+      expect_match_text: [tx.Commit]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Commit() — transaction-after-error race-pair; later command.ExecuteNonQuery on the same connection runs outside the intended transaction window."
+- id: csharp.race.sql_transaction_rollback
+  enabled: true
+  language: csharp
+  tag: race
+  severity: medium
+  packages: [System.Data, System.Data.SqlClient]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Rollback$
+  match_examples:
+    - name: sql transaction rollback
+      code: |
+        using System.Data.SqlClient;
+        class App {
+          void Handle(SqlTransaction tx) {
+            tx.Rollback();
+          }
+        }
+      expect_match_text: [tx.Rollback]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). SqlTransaction.Rollback() — transaction-after-error race-pair; later writes on the same connection persist data the rollback was supposed to undo."

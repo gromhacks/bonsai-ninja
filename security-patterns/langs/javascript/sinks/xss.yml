@@ -1,0 +1,605 @@
+- id: javascript.xss.innerhtml
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: innerHTML
+  match_examples:
+  - name: innerhtml
+    code: "function demo(input, req, obj) {\n  innerHTML = input; return innerHTML;\n}\n"
+  description: "Element.innerHTML = tainted \u2014 DOM XSS."
+- id: javascript.xss.outerhtml
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: outerHTML
+  match_examples:
+  - name: outerhtml
+    code: "function demo(input, req, obj) {\n  outerHTML = input; return outerHTML;\n}\n"
+  description: "Element.outerHTML = tainted \u2014 DOM XSS."
+- id: javascript.xss.insertadjacenthtml
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: insertAdjacentHTML
+  description: "Disabled \u2014 bare `insertAdjacentHTML` is DOM-specific but the name alone is ubiquitous; enable with receiver narrowing (Element)."
+- id: javascript.xss.document_write
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - document
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: document write tainted
+    code: "function demo(input) {\n  return document.write(input);\n}\n"
+    expect_match_text:
+    - document.write
+  - name: document write literal
+    code: "function demo() {\n  return document.write(\"<p>safe</p>\");\n}\n"
+    expect_no_match: true
+  description: "document.write(tainted) \u2014 legacy DOM XSS vector. arg_tainted scopes to attacker-controlled content; literal/static strings don't fire (R6)."
+- id: javascript.xss.document_writeln
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - document
+      - writeln
+  match_examples:
+  - name: document writeln
+    code: "function demo(input, req, obj) {\n  return document.writeln(input);\n}\n"
+    expect_match_text:
+    - document.writeln
+  - name: document writeln literal
+    code: "function demo() {\n  return document.writeln(\"<p>safe</p>\");\n}\n"
+    expect_no_match: true
+  description: document.writeln(tainted) - legacy DOM XSS vector. arg_tainted avoids static response fragments.
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.html_return
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: return
+    target:
+      regex: (?is)^\s*(?:`|'|").*(<!doctype|<html\b|<[a-z][a-z0-9:-]*\b[^>]*>)
+  match_examples:
+  - name: raw html template return
+    code: "function page(q) {\n  return `<!doctype html><h1>${q}</h1>`;\n}\n"
+    expect_match_text:
+    - '`<!doctype html><h1>${q}</h1>`'
+  description: Route/helper return of raw HTML expression. Taint reachability decides whether interpolated content is attacker controlled.
+- id: javascript.xss.serialize_javascript_unsafe_embed
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - serialize-javascript
+  imports:
+  - serialize-javascript
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^(serialize|serializeJavascript|serializeJavaScript)$
+  match_examples:
+  - name: serialize-javascript unsafe option
+    code: "const serialize = require(\"serialize-javascript\");\nfunction embed(input) {\n  return serialize(input, { unsafe: true });\n}\n"
+    expect_match_text:
+    - serialize
+  - name: serializeJavaScript unsafe option
+    code: "const _u = require(\"serialize-javascript\");\nfunction embed(serializeJavaScript, input) {\n  return serializeJavaScript(input, { unsafe: true });\n}\n"
+    expect_match_text:
+    - serializeJavaScript
+  description: serialize-javascript with unsafe embedding options can emit attacker-controlled script-context content.
+- id: javascript.xss.dangerously_set_inner_html
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - react
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: dangerouslySetInnerHTML
+  match_examples:
+  - name: dangerously set inner html
+    code: "const _u = require(\"react\");\nfunction demo(input, req, obj) {\n  dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;\n}\n"
+  description: "React dangerouslySetInnerHTML={{__html: tainted}} renders raw HTML \u2014 explicit XSS escape hatch."
+- id: javascript.xss.vue_v_html
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - vue
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: v-html
+  description: "Disabled \u2014 `v-html` is a template directive, not a JS assignment; requires a template-parser to detect, not tree-sitter JS."
+- id: javascript.xss.angular_bypass_security_html
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustHtml
+  match_examples:
+  - name: angular bypass security html
+    code: "const _u = require(\"@angular/core\");\nfunction demo(input, req, obj) {\n  return DomSanitizer.bypassSecurityTrustHtml(input);\n}\n"
+  - name: angular bypass security html literal
+    code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustHtml(\"<p>safe</p>\");\n}\n"
+    expect_no_match: true
+  description: "Angular DomSanitizer.bypassSecurityTrustHtml \u2014 explicit escape hatch for raw HTML."
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.angular_bypass_security_script
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: critical
+  packages:
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustScript
+  match_examples:
+  - name: angular bypass security script
+    code: "const _u = require(\"@angular/core\");\nfunction demo(input, req, obj) {\n  return DomSanitizer.bypassSecurityTrustScript(input);\n}\n"
+  - name: angular bypass security script literal
+    code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustScript(\"console.log(1)\");\n}\n"
+    expect_no_match: true
+  description: "Angular bypassSecurityTrustScript \u2014 explicit code-execution escape hatch."
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.angular_bypass_security_url
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustUrl
+  match_examples:
+  - name: angular bypass security url
+    code: "const _u = require(\"@angular/core\");\nfunction demo(input, req, obj) {\n  return DomSanitizer.bypassSecurityTrustUrl(input);\n}\n"
+  - name: angular bypass security url literal
+    code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustUrl(\"/safe\");\n}\n"
+    expect_no_match: true
+  description: "Angular bypassSecurityTrustUrl \u2014 bypasses URL sanitisation (javascript: URIs)."
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.angular_bypass_security_resourceurl
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustResourceUrl
+  match_examples:
+  - name: angular bypass security resourceurl
+    code: "const _u = require(\"@angular/core\");\nfunction demo(input, req, obj) {\n  return DomSanitizer.bypassSecurityTrustResourceUrl(input);\n}\n"
+  - name: angular bypass security resourceurl literal
+    code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustResourceUrl(\"/safe.js\");\n}\n"
+    expect_no_match: true
+  description: "Angular bypassSecurityTrustResourceUrl \u2014 bypasses script/iframe URL sanitisation."
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.angular_bypass_security_style
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: medium
+  packages:
+  - '@angular/core'
+  - '@angular/platform-browser'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustStyle
+  match_examples:
+  - name: angular bypass security style
+    code: "const _u = require(\"@angular/core\");\nfunction demo(input, req, obj) {\n  return DomSanitizer.bypassSecurityTrustStyle(input);\n}\n"
+  - name: angular bypass security style literal
+    code: "const _u = require(\"@angular/core\");\nfunction demo() {\n  return DomSanitizer.bypassSecurityTrustStyle(\"color: black\");\n}\n"
+    expect_no_match: true
+  description: "Angular DomSanitizer.bypassSecurityTrustStyle \u2014 bypasses CSS sanitization."
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.angularjs_sce_trustashtml
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - angular
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^\$sce\.trustAs(Html|Js|Url|ResourceUrl|Css)$
+  match_examples:
+  - name: angularjs sce trust as html
+    code: "const _u = require(\"angular\");\nfunction demo($sce, input) {\n  return $sce.trustAsHtml(input);\n}\n"
+    expect_match_text:
+    - $sce.trustAsHtml
+  - name: angularjs sce trust as resource url
+    code: "const _u = require(\"angular\");\nfunction demo($sce, input) {\n  return $sce.trustAsResourceUrl(input);\n}\n"
+    expect_match_text:
+    - $sce.trustAsResourceUrl
+  - name: angularjs sce trust literal
+    code: "const _u = require(\"angular\");\nfunction demo($sce) {\n  return $sce.trustAsHtml(\"<p>safe</p>\");\n}\n"
+    expect_no_match: true
+  description: "AngularJS $sce.trustAs* \u2014 explicit trust bypass for HTML, script, URL, resource URL, or CSS contexts."
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.angularjs_resource_url_wildcard
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: medium
+  packages:
+  - angular
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^(\$sceDelegateProvider|sceDelegateProvider)\.resourceUrlWhitelist$
+  match_examples:
+  - name: angularjs resource url wildcard
+    code: "const _u = require(\"angular\");\nfunction config(sceDelegateProvider) {\n  return sceDelegateProvider.resourceUrlWhitelist([\"self\", \"**\"]);\n}\n"
+    expect_match_text:
+    - sceDelegateProvider.resourceUrlWhitelist
+  description: AngularJS resourceUrlWhitelist containing '**' allows templates/resources from arbitrary origins.
+- id: javascript.xss.jquery_dollar_html
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^\$\([^)]*\)\.html$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jquery dollar html
+    code: "const _u = require(\"jquery\");\nfunction demo(input) {\n  return $(\"#target\").html(input);\n}\n"
+    expect_match_text:
+    - $("#target").html
+  - name: jquery dollar html literal
+    code: "const _u = require(\"jquery\");\nfunction demo() {\n  return $(\"#target\").html(\"<p>safe</p>\");\n}\n"
+    expect_no_match: true
+  description: $(...).html(tainted) - jQuery HTML insertion with a constrained $() receiver pattern.
+- id: javascript.xss.jquery_html
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: html
+  description: "Disabled \u2014 bare `.html(tainted)` on any object is too ubiquitous; jQuery-specific form requires receiver narrowing."
+- id: javascript.xss.jquery_append
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: append
+  description: "Disabled \u2014 `.append()` is also common on arrays/streams/Buffers; enable with jQuery receiver narrowing."
+- id: javascript.xss.jquery_prepend
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: prepend
+  description: "Disabled \u2014 ubiquitous method name; enable with jQuery receiver narrowing."
+- id: javascript.xss.jquery_after
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: after
+  description: "Disabled \u2014 `.after()` is ubiquitous (also sinon, lodash); enable with jQuery receiver narrowing."
+- id: javascript.xss.location_href_assign
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: href
+  description: "Disabled \u2014 bare `.href = ...` is too broad; enable only when the assignment is on `location`/`anchor` with a javascript:-URI constraint."
+- id: javascript.xss.script_src_assign
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: src
+  description: "Disabled \u2014 bare `.src = ...` fires on every img/video/audio/iframe assignment; enable with element-type constraint."
+- id: javascript.xss.iframe_srcdoc
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: srcdoc
+  match_examples:
+  - name: iframe srcdoc
+    code: "function demo(input, req, obj) {\n  srcdoc = input; return srcdoc;\n}\n"
+  description: "iframe.srcdoc = tainted HTML \u2014 renders attacker-controlled document inside an iframe."
+- id: javascript.xss.range_createcontextualfragment
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Range
+      - createContextualFragment
+  match_examples:
+  - name: range createcontextualfragment
+    code: "function demo(input, req, obj) {\n  return Range.createContextualFragment(input);\n}\n"
+  - name: range createcontextualfragment literal
+    code: "function demo() {\n  return Range.createContextualFragment(\"<p>safe</p>\");\n}\n"
+    expect_no_match: true
+  description: Range.createContextualFragment(tainted) - parses attacker-controlled HTML into live DOM nodes.
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.dom_parser_parsefromstring
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DOMParser
+      - parseFromString
+  description: "Disabled \u2014 DOMParser parses but doesn't auto-render; XSS only materialises when the result is attached; flag downstream."
+- id: javascript.xss.koa_ctx_body_html
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - koa
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.body$
+  match_examples:
+  - name: koa ctx body doctype concat
+    code: "const _u = require(\"koa\");\nfunction demo(ctx, q) {\n  ctx.body = \"<!doctype html>\" + q;\n}\n"
+    expect_match_text:
+    - ctx.body
+  - name: koa ctx body template html
+    code: "const _u = require(\"koa\");\nfunction demo(ctx, q) {\n  ctx.body = `<!doctype html><section>${q}</section>`;\n}\n"
+    expect_match_text:
+    - ctx.body
+  description: "Koa <ctx>.body = concatenated/template HTML \u2014 raw response body can reflect attacker-controlled markup. Receiver-agnostic; package gate keeps this from firing outside Koa workspaces."
+- id: javascript.xss.create_html_document_href_concat
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: createHtmlDocument
+  match_examples:
+  - name: create html document href concat
+    code: "function demo(input, req, obj) {\n  return createHtmlDocument(input, \"<a href='\" + input + \"'>\");\n}\n"
+  description: "createHtmlDocument(...) with concatenated href-bearing HTML \u2014 flags the precise HTML construction site before it is sent/rendered."
+- id: javascript.xss.express_res_write
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - express
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - write
+  match_examples:
+  - name: express res write
+    code: "const _u = require(\"express\");\nfunction demo(input, req, obj) {\n  return res.write(input);\n}\n"
+    expect_match_text:
+    - res.write
+  - name: express res write literal
+    code: "const _u = require(\"express\");\nfunction demo(res) {\n  return res.write(\"<p>safe</p>\");\n}\n"
+    expect_no_match: true
+  description: Express/Node res.write(tainted HTML) - writes user-controlled raw response chunks without escaping.
+  constraints:
+  - arg_tainted:
+      index: 0
+- id: javascript.xss.express_res_end_html
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - express
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - end
+  match_examples:
+  - name: response end html concat
+    code: "const _u = require(\"express\");\nfunction demo(res, body) {\n  return res.end(\"<h1>\" + body + \"</h1>\");\n}\n"
+    expect_match_text:
+    - res.end
+  - name: response end template html
+    code: "const _u = require(\"express\");\nfunction demo(res, body) {\n  return res.end(`<p>${body}</p>`);\n}\n"
+    expect_match_text:
+    - res.end
+  description: "Express/Node res.end with concatenated or template HTML \u2014 raw HTTP response body can become reflected XSS."

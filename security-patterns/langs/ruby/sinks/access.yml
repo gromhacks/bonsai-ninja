@@ -1,0 +1,119 @@
+- id: ruby.access.aws_get_object
+  enabled: true
+  language: ruby
+  tag: access-control
+  severity: high
+  packages: [aws-sdk-s3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: get_object
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.access.aws_get_object example
+    code: |
+      require "aws-sdk-s3"
+      def example(input, url, id, payload, request, params)
+        get_object(input)
+      end
+  - name: ruby.access.aws_get_object literal negative
+    code: |
+      require "aws-sdk-s3"
+      def example(input, url, id, payload, request, params)
+        get_object(bucket: "public", key: "readme.txt")
+      end
+    expect_no_match: true
+  description: "aws-sdk-s3 get_object — tainted bucket/key selector reads arbitrary object data."
+
+- id: ruby.access.aws_put_object
+  enabled: true
+  language: ruby
+  tag: access-control
+  severity: high
+  packages: [aws-sdk-s3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: put_object
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.access.aws_put_object example
+    code: |
+      require "aws-sdk-s3"
+      def example(input, url, id, payload, request, params)
+        put_object(input)
+      end
+  - name: ruby.access.aws_put_object literal negative
+    code: |
+      require "aws-sdk-s3"
+      def example(input, url, id, payload, request, params)
+        put_object(bucket: "public", key: "readme.txt", body: "ok")
+      end
+    expect_no_match: true
+  description: "aws-sdk-s3 put_object — tainted bucket/key selector overwrites attacker-chosen object keys."
+
+- id: ruby.access.aws_get_secret_value
+  enabled: true
+  language: ruby
+  tag: access-control
+  severity: high
+  packages: [aws-sdk-secretsmanager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      name: get_secret_value
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.access.aws_get_secret_value example
+    code: |
+      require "aws-sdk-secretsmanager"
+      def example(input, url, id, payload, request, params)
+        get_secret_value(input)
+      end
+  - name: ruby.access.aws_get_secret_value literal negative
+    code: |
+      require "aws-sdk-secretsmanager"
+      def example(input, url, id, payload, request, params)
+        get_secret_value(secret_id: "app/config")
+      end
+    expect_no_match: true
+  description: "aws-sdk-secretsmanager get_secret_value — tainted secret id reads arbitrary secret material."
+
+- id: ruby.access.gcp_access_secret_version
+  enabled: true
+  language: ruby
+  tag: access-control
+  severity: high
+  packages: [google-cloud-secret_manager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      name: access_secret_version
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.access.gcp_access_secret_version example
+    code: |
+      require "google-cloud-secret_manager"
+      def example(input, url, id, payload, request, params)
+        access_secret_version(input)
+      end
+  - name: ruby.access.gcp_access_secret_version literal negative
+    code: |
+      require "google-cloud-secret_manager"
+      def example(input, url, id, payload, request, params)
+        access_secret_version(name: "projects/demo/secrets/app/versions/latest")
+      end
+    expect_no_match: true
+  description: "Secret Manager access_secret_version — tainted resource name reads arbitrary secret versions."

@@ -1,0 +1,213 @@
+# Reentrancy sinks — low-level value-forwarding external calls.
+#
+# Why bare-name matchers here, when pattern-guide.mdx warns against
+# bare-name `send` / `call` / `transfer`?
+#
+# In Solidity these three identifiers are language-level member
+# functions on the `address` / `address payable` type — they are not
+# user-defined methods. The grammar guarantees that `<expr>.call(…)`,
+# `<expr>.send(…)`, `<expr>.transfer(…)` resolve to the EVM
+# CALL / CALL+2300gas / CALL+2300gas+revert primitives whenever the
+# receiver is an address. That is exactly the sink we want to label.
+#
+# False-positive surface and mitigations:
+#   * `.call(…)` collides with user-defined methods literally named
+#     `call` (rare but legal, e.g. function pointers, mock harnesses).
+#     We accept that residual FP; the audit reports this rule as
+#     `FRAGILE` so reviewers know to filter on receiver type when
+#     receiver-typing lands.
+#   * `.send(…)` collides with WebSocket/queue mocks if such code is
+#     ever embedded in a Solidity fixture (very unlikely).
+#   * `.transfer(…)` collides with ERC20.transfer; the medium severity
+#     reflects that the ERC20 case is also worth surfacing as an
+#     external-call site (it can re-enter via ERC777 hooks etc.).
+#
+# `top_level: false` ensures we only fire on member-call positions
+# (i.e. `<recv>.call(…)` and not a top-level free `call(…)`), which
+# eliminates a large class of false positives.
+- id: solidity.reentrancy.call
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: critical
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: '.*\.call$'
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { target.call(input); } }
+  description: "Low-level addr.call / addr.call{value:...}(...) - arbitrary external call with full forwarded gas. Reentrancy vector if a state update follows the call (violates Checks-Effects-Interactions). Bare-name match; see file header for FP notes."
+
+# Canonical pre-Solidity-0.5 reentrancy primitive: `addr.call.value(amt)(data)`.
+# The DAO hack used exactly this shape. Modern Solidity wraps it as
+# `addr.call{value: amt}(data)` (covered above), but legacy contracts
+# still use the chained `.call.value(...)(...)` form.
+- id: solidity.reentrancy.call_value_chain
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: critical
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "\\.call\\.value$"
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { target.call.value(amount)(data); } }
+  description: "addr.call.value(amount)(data) - pre-0.5 ETH-forwarding reentrancy primitive used in TheDAO hack. Forwards full remaining gas; if a state update follows the call (violates Checks-Effects-Interactions), recipient can re-enter."
+
+# `send` is a method on Solidity's `address` value type, not a
+# library function. Like `emit`, there's no `packages:` / receiver
+# scope to narrow on at the rule level — this IS the language API.
+# `fp_audit.py` flags it as "bare generic verb name"; intentional
+# false positive for a language primitive.
+- id: solidity.reentrancy.send
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: high
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: call
+    callee:
+      name: send
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { target.send(input); } }
+  description: ".send() — 2300-gas-stipend ETH forward, returns bool. Cannot trigger deep reentry but cross-function reentrancy is still possible if state is read after the send. Bare-name match; see file header."
+- id: solidity.reentrancy.transfer
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: medium
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: call
+    callee:
+      name: transfer
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { target.transfer(input); } }
+  description: ".transfer() — 2300-gas-stipend ETH forward, reverts on failure. Reentrancy still possible if state read after external call; also fires on ERC20.transfer (also a reentrancy vector via ERC777-style hooks)."
+- id: solidity.reentrancy.unchecked_external_call_pattern
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: solidity
+  tag: reentrancy
+  severity: high
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: call
+    callee:
+      name: call
+  description: "Disabled — duplicate shape of solidity.reentrancy.call. Reserved id for the future check-effects-interaction-violation analyser that wants to flag the classic 'external call before state-update' pattern as a distinct finding (rather than reusing the generic reentrancy.call sink)."
+
+# State-write sinks for the Checks-Effects-Interactions ordering
+# review (T500). These don't say "reentrancy is happening" — they
+# mark the state-mutation sites the reviewer (LLM/human) needs to
+# enumerate alongside `--tag reentrancy` external-call sinks.
+# Workflow: `security sinks --tag reentrancy` lists both call-sites
+# and state-write sites in source order; reviewer checks whether
+# any function has a call BEFORE a write (CEI violation).
+- id: solidity.reentrancy.field_write
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: solidity
+  tag: reentrancy
+  severity: medium
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: write
+    target:
+      regex: "^this\\."
+  description: "Disabled — `this.<field> = X` member-field write. Off by default because every contract has many field writes; enable for a targeted reentrancy review."
+- id: solidity.reentrancy.mapping_write
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: solidity
+  tag: reentrancy
+  severity: medium
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: write
+    target:
+      regex: "\\["
+  description: "Disabled — `mapping[k] = v` write. Off by default; enable to enumerate all mapping writes alongside external-call sites for CEI ordering review."
+- id: solidity.reentrancy.balance_decrement
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: high
+  cwe: [CWE-841, CWE-94]
+  match:
+    kind: write
+    target:
+      regex: "^Balance$"
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { Balance = amount; } }
+  description: "User-balance mapping write — when this happens AFTER an external call (.call/.send/.transfer) without nonReentrant guard, it's the canonical TheDAO-style reentrancy: attacker re-enters and re-withdraws before balance is decremented."
+- id: solidity.reentrancy.erc677_call_after_transfer
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: high
+  cwe: [CWE-841]
+  match:
+    kind: call
+    callee:
+      name: callAfterTransfer
+  match_examples:
+    - name: erc677 callback
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(address receiver, address sender, uint256 amount, bytes memory data) public { callAfterTransfer(receiver, sender, amount, data); } }
+  description: "ERC677 callAfterTransfer(...) invokes receiver-controlled code during token transfer. Review state-update ordering and reentrancy guards."
+- id: solidity.reentrancy.erc721_receiver_check
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: high
+  cwe: [CWE-841]
+  match:
+    kind: call
+    callee:
+      name: _checkOnERC721Received
+  match_examples:
+    - name: erc721 receiver callback
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(address from, address to, uint256 tokenId, bytes memory data) public { _checkOnERC721Received(from, to, tokenId, data); } }
+  description: "ERC721 _checkOnERC721Received(...) calls the recipient hook. Review for state changes or invariants that can be observed/reentered before completion."
+- id: solidity.reentrancy.erc777_tokens_received
+  enabled: true
+  language: solidity
+  tag: reentrancy
+  severity: high
+  cwe: [CWE-841]
+  match:
+    kind: call
+    callee:
+      name: tokensReceived
+  match_examples:
+    - name: erc777 recipient hook
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(address hook, address operator, address from, address to, uint256 amount, bytes memory userData, bytes memory operatorData) public { hook.tokensReceived(operator, from, to, amount, userData, operatorData); } }
+  description: "ERC777 tokensReceived(...) is an external recipient hook. Treat it as a reentrancy sink when balances, allowances, or accounting are updated after the call."

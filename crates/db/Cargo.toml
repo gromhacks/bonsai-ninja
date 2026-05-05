@@ -1,0 +1,28 @@
+[package]
+name = "bonsai_db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Incremental analyzer database."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_diagnostics = { workspace = true }
+bonsai_vfs = { workspace = true }
+bonsai_parser = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_index = { workspace = true }
+bonsai_cfg = { workspace = true }
+bonsai_abstract_interp = { workspace = true }
+bonsai_trace = { workspace = true }
+parking_lot = { workspace = true }
+ahash = { workspace = true }
+
+[dev-dependencies]
+bonsai_lang_python = { workspace = true }
+tree-sitter = { workspace = true }
+
+[lints]
+workspace = true

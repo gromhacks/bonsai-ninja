@@ -1,0 +1,78 @@
+# ruby race / TOCTOU sinks (T501).
+
+# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# in source order to identify the race window.
+- id: ruby.toctou.file_exist
+  enabled: true
+  language: ruby
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [File, "exist?"]
+  match_examples:
+    - name: ruby.toctou.file_exist example
+      code: |
+        def example(input, url, id, payload, request, params)
+          File.exist?(input)
+        end
+  description: "File.exist?(path) — check site; followed by File.open in a different stat window is TOCTOU."
+- id: ruby.toctou.file_stat
+  enabled: true
+  language: ruby
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [File, stat]
+  match_examples:
+    - name: ruby.toctou.file_stat example
+      code: |
+        def example(input, url, id, payload, request, params)
+          File.stat(input)
+        end
+  description: "File.stat(path) — check site for TOCTOU."
+- id: ruby.race.activerecord_commit
+  enabled: true
+  language: ruby
+  tag: race
+  severity: medium
+  packages: [activerecord]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.commit$
+  match_examples:
+    - name: activerecord commit audit
+      code: |
+        require "activerecord"
+        def example(txn)
+          txn.commit
+        end
+      expect_match_text: [txn.commit]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). ActiveRecord transaction#commit — transaction-after-error race-pair; later writes on the same connection without a fresh begin run outside the intended transaction window."
+- id: ruby.race.activerecord_rollback
+  enabled: true
+  language: ruby
+  tag: race
+  severity: medium
+  packages: [activerecord]
+  cwe: [CWE-662, CWE-367]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.rollback$
+  match_examples:
+    - name: activerecord rollback audit
+      code: |
+        require "activerecord"
+        def example(txn)
+          txn.rollback
+        end
+      expect_match_text: [txn.rollback]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value once the must-alias + lifecycle-state primitives ship (see docs/contributing/analysis-roadmap.mdx). ActiveRecord transaction#rollback — transaction-after-error race-pair; later writes on the same connection persist data the rollback was supposed to undo."

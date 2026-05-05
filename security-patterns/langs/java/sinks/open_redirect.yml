@@ -1,0 +1,317 @@
+- id: java.open_redirect.send_redirect
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpServletResponse
+      - sendRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    HttpServletResponse.sendRedirect(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          HttpServletResponse.sendRedirect("/home");
+        }
+      }
+    expect_no_match: true
+  description: HttpServletResponse.sendRedirect(tainted).
+- id: java.open_redirect.spring_redirect_view
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - org.springframework.web.servlet
+  cwe:
+  - CWE-601
+  match:
+    kind: new
+    callee:
+      name: RedirectView
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          new RedirectView(input);
+        }
+      }
+      class RedirectView {
+        RedirectView(Object... args) {}
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          new RedirectView("/home");
+        }
+      }
+    expect_no_match: true
+  description: new RedirectView(tainted).
+  imports:
+  - org.springframework.web.servlet
+- id: java.open_redirect.spring_modelandview_redirect
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: medium
+  packages:
+  - org.springframework.web.servlet
+  cwe:
+  - CWE-601
+  match:
+    kind: new
+    callee:
+      name: ModelAndView
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spring modelandview redirect concat
+    code: |
+      import org.springframework.web.servlet.*;
+      class App {
+        Object handle(String next) {
+          return new ModelAndView("redirect:" + next);
+        }
+      }
+      class ModelAndView {
+        ModelAndView(Object... args) {}
+      }
+    expect_match_text:
+    - ModelAndView
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.servlet.*;
+      class App {
+        void handle(String input) throws Exception {
+          new ModelAndView("home");
+        }
+      }
+    expect_no_match: true
+  description: "Spring ModelAndView(\"redirect:\" + target) — tainted redirect view suffix can send users to attacker-controlled locations."
+  imports:
+  - org.springframework.web.servlet
+- id: java.open_redirect.jaxrs_response_seeother
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - javax.ws.rs
+  - jakarta.ws.rs
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - seeOther
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          Response.seeOther(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          Response.seeOther("/home");
+        }
+      }
+    expect_no_match: true
+  description: JAX-RS Response.seeOther(tainted URI).
+- id: java.open_redirect.jaxrs_response_temporaryredirect
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - javax.ws.rs
+  - jakarta.ws.rs
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - temporaryRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          Response.temporaryRedirect(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          Response.temporaryRedirect("/home");
+        }
+      }
+    expect_no_match: true
+  description: JAX-RS Response.temporaryRedirect.
+- id: java.open_redirect.struts_redirect
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - struts2
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ActionRedirectResult
+      - setLocation
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import struts2.*;
+      class App {
+        void handle(String input) throws Exception {
+          ActionRedirectResult.setLocation(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import struts2.*;
+      class App {
+        void handle(String input) throws Exception {
+          ActionRedirectResult.setLocation("/home");
+        }
+      }
+    expect_no_match: true
+  description: Struts2 ActionRedirectResult.setLocation.
+- id: java.open_redirect.spring_responseentity_status
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: open-redirect
+  severity: medium
+  packages:
+  - org.springframework.http
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - status
+  description: "Disabled — flag only when 30x + Location header is tainted."
+- id: java.open_redirect.quarkus_response_seeother
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages:
+  - io.quarkus
+  - jakarta.ws.rs
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestResponse
+      - seeOther
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: quarkus rest response see other
+    code: |
+      import io.quarkus.*;
+      class App {
+        Object handle(Object target) {
+          return RestResponse.seeOther(target);
+        }
+      }
+    expect_match_text:
+    - RestResponse.seeOther
+  - name: arg tainted literal negative
+    code: |
+      import io.quarkus.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestResponse.seeOther("/home");
+        }
+      }
+    expect_no_match: true
+  description: "Quarkus RestResponse.seeOther(tainted URI) — open redirect."
+
+- id: java.open_redirect.spring_oauth_redirect_uri_tainted
+  enabled: true
+  language: java
+  tag: open-redirect
+  severity: high
+  packages: [org.springframework.security.oauth2]
+  imports: [org.springframework.security.oauth2]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [OAuth2AuthorizationRequest, redirectUri]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: OAuth2AuthorizationRequest redirectUri tainted
+    code: |
+      import org.springframework.security.oauth2.*;
+      class App {
+        void handle(String input) throws Exception {
+          OAuth2AuthorizationRequest.redirectUri(input);
+        }
+      }
+    expect_match_text: [OAuth2AuthorizationRequest.redirectUri]
+  - name: OAuth2AuthorizationRequest redirectUri literal negative
+    code: |
+      import org.springframework.security.oauth2.*;
+      class App {
+        void handle() throws Exception {
+          OAuth2AuthorizationRequest.redirectUri("https://app.example.com/cb");
+        }
+      }
+    expect_no_match: true
+  description: "Spring OAuth2AuthorizationRequest.redirectUri(tainted) — attacker-controlled redirect_uri allows OAuth callback hijack and token theft."

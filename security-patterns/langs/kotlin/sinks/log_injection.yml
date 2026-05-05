@@ -1,0 +1,183 @@
+- id: kotlin.log_injection.slf4j_info_format
+  enabled: true
+  language: kotlin
+  tag: header-injection
+  severity: medium
+  packages:
+  - slf4j
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - info
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import slf4j.*
+      class App {
+        fun handle(input: String) {
+          Logger.info("\\n" + input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import slf4j.*
+      class App {
+      fun handle(input: String) {
+        Logger.info("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Logger.info(\"...$user...\\n\") — newline in interpolated user text forges log entries. Merged aliases: kotlin.log_injection.logger_info_concat."
+  aliases:
+  - kotlin.log_injection.logger_info_concat
+- id: kotlin.log_injection.logger_debug_concat
+  enabled: true
+  language: kotlin
+  tag: log-injection
+  severity: low
+  packages: [org.slf4j]
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - debug
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.slf4j.*
+      // uses org.slf4j
+      class App {
+        fun handle(input: String) {
+          Logger.debug(input + "x")
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.slf4j.*
+      // uses org.slf4j
+      class App {
+      fun handle(input: String) {
+        Logger.debug("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Logger.debug(... tainted ...) — log-injection via concat / template."
+- id: kotlin.log_injection.logger_warn_concat
+  enabled: true
+  language: kotlin
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - warn
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Logger.warn(input + \"x\")\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Logger.warn("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Logger.warn(... tainted ...) — log-injection via concat / template."
+- id: kotlin.log_injection.logger_error_concat
+  enabled: true
+  language: kotlin
+  tag: log-injection
+  severity: medium
+  packages: [org.slf4j]
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - error
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.slf4j.*
+      // uses org.slf4j
+      class App {
+        fun handle(input: String) {
+          Logger.error(input + "x")
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.slf4j.*
+      // uses org.slf4j
+      class App {
+      fun handle(input: String) {
+        Logger.error("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Logger.error(... tainted ...) — log-injection via concat / template."
+- id: kotlin.log_injection.mdc_put
+  enabled: true
+  language: kotlin
+  tag: log-injection
+  severity: medium
+  packages:
+  - slf4j
+  - log4j
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MDC
+      - put
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mdc put request header
+    code: |
+      import slf4j.*
+      class App {
+        fun handle(header: String) {
+          MDC.put("x-request-id", header)
+        }
+      }
+    expect_match_text:
+    - MDC.put
+  - name: arg tainted literal negative
+    code: |
+      import slf4j.*
+      class App {
+      fun handle(header: String) {
+        MDC.put("x-request-id", "safe")
+      }
+      }
+    expect_no_match: true
+  description: "MDC.put(key, tainted header) — attacker-controlled logging context value can forge structured logs or poison downstream log correlation."

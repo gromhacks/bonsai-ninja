@@ -1,0 +1,103 @@
+- id: rust.access.aws_get_object
+  enabled: true
+  language: rust
+  tag: access-control
+  severity: high
+  packages: [aws_sdk_s3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.get_object$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use aws_sdk_s3;
+      use aws_sdk_s3;
+      use aws_sdk_s3::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.get_object(target);
+      }
+  description: "aws-sdk-s3 get_object — tainted bucket/key selector reads arbitrary object data."
+
+  imports:
+  - aws_sdk_s3
+- id: rust.access.aws_put_object
+  enabled: true
+  language: rust
+  tag: access-control
+  severity: high
+  packages: [aws_sdk_s3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.put_object$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use aws_sdk_s3;
+      use aws_sdk_s3;
+      use aws_sdk_s3::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.put_object(target);
+      }
+  description: "aws-sdk-s3 put_object — tainted bucket/key selector overwrites attacker-chosen object keys."
+
+  imports:
+  - aws_sdk_s3
+- id: rust.access.aws_get_secret_value
+  enabled: true
+  language: rust
+  tag: access-control
+  severity: high
+  packages: [aws_sdk_secretsmanager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.get_secret_value$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use aws_sdk_secretsmanager;
+      use aws_sdk_secretsmanager;
+      use aws_sdk_secretsmanager::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.get_secret_value(target);
+      }
+  description: "aws-sdk-secretsmanager get_secret_value — tainted secret id reads arbitrary secret material."
+
+  imports:
+  - aws_sdk_secretsmanager
+- id: rust.access.gcp_access_secret_version
+  enabled: true
+  language: rust
+  tag: access-control
+  severity: high
+  packages: [google_cloud_secretmanager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.access_secret_version$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use google_cloud_secretmanager;
+      use google_cloud_secretmanager;
+      use google_cloud_secretmanager::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.access_secret_version(target);
+      }
+  description: "Secret Manager access_secret_version — tainted resource name reads arbitrary secret versions."
+  imports:
+  - google_cloud_secretmanager

@@ -1,0 +1,70 @@
+# C# cloud / FaaS sources. AWS Lambda, Azure Functions, GCF.
+- id: csharp.source.aws_lambda_handler
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: cloud-event
+  trust: service
+  packages: [Amazon.Lambda.Core]
+  match:
+    kind: param
+    target:
+      name: FunctionHandler
+  description: "Disabled — `FunctionHandler` is the delegate/type name; `kind: param` only matches parameter identifiers."
+
+- id: csharp.source.azure_function_http_trigger
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: cloud-event
+  trust: service
+  packages: [Microsoft.Azure.WebJobs]
+  match:
+    kind: param
+    target:
+      name: HttpTrigger
+  description: "Disabled — matcher only sees parameter identifiers, not Azure [HttpTrigger] attributes."
+
+- id: csharp.source.azure_function_blob_trigger
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: cloud-event
+  trust: service
+  packages: [Microsoft.Azure.WebJobs]
+  match:
+    kind: param
+    target:
+      name: BlobTrigger
+  description: "Disabled — matcher only sees parameter identifiers, not Azure [BlobTrigger] attributes."
+
+- id: csharp.source.azure_function_eventhub_trigger
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: cloud-event
+  trust: service
+  packages: [Microsoft.Azure.WebJobs]
+  match:
+    kind: param
+    target:
+      name: EventHubTrigger
+  description: "Disabled — matcher only sees parameter identifiers, not Azure [EventHubTrigger] attributes."
+
+- id: csharp.source.gcf_function
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: cloud-event
+  trust: service
+  packages: [Google.Cloud.Functions.Framework]
+  match:
+    kind: param
+    target:
+      name: IHttpFunction
+  description: "Disabled — `IHttpFunction` is an interface name; `kind: param` only matches parameter identifiers."

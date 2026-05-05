@@ -1,0 +1,474 @@
+- id: python.xss.flask_render_template_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: xss
+  severity: high
+  category: template-render
+  frameworks:
+  - flask
+  - jinja2
+  packages:
+  - flask
+  - jinja2
+  imports:
+  - flask
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - flask
+      - render_template_string
+  description: "Disabled duplicate — flask.render_template_string is classified as SSTI in python.template.flask_render_template_string; that finding is the higher-severity root cause."
+- id: python.xss.markupsafe_markup
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  packages:
+  - markupsafe
+  imports:
+  - markupsafe
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - markupsafe
+      - Markup
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xss markupsafe markup
+    code: |
+      import markupsafe
+      def example(user_input):
+          return markupsafe.Markup(user_input)
+  - name: markupsafe markup literal negative
+    code: |
+      import markupsafe
+
+      def example(user_input):
+          return markupsafe.Markup('safe')
+    expect_no_match: true
+  description: "Markup() declares content safe — tainted input yields XSS."
+- id: python.xss.django_mark_safe
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - django
+  packages:
+  - django
+  imports:
+  - django
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: mark_safe
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xss django mark safe
+    code: |
+      import django
+      def example(user_input):
+          return mark_safe(user_input)
+  - name: django mark safe literal negative
+    code: |
+      import django
+
+      def example(user_input):
+          return mark_safe('safe')
+    expect_no_match: true
+  description: "django.utils.safestring.mark_safe(tainted) — marks the string as exempt from auto-escape, re-introducing XSS."
+- id: python.xss.django_format_html
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - django
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: format_html
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xss django format html
+    code: "def example(user_input):\n    return format_html(user_input)\n"
+  - name: django format html literal negative
+    code: |
+      def example(user_input):
+          return format_html('safe')
+    expect_no_match: true
+  description: "django.utils.html.format_html — args are HTML-escaped, but a tainted format string itself is interpolated raw and yields XSS."
+- id: python.xss.django_safestring
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - django
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: SafeString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xss django safestring
+    code: "class SafeString:\n    pass\n\ndef example(user_input):\n    return SafeString(user_input)\n"
+  - name: django safestring literal negative
+    code: |
+      class SafeString:
+          pass
+
+      def example(user_input):
+          return SafeString('safe')
+    expect_no_match: true
+  description: SafeString constructor with tainted data.
+- id: python.xss.starlette_html_response_concat
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - fastapi
+  - starlette
+  packages:
+  - fastapi
+  - starlette
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: HTMLResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: starlette htmlresponse concat
+    code: |
+      import fastapi
+      class HTMLResponse:
+          pass
+
+      def example(user_input):
+          return HTMLResponse("<p>" + user_input + "</p>")
+    expect_match_text:
+    - HTMLResponse
+  - name: starlette html response concat literal negative
+    code: |
+      import fastapi
+
+      class HTMLResponse:
+          pass
+
+      def example(user_input):
+          return HTMLResponse('safe')
+    expect_no_match: true
+  description: FastAPI/Starlette HTMLResponse with concatenated/f-string HTML - tainted content is rendered directly as HTML.
+- id: python.xss.flask_make_response_html_concat
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - flask
+  packages:
+  - flask
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - flask
+      - make_response
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: flask make response html concat
+    code: "import flask\n\ndef example(user_input):\n    return flask.make_response(\"<h1>\" + user_input + \"</h1>\")\n"
+    expect_match_text:
+    - flask.make_response
+  - name: flask make response html concat literal negative
+    code: |
+      import flask
+
+      def example(user_input):
+          return flask.make_response('safe')
+    expect_no_match: true
+  description: Flask make_response(HTML concat/f-string) - tainted response body is emitted as HTML.
+- id: python.xss.django_http_response_html_concat
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - django
+  packages:
+  - django
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: HttpResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: django httpresponse html concat
+    code: "from django.http import HttpResponse\n\ndef example(user_input):\n    return HttpResponse(\"<section>\" + user_input + \"</section>\", content_type=\"text/html\")\n"
+    expect_match_text:
+    - HttpResponse
+  - name: django http response html concat literal negative
+    code: |
+      from django.http import HttpResponse
+
+      def example(user_input):
+          return HttpResponse('safe', content_type='text/html')
+    expect_no_match: true
+  description: Django HttpResponse with HTML body/content_type - tainted content reaches the browser without template escaping.
+- id: python.xss.aiohttp_web_response_html_text
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - aiohttp
+  packages:
+  - aiohttp
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - web
+      - Response
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: aiohttp web response html text
+    code: "from aiohttp import web\n\ndef example(user_input):\n    return web.Response(text=\"<p>\" + user_input + \"</p>\", content_type=\"text/html\")\n"
+    expect_match_text:
+    - web.Response
+  - name: aiohttp web response html text literal negative
+    code: |
+      from aiohttp import web
+
+      def example(user_input):
+          return web.Response(text='safe', content_type='text/html')
+    expect_no_match: true
+  description: aiohttp web.Response(text=..., content_type='text/html') - tainted HTML text is returned directly.
+- id: python.xss.sanic_response_html_concat
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - sanic
+  packages:
+  - sanic
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - response
+      - html
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sanic response html concat
+    code: "from sanic import response\n\ndef example(user_input):\n    return response.html(\"<div>\" + user_input + \"</div>\")\n"
+    expect_match_text:
+    - response.html
+  - name: sanic response html concat literal negative
+    code: |
+      from sanic import response
+
+      def example(user_input):
+          return response.html('safe')
+    expect_no_match: true
+  description: Sanic response.html(tainted) - helper returns raw HTML.
+- id: python.xss.sanic_response_text_html
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - sanic
+  packages:
+  - sanic
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - response
+      - text
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sanic response text html
+    code: "from sanic import response\n\ndef example(user_input):\n    return response.text(\"<b>\" + user_input + \"</b>\", content_type=\"text/html\")\n"
+    expect_match_text:
+    - response.text
+  - name: sanic response text html literal negative
+    code: |
+      from sanic import response
+
+      def example(user_input):
+          return response.text('safe', content_type='text/html')
+    expect_no_match: true
+  description: Sanic response.text(..., content_type='text/html') - tainted text is interpreted by the browser as HTML.
+- id: python.xss.pyramid_response_html_concat
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - pyramid
+  packages:
+  - pyramid
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^Response$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: pyramid response html concat
+    code: "from pyramid.response import Response\n\ndef example(user_input):\n    return Response(\"<article>\" + user_input + \"</article>\", content_type=\"text/html\")\n"
+    expect_match_text:
+    - Response
+  - name: pyramid response html concat literal negative
+    code: |
+      from pyramid.response import Response
+
+      def example(user_input):
+          return Response('safe', content_type='text/html')
+    expect_no_match: true
+  description: Pyramid Response with HTML body/content_type - tainted body is returned without template escaping.
+- id: python.xss.tornado_self_write_html_concat
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - tornado
+  packages:
+  - tornado
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.(write|finish)$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tornado self write html concat
+    code: |
+      import tornado
+      class Handler:
+          def get(self, user_input):
+              return self.write("<span>" + user_input + "</span>")
+    expect_match_text:
+    - self.write
+  - name: tornado self write html concat literal negative
+    code: |
+      import tornado
+
+      class Handler:
+
+          def get(self, user_input):
+              return self.write('safe')
+    expect_no_match: true
+  description: Tornado RequestHandler.write/finish with HTML content - tainted body is sent as HTML.
+- id: python.xss.bottle_httpresponse_html_concat
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - bottle
+  packages:
+  - bottle
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: HTTPResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bottle httpresponse html concat
+    code: "from bottle import HTTPResponse\n\ndef example(user_input):\n    return HTTPResponse(\"<main>\" + user_input + \"</main>\")\n"
+    expect_match_text:
+    - HTTPResponse
+  - name: bottle httpresponse html concat literal negative
+    code: |
+      from bottle import HTTPResponse
+
+      def example(user_input):
+          return HTTPResponse('safe')
+    expect_no_match: true
+  description: Bottle HTTPResponse with string-built HTML body - tainted content is returned without template escaping.
+- id: python.xss.falcon_response_body_html_write
+  enabled: true
+  language: python
+  tag: xss
+  severity: high
+  frameworks:
+  - falcon
+  packages:
+  - falcon
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      regex: ^(resp|response)\.(text|body)$
+  match_examples:
+  - name: falcon response text html write
+    code: |
+      import falcon
+      def on_get(req, resp, user_input):
+          resp.text = "<p>" + user_input + "</p>"
+    expect_match_text:
+    - resp.text
+  description: Falcon response.text/body assignment with string-built HTML - tainted content is sent in the response body.

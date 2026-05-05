@@ -1,0 +1,124 @@
+# JavaScript cloud-function handler sources.
+# AWS Lambda / GCF / Azure Functions / CloudEvents — all deliver untrusted
+# payloads. Bare `event`/`req`/`context` param names are FP-prone, so these
+# rules are off by default and must be enabled in a cloud-specific audit
+# profile (where the entry-point shape is known).
+
+- id: javascript.cloud.aws_lambda_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: ["aws-sdk", "@aws-sdk/client-lambda", "aws-lambda"]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "AWS Lambda handler `event` parameter. Disabled — bare param name `event` matches every event-emitter handler; enable in Lambda-only audits."
+
+- id: javascript.cloud.aws_lambda_event_body
+  enabled: true
+  language: javascript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, body]
+  match_examples:
+  - name: aws lambda event body
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.body;
+      }
+  description: "AWS Lambda/APIGateway event.body — cloud-delivered request payload."
+
+- id: javascript.cloud.aws_lambda_event_headers
+  enabled: true
+  language: javascript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, header]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, headers]
+  match_examples:
+  - name: aws lambda event headers
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.headers;
+      }
+  description: "AWS Lambda/APIGateway event.headers — attacker-controlled request headers."
+
+- id: javascript.cloud.aws_lambda_event_query
+  enabled: true
+  language: javascript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, query]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, queryStringParameters]
+  match_examples:
+  - name: aws lambda event query
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.queryStringParameters;
+      }
+  description: "AWS Lambda/APIGateway event.queryStringParameters — cloud-delivered query input."
+
+- id: javascript.cloud.aws_lambda_event_path
+  enabled: true
+  language: javascript
+  trust: service
+  tag: cloud-event
+  payload_types: [event, path]
+  frameworks: [aws-lambda]
+  packages: ["aws-lambda"]
+  match:
+    kind: read
+    target:
+      attribute: [event, pathParameters]
+  match_examples:
+  - name: aws lambda event path
+    code: |
+      const _u = require("aws-lambda");
+      function demo(input, req, obj) {
+        return event.pathParameters;
+      }
+  description: "AWS Lambda/APIGateway event.pathParameters — cloud-delivered route parameters."
+
+- id: javascript.cloud.cloudevent_data
+  enabled: true
+  language: javascript
+  trust: service
+  tag: cloud-event
+  packages: [cloudevents]
+  match:
+    kind: read
+    target:
+      attribute: [cloudEvent, data]
+  match_examples:
+  - name: cloudevent data
+    code: |
+      const _u = require("cloudevents");
+      function demo(input, req, obj) {
+        return cloudEvent.data;
+      }
+  description: "CloudEvents cloudEvent.data attribute — service-delivered event payload."

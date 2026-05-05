@@ -1,0 +1,223 @@
+# Elixir JWT sinks (Joken / Guardian / jose).
+- id: elixir.jwt.joken_decode_and_verify
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: high
+  packages: [joken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Joken, decode_and_verify]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Joken
+      defmodule App do
+        def test(input) do
+          Joken.decode_and_verify(input)
+        end
+      end
+  description: "Joken.decode_and_verify/3 — verifies against the configured default_signer; weak secret, alg=none, or an HS256 signer set from env without strength checks accepts forged tokens."
+
+  imports:
+  - Joken
+- id: elixir.jwt.joken_verify
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: high
+  packages: [joken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Joken, verify]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Joken
+      # uses joken
+      defmodule App do
+        def test(input) do
+          Joken.verify(input)
+        end
+      end
+  description: "Joken.verify/3 — explicit signer supplied; misconfigured signer (alg=none, shared weak secret) accepts forged tokens."
+
+  imports:
+  - Joken
+- id: elixir.jwt.joken_peek_claims
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: high
+  packages: [joken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Joken, peek_claims]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Joken
+      defmodule App do
+        def test(input) do
+          Joken.peek_claims(input)
+        end
+      end
+  description: "Joken.peek_claims/1 — returns JWT claims without any signature check; trusting the output for authorisation is an auth bypass."
+
+  imports:
+  - Joken
+- id: elixir.jwt.joken_peek_header
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: medium
+  packages: [joken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Joken, peek_header]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Joken
+      defmodule App do
+        def test(input) do
+          Joken.peek_header(input)
+        end
+      end
+  description: "Joken.peek_header/1 — attacker-controlled JWT header (alg, kid); never drive verification decisions from these values (kid-confusion, alg=none)."
+
+  imports:
+  - Joken
+- id: elixir.jwt.guardian_decode_and_verify
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: high
+  packages: [guardian]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Guardian, decode_and_verify]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Guardian
+      defmodule App do
+        def test(input) do
+          Guardian.decode_and_verify(input)
+        end
+      end
+  description: "Guardian.decode_and_verify/3 — weak `secret_key` / permissive `allowed_algos` (includes :none or :HS256 with short secret) accepts forged tokens."
+
+  imports:
+  - Guardian
+- id: elixir.jwt.jose_jwt_verify
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: high
+  packages: [jose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      regex: "^:jose_jwt\\.verify$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Jose
+      defmodule App do
+        def test(input) do
+          :jose_jwt.verify(input)
+        end
+      end
+  description: "Erlang :jose_jwt.verify/2 — caller must supply the JWK and whitelist algorithms; default behaviour trivially accepts alg=none."
+
+  imports:
+  - Jose
+- id: elixir.jwt.jose_jwt_verify_strict
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: high
+  packages: [jose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JOSE, JWT, verify]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Jose
+      # uses jose
+      defmodule App do
+        def test(input) do
+          JOSE.JWT.verify(input)
+        end
+      end
+  description: "JOSE.JWT.verify/2 — Elixir wrapper over :jose_jwt; same alg-whitelist footgun."
+
+  imports:
+  - Jose
+- id: elixir.jwt.jose_jwt_peek_payload
+  enabled: true
+  language: elixir
+  tag: jwt
+  severity: high
+  packages: [jose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JOSE, JWT, peek_payload]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Jose
+      defmodule App do
+        def test(input) do
+          JOSE.JWT.peek_payload(input)
+        end
+      end
+  description: "JOSE.JWT.peek_payload/1 — returns claims without any signature check; trusting these is auth bypass."
+
+# JWT alg-confusion (T400). HMAC verify with an RSA public
+# key — when both HS* and RS* algorithms are allowed in the
+# verifier's algorithm list, an attacker can sign their own
+# token with the public key as the HMAC secret. Detect by
+# matching the algorithm-list shape at the verify call.
+  imports:
+  - Jose
+- id: elixir.jwt.alg_confusion
+  enabled: true
+  language: elixir
+  tag: untrusted-token
+  severity: high
+  packages: [joken]
+  cwe: [CWE-345]
+  match:
+    kind: call
+    callee:
+      attribute: [Joken, verify_and_validate]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Joken
+      defmodule App do
+        def test(input) do
+          Joken.verify_and_validate("HS256RS256")
+        end
+      end
+  description: "Joken verify_and_validate with mixed HMAC+RSA algorithms — alg-confusion vector."
+  imports:
+  - Joken

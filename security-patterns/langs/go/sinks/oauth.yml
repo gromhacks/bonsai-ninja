@@ -1,0 +1,72 @@
+# go oauth sinks.
+
+# OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
+# id_token verify off, redirect_uri substring match.
+- id: go.oauth.golang_oauth2_no_state
+  enabled: true
+  language: go
+  tag: oauth
+  severity: high
+  packages: [golang.org/x/oauth2]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [oauth2, AuthCodeURL]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "golang.org/x/oauth2"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        oauth2.AuthCodeURL("")
+      }
+  description: 'oauth2.Config.AuthCodeURL("", ...) — empty state string disables CSRF protection on the OAuth callback.'
+
+- id: go.oauth.golang_oauth2_exchange_tainted
+  enabled: true
+  language: go
+  tag: oauth
+  severity: high
+  packages: [golang.org/x/oauth2]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Exchange$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: oauth2 config Exchange tainted code
+    code: |
+      package main
+
+      import (
+        "context"
+        "golang.org/x/oauth2"
+      )
+
+      func handle(cfg *oauth2.Config, code string) {
+        cfg.Exchange(context.Background(), code)
+      }
+    expect_match_text: [cfg.Exchange]
+  - name: oauth2 config Exchange literal negative
+    code: |
+      package main
+
+      import (
+        "context"
+        "golang.org/x/oauth2"
+      )
+
+      func handle(cfg *oauth2.Config) {
+        cfg.Exchange(context.Background(), "fixed-static-code")
+      }
+    expect_no_match: true
+  description: "oauth2.Config.Exchange(ctx, tainted_code) — accepts attacker-supplied authorization code; without state binding the call enables OAuth code-injection / login CSRF."
+

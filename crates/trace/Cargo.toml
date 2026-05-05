@@ -1,0 +1,19 @@
+[package]
+name = "bonsai_trace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Trace result + renderers."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_abstract_interp = { workspace = true }
+bonsai_vfs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ahash = { workspace = true }
+
+[lints]
+workspace = true

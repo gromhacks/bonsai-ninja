@@ -1,0 +1,280 @@
+- id: cpp.xss.cpphttplib_set_content
+  aliases:
+  - cpp.info_disclosure.httplib_error_detail
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - cpp-httplib
+  cwe:
+  - CWE-79
+  - CWE-209
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - set_content
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Response::set_content(\"<p>\" + arg + \"</p>\", \"text/html\");\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Response::set_content("safe");
+      }
+    expect_no_match: true
+  description: "cpp-httplib Response::set_content(tainted, \"text/html\") — reflected XSS. Also covers merged aliases: cpp.info_disclosure.httplib_error_detail."
+  imports:
+  - httplib.h
+  - httplib
+- id: cpp.xss.crow_response_body
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - crow
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      attribute:
+      - res
+      - body
+  match_examples:
+  - name: generated direct match
+    code: "#include <crow.h> /* crow */\nvoid example() {\n  res.body = \"tainted\";\n}\n"
+  description: "crow res.body = tainted — reflected XSS if Content-Type is HTML."
+- id: cpp.xss.drogon_response_setbody
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - drogon
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - setBody
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::setBody(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpResponse::setBody("safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpResponse::setBody(tainted) — reflected XSS when content-type is HTML."
+- id: cpp.xss.drogon_newhttpresponse
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: xss
+  severity: medium
+  packages:
+  - drogon
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - newHttpResponse
+  description: "Disabled — newHttpResponse is a factory; the actual sink is setBody on the returned object."
+- id: cpp.xss.pistache_setbody
+  enabled: false
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - pistache
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseWriter
+      - send
+  match_examples:
+  - name: generated direct match
+    code: "#include <pistache/endpoint.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  ResponseWriter::send(arg);\n}\n"
+  description: "pistache ResponseWriter::send(code, tainted) — reflected XSS when body is HTML."
+  disabled_reason:
+    code: over-broad
+- id: cpp.xss.qt_qwebengineview_sethtml
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - Qt
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^QWebEngineView::setHtml$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QWebEngineView::setHtml(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        qt_qwebengineview_sethtml("safe");
+      }
+    expect_no_match: true
+  description: "Qt QWebEngineView::setHtml(tainted) — attacker-controlled DOM in embedded browser."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.xss.qt_qwebenginepage_sethtml
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - Qt
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^QWebEnginePage::setHtml$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QWebEnginePage::setHtml(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        qt_qwebenginepage_sethtml("safe");
+      }
+    expect_no_match: true
+  description: "Qt QWebEnginePage::setHtml(tainted) — attacker-controlled DOM."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.xss.qt_qwebengineview_runjavascript
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: critical
+  packages:
+  - Qt
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QWebEnginePage
+      - runJavaScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QWebEnginePage::runJavaScript(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        QWebEnginePage::runJavaScript("safe");
+      }
+    expect_no_match: true
+  description: "Qt QWebEnginePage::runJavaScript(tainted) — arbitrary JS in embedded context."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.xss.crow_response_write
+  enabled: false
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - crow
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - response
+      - write
+  match_examples:
+  - name: generated direct match
+    code: "#include <crow.h> /* crow */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  response::write(arg);\n}\n"
+  description: "Crow response.write(tainted) — appends to response body; reflected XSS when content-type is HTML."
+  disabled_reason:
+    code: over-broad
+- id: cpp.xss.drogon_response_appendbody
+  enabled: true
+  language: cpp
+  tag: xss
+  severity: high
+  packages:
+  - drogon
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - appendBody
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::appendBody(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpResponse::appendBody("safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpResponse::appendBody(tainted) — reflected XSS when HTML."
+- id: cpp.xss.drogon_response_redirect
+  enabled: false
+  language: cpp
+  tag: open-redirect
+  severity: medium
+  packages:
+  - drogon
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - redirect
+  match_examples:
+  - name: generated direct match
+    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::redirect(arg);\n}\n"
+  description: "Drogon HttpResponse::redirect(tainted) — open redirect to attacker host."
+  disabled_reason:
+    code: over-broad

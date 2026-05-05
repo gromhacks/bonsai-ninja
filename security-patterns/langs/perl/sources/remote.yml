@@ -1,0 +1,514 @@
+# Perl HTTP sources.
+# Adapter note: $req->param etc match as `call` with bare `name:` = method.
+# Where multiple frameworks share a method name, one rule lists every
+# framework that exposes it (CGI.pm-style param/header/cookie verbs are
+# almost universal across Perl web stacks).
+- id: perl.source.cgi_param
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query, form]
+  packages: [CGI, "Plack::Request", "Dancer2", "Catalyst"]
+  match:
+    kind: call
+    callee:
+      name: param
+  match_examples:
+  - name: perl.source.cgi_param example
+    code: |
+      use CGI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        param($input)
+      }
+  description: "->param('name') — CGI $q->param, Plack::Request $req->param, Dancer/Dancer2 param helper, Catalyst $c->req->param. All return user-supplied query/body values."
+
+- id: perl.source.cgi_vars
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query, form]
+  packages: [CGI]
+  match:
+    kind: call
+    callee:
+      name: Vars
+  match_examples:
+  - name: perl.source.cgi_vars example
+    code: |
+      use CGI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Vars($input)
+      }
+  description: "CGI $q->Vars / Vars() — flat hash of every query/body param name=>value pair."
+
+- id: perl.source.cgi_cookie
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [cookie]
+  packages: [CGI, "Plack::Request", "Dancer2", "Catalyst"]
+  match:
+    kind: call
+    callee:
+      name: cookie
+  match_examples:
+  - name: perl.source.cgi_cookie example
+    code: |
+      use CGI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        cookie($input)
+      }
+  description: "->cookie('name') — CGI $q->cookie / Plack::Request $req->cookies / Dancer2 cookie() / Catalyst $c->req->cookie. Cookie values are attacker-controlled."
+
+- id: perl.source.cgi_url_param
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query]
+  packages: [CGI]
+  match:
+    kind: call
+    callee:
+      name: url_param
+  match_examples:
+  - name: perl.source.cgi_url_param example
+    code: |
+      use CGI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        url_param($input)
+      }
+  description: "CGI $q->url_param — query-string-only variant of param() (ignores POST body)."
+
+- id: perl.source.cgi_header_in
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header]
+  packages: [CGI]
+  match:
+    kind: call
+    callee:
+      name: http
+  match_examples:
+  - name: perl.source.cgi_header_in example
+    code: |
+      use CGI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        http($input)
+      }
+  description: "CGI $q->http('HEADER') — read inbound HTTP request header by name."
+
+# -- Plack ----------------------------------------------------------
+- id: perl.source.plack_request_parameters
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query, form]
+  packages: ["Plack::Request", Dancer2]
+  match:
+    kind: call
+    callee:
+      name: parameters
+  match_examples:
+  - name: perl.source.plack_request_parameters example
+    code: |
+      use Plack::Request;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        parameters($input)
+      }
+  description: "Plack::Request $req->parameters — merged query+body params (Hash::MultiValue)."
+
+- id: perl.source.plack_request_body_parameters
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [form]
+  packages: ["Plack::Request"]
+  match:
+    kind: call
+    callee:
+      name: body_parameters
+  match_examples:
+  - name: perl.source.plack_request_body_parameters example
+    code: |
+      use Plack::Request;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        body_parameters($input)
+      }
+  description: "Plack::Request / Dancer2 body_parameters — POST body form fields."
+
+- id: perl.source.plack_request_query_parameters
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query]
+  packages: ["Plack::Request"]
+  match:
+    kind: call
+    callee:
+      name: query_parameters
+  match_examples:
+  - name: perl.source.plack_request_query_parameters example
+    code: |
+      use Plack::Request;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        query_parameters($input)
+      }
+  description: "Plack::Request $req->query_parameters — query string only."
+
+- id: perl.source.plack_request_raw_body
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [form]
+  packages: ["Plack::Request"]
+  match:
+    kind: call
+    callee:
+      name: raw_body
+  match_examples:
+  - name: perl.source.plack_request_raw_body example
+    code: |
+      use Plack::Request;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        raw_body($input)
+      }
+  description: "Plack::Request $req->raw_body / content — raw HTTP request body bytes."
+
+- id: perl.source.plack_upload_filename
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [path]
+  packages: ["Plack::Request", "Plack::Request::Upload", "Mojolicious", CGI]
+  match:
+    kind: call
+    callee:
+      name: filename
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: perl.source.plack_upload_filename example
+    code: |
+      use Plack::Request;
+      sub example {
+        my ($upload) = @_;
+        $upload->filename()
+      }
+  description: "Plack/Mojolicious/CGI upload filename accessor — client-controlled multipart filename metadata."
+
+# -- Dancer / Dancer2 ----------------------------------------------
+- id: perl.source.dancer_params
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query, form, path]
+  packages: [Dancer, Dancer2, Catalyst]
+  match:
+    kind: call
+    callee:
+      name: params
+  match_examples:
+  - name: perl.source.dancer_params example
+    code: |
+      use Dancer;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        params($input)
+      }
+  description: "params helper — Dancer/Dancer2 params (merged), Catalyst $c->req->params. Attacker-controlled."
+
+- id: perl.source.dancer2_body_parameters
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [form]
+  packages: [Dancer2]
+  match:
+    kind: call
+    callee:
+      name: body_parameters
+  match_examples:
+  - name: perl.source.dancer2_body_parameters example
+    code: |
+      use Dancer2;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        body_parameters($input)
+      }
+  description: "Disabled duplicate — perl.source.plack_request_body_parameters carries the same `body_parameters` call shape and includes Dancer2 package metadata."
+
+- id: perl.source.dancer2_route_parameters
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [path]
+  packages: [Dancer2]
+  match:
+    kind: call
+    callee:
+      name: route_parameters
+  match_examples:
+  - name: perl.source.dancer2_route_parameters example
+    code: |
+      use Dancer2;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        route_parameters($input)
+      }
+  description: "Dancer2 route_parameters — captured URL path segments (e.g. /user/:id). Attacker-controlled."
+
+# -- Catalyst -------------------------------------------------------
+- id: perl.source.catalyst_body_data
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [form, json]
+  packages: [Catalyst]
+  match:
+    kind: call
+    callee:
+      name: body_data
+  match_examples:
+  - name: perl.source.catalyst_body_data example
+    code: |
+      use Catalyst;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        body_data($input)
+      }
+  description: "Catalyst $c->req->body_data — parsed JSON/XML/YAML request body. Fully attacker-controlled."
+
+# -- Mojolicious ---------------------------------------------------
+- id: perl.source.mojolicious_req_query_params
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [query]
+  packages: [Mojolicious]
+  match:
+    kind: call
+    callee:
+      name: query_params
+  match_examples:
+  - name: perl.source.mojolicious_req_query_params example
+    code: |
+      use Mojolicious;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        query_params($input)
+      }
+  description: "Mojolicious $c->req->query_params — query string params."
+
+- id: perl.source.mojolicious_req_body_params
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [form]
+  packages: [Mojolicious]
+  match:
+    kind: call
+    callee:
+      name: body_params
+  match_examples:
+  - name: perl.source.mojolicious_req_body_params example
+    code: |
+      use Mojolicious;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        body_params($input)
+      }
+  description: "Mojolicious $c->req->body_params — POST body params."
+
+# -- DBI second-order taint ----------------------------------------
+# Database row reads are not first-order remote, but represent
+# stored-input flows that can re-enter SQL/eval/cmd sinks. Marked
+# `trust: database` so audits opt in via --trust database.
+- id: perl.source.dbi_fetchrow_array
+  enabled: true
+  language: perl
+  trust: database
+  category: db-input
+  tag: db-input
+  packages: [DBI]
+  match:
+    kind: call
+    callee:
+      name: fetchrow_array
+  match_examples:
+  - name: perl.source.dbi_fetchrow_array example
+    code: |
+      use DBI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        fetchrow_array($input)
+      }
+  description: "DBI $sth->fetchrow_array — row values previously written to the DB. Models second-order injection (stored XSS / SQL gadget reuse)."
+
+- id: perl.source.dbi_fetchrow_hashref
+  enabled: true
+  language: perl
+  trust: database
+  category: db-input
+  tag: db-input
+  packages: [DBI]
+  match:
+    kind: call
+    callee:
+      name: fetchrow_hashref
+  match_examples:
+  - name: perl.source.dbi_fetchrow_hashref example
+    code: |
+      use DBI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        fetchrow_hashref($input)
+      }
+  description: "DBI $sth->fetchrow_hashref — hash form of fetchrow_array; same second-order trust model."
+
+# -- Other I/O sources ---------------------------------------------
+- id: perl.source.anyevent_socket_recv
+  enabled: true
+  language: perl
+  trust: remote
+  category: net-input
+  tag: net-input
+  payload_types: [binary]
+  packages: ["AnyEvent::Socket", "AnyEvent::Handle"]
+  match:
+    kind: call
+    callee:
+      name: recv
+  match_examples:
+  - name: perl.source.anyevent_socket_recv example
+    code: |
+      use AnyEvent::Socket;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        recv($input)
+      }
+  description: "AnyEvent::Socket / AnyEvent::Handle recv — raw network bytes from a peer. Attacker-controlled when the socket faces the network."
+
+- id: perl.source.env_http
+  enabled: true
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  payload_types: [header]
+  match:
+    kind: read
+    target:
+      name: ENV
+  match_examples:
+  - name: perl.source.env_http example
+    code: |
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        my $value = $ENV;
+      }
+  description: "%ENV HTTP_* — CGI env-var form of inbound request headers. Also used by many Plack-style runners."
+
+# -- Disabled / FP-prone -------------------------------------------
+- id: perl.source.dancer_request_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  packages: [Dancer, Dancer2]
+  match:
+    kind: call
+    callee:
+      name: request
+  description: "Disabled — bare `name: request` collides with perl.ssrf.useragent_request ($ua->request). Body coverage already provided by dancer2_body_parameters / catalyst_body_data."
+
+- id: perl.source.mojolicious_req_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  packages: [Mojolicious]
+  match:
+    kind: call
+    callee:
+      name: param
+  description: "Disabled — overlaps perl.source.cgi_param (same bare `param` name). One rule covers both."
+
+- id: perl.source.mojolicious_req_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  packages: [Mojolicious]
+  match:
+    kind: call
+    callee:
+      name: body
+  description: "Disabled — bare `body` overmatches HTTP::Response/email/HTML body accessors. body_params + plack_request_raw_body cover the real cases."
+
+- id: perl.source.mojolicious_req_headers
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: remote
+  category: http-input
+  tag: http-input
+  packages: [Mojolicious]
+  match:
+    kind: call
+    callee:
+      name: headers
+  description: "Disabled — bare `headers` overmatches HTTP::Response::headers, email headers, etc. Use env_http / specific header reads instead."

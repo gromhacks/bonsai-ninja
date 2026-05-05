@@ -1,0 +1,142 @@
+- id: kotlin.crypto.md5_digest
+  enabled: true
+  language: kotlin
+  tag: weak-crypto
+  severity: low
+  cwe:
+  - CWE-327
+  - CWE-328
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MessageDigest
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    MessageDigest.getInstance(\"MD5\")\n  }\n}\n"
+  description: 'MessageDigest.getInstance("MD5"). Merged aliases: kotlin.crypto.sha1_digest.'
+  aliases:
+  - kotlin.crypto.sha1_digest
+- id: kotlin.crypto.cipher_des
+  enabled: true
+  language: kotlin
+  tag: weak-crypto
+  severity: high
+  cwe:
+  - CWE-327
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cipher
+      - getInstance
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Cipher.getInstance(\"DES\")\n  }\n}\n"
+  description: 'Cipher.getInstance("DES"). Merged aliases: kotlin.crypto.cipher_des_cbc, kotlin.crypto.cipher_3des, kotlin.crypto.cipher_rc4, kotlin.crypto.cipher_aes_ecb, kotlin.crypto.cipher_blowfish.'
+  aliases:
+  - kotlin.crypto.cipher_des_cbc
+  - kotlin.crypto.cipher_3des
+  - kotlin.crypto.cipher_rc4
+  - kotlin.crypto.cipher_aes_ecb
+  - kotlin.crypto.cipher_blowfish
+- id: kotlin.crypto.random_ctor
+  enabled: true
+  language: kotlin
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: new
+    callee:
+      name: Random
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Random(input)\n  }\n}\nclass Random(vararg args: Any?)\n"
+  description: "new java.util.Random — non-cryptographic."
+- id: kotlin.crypto.math_random
+  enabled: true
+  language: kotlin
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Math
+      - random
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Math.random(input)\n  }\n}\n"
+  description: "TODO(only-when-packaged): java.lang.Math is auto-imported in Kotlin/JVM — Math.random() — non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
+- id: kotlin.crypto.bouncycastle_des
+  enabled: true
+  language: kotlin
+  tag: weak-crypto
+  severity: high
+  packages:
+  - bcprov
+  cwe:
+  - CWE-327
+  match:
+    kind: new
+    callee:
+      name: DESEngine
+  match_examples:
+  - name: generated shape example
+    code: |
+      import bcprov.*
+      class App {
+        fun handle(input: String) {
+          DESEngine(input)
+        }
+      }
+      class DESEngine(vararg args: Any?)
+  description: BouncyCastle DESEngine.
+- id: kotlin.crypto.keyfactory_dh_512
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: weak-crypto
+  severity: medium
+  cwe:
+  - CWE-326
+  match:
+    kind: call
+    callee:
+      attribute:
+      - KeyPairGenerator
+      - initialize
+  description: "Disabled — flag only on key sizes < 2048 (RSA) / < 256 (EC)."
+- id: kotlin.crypto.kotlin_random_nextbytes
+  enabled: true
+  language: kotlin
+  tag: weak-randomness
+  severity: medium
+  packages:
+  - kotlin.random
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Random
+      - nextBytes
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.random.*
+      class App {
+        fun handle(input: String) {
+          Random.nextBytes(input)
+        }
+      }
+  description: "kotlin.random.Random.nextBytes — not cryptographically secure; use java.security.SecureRandom for keys/tokens/IVs."

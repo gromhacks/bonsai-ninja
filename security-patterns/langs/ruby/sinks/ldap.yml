@@ -1,0 +1,119 @@
+- id: ruby.ldap.net_ldap_search
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: ldap-injection
+  severity: high
+  packages:
+  - net-ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: search
+  description: "Disabled \u2014 bare `search` tail-matches too many method families\
+    \ (AR search, Elasticsearch search, etc.); LDAP search is better flagged via filter:\
+    \ kwarg."
+- id: ruby.ldap.net_ldap_bind_as
+  enabled: true
+  language: ruby
+  tag: ldap-injection
+  severity: high
+  packages:
+  - net-ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: bind_as
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ldap.net_ldap_bind_as example
+    code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  bind_as(input)\nend\n"
+  - name: ruby.ldap.net_ldap_bind_as literal negative
+    code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  bind_as(filter: \"(uid=alice)\")\nend\n"
+    expect_no_match: true
+  description: "Net::LDAP#bind_as \u2014 flag tainted :filter."
+- id: ruby.ldap.ldap_filter_construct
+  enabled: true
+  language: ruby
+  tag: ldap-injection
+  severity: high
+  packages:
+  - net-ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Net::LDAP::Filter
+      - construct
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ldap.ldap_filter_construct example
+    code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::LDAP::Filter.construct(input)\nend\n"
+  - name: ruby.ldap.ldap_filter_construct literal negative
+    code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::LDAP::Filter.construct(\"(uid=alice)\")\nend\n"
+    expect_no_match: true
+  description: "Net::LDAP::Filter.construct(string) \u2014 string form unparameterized."
+- id: ruby.ldap.ldap_filter_from_rfc2254
+  enabled: true
+  language: ruby
+  tag: ldap-injection
+  severity: high
+  packages:
+  - net-ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Net::LDAP::Filter
+      - from_rfc2254
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.ldap.ldap_filter_from_rfc2254 example
+    code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::LDAP::Filter.from_rfc2254(input)\nend\n"
+  - name: ruby.ldap.ldap_filter_from_rfc2254 literal negative
+    code: "require \"net-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  Net::LDAP::Filter.from_rfc2254(\"(uid=alice)\")\nend\n"
+    expect_no_match: true
+  description: Net::LDAP::Filter.from_rfc2254(tainted_string).
+- id: ruby.ldap.ruby_ldap_search
+  enabled: false
+  language: ruby
+  tag: ldap-injection
+  severity: high
+  packages:
+  - ruby-ldap
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LDAP::Conn
+      - search
+  match_examples:
+  - name: ruby.ldap.ruby_ldap_search example
+    code: "require \"ruby-ldap\"\ndef example(input, url, id, payload, request, params)\n\
+      \  LDAP::Conn.search(\"(uid=user)\")\nend\n"
+  description: ruby-ldap LDAP::Conn#search.
+  disabled_reason:
+    code: over-broad

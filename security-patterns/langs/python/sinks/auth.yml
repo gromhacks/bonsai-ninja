@@ -1,0 +1,14 @@
+- id: python.auth.djangopy_authenticate_weak_hash
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: weak-auth
+  severity: medium
+  frameworks: [django]
+  cwe: [CWE-287]
+  match:
+    kind: call
+    callee:
+      name: check_password
+  description: "Disabled — Django check_password is safe with supported hashers; flag only custom hashers that use weak schemes."

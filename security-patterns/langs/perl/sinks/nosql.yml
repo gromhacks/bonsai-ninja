@@ -1,0 +1,334 @@
+# Perl NoSQL injection (MongoDB / Redis).
+# Adapter note: $coll->method matches as call with bare name = method.
+- id: perl.nosql.mongodb_find
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: find
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.mongodb_find example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $coll->find($input)
+      }
+  - name: literal mongodb find negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $coll->find({ name => "alice" })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection find with tainted filter. Receiver allowlist filters generic `find` collisions on hash/iterator/array-find calls that share the verb without being MongoDB ops."
+
+- id: perl.nosql.mongodb_find_one
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: find_one
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.mongodb_find_one example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        find_one($input)
+      }
+  - name: literal mongodb find one negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        find_one({ name => "alice" })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection find_one."
+
+- id: perl.nosql.mongodb_aggregate
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.mongodb_aggregate example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        aggregate($input)
+      }
+  - name: literal mongodb aggregate negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        aggregate([{ '$match' => { name => "alice" } }])
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection aggregate."
+
+- id: perl.nosql.mongodb_update_many
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: update_many
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.mongodb_update_many example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        update_many($input)
+      }
+  - name: literal mongodb update many filter negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input) = @_;
+        update_many({ name => "alice" })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection update_many."
+- id: perl.nosql.mongodb_update_many_update
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: update_many
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.nosql.mongodb_update_many update document example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input) = @_;
+        update_many({ name => "alice" }, $input)
+      }
+  - name: literal mongodb update many update negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input) = @_;
+        update_many({ name => "alice" }, { '$set' => { active => 0 } })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection update_many(filter, tainted_update)."
+
+- id: perl.nosql.mongodb_update_one
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: update_one
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.mongodb_update_one example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        update_one($input)
+      }
+  - name: literal mongodb update one filter negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input) = @_;
+        update_one({ name => "alice" })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection update_one."
+- id: perl.nosql.mongodb_update_one_update
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: update_one
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.nosql.mongodb_update_one update document example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input) = @_;
+        update_one({ name => "alice" }, $input)
+      }
+  - name: literal mongodb update one update negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input) = @_;
+        update_one({ name => "alice" }, { '$set' => { active => 0 } })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection update_one(filter, tainted_update)."
+
+- id: perl.nosql.mongodb_delete_many
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: critical
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: delete_many
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.mongodb_delete_many example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        delete_many($input)
+      }
+  - name: literal mongodb delete many negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        delete_many({ active => 0 })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection delete_many."
+
+- id: perl.nosql.mongodb_delete_one
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["MongoDB"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: delete_one
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.mongodb_delete_one example
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        delete_one($input)
+      }
+  - name: literal mongodb delete one negative
+    code: |
+      use MongoDB;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        delete_one({ name => "alice" })
+      }
+    expect_no_match: true
+  description: "MongoDB::Collection delete_one."
+
+- id: perl.nosql.redis_eval
+  enabled: true
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["Redis"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: evalsha
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.nosql.redis_eval example
+    code: |
+      use Redis;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        evalsha($input)
+      }
+  - name: literal redis evalsha negative
+    code: |
+      use Redis;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        evalsha("0123456789abcdef0123456789abcdef01234567")
+      }
+    expect_no_match: true
+  description: "Redis->evalsha — Lua script injection via SHA."
+
+- id: perl.nosql.redis_eval_direct
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  tag: nosql-injection
+  severity: high
+  packages: ["Redis"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: eval
+  description: "Disabled — overlaps Perl builtin eval (see eval.builtin_eval)."

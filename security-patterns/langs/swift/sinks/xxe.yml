@@ -1,0 +1,131 @@
+# Swift XXE sinks.
+- id: swift.xxe.xmlparser_init
+  enabled: true
+  language: swift
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: XMLParser
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        func test(input: Data) { XMLParser(input) }
+    - name: literal xml parser negative
+      code: |
+        func test() { XMLParser("<root/>") }
+      expect_no_match: true
+  description: "XMLParser(data:) — review shouldResolveExternalEntities setting."
+
+- id: swift.xxe.should_resolve_external_entities
+  enabled: true
+  language: swift
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: write
+    target:
+      name: shouldResolveExternalEntities
+  match_examples:
+    - name: declared shape
+      code: |
+        func test() { let input = "x"; let amount = 1; shouldResolveExternalEntities = input }
+  description: "XMLParser.shouldResolveExternalEntities = true — enables XXE."
+
+- id: swift.xxe.xmldocument_init
+  enabled: true
+  language: swift
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: XMLDocument
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        func test(input: Data) { XMLDocument(input) }
+    - name: literal xml document negative
+      code: |
+        func test() { XMLDocument("<root/>") }
+      expect_no_match: true
+  description: "XMLDocument(data:options:) — XMLNode.Options.documentTidyHTML enables entity resolution."
+
+- id: swift.xxe.libxml2_xmlreadmemory
+  enabled: true
+  language: swift
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadMemory
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        func test(input: String) { xmlReadMemory(input, input.count, nil, nil, 0) }
+    - name: literal xml read memory negative
+      code: |
+        func test() { xmlReadMemory("<root/>", 7, nil, nil, 0) }
+      expect_no_match: true
+  description: "Bridged libxml2 xmlReadMemory."
+
+- id: swift.xxe.libxml2_xmlreadfile
+  enabled: true
+  language: swift
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        func test(input: String) { xmlReadFile(input, nil, 0) }
+    - name: literal xml read file negative
+      code: |
+        func test() { xmlReadFile("/tmp/safe.xml", nil, 0) }
+      expect_no_match: true
+  description: "Bridged libxml2 xmlReadFile."
+
+- id: swift.xxe.libxml2_xmlctxtreadmemory
+  enabled: true
+  language: swift
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlCtxtReadMemory
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: declared shape
+      code: |
+        func test(input: String) { xmlCtxtReadMemory(ctx, input, input.count, nil, nil, 0) }
+    - name: literal xml ctxt read memory negative
+      code: |
+        func test() { xmlCtxtReadMemory(ctx, "<root/>", 7, nil, nil, 0) }
+      expect_no_match: true
+  description: "Bridged libxml2 xmlCtxtReadMemory."

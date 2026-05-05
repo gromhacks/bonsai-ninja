@@ -1,0 +1,19 @@
+[package]
+name = "bonsai_callgraph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-function call graph + function summaries."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_index = { workspace = true }
+bonsai_resolve = { workspace = true }
+ahash = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

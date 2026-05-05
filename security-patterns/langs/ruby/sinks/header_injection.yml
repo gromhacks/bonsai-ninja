@@ -1,0 +1,137 @@
+- id: ruby.header.rails_set_header
+  enabled: true
+  language: ruby
+  tag: header-injection
+  severity: high
+  packages:
+  - actionpack
+  - rack
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      name: set_header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ruby.header.rails_set_header example
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        set_header("X-User", input)
+      end
+  - name: ruby.header.rails_set_header literal negative
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        set_header("X-User", "alice")
+      end
+    expect_no_match: true
+  description: 'ActionDispatch response.set_header(name, tainted). Merged collision aliases: ruby.header.rack_response_set_header.'
+  aliases:
+  - ruby.header.rack_response_set_header
+- id: ruby.header.rails_response_write_header
+  enabled: true
+  language: ruby
+  tag: header-injection
+  severity: high
+  packages:
+  - actionpack
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - response
+      - write_header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ruby.header.rails_response_write_header example
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        response.write_header("X-User", input)
+      end
+  - name: ruby.header.rails_response_write_header literal negative
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        response.write_header("X-User", "alice")
+      end
+    expect_no_match: true
+  description: ActionDispatch response.write_header(name, tainted).
+- id: ruby.header.sinatra_headers
+  enabled: true
+  language: ruby
+  tag: header-injection
+  severity: medium
+  packages:
+  - sinatra
+  cwe:
+  - CWE-113
+  - CWE-444
+  match:
+    kind: call
+    callee:
+      name: headers
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.header.sinatra_headers example
+    code: |
+      require "sinatra"
+      def example(input, url, id, payload, request, params)
+        headers(input)
+      end
+  - name: ruby.header.sinatra_headers literal negative
+    code: |
+      require "sinatra"
+      def example(input, url, id, payload, request, params)
+        headers("X-User" => "alice")
+      end
+    expect_no_match: true
+  description: "Sinatra headers(hash) — flag only when hash value is tainted. Merged collision aliases: ruby.smuggle.set_dual_cl_te_headers."
+  aliases:
+  - ruby.smuggle.set_dual_cl_te_headers
+- id: ruby.header.rails_cookies_setitem
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: header-injection
+  severity: medium
+  packages:
+  - actionpack
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - cookies
+      - '[]='
+  description: "Disabled — cookies[name]= is aset syntax, not a named call; rule cannot fire."
+- id: ruby.header.rails_response_headers_setitem
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: header-injection
+  severity: medium
+  packages:
+  - actionpack
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - headers
+      - '[]='
+  description: "Disabled — response.headers[name]= is aset syntax, not a named call; use set_header/write_header rules."

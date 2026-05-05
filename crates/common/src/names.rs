@@ -1,0 +1,197 @@
+//! Name normalization helpers shared across crates.
+//!
+//! Owns the cross-crate constants for identifier sigils
+//! ([`IDENTIFIER_SIGILS`]) and qualified-name separators
+//! ([`QUALIFIED_NAME_SEPARATORS`]) plus the canonical
+//! `short_qualified_tail` and `callable_reference_variants` helpers.
+
+/// Identifier sigils used by adapters to mark scalar/array/hash
+/// (`$`, `@`, `%`) variables (Perl, PHP). The engine treats `$foo`,
+/// `@foo`, `%foo`, and `foo` as referring to the same identifier
+/// when the sigil is missing in the queried form, since adapters
+/// emit the same identifier with and without sigil depending on the
+/// surrounding syntactic context.
+///
+/// Kept here because three crates (`bonsai_taint::text`,
+/// `bonsai_taint::inter`, `bonsai_security::matcher` indirectly via
+/// `qualified_access_bases`) all need the same set; defining it
+/// once prevents drift.
+pub const IDENTIFIER_SIGILS: &[char] = &['$', '@', '%'];
+
+/// Qualified-name separators recognized by the workspace. `.` is the
+/// universal member access; `::` is Rust/C++/Perl module separator;
+/// `->` is C/C++/PHP/Perl pointer member access; `:` is Erlang
+/// remote call. Order matters when used by callers that try
+/// candidates in priority order — pick the longer alternative first.
+pub const QUALIFIED_NAME_SEPARATORS: &[&str] = &["::", "->", ".", ":"];
+
+/// Tail of a qualified call/reference name.
+///
+/// Handles the separators emitted by supported adapters: dotted
+/// namespaces, Rust/C++ `::`, pointer/member `->`, and Erlang-style
+/// single `:` module calls. The single-colon case deliberately ignores
+/// the second byte of `::`.
+#[must_use]
+pub fn short_qualified_tail(name: &str) -> &str {
+    let last_dot = name.rfind('.').map(|i| i + 1).unwrap_or(0);
+    let last_double_colon = name.rfind("::").map(|i| i + 2).unwrap_or(0);
+    let last_arrow = name.rfind("->").map(|i| i + 2).unwrap_or(0);
+    let last_single_colon = name
+        .rfind(':')
+        .filter(|&i| {
+            let bytes = name.as_bytes();
+            !(i > 0 && bytes[i - 1] == b':')
+        })
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let cut = last_dot
+        .max(last_double_colon)
+        .max(last_arrow)
+        .max(last_single_colon);
+    &name[cut..]
+}
+
+/// Return normalized callable-reference spellings for language syntax
+/// that passes a function as a value rather than calling it directly.
+///
+/// This is intentionally syntax-only. It does not decide whether the
+/// value is safe, dangerous, source, sink, or sanitizer; resolver users
+/// still have to prove that the returned name reaches a workspace
+/// callable under the caller's semantic context.
+#[must_use]
+pub fn callable_reference_variants(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    push_callable_variant(&mut out, raw);
+
+    let mut s = raw.trim();
+    if s.is_empty() {
+        return out;
+    }
+
+    if let Some(rest) = s.strip_prefix("fun ") {
+        s = rest.trim();
+        push_callable_variant(&mut out, strip_arity_suffix(s));
+    }
+
+    if let Some(rest) = s.strip_prefix('&') {
+        push_callable_variant(&mut out, strip_arity_suffix(rest.trim()));
+    }
+
+    if let Some(rest) = s.strip_prefix("\\&") {
+        push_callable_variant(&mut out, rest.trim());
+    }
+
+    if let Some(inner) = quoted_bare_callable(s) {
+        push_callable_variant(&mut out, inner);
+    }
+
+    if let Some(inner) = method_symbol_callable(s) {
+        push_callable_variant(&mut out, inner);
+    }
+
+    if let Some(trimmed) = s.strip_suffix('.') {
+        push_callable_variant(&mut out, trimmed.trim());
+    }
+
+    if let Some(trimmed) = s.strip_suffix("->") {
+        push_callable_variant(&mut out, trimmed.trim());
+    }
+
+    let tail = short_qualified_tail(s);
+    if tail != s && !tail.is_empty() {
+        push_callable_variant(&mut out, tail);
+    }
+
+    out
+}
+
+fn push_callable_variant(out: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || out.iter().any(|existing| existing == value) {
+        return;
+    }
+    out.push(value.to_string());
+}
+
+fn strip_arity_suffix(value: &str) -> &str {
+    let value = value.trim();
+    if let Some((name, arity)) = value.rsplit_once('/') {
+        if !name.is_empty() && arity.chars().all(|c| c.is_ascii_digit()) {
+            return name.trim();
+        }
+    }
+    value
+}
+
+fn quoted_bare_callable(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let quote = value.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || value.as_bytes().last().copied()? != quote {
+        return None;
+    }
+    let inner = value.get(1..value.len().saturating_sub(1))?.trim();
+    looks_like_callable_ident(inner).then_some(inner)
+}
+
+fn method_symbol_callable(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let inner = value.strip_prefix("method(")?.strip_suffix(')')?.trim();
+    let inner = inner.strip_prefix(':').unwrap_or(inner).trim();
+    looks_like_callable_ident(inner).then_some(inner)
+}
+
+fn looks_like_callable_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Repository-local bonsai state directory.
+///
+/// Defaults to `<workspace>/.bonsai`. `BONSAI_WORKSPACE_DIR` may point
+/// at an alternate directory; relative values are resolved under the
+/// workspace root so each project can still keep isolated state.
+#[must_use]
+pub fn workspace_bonsai_dir(workspace_root: &std::path::Path) -> std::path::PathBuf {
+    match std::env::var_os("BONSAI_WORKSPACE_DIR") {
+        Some(raw) if !raw.is_empty() => {
+            let path = std::path::PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        }
+        _ => workspace_root.join(".bonsai"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{callable_reference_variants, short_qualified_tail};
+
+    #[test]
+    fn qualified_tail_uses_rightmost_supported_separator() {
+        assert_eq!(short_qualified_tail("a.b.c"), "c");
+        assert_eq!(short_qualified_tail("std::fs::read"), "read");
+        assert_eq!(short_qualified_tail("ptr->call"), "call");
+        assert_eq!(short_qualified_tail("Module:function"), "function");
+        assert_eq!(short_qualified_tail("plain"), "plain");
+    }
+
+    #[test]
+    fn single_colon_does_not_split_inside_double_colon_tail() {
+        assert_eq!(short_qualified_tail("A::B:C"), "C");
+        assert_eq!(short_qualified_tail("A::B::C"), "C");
+    }
+
+    #[test]
+    fn callable_reference_variants_normalize_common_forms() {
+        assert!(callable_reference_variants("&executor/1").contains(&"executor".to_string()));
+        assert!(callable_reference_variants("fun executor/1").contains(&"executor".to_string()));
+        assert!(callable_reference_variants("\\&executor").contains(&"executor".to_string()));
+        assert!(callable_reference_variants("'executor'").contains(&"executor".to_string()));
+        assert!(callable_reference_variants("method(:executor)").contains(&"executor".to_string()));
+        assert!(callable_reference_variants("App::executor").contains(&"executor".to_string()));
+    }
+}

@@ -1,0 +1,29 @@
+# PHP cloud sources. AWS Lambda PHP runtime bootstrap handler events.
+# trust: service.
+- id: php.source.aws_lambda_handler_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: cloud-event
+  trust: service
+  packages: [bref/bref]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "Disabled — too broad; enable per-project via a narrower rule."
+
+- id: php.source.bref_handler_handle
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: php
+  tag: cloud-event
+  trust: service
+  packages: [bref/bref]
+  match:
+    kind: call
+    callee:
+      attribute: [Handler, handle]
+  description: "Disabled — adapters index local receivers like `$handler->handle(...)`, and bare `handle` is too broad to tail-match safely."

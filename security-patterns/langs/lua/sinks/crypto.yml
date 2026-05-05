@@ -1,0 +1,205 @@
+# Lua weak-crypto + weak-randomness sinks.
+- id: lua.crypto.md5_sum
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [md5, sum]
+  match_examples:
+  - name: lua.crypto.md5_sum example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        md5.sum(input)
+      end
+  description: "md5.sum — MD5 is broken (collisions); unsafe for signatures, password-hashing, or integrity."
+
+- id: lua.crypto.md5_sumhexa
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [md5, sumhexa]
+  match_examples:
+  - name: lua.crypto.md5_sumhexa example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        md5.sumhexa(input)
+      end
+  description: "md5.sumhexa — MD5 hex digest; same collision weakness as md5.sum."
+
+- id: lua.crypto.sha1_sum
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [sha1, sum]
+  match_examples:
+  - name: lua.crypto.sha1_sum example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        sha1.sum(input)
+      end
+  description: "sha1.sum — SHA-1 is collision-broken; unsafe for new signatures or integrity checks."
+
+- id: lua.crypto.resty_md5_final
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: low
+  packages: [lua-resty-md5]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [md5, final]
+  match_examples:
+  - name: lua.crypto.resty_md5_final example
+    code: |
+      local _lua_resty_md5 = require("lua-resty-md5")
+      function example(input, url, id, payload, request, params, user)
+        md5.final(input)
+      end
+  description: "lua-resty-md5 md5:final() — MD5 digest; collision-broken."
+
+- id: lua.crypto.resty_sha1_final
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: low
+  packages: [lua-resty-string]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [sha1, final]
+  match_examples:
+  - name: lua.crypto.resty_sha1_final example
+    code: |
+      local _lua_resty_string = require("lua-resty-string")
+      function example(input, url, id, payload, request, params, user)
+        sha1.final(input)
+      end
+  description: "lua-resty-string sha1:final() — SHA-1 digest; collision-broken."
+
+- id: lua.crypto.openssl_md5
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: low
+  packages: [luacrypto, lua-openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [crypto, digest]
+  match_examples:
+  - name: lua.crypto.openssl_md5 example
+    code: |
+      local _luacrypto = require("luacrypto")
+      function example(input, url, id, payload, request, params, user)
+        crypto.digest(input)
+      end
+  description: "crypto.digest(algo, ...) — flag when algo is 'md5', 'md4', 'sha1'."
+
+- id: lua.crypto.openssl_evp_digest
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: low
+  packages: [lua-openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [evp, digest]
+  match_examples:
+  - name: lua.crypto.openssl_evp_digest example
+    code: |
+      local _lua_openssl = require("lua-openssl")
+      function example(input, url, id, payload, request, params, user)
+        evp.digest(input)
+      end
+  description: "lua-openssl evp.digest(algo) — flag weak algorithms (md5/md4/sha1)."
+
+- id: lua.crypto.openssl_cipher_des
+  enabled: true
+  language: lua
+  tag: weak-crypto
+  severity: high
+  packages: [lua-openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [cipher, new]
+  match_examples:
+  - name: lua.crypto.openssl_cipher_des example
+    code: |
+      local _lua_openssl = require("lua-openssl")
+      function example(input, url, id, payload, request, params, user)
+        cipher.new(input)
+      end
+  description: "openssl.cipher.new — flag when algorithm is DES/3DES/RC4/AES-ECB (no confidentiality)."
+
+- id: lua.crypto.openssl_cipher_encrypt_ecb
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: lua
+  tag: weak-crypto
+  severity: high
+  packages: [lua-openssl]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [cipher, encrypt]
+  description: "Disabled — cipher:encrypt is context-dependent; flag with ECB-mode narrowing."
+
+- id: lua.crypto.math_random
+  enabled: true
+  language: lua
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      attribute: [math, random]
+  match_examples:
+  - name: lua.crypto.math_random example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        math.random(input)
+      end
+  description: "math.random — Mersenne Twister; non-cryptographic, predictable from seed/state."
+
+- id: lua.crypto.math_randomseed
+  enabled: true
+  language: lua
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      attribute: [math, randomseed]
+  match_examples:
+  - name: lua.crypto.math_randomseed example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        math.randomseed(input)
+      end
+  description: "math.randomseed — seeds non-crypto PRNG; often seeded with os.time (predictable)."

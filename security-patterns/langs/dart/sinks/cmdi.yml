@@ -1,0 +1,197 @@
+# Dart command-injection sinks (dart:io Process + shell wrappers).
+- id: dart.cmdi.process_run
+  enabled: true
+  language: dart
+  tag: command-injection
+  severity: high
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted executable
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.run(input, []); }
+  - name: literal executable negative
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.run("echo", [input]); }
+    expect_no_match: true
+  description: "Process.run(tainted_executable, argv) — attacker-controlled executable paths can spawn unintended programs. Shell-command string injection is covered by dart.cmdi.process_run_in_shell."
+
+- id: dart.cmdi.process_run_in_shell
+  aliases:
+  - dart.cmdi.process_run_sh_c
+  enabled: true
+  language: dart
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, run]
+  constraints:
+  - keyword_arg_equals:
+      name: runInShell
+      value: "true"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted shell argument list
+    code: |
+      void test(String input) { Process.run("sh", ["-c", input], runInShell: true); }
+  - name: literal shell argument list negative
+    code: |
+      void test() { Process.run("sh", ["-c", "whoami"], runInShell: true); }
+    expect_no_match: true
+  - name: argv mode negative
+    code: |
+      void test(String input) { Process.run("sh", ["-c", input], runInShell: false); }
+    expect_no_match: true
+  description: "Process.run(runInShell: true) — passes command arguments through /bin/sh or cmd.exe; metacharacters in the argument list execute arbitrary commands. Also covers merged aliases: dart.cmdi.process_run_sh_c."
+
+- id: dart.cmdi.process_run_sync
+  enabled: true
+  language: dart
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, runSync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted executable
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.runSync(input, []); }
+  - name: literal executable negative
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.runSync("echo", [input]); }
+    expect_no_match: true
+  description: "Process.runSync(tainted_executable, argv) — attacker-controlled executable paths can spawn unintended programs."
+
+- id: dart.cmdi.process_runsync_in_shell
+  enabled: true
+  language: dart
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, runSync]
+  constraints:
+  - keyword_arg_equals:
+      name: runInShell
+      value: "true"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted shell argument list
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.runSync("sh", ["-c", input], runInShell: true); }
+  - name: literal shell argument list negative
+    code: |
+      import 'dart:io';
+      void test() { Process.runSync("sh", ["-c", "whoami"], runInShell: true); }
+    expect_no_match: true
+  - name: argv mode negative
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.runSync("sh", ["-c", input], runInShell: false); }
+    expect_no_match: true
+  description: "Process.runSync(runInShell: true) — shell-interpreted exec where tainted command arguments execute arbitrary commands."
+
+- id: dart.cmdi.process_start
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, start]
+  description: "Disabled — Process.start without `runInShell: true` is argv-form (safe). The real RCE sink is dart.cmdi.process_start_in_shell."
+
+- id: dart.cmdi.process_start_in_shell
+  enabled: true
+  language: dart
+  tag: command-injection
+  severity: critical
+  packages: [dart:io]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, start]
+  constraints:
+  - keyword_arg_equals:
+      name: runInShell
+      value: "true"
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted shell program
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.start(input, [], runInShell: true); }
+  - name: literal shell program negative
+    code: |
+      import 'dart:io';
+      void test() { Process.start("sh", ["-c", "whoami"], runInShell: true); }
+    expect_no_match: true
+  - name: argv mode executable negative
+    code: |
+      import 'dart:io';
+      void test(String input) { Process.start(input, [], runInShell: false); }
+    expect_no_match: true
+  description: "Process.start(tainted_executable, argv) — attacker-controlled executable paths can spawn unintended programs."
+
+# Explicit `sh -c` argv shape. Skips the runInShell gate because the
+# program itself is /bin/sh and arg0 of arguments is `-c` carrying a
+# tainted concatenated command string. Caught via arg0-literal
+# constraint that requires the program to be `sh` / `bash` / `/bin/sh`.
+- id: dart.cmdi.process_start_shell_args
+  enabled: true
+  language: dart
+  tag: command-injection
+  severity: critical
+  packages: [dart:io]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, start]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"(?:/bin/)?(?:sh|bash)"$'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted explicit shell args
+    code: |
+      import 'dart:io';
+      void test(List<String> args) { Process.start("sh", args); }
+  - name: literal explicit shell args negative
+    code: |
+      import 'dart:io';
+      void test() { Process.start("sh", ["-c", "whoami"]); }
+    expect_no_match: true
+  description: "Process.start(\"sh\", tainted_argv) — explicit shell invocation can interpret attacker-controlled command strings."

@@ -1,0 +1,13 @@
+- id: go.hostheader.request_host
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: host-header
+  severity: medium
+  cwe: [CWE-115]
+  match:
+    kind: read
+    target:
+      name: Host
+  description: "Disabled — Request.Host is attacker-controlled but only exploitable when reflected into links, redirects, cache keys, or password-reset URLs."

@@ -1,0 +1,12 @@
+{
+  "_source_hash": "03fb30b3fe4c709d",
+  "fixture": "python_command_injection",
+  "input_shape": {
+    "files": 1,
+    "language": "python",
+    "sink_callee_expected": "os.system",
+    "source_callee_expected": "request.GET",
+    "tainted_chain_count_expected": 1
+  },
+  "result_signatures": []
+}

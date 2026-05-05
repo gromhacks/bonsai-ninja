@@ -1,0 +1,16 @@
+[package]
+name = "bonsai_lang_erlang"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Erlang language adapter."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_lang_api = { workspace = true }
+tree-sitter = { workspace = true }
+
+[lints]
+workspace = true

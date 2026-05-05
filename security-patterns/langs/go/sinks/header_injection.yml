@@ -1,0 +1,441 @@
+- id: go.header.responsewriter_header_set
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: header-injection
+  severity: medium
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: \.Set$
+  match_examples:
+  - name: generated direct match
+    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  Header.Set(target, target)\n}\n"
+  description: "Header().Set(name, value) — only response headers and arg 1 are injection-relevant; kept medium until receiver/arg precision improves."
+- id: go.header.responsewriter_header_chain_set
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  cwe:
+  - CWE-113
+  - CWE-601
+  - CWE-444
+  match:
+    kind: call
+    callee:
+      regex: ^(w|rw|writer|responseWriter)\.Header\(\)\.Set$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: response writer header chain set
+    code: |
+      import "github.com/labstack/echo"
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request) {
+        name := "X-" + input
+        val := "ok" + input
+        w.Header().Set(name, val)
+      }
+    expect_match_text:
+    - w.Header().Set
+  - name: content disposition concat
+    code: |
+      import "github.com/labstack/echo"
+      package main
+      import "net/http"
+      func download(w http.ResponseWriter, r *http.Request) {
+        name := input
+        w.Header().Set("Content-Disposition", "attachment; filename=" + name)
+      }
+    expect_match_text:
+    - w.Header().Set
+  - name: literal response writer header set negative
+    code: |
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("X-User", "safe")
+      }
+    expect_no_match: true
+  description: "w.Header().Set(name, value) — response header name or value derived from tainted input can produce response-splitting/header-injection risk. Merged aliases: go.open_redirect.location_header_set."
+  aliases:
+  - go.open_redirect.location_header_set
+  - go.header.echo_response_header_set
+  - go.header.gin_writer_header_set
+  - go.smuggle.set_dual_cl_te_headers
+  packages:
+  - github.com/labstack/echo
+  - github.com/gin-gonic/gin
+- id: go.header.responsewriter_header_chain_set_name
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^(w|rw|writer|responseWriter)\.Header\(\)\.Set$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted response writer header name
+    code: |
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request, input string) {
+        w.Header().Set(input, "safe")
+      }
+    expect_match_text:
+    - w.Header().Set
+  - name: literal response writer header name negative
+    code: |
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("X-User", "safe")
+      }
+    expect_no_match: true
+  description: "w.Header().Set(name, value) — tainted response header names can inject delimiters or overwrite security-sensitive headers."
+- id: go.header.responsewriter_header_chain_add
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  cwe:
+  - CWE-113
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      regex: ^(w|rw|writer|responseWriter)\.Header\(\)\.Add$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: response writer header chain add
+    code: |
+      import "github.com/go-ldap/ldap"
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request) {
+        val := token
+        w.Header().Add("X-Token", val)
+      }
+    expect_match_text:
+    - w.Header().Add
+  - name: literal response writer header add negative
+    code: |
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request) {
+        w.Header().Add("X-Token", "safe")
+      }
+    expect_no_match: true
+  description: "w.Header().Add(name, value) — response header value derived from tainted input can produce response-splitting/header-injection risk. Merged collision aliases: go.ldap.conn_add."
+  aliases:
+  - go.ldap.conn_add
+  packages:
+  - github.com/go-ldap/ldap
+  - github.com/go-ldap/ldap/v3
+  - gopkg.in/ldap.v3
+- id: go.header.responsewriter_header_chain_add_name
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^(w|rw|writer|responseWriter)\.Header\(\)\.Add$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted response writer header add name
+    code: |
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request, input string) {
+        w.Header().Add(input, "safe")
+      }
+    expect_match_text:
+    - w.Header().Add
+  - name: literal response writer header add name negative
+    code: |
+      package main
+      import "net/http"
+      func hdr(w http.ResponseWriter, r *http.Request) {
+        w.Header().Add("X-Token", "safe")
+      }
+    expect_no_match: true
+  description: "w.Header().Add(name, value) — tainted response header names can corrupt the emitted header block."
+- id: go.header.http_header_set
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^(h|hdr|header|headers|httpHeader)\.Set$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: http header variable set
+    code: "package main\nimport \"net/http\"\nfunc hdr(r *http.Request) {\n  h := http.Header{}\n  value := input\n  h.Set(\"X-User\", value)\n}\n"
+    expect_match_text:
+    - h.Set
+  - name: literal http header variable set negative
+    code: |
+      package main
+      import "net/http"
+      func hdr(r *http.Request) {
+        h := http.Header{}
+        h.Set("X-User", "safe")
+      }
+    expect_no_match: true
+  description: "http.Header.Set(name, tainted) — response header maps assigned through a local header variable can still carry CRLF/header-injection risk."
+- id: go.header.http_header_set_name
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^(h|hdr|header|headers|httpHeader)\.Set$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted http header variable name
+    code: |
+      package main
+      import "net/http"
+      func hdr(r *http.Request, input string) {
+        h := http.Header{}
+        h.Set(input, "safe")
+      }
+    expect_match_text:
+    - h.Set
+  - name: literal http header variable name negative
+    code: |
+      package main
+      import "net/http"
+      func hdr(r *http.Request) {
+        h := http.Header{}
+        h.Set("X-User", "safe")
+      }
+    expect_no_match: true
+  description: "http.Header.Set(name, value) — tainted header names can inject delimiters or target security-sensitive headers."
+- id: go.header.responsewriter_header_add
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: go
+  tag: header-injection
+  severity: high
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: \.Add$
+  description: "Disabled — bare `.Add$` regex double-fires with go.ldap.conn_add. The ldap rule already covers the call shape; without receiver-type narrowing we would double-count."
+- id: go.header.gin_header
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  packages:
+  - github.com/gin-gonic/gin
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^(c|ctx|gctx|ginCtx)\.Header$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted gin header value
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+
+      func example(c *gin.Context, value string) {
+        c.Header("X-User", value)
+      }
+  - name: literal gin header value negative
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+
+      func example(c *gin.Context) {
+        c.Header("X-User", "safe")
+      }
+    expect_no_match: true
+  description: "gin Context.Header(name, tainted) — sets response header with tainted value."
+- id: go.header.gin_header_name
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  packages:
+  - github.com/gin-gonic/gin
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: ^(c|ctx|gctx|ginCtx)\.Header$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted gin header name
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+
+      func example(c *gin.Context, name string) {
+        c.Header(name, "safe")
+      }
+  - name: literal gin header name negative
+    code: |
+      import "github.com/gin-gonic/gin"
+      package main
+
+      func example(c *gin.Context) {
+        c.Header("X-User", "safe")
+      }
+    expect_no_match: true
+  description: "gin Context.Header(name, value) — tainted response header names can corrupt the emitted header block."
+- id: go.header.gin_fileattachment
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  packages:
+  - github.com/gin-gonic/gin
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: \.FileAttachment$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: gin file attachment tainted filename
+    code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc download(c *gin.Context, file string, name string) {\n  c.FileAttachment(file, name)\n}\n"
+    expect_match_text:
+    - c.FileAttachment
+  - name: literal gin file attachment filename negative
+    code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc download(c *gin.Context, file string) {\n  c.FileAttachment(file, \"report.txt\")\n}\n"
+    expect_no_match: true
+  description: "gin Context.FileAttachment(file, filename) — filename argument is used to build Content-Disposition; CR/LF or quote injection can corrupt response headers."
+- id: go.header.echo_attachment
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: high
+  packages:
+  - github.com/labstack/echo
+  - github.com/gofiber/fiber/v2
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: \.Attachment$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: echo attachment tainted filename
+    code: "package main\nimport \"github.com/labstack/echo\"\nfunc download(ctx echo.Context, file string, name string) error {\n  return ctx.Attachment(file, name)\n}\n"
+    expect_match_text:
+    - ctx.Attachment
+  - name: literal echo attachment filename negative
+    code: "package main\nimport \"github.com/labstack/echo\"\nfunc download(ctx echo.Context, file string) error {\n  return ctx.Attachment(file, \"report.txt\")\n}\n"
+    expect_no_match: true
+  description: "echo Context.Attachment(file, filename) — filename argument is used to build Content-Disposition; attacker text can produce header injection. Merged aliases: go.header.fiber_attachment."
+  aliases:
+  - go.header.fiber_attachment
+- id: go.header.fiber_set
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: go.header.http_header_set
+  language: go
+  tag: header-injection
+  severity: high
+  packages:
+  - github.com/gofiber/fiber
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      regex: \.Set$
+  description: "Disabled — bare `.Set$` regex is over-broad; go.header.http_header_set (enabled) covers the same `<receiver>.Set` call shape via `^[A-Za-z_$][A-Za-z0-9_$]*\\.Set$`."
+- id: go.header.set_cookie
+  enabled: true
+  language: go
+  tag: header-injection
+  severity: medium
+  packages:
+  - net/http
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - SetCookie
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted set-cookie object
+    code: |
+      import "net/http"
+      package main
+
+      func example(w http.ResponseWriter, cookie *http.Cookie) {
+        http.SetCookie(w, cookie)
+      }
+  - name: literal set-cookie object negative
+    code: |
+      import "net/http"
+      package main
+
+      func example(w http.ResponseWriter) {
+        http.SetCookie(w, &http.Cookie{Name: "sid", Value: "safe"})
+      }
+    expect_no_match: true
+  description: "http.SetCookie(w, cookie) — tainted cookie name/value reaches Set-Cookie header."

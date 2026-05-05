@@ -1,0 +1,289 @@
+- id: php.deser.unserialize
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: critical
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: unserialize
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.unserialize example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  unserialize($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  unserialize('a:0:{}');\n}\n"
+    expect_no_match: true
+  description: unserialize() — POP-chain RCE via __wakeup / __destruct.
+- id: php.deser.phardata_new
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: critical
+  cwe:
+  - CWE-502
+  match:
+    kind: new
+    callee:
+      name: PharData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.phardata_new example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  new PharData($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  new PharData('archive.tar');\n}\n"
+    expect_no_match: true
+  description: new PharData(tainted) — phar:// stream triggers unserialize.
+- id: php.deser.phar_new
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: critical
+  cwe:
+  - CWE-502
+  match:
+    kind: new
+    callee:
+      name: Phar
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.phar_new example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  new Phar($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  new Phar('archive.phar');\n}\n"
+    expect_no_match: true
+  description: new Phar(tainted path).
+- id: php.deser.file_exists_phar
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: insecure-deserialization
+  severity: high
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: file_exists
+  description: Disabled — file_exists is ubiquitous; phar:// variant needs arg-string-prefix constraint not expressible in schema.
+- id: php.deser.file_get_contents_phar
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: insecure-deserialization
+  severity: high
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: file_get_contents
+  description: Disabled — file_get_contents ubiquitous; phar:// needs path-prefix constraint. Already covered as SSRF/path sink.
+- id: php.deser.igbinary_unserialize
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: critical
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: igbinary_unserialize
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.igbinary_unserialize example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  igbinary_unserialize($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  igbinary_unserialize('a:0:{}');\n}\n"
+    expect_no_match: true
+  description: igbinary_unserialize — same risk as unserialize.
+- id: php.deser.symfony_yaml_parse_object
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - symfony/yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Yaml
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.symfony_yaml_parse_object example
+    code: |
+      <?php
+      use symfony\yaml;
+      use symfony\yaml;
+      function example($input, $url, $id, $payload, $request) {
+        Yaml::parse($input, $input, flags: Yaml::PARSE_OBJECT);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use symfony\yaml;
+      function example($input, $url, $id, $payload, $request) {
+        Yaml::parse("safe: true", flags: Yaml::PARSE_OBJECT);
+      }
+    expect_no_match: true
+  description: Symfony Yaml::parse with PARSE_OBJECT.
+  imports:
+  - symfony\yaml
+  - symfony
+- id: php.deser.symfony_yaml_parsefile
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - symfony/yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Yaml
+      - parseFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.symfony_yaml_parsefile example
+    code: |
+      <?php
+      use symfony\yaml;
+      use symfony\yaml;
+      function example($input, $url, $id, $payload, $request) {
+        Yaml::parseFile($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use symfony\yaml;
+      function example($input, $url, $id, $payload, $request) {
+        Yaml::parseFile("config/services.yaml");
+      }
+    expect_no_match: true
+  description: Symfony Yaml::parseFile.
+  imports:
+  - symfony\yaml
+  - symfony
+- id: php.deser.symfony_serializer_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: insecure-deserialization
+  severity: medium
+  packages:
+  - symfony/serializer
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Serializer
+      - deserialize
+  description: Disabled — Symfony Serializer with PhpSerializer encoder only.
+- id: php.deser.jms_serializer
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: insecure-deserialization
+  severity: medium
+  packages:
+  - jms/serializer
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SerializerBuilder
+      - build
+  description: Disabled — JMS Serializer with type metadata can be abused.
+- id: php.deser.wddx_deserialize
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: high
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: wddx_deserialize
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.wddx_deserialize example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  wddx_deserialize($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  wddx_deserialize('<wddxPacket version=\"1.0\"><data></data></wddxPacket>');\n}\n"
+    expect_no_match: true
+  description: wddx_deserialize — XML-based PHP-variable deserialisation.
+- id: php.deser.yaml_parse
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: high
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: yaml_parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.yaml_parse example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  yaml_parse($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  yaml_parse('safe: true');\n}\n"
+    expect_no_match: true
+  description: ext-yaml yaml_parse — object instantiation via !php/object tag.
+- id: php.deser.syck_load
+  enabled: true
+  language: php
+  tag: insecure-deserialization
+  severity: medium
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: syck_load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.deser.syck_load example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  syck_load($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  syck_load('safe: true');\n}\n"
+    expect_no_match: true
+  description: syck_load — legacy YAML parser.

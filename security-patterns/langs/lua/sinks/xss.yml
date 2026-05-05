@@ -1,0 +1,60 @@
+# Lua XSS sinks (OpenResty / Lapis).
+- id: lua.xss.ngx_say
+  aliases:
+    - lua.info_disclosure.ngx_say_traceback
+  enabled: true
+  language: lua
+  tag: xss
+  severity: medium
+  frameworks: [openresty]
+  cwe: [CWE-79, CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, say]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: lua.xss.ngx_say example
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          ngx.say("<p>" .. input)
+        end
+    - name: literal body negative
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          ngx.say("<p>ok</p>")
+        end
+      expect_no_match: true
+  description: "ngx.say(body) — writes response body + newline; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_say_traceback."
+
+- id: lua.xss.ngx_print
+  aliases:
+    - lua.info_disclosure.ngx_print_error
+  enabled: true
+  language: lua
+  tag: xss
+  severity: medium
+  frameworks: [openresty]
+  cwe: [CWE-79, CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, print]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: lua.xss.ngx_print example
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          ngx.print("<p>" .. input)
+        end
+    - name: literal body negative
+      code: |
+        function example(input, url, id, payload, request, params, user)
+          ngx.print("<p>ok</p>")
+        end
+      expect_no_match: true
+  description: "ngx.print(body) — writes raw response body; XSS when Content-Type is text/html and body is tainted. Also covers merged aliases: lua.info_disclosure.ngx_print_error."

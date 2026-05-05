@@ -1,0 +1,208 @@
+# C# NoSQL injection. MongoDB / RavenDB / Cosmos / Redis.
+- id: csharp.nosql.mongo_find
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [MongoDB.Driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [IMongoCollection, Find]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoCollection.Find(input); } }
+  - name: literal mongo find filter negative
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { IMongoCollection.Find("{ status: 'active' }"); } }
+    expect_no_match: true
+  description: "MongoDB IMongoCollection.Find with tainted filter."
+
+- id: csharp.nosql.mongo_findasync
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [MongoDB.Driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [IMongoCollection, FindAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoCollection.FindAsync(input); } }
+  - name: literal mongo findasync filter negative
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { IMongoCollection.FindAsync("{ status: 'active' }"); } }
+    expect_no_match: true
+  description: "MongoDB FindAsync."
+
+- id: csharp.nosql.mongo_aggregate
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [MongoDB.Driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [IMongoCollection, Aggregate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoCollection.Aggregate(input); } }
+  - name: literal mongo aggregate pipeline negative
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { IMongoCollection.Aggregate("[{ '$match': {} }]"); } }
+    expect_no_match: true
+  description: "MongoDB Aggregate."
+
+- id: csharp.nosql.mongo_runcommand
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [MongoDB.Driver]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [IMongoDatabase, RunCommand]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IMongoDatabase.RunCommand(input); } }
+  - name: literal mongo command negative
+    code: |
+      using MongoDB.Driver;
+      class App { void Test() { IMongoDatabase.RunCommand("{ ping: 1 }"); } }
+    expect_no_match: true
+  description: "MongoDB IMongoDatabase.RunCommand — arbitrary BSON command."
+
+- id: csharp.nosql.bsondocument_parse
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [MongoDB.Bson]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [BsonDocument, Parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using MongoDB.Bson;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BsonDocument.Parse(input); } }
+  - name: literal bson parse negative
+    code: |
+      using MongoDB.Bson;
+      class App { void Test() { BsonDocument.Parse("{ status: 'active' }"); } }
+    expect_no_match: true
+  description: "BsonDocument.Parse(tainted JSON) — feeds Find filter."
+
+- id: csharp.nosql.cosmos_query_with_string
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [Microsoft.Azure.Cosmos]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Container, GetItemQueryIterator]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.Azure.Cosmos;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Container.GetItemQueryIterator(input); } }
+  - name: literal cosmos query negative
+    code: |
+      using Microsoft.Azure.Cosmos;
+      class App { void Test() { Container.GetItemQueryIterator("select * from c"); } }
+    expect_no_match: true
+  description: "Cosmos Container.GetItemQueryIterator(string SQL) — flag string overload."
+
+- id: csharp.nosql.ravendb_advanced_rawquery
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [RavenDB.Client]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [Advanced, RawQuery]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using RavenDB.Client;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Advanced.RawQuery(input); } }
+  - name: literal ravendb raw query negative
+    code: |
+      using RavenDB.Client;
+      class App { void Test() { Advanced.RawQuery("from Users"); } }
+    expect_no_match: true
+  description: "RavenDB IDocumentSession.Advanced.RawQuery."
+
+- id: csharp.nosql.stackexchange_redis_eval
+  enabled: true
+  language: csharp
+  tag: nosql-injection
+  severity: high
+  packages: [StackExchange.Redis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [IDatabase, ScriptEvaluate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using StackExchange.Redis;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; IDatabase.ScriptEvaluate(input); } }
+  - name: literal redis script negative
+    code: |
+      using StackExchange.Redis;
+      class App { void Test() { IDatabase.ScriptEvaluate("return 1"); } }
+    expect_no_match: true
+  description: "StackExchange.Redis IDatabase.ScriptEvaluate — Lua injection."

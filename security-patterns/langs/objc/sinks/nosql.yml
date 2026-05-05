@@ -1,0 +1,122 @@
+# Objective-C NoSQL / predicate-injection sinks (Realm, Core Data, MongoDB driver, Couchbase).
+- id: objc.nosql.realm_predicate_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  tag: nosql-injection
+  severity: high
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: predicateWithFormat
+  description: "Disabled — canonical rule is objc.eval.nspredicate_format in eval.yml. NSPredicate +predicateWithFormat: with tainted format is predicate/DSL injection (a subset of code-injection)."
+
+- id: objc.nosql.realm_objects_where
+  enabled: true
+  language: objc
+  tag: nosql-injection
+  severity: high
+  packages: [Realm]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(objectsWhere|objectsWithPredicate)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <Realm/Realm.h>
+      void test(id input) { id target = input; int amount = 1; [RLMRealm objectsWhere:input]; }
+  - name: literal realm predicate negative
+    code: |
+      #import <Realm/Realm.h>
+      void test(void) { [RLMRealm objectsWhere:@"name == 'safe'"]; }
+    expect_no_match: true
+  description: "RLMRealm -objectsWhere: / -objectsWithPredicate: with tainted predicate string — Realm DSL injection. Constrained to Realm receivers."
+
+- id: objc.nosql.realm_filter_format
+  enabled: true
+  language: objc
+  tag: nosql-injection
+  severity: high
+  packages: [Realm]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: filter
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <Realm/Realm.h>
+      void test(id input) { id target = input; int amount = 1; [RLMResults filter:input]; }
+  - name: literal realm filter negative
+    code: |
+      #import <Realm/Realm.h>
+      void test(void) { [RLMResults filter:@"name == 'safe'"]; }
+    expect_no_match: true
+  description: "Realm Results -filter: with tainted format string — Realm predicate injection. Constrained to Realm receivers; bare `filter` is too generic."
+
+- id: objc.nosql.core_data_fetch_request_predicate
+  enabled: true
+  language: objc
+  tag: nosql-injection
+  severity: high
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: setPredicate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [NSFetchRequest setPredicate:input]; }
+  - name: literal fetch predicate negative
+    code: |
+      void test(void) { [NSFetchRequest setPredicate:@"name == 'safe'"]; }
+    expect_no_match: true
+  description: "NSFetchRequest -setPredicate: with NSPredicate built from tainted format — Core Data predicate injection. Constrained to fetch request receivers."
+
+- id: objc.nosql.mongoc_find
+  enabled: true
+  language: objc
+  tag: nosql-injection
+  severity: high
+  packages: [mongoc]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^(mongoc_collection_find_with_opts|mongoc_collection_find)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <mongoc/mongoc.h>
+      void test(id input) { id target = input; int amount = 1; mongoc_collection_find_with_opts(input); }
+  description: "libmongoc mongoc_collection_find(_with_opts) — tainted BSON filter permits NoSQL injection."
+
+- id: objc.nosql.couchbase_query
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  tag: nosql-injection
+  severity: high
+  packages: [CouchbaseLite]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^(createQueryWhere|queryWithN1QL|n1qlQueryWithString)$"
+  description: "Disabled — Couchbase Lite N1QL / createQueryWhere: with tainted string. Off by default; enable for apps using CouchbaseLite."

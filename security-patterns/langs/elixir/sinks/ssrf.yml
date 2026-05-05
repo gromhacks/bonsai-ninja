@@ -1,0 +1,626 @@
+- id: elixir.ssrf.httpoison_get
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - httpoison
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPoison
+      - get
+  match_examples:
+  - name: declared shape
+    code: "alias Httpoison\ndefmodule App do\n  def test(input) do\n    HTTPoison.get(input)\n\
+      \  end\nend\n"
+  description: "HTTPoison.get/3 \u2014 tainted URL fetches attacker-chosen endpoints,\
+    \ including cloud metadata (169.254.169.254) and internal services."
+  imports:
+  - Httpoison
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.httpoison_post
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - httpoison
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPoison
+      - post
+  match_examples:
+  - name: declared shape
+    code: "alias Httpoison\ndefmodule App do\n  def test(input) do\n    HTTPoison.post(input)\n\
+      \  end\nend\n"
+  description: "HTTPoison.post/4 \u2014 tainted URL sends the request body to attacker-controlled\
+    \ host."
+  imports:
+  - Httpoison
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.httpoison_request
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - httpoison
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPoison
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpoison request url or struct
+    code: "alias Httpoison\n# uses httpoison\ndefmodule App do\n  def test(input)\
+      \ do\n    HTTPoison.request(input)\n  end\nend\n"
+  - name: literal httpoison request negative
+    code: |
+      alias Httpoison
+      defmodule App do
+        def test() do
+          HTTPoison.request("https://example.com")
+        end
+      end
+    expect_no_match: true
+  description: "HTTPoison.request/5 \u2014 generic verb; tainted URL reaches arbitrary\
+    \ hosts."
+  imports:
+  - Httpoison
+- id: elixir.ssrf.tesla_get
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - tesla
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Tesla
+      - get
+  match_examples:
+  - name: declared shape
+    code: "alias Tesla\ndefmodule App do\n  def test(input) do\n    Tesla.get(input)\n\
+      \  end\nend\n"
+  description: "Tesla.get/3 \u2014 tainted URL reaches arbitrary hosts (cloud metadata,\
+    \ internal svc) regardless of the configured adapter."
+  imports:
+  - Tesla
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.tesla_post
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - tesla
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Tesla
+      - post
+  match_examples:
+  - name: declared shape
+    code: "alias Tesla\ndefmodule App do\n  def test(input) do\n    Tesla.post(input)\n\
+      \  end\nend\n"
+  description: "Tesla.post/4 \u2014 tainted URL sends body to attacker-chosen host."
+  imports:
+  - Tesla
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.tesla_request
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - tesla
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Tesla
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted tesla request options
+    code: "alias Tesla\n# uses tesla\ndefmodule App do\n  def test(input) do\n   \
+      \ Tesla.request(input)\n  end\nend\n"
+  - name: literal tesla request options negative
+    code: |
+      alias Tesla
+      defmodule App do
+        def test() do
+          Tesla.request(url: "https://example.com")
+        end
+      end
+    expect_no_match: true
+  description: "Tesla.request/2 \u2014 generic verb; tainted :url opt issues attacker-chosen\
+    \ request."
+  imports:
+  - Tesla
+- id: elixir.ssrf.finch_build
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - finch
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Finch
+      - build
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted finch build url
+    code: "alias Finch\n# uses finch\ndefmodule App do\n  def test(input) do\n   \
+      \ Finch.build(:get, input)\n  end\nend\n"
+  - name: literal finch build url negative
+    code: |
+      alias Finch
+      defmodule App do
+        def test() do
+          Finch.build(:get, "https://example.com")
+        end
+      end
+    expect_no_match: true
+  description: "Finch.build/5 \u2014 tainted URL is baked into the %Finch.Request{};\
+    \ subsequent Finch.request/2 sends it."
+  imports:
+  - Finch
+- id: elixir.ssrf.finch_request
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - finch
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Finch
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted finch request struct
+    code: "alias Finch\n# uses finch\ndefmodule App do\n  def test(input) do\n   \
+      \ Finch.request(input)\n  end\nend\n"
+  - name: literal finch request struct negative
+    code: |
+      alias Finch
+      defmodule App do
+        def test(request) do
+          Finch.request(%Finch.Request{})
+        end
+      end
+    expect_no_match: true
+  description: "Finch.request/3 \u2014 dispatches the request struct; the URL inside\
+    \ is attacker-controlled if built from tainted data."
+  imports:
+  - Finch
+- id: elixir.ssrf.req_get
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - req
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Req
+      - get
+  match_examples:
+  - name: declared shape
+    code: "alias Req\ndefmodule App do\n  def test(input) do\n    Req.get(input)\n\
+      \  end\nend\n"
+  description: "Req.get/2 \u2014 tainted URL reaches arbitrary hosts; Req follows\
+    \ redirects by default so DNS rebinding / 302-to-metadata tricks apply."
+  imports:
+  - Req
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.req_post
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - req
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Req
+      - post
+  match_examples:
+  - name: declared shape
+    code: "alias Req\ndefmodule App do\n  def test(input) do\n    Req.post(input)\n\
+      \  end\nend\n"
+  description: "Req.post/2 \u2014 tainted URL sends body to attacker-chosen host."
+  imports:
+  - Req
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.req_request
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - req
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Req
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted req request options
+    code: "alias Req\ndefmodule App do\n  def test(input) do\n    Req.request(input)\n\
+      \  end\nend\n"
+  - name: literal req request options negative
+    code: |
+      alias Req
+      defmodule App do
+        def test() do
+          Req.request(url: "https://example.com")
+        end
+      end
+    expect_no_match: true
+  description: "Req.request/2 \u2014 generic verb; tainted `url:` opt reaches any\
+    \ host."
+  imports:
+  - Req
+- id: elixir.ssrf.mint_connect
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - mint
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mint
+      - HTTP
+      - connect
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted mint connect host
+    code: |
+      alias Mint
+      # uses mint
+      defmodule App do
+        def test(input) do
+          Mint.HTTP.connect(:http, input, 80)
+        end
+      end
+  - name: literal mint connect host negative
+    code: |
+      alias Mint
+      defmodule App do
+        def test() do
+          Mint.HTTP.connect(:http, "example.com", 80)
+        end
+      end
+    expect_no_match: true
+  description: "Mint.HTTP.connect/4 \u2014 tainted host opens a TCP connection to\
+    \ attacker-chosen peer (pre-TLS)."
+  imports:
+  - Mint
+- id: elixir.ssrf.mint_request
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - mint
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mint
+      - HTTP
+      - request
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted mint request path
+    code: |
+      alias Mint
+      # uses mint
+      defmodule App do
+        def test(conn, input) do
+          Mint.HTTP.request(conn, "GET", input, [])
+        end
+      end
+  - name: literal mint request path negative
+    code: |
+      alias Mint
+      defmodule App do
+        def test(conn) do
+          Mint.HTTP.request(conn, "GET", "/safe", [])
+        end
+      end
+    expect_no_match: true
+  description: "Mint.HTTP.request/5 \u2014 tainted path / host header allows attacker-directed\
+    \ HTTP request over the connection."
+  imports:
+  - Mint
+- id: elixir.ssrf.hackney_request
+  aliases:
+  - elixir.tls.hackney_insecure
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - hackney
+  cwe:
+  - CWE-918
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      regex: ^:hackney\.request$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted hackney request url
+    code: |
+      alias Hackney
+      defmodule App do
+        def test(input) do
+          :hackney.request(:get, input, [], <<>>, [])
+        end
+      end
+  - name: literal hackney request url negative
+    code: |
+      alias Hackney
+      defmodule App do
+        def test() do
+          :hackney.request(:get, "https://example.com", [], <<>>, [])
+        end
+      end
+    expect_no_match: true
+  description: ":hackney.request/5 \u2014 tainted URL reaches arbitrary hosts (the\
+    \ Erlang HTTP client underlying many Elixir libs). Also covers merged aliases:\
+    \ elixir.tls.hackney_insecure."
+  imports:
+  - Hackney
+- id: elixir.ssrf.httpc_request
+  enabled: true
+  language: elixir
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^:httpc\.request$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted httpc request url
+    code: "defmodule App do\n  def test(input) do\n    :httpc.request(input)\n  end\n\
+      end\n"
+  - name: literal httpc request url negative
+    code: |
+      defmodule App do
+        def test() do
+          :httpc.request("https://example.com")
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :httpc.request/1..4 \u2014 stdlib HTTP client; tainted URL\
+    \ issues attacker-directed request."
+- id: elixir.ssrf.httpoison_put
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - httpoison
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPoison
+      - put
+  match_examples:
+  - name: declared shape
+    code: "alias Httpoison\ndefmodule App do\n  def test(input) do\n    HTTPoison.put(input)\n\
+      \  end\nend\n"
+  description: "HTTPoison.put/4 \u2014 tainted URL writes attacker-chosen body to\
+    \ attacker-chosen host."
+  imports:
+  - Httpoison
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.httpoison_delete
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - httpoison
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTTPoison
+      - delete
+  match_examples:
+  - name: declared shape
+    code: "alias Httpoison\n# uses httpoison\ndefmodule App do\n  def test(input)\
+      \ do\n    HTTPoison.delete(input)\n  end\nend\n"
+  description: "HTTPoison.delete/3 \u2014 tainted URL issues DELETE against attacker-chosen\
+    \ endpoint."
+  imports:
+  - Httpoison
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.tesla_put
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - tesla
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Tesla
+      - put
+  match_examples:
+  - name: declared shape
+    code: "alias Tesla\ndefmodule App do\n  def test(input) do\n    Tesla.put(input)\n\
+      \  end\nend\n"
+  description: "Tesla.put/4 \u2014 tainted URL writes body to attacker-chosen host."
+  imports:
+  - Tesla
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.tesla_delete
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - tesla
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Tesla
+      - delete
+  match_examples:
+  - name: declared shape
+    code: "alias Tesla\n# uses tesla\ndefmodule App do\n  def test(input) do\n   \
+      \ Tesla.delete(input)\n  end\nend\n"
+  description: "Tesla.delete/3 \u2014 tainted URL issues DELETE against attacker-chosen\
+    \ endpoint."
+  imports:
+  - Tesla
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.req_put
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - req
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Req
+      - put
+  match_examples:
+  - name: declared shape
+    code: "alias Req\ndefmodule App do\n  def test(input) do\n    Req.put(input)\n\
+      \  end\nend\n"
+  description: "Req.put/2 \u2014 tainted URL writes body to attacker-chosen host;\
+    \ Req follows redirects by default."
+  imports:
+  - Req
+  disabled_reason:
+    code: over-broad
+- id: elixir.ssrf.req_delete
+  enabled: false
+  language: elixir
+  tag: ssrf
+  severity: high
+  packages:
+  - req
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Req
+      - delete
+  match_examples:
+  - name: declared shape
+    code: "alias Req\n# uses req\ndefmodule App do\n  def test(input) do\n    Req.delete(input)\n\
+      \  end\nend\n"
+  description: "Req.delete/2 \u2014 tainted URL issues DELETE against attacker-chosen\
+    \ endpoint."
+  imports:
+  - Req
+  disabled_reason:
+    code: over-broad

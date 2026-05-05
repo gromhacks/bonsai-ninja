@@ -1,0 +1,199 @@
+# Rust memory-safety sinks. Unsafe-block raw-pointer operations and
+# transmutes — tainted offsets / lengths reach memory primitives that
+# bypass the borrow checker.
+- id: rust.memory.ptr_read
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: high
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-125, CWE-787]
+  match:
+    kind: call
+    callee:
+      attribute: [ptr, read]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ptr::read(target);
+      }
+  description: "std::ptr::read(src) — reads from a raw pointer; tainted offset/pointer = out-of-bounds read or use-after-free in unsafe blocks."
+- id: rust.memory.ptr_write
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: critical
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-787]
+  match:
+    kind: call
+    callee:
+      attribute: [ptr, write]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ptr::write(target);
+      }
+  description: "std::ptr::write(dst, val) — writes to a raw pointer; tainted destination = arbitrary memory write inside unsafe."
+- id: rust.memory.ptr_copy_nonoverlapping
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: critical
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-787, CWE-120]
+  match:
+    kind: call
+    callee:
+      attribute: [ptr, copy_nonoverlapping]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ptr::copy_nonoverlapping(target);
+      }
+  description: "ptr::copy_nonoverlapping(src, dst, count) — memcpy primitive; tainted count or pointers cause buffer overflow."
+- id: rust.memory.ptr_copy
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: critical
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-787, CWE-120]
+  match:
+    kind: call
+    callee:
+      attribute: [ptr, copy]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ptr::copy(target);
+      }
+  description: "ptr::copy(src, dst, count) — memmove primitive; same exposure as copy_nonoverlapping."
+- id: rust.memory.slice_from_raw_parts
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: high
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-125, CWE-129]
+  match:
+    kind: call
+    callee:
+      attribute: [slice, from_raw_parts]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          slice::from_raw_parts(target);
+      }
+  description: "std::slice::from_raw_parts(data, len) — synthesises a slice from raw pointer + length; tainted len = out-of-bounds reads when the slice is later indexed."
+- id: rust.memory.slice_from_raw_parts_mut
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: critical
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-787, CWE-129]
+  match:
+    kind: call
+    callee:
+      attribute: [slice, from_raw_parts_mut]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          slice::from_raw_parts_mut(target);
+      }
+  description: "slice::from_raw_parts_mut — mutable slice from raw pointer + length; tainted len enables arbitrary writes."
+- id: rust.memory.transmute
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: high
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-704, CWE-843]
+  match:
+    kind: call
+    callee:
+      attribute: [mem, transmute]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          mem::transmute(target);
+      }
+  description: "std::mem::transmute — reinterprets bytes as another type; tainted bytes can forge invalid references / fat-pointer metadata."
+- id: rust.memory.ptr_offset
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: memory-safety
+  severity: high
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-823, CWE-125]
+  match:
+    kind: call
+    callee:
+      name: offset
+  description: "Disabled — bare `offset` overmatches Vec/Iterator helpers; enable for unsafe-block audits where the receiver is known to be a raw pointer."
+
+# Double-drop on `ManuallyDrop` is a documented unsoundness shape:
+# `ManuallyDrop::drop(&mut x)` runs Drop manually, and a second call
+# on the same value re-invokes Drop on freed memory (CWE-415).
+# Engine same-call-site clustering surfaces double-call cases.
+- id: rust.memory.manuallydrop_drop
+  enabled: true
+  language: rust
+  tag: memory-safety
+  severity: critical
+  category: memory
+  packages: [std, core]
+  cwe: [CWE-415]
+  match:
+    kind: call
+    callee:
+      attribute: [ManuallyDrop, drop]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use std::process::Command;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ManuallyDrop::drop(target);
+      }
+  description: "ManuallyDrop::drop(&mut x) — manually runs Drop. Two calls on the same value double-free (CWE-415); the engine surfaces both sites for audit pairing."

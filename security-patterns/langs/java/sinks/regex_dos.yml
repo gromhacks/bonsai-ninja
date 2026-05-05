@@ -1,0 +1,34 @@
+- id: java.redos.pattern_compile
+  enabled: true
+  language: java
+  tag: redos
+  severity: medium
+  packages: ["java.util.regex"]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [Pattern, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.util.regex.*;
+      class App {
+        void handle(String input) throws Exception {
+          Pattern.compile(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.util.regex.*;
+      class App {
+        void handle(String input) throws Exception {
+          Pattern.compile("^[a-z]+$");
+        }
+      }
+    expect_no_match: true
+  description: "Pattern.compile(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+

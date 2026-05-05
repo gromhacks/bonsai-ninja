@@ -1,0 +1,380 @@
+//! Cross-file / cross-module trace integration tests.
+//!
+//! These are the tests that prove the analyzer does what the README
+//! promises: simulate execution flow across files for every supported
+//! language, statically. Each language gets a 2- or 3-file fixture and we
+//! assert the trace visits the callee in a *different* file.
+
+use bonsai_callgraph::{collect_callable_targets, EdgeKind};
+use bonsai_lang_api::{AdapterArc, LanguageRegistry};
+use bonsai_trace::TraceStepKind;
+use bonsai_workspace::Workspace;
+use std::sync::Arc;
+
+fn ws_with(adapter: AdapterArc, files: &[(&str, &str)]) -> Workspace {
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(adapter);
+    let ws = Workspace::new(registry);
+    for (path, text) in files {
+        ws.vfs().write((*path).to_string(), Arc::<str>::from(*text));
+    }
+    // Prime the global index.
+    for f in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(f);
+    }
+    ws
+}
+
+fn assert_cross_file_trace(ws: &Workspace, entry: &str, callee: &str, expected_file_fragment: &str) {
+    let trace = ws
+        .trace_from(entry)
+        .unwrap_or_else(|e| panic!("trace_from({entry}) failed: {e:?}"));
+    // The trace must contain a Call step to `callee`, followed by an
+    // EnterFunction step whose file is in a different file from entry's.
+    let call_idx = trace
+        .steps
+        .iter()
+        .position(|s| s.kind == TraceStepKind::Call && s.message.contains(callee))
+        .unwrap_or_else(|| {
+            panic!(
+                "no Call step matching {callee}; steps={:#?}",
+                trace
+                    .steps
+                    .iter()
+                    .map(|s| (s.kind, s.message.clone(), s.file.clone()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let enter_idx = trace
+        .steps
+        .iter()
+        .skip(call_idx + 1)
+        .position(|s| s.kind == TraceStepKind::EnterFunction)
+        .unwrap_or_else(|| {
+            panic!(
+                "no EnterFunction after Call {callee}; steps={:#?}",
+                trace
+                    .steps
+                    .iter()
+                    .map(|s| (s.kind, s.message.clone(), s.file.clone()))
+                    .collect::<Vec<_>>()
+            )
+        })
+        + call_idx
+        + 1;
+    let entered_file = &trace.steps[enter_idx].file;
+    assert!(
+        entered_file.contains(expected_file_fragment),
+        "expected cross-file entry in {expected_file_fragment}, got {entered_file}"
+    );
+}
+
+#[test]
+fn rust_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_rust::RustAdapter::new()),
+        &[
+            ("/w/main.rs", "fn main() { helper(); }"),
+            ("/w/mod_helpers.rs", "pub fn helper() {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "helper", "mod_helpers.rs");
+}
+
+#[test]
+fn python_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[
+            ("/w/app.py", "def main():\n    worker()\n"),
+            ("/w/worker.py", "def worker():\n    pass\n"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "worker.py");
+}
+
+#[test]
+fn javascript_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
+        &[
+            ("/w/app.js", "function main() { worker(); }"),
+            ("/w/w.js", "function worker() {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.js");
+}
+
+#[test]
+fn javascript_receiver_callback_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
+        &[(
+            "/w/app.js",
+            "function entry(items) { items.forEach(cb); }\n\
+             function cb(item) { sink(item); }\n\
+             function sink(x) {}\n",
+        )],
+    );
+    let trace = ws.trace_from("entry").expect("trace_from entry");
+    let global = ws.db().global_index();
+    let entry = collect_callable_targets(&global, "entry")[0];
+    let cb = collect_callable_targets(&global, "cb")[0];
+    let graph = ws.resolved_call_graph();
+    assert!(
+        graph
+            .callees_of(entry)
+            .any(|edge| edge.to == cb && edge.kind == EdgeKind::Indirect),
+        "resolved call graph did not include entry -> cb receiver-callback edge"
+    );
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|s| s.kind == TraceStepKind::EnterFunction && s.message.contains("cb")),
+        "receiver callback `cb` was not expanded; steps={:#?}",
+        trace.steps
+    );
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|s| s.kind == TraceStepKind::Call && s.message.contains("sink")),
+        "callback body did not reach sink; steps={:#?}",
+        trace.steps
+    );
+}
+
+#[test]
+fn javascript_imported_export_const_lambda_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
+        &[
+            (
+                "/w/app.js",
+                "import { flow } from './wrapper.js';\n\
+                 function entry(token) { flow(token); }\n",
+            ),
+            (
+                "/w/wrapper.js",
+                "export const flow = (value) => { sink(value); };\n\
+                 function sink(x) {}\n",
+            ),
+        ],
+    );
+    let trace = ws.trace_from("entry").expect("trace_from entry");
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|s| s.kind == TraceStepKind::EnterFunction && s.message.contains("flow")),
+        "exported const lambda `flow` was not expanded; steps={:#?}",
+        trace.steps
+    );
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|s| s.kind == TraceStepKind::Call && s.message.contains("sink")),
+        "exported const lambda body did not reach sink; steps={:#?}",
+        trace.steps
+    );
+}
+
+#[test]
+fn typescript_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
+        &[
+            ("/w/app.ts", "function main(): void { worker(); }"),
+            ("/w/w.ts", "function worker(): void {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.ts");
+}
+
+#[test]
+fn go_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_go::GoAdapter::new()),
+        &[
+            ("/w/main.go", "package main\nfunc main() { worker() }\n"),
+            ("/w/w.go", "package main\nfunc worker() {}\n"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.go");
+}
+
+#[test]
+fn java_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_java::JavaAdapter::new()),
+        &[
+            (
+                "/w/Main.java",
+                "class Main { static void main() { Helper.worker(); } }",
+            ),
+            ("/w/Helper.java", "class Helper { static void worker() {} }"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "Helper.java");
+}
+
+#[test]
+fn java_receiver_type_dispatch_prefers_service_bean_method() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_java::JavaAdapter::new()),
+        &[
+            (
+                "/w/Controller.java",
+                "class Controller {\n\
+                   private UserService svc;\n\
+                   void handle(String token) { svc.process(token); }\n\
+                 }\n",
+            ),
+            (
+                "/w/UserService.java",
+                "class UserService {\n\
+                   void process(String token) { sink(token); }\n\
+                   void sink(String value) {}\n\
+                 }\n",
+            ),
+            (
+                "/w/AuditService.java",
+                "class AuditService {\n\
+                   void process(String token) { audit(token); }\n\
+                   void audit(String value) {}\n\
+                 }\n",
+            ),
+        ],
+    );
+    let trace = ws.trace_from("handle").expect("trace_from handle");
+    assert!(
+        trace.steps.iter().any(|s| s.kind == TraceStepKind::EnterFunction
+            && s.message.contains("process")
+            && s.file.ends_with("UserService.java")),
+        "receiver-typed service call did not enter UserService.process; steps={:#?}",
+        trace.steps
+    );
+    assert!(
+        !trace.steps.iter().any(|s| s.kind == TraceStepKind::EnterFunction
+            && s.message.contains("process")
+            && s.file.ends_with("AuditService.java")),
+        "receiver-typed service call should not dispatch to AuditService.process; steps={:#?}",
+        trace.steps
+    );
+}
+
+#[test]
+fn c_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_c::CAdapter::new()),
+        &[
+            (
+                "/w/main.c",
+                "extern void worker(void);\nint main(void) { worker(); return 0; }",
+            ),
+            ("/w/w.c", "void worker(void) {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.c");
+}
+
+#[test]
+fn cpp_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_cpp::CppAdapter::new()),
+        &[
+            ("/w/main.cpp", "void worker();\nint main() { worker(); }"),
+            ("/w/w.cpp", "void worker() {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.cpp");
+}
+
+#[test]
+fn csharp_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_csharp::CSharpAdapter::new()),
+        &[
+            ("/w/Main.cs", "class M { static void Main() { H.Worker(); } }"),
+            ("/w/H.cs", "class H { public static void Worker() {} }"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "Main", "Worker", "H.cs");
+}
+
+#[test]
+fn kotlin_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
+        &[
+            ("/w/Main.kt", "fun main() { worker() }"),
+            ("/w/W.kt", "fun worker() {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "W.kt");
+}
+
+#[test]
+fn scala_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
+        &[
+            (
+                "/w/Main.scala",
+                "object Main { def main(args: Array[String]): Unit = worker() }",
+            ),
+            ("/w/W.scala", "object W { def worker(): Unit = () }"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "W.scala");
+}
+
+#[test]
+fn swift_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
+        &[
+            ("/w/Main.swift", "func main() { worker() }"),
+            ("/w/W.swift", "func worker() {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "W.swift");
+}
+
+#[test]
+fn php_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_php::PhpAdapter::new()),
+        &[
+            ("/w/main.php", "<?php function main() { worker(); }"),
+            ("/w/w.php", "<?php function worker() {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.php");
+}
+
+#[test]
+fn ruby_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
+        &[
+            ("/w/main.rb", "def main\n  worker()\nend\n"),
+            ("/w/w.rb", "def worker\n  puts 1\nend\n"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.rb");
+}
+
+#[test]
+fn perl_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_perl::PerlAdapter::new()),
+        &[
+            ("/w/main.pl", "sub main { worker(); }"),
+            ("/w/w.pl", "sub worker { }"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.pl");
+}

@@ -1,0 +1,55 @@
+# Lua TLS-misconfig sinks.
+- id: lua.tls.proxy_ssl_verify_off
+  enabled: true
+  language: lua
+  tag: weak-tls
+  severity: high
+  packages: [openresty]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: ssl_verify
+  match_examples:
+  - name: lua.tls.proxy_ssl_verify_off example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ssl_verify = false
+      end
+  description: "ssl_verify = false in proxy/subrequest config — disables peer cert validation (MITM)."
+
+- id: lua.tls.luasec_verify_none
+  enabled: true
+  language: lua
+  tag: weak-tls
+  severity: high
+  packages: [luasec]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: verify
+  match_examples:
+  - name: lua.tls.luasec_verify_none example
+    code: |
+      local _luasec = require("luasec")
+      function example(input, url, id, payload, request, params, user)
+        verify = false
+      end
+  description: "luasec ssl params verify = 'none' — skips certificate validation."
+
+- id: lua.tls.http_request_verify_false
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: weak-tls
+  severity: high
+  packages: [lua-requests]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [requests, get]
+  description: "Disabled — lua-requests get{verify=false}; off by default because lua-requests already has the SSRF rule."

@@ -1,0 +1,32 @@
+- id: php.cors.allow_origin_wildcard_header
+  enabled: true
+  language: php
+  tag: cors
+  severity: high
+  cwe:
+  - CWE-942
+  - CWE-113
+  - CWE-444
+  match:
+    kind: call
+    callee:
+      regex: ^header$
+  match_examples:
+  - name: php.cors.allow_origin_wildcard_header example
+    code: |
+      <?php
+      use illuminate\http;
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        header("Access-Control-Allow-Origin: *");
+      }
+  description: 'header(''Access-Control-Allow-Origin: *'') — explicit wildcard CORS via header(). Merged aliases: php.header.builtin, php.smuggle.header_dual_cl_te.'
+  aliases:
+  - php.header.builtin
+  - php.smuggle.header_dual_cl_te
+  - php.header.laravel_response_header
+  packages:
+  - illuminate/http
+  imports:
+  - illuminate\http
+  - illuminate

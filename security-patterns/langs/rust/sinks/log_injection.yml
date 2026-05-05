@@ -1,0 +1,24 @@
+# rust log_injection sinks.
+
+# Log-injection sinks (round 2 fill).
+- id: rust.log_injection.log_info_newline
+  enabled: true
+  language: rust
+  tag: header-injection
+  severity: medium
+  packages: [log]
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [log, info]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use log::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          log::info("user\\n");
+      }
+  description: 'log::info!("... {user} ...\n") — newline in user text forges log entries.'

@@ -1,0 +1,268 @@
+# C++ NoSQL injection (mongocxx / hiredis).
+- id: cpp.nosql.mongocxx_find
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [mongocxx]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)find$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongocxx/client.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        collection::find("$where");
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        mongocxx_find("safe");
+      }
+    expect_no_match: true
+  description: "mongocxx collection::find(filter) — flag when BSON filter is built from tainted input."
+
+- id: cpp.nosql.mongocxx_find_one
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [mongocxx]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)find_one$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongocxx/client.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        collection::find_one("$where");
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        mongocxx_find_one("safe");
+      }
+    expect_no_match: true
+  description: "mongocxx collection::find_one(filter) — same concern as find."
+
+- id: cpp.nosql.mongocxx_aggregate
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [mongocxx]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)aggregate$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongocxx/client.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        collection::aggregate("$where");
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        mongocxx_aggregate("safe");
+      }
+    expect_no_match: true
+  description: "mongocxx collection::aggregate(pipeline) — tainted pipeline stages."
+
+- id: cpp.nosql.mongocxx_update
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [mongocxx]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)update_one$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongocxx/client.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        collection::update_one("$where");
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        mongocxx_update("safe");
+      }
+    expect_no_match: true
+  description: "mongocxx collection::update_one(filter, update) — tainted filter = NoSQL injection."
+
+- id: cpp.nosql.mongocxx_update_doc
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [mongocxx]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)update_one$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      #include <mongocxx/client.hpp>
+      void example(const char *input) {
+        collection::update_one("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        collection::update_one("safe", "safe");
+      }
+    expect_no_match: true
+  description: "collection::update_one(filter, update) — tainted update documents can inject operators or alter unintended fields."
+
+- id: cpp.nosql.mongocxx_delete
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [mongocxx]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)delete_one$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongocxx/client.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        collection::delete_one("$where");
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        mongocxx_delete("safe");
+      }
+    expect_no_match: true
+  description: "mongocxx collection::delete_one(filter) — tainted filter deletes wrong docs."
+
+- id: cpp.nosql.mongocxx_runcommand
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [mongocxx]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)run_command$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <mongocxx/client.hpp>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        database::run_command("$where");
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        mongocxx_runcommand("safe");
+      }
+    expect_no_match: true
+  description: "mongocxx database::run_command(cmd) — admin command injection."
+
+- id: cpp.nosql.hiredis_eval
+  enabled: true
+  language: cpp
+  tag: nosql-injection
+  severity: high
+  packages: [hiredis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: redisCommand
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <hiredis/hiredis.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        redisCommand(arg, "EVAL %s");
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        redisCommand("safe", "safe");
+      }
+    expect_no_match: true
+  description: "hiredis redisCommand(\"EVAL %s\", tainted) — Redis Lua injection."
+
+- id: cpp.nosql.hiredis_command_generic
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: nosql-injection
+  severity: medium
+  packages: [hiredis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: redisCommand
+  description: "Disabled — redisCommand is typically safe; enable only when the format string is tainted."

@@ -1,0 +1,37 @@
+# kotlin mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: kotlin.mass_assign.databinder_bind_all
+  enabled: true
+  language: kotlin
+  tag: mass-assignment
+  severity: medium
+  packages: [org.springframework.web.bind]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [DataBinder, bind]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.*
+      class App {
+        fun handle(input: String) {
+          DataBinder.bind(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.bind.*
+      class App {
+      fun handle(input: String) {
+        DataBinder.bind("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring DataBinder.bind (Kotlin)."

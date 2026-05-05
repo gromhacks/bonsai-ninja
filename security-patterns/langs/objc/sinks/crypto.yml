@@ -1,0 +1,94 @@
+# Objective-C weak-crypto sinks (CommonCrypto).
+- id: objc.crypto.cc_md5
+  enabled: true
+  language: objc
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^(CC_MD5|CC_MD5_Init|CC_MD5_Update|CC_MD5_Final)$"
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; CC_MD5(input); }
+  description: "CommonCrypto CC_MD5 — MD5 is collision-broken; unsafe for signatures/integrity."
+
+- id: objc.crypto.cc_md2_md4
+  enabled: true
+  language: objc
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^(CC_MD2|CC_MD4|CC_MD2_Init|CC_MD4_Init)$"
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; CC_MD2(input); }
+  description: "CommonCrypto CC_MD2 / CC_MD4 — pre-MD5 hashes; entirely broken."
+
+- id: objc.crypto.cc_sha1
+  enabled: true
+  language: objc
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^(CC_SHA1|CC_SHA1_Init|CC_SHA1_Update|CC_SHA1_Final)$"
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; CC_SHA1(input); }
+  description: "CommonCrypto CC_SHA1 — deprecated for cryptographic use (collisions demonstrated)."
+
+- id: objc.crypto.cccrypt_weak
+  enabled: true
+  language: objc
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: CCCrypt
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; CCCrypt(input); }
+  description: "CommonCrypto CCCrypt — flag when algorithm is kCCAlgorithmDES / kCCAlgorithm3DES / kCCAlgorithmRC4 / kCCAlgorithmRC2 or options include kCCOptionECBMode."
+
+- id: objc.crypto.cccryptor_create
+  enabled: true
+  language: objc
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^(CCCryptorCreate|CCCryptorCreateWithMode)$"
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; CCCryptorCreate(input); }
+  description: "CommonCrypto CCCryptorCreate / CCCryptorCreateWithMode — flag weak algs (DES/3DES/RC4/RC2) or ECB mode."
+
+- id: objc.crypto.arc4random_uniform
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  tag: weak-randomness
+  severity: low
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      name: arc4random
+  description: "Disabled — arc4random on Darwin is a CSPRNG; not a vulnerability by itself."

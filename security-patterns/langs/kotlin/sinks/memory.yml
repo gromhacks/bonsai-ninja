@@ -1,0 +1,91 @@
+# Kotlin memory-safety / lifecycle audit-pair sites.
+# Kotlin's `.use { }` block is RAII so explicit `.close()` outside the
+# block is the audit-interesting shape. These rules fire on the
+# *use-after-transition* call (read / await / etc.) and gate on the
+# adapter-emitted lifecycle state via the `requires_state` engine
+# constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: kotlin.memory.closeable_close
+  enabled: true
+  language: kotlin
+  tag: memory-safety
+  severity: medium
+  packages: [java.io, java.nio, kotlinx.coroutines]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - requires_state:
+      name: stream
+      expected: closed
+  match_examples:
+  - name: read after close
+    code: |
+      import java.io.InputStream
+      fun handle(stream: InputStream) {
+        stream.close()
+        stream.read()
+      }
+    expect_match_text: [stream.read]
+  - name: read without preceding close
+    code: |
+      import java.io.InputStream
+      fun handle(stream: InputStream) {
+        stream.read()
+      }
+    expect_no_match: true
+  description: "Use-after-close — `<Closeable>.read()` on a stream whose preceding `.close()` released the underlying resource. Subsequent reads throw IOException at runtime (CWE-416/CWE-404). The `requires_state` constraint gates the rule on the binding's actual `closed` lifecycle state, so explicit-close-then-reuse is flagged while RAII `.use { }` blocks stay silent."
+- id: kotlin.memory.job_cancel
+  enabled: true
+  language: kotlin
+  tag: memory-safety
+  severity: medium
+  packages: [kotlinx.coroutines]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      name: await
+  constraints:
+  - requires_state:
+      name: job
+      expected: cancelled
+  match_examples:
+  - name: await after cancel
+    code: |
+      import kotlinx.coroutines.*
+      suspend fun handle(job: Deferred<Int>) {
+        job.cancel()
+        job.await()
+      }
+    expect_match_text: [job.await]
+  - name: await without preceding cancel
+    code: |
+      import kotlinx.coroutines.*
+      suspend fun handle(job: Deferred<Int>) {
+        job.await()
+      }
+    expect_no_match: true
+  description: "Use-after-cancel — `Deferred.await()` on a job whose preceding `.cancel()` invalidated the result. The call throws CancellationException at runtime (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+- id: kotlin.memory.lock_unlock
+  enabled: true
+  language: kotlin
+  tag: memory-safety
+  severity: medium
+  packages: [java.util.concurrent.locks, kotlinx.coroutines.sync]
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.unlock$
+  match_examples:
+  - name: lock unlock site
+    code: |
+      import java.util.concurrent.locks.Lock
+      fun handle(lock: Lock) {
+        lock.unlock()
+      }
+    expect_match_text: [lock.unlock]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. <Lock>.unlock() / <Mutex>.unlock() — subsequent guarded-region reads/writes without re-locking are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

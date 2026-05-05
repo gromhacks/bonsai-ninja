@@ -1,0 +1,45 @@
+# c log_injection sinks.
+
+# Log-injection sinks (round 2 fill).
+- id: c.log_injection.printf_format_user
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: printf
+  match_examples:
+    - name: generated direct match
+      code: |
+        void example(void) {
+          char *arg = "tainted";
+          char *fmt = arg;
+          printf(arg);
+        }
+  description: 'Disabled duplicate — c.format.printf_tainted is the canonical CWE-134 rule for printf(user_str).'
+- id: c.log_injection.fprintf_format_user
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: format-string
+  severity: high
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      name: fprintf
+  match_examples:
+    - name: generated direct match
+      code: |
+        void example(void) {
+          char *arg = "tainted";
+          char *fmt = arg;
+          fprintf(arg);
+        }
+  description: 'Disabled duplicate — c.format.fprintf_tainted is the canonical CWE-134 rule for fprintf(stream, user_format).'

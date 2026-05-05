@@ -1,0 +1,182 @@
+# Erlang SQL injection sinks across the major DB drivers.
+- id: erlang.sqli.epgsql_squery
+  enabled: true
+  language: erlang
+  tag: sql-injection
+  severity: critical
+  category: sql-exec
+  packages: [epgsql]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^epgsql:squery$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("epgsql/include/epgsql.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        epgsql:squery(Conn, Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("epgsql/include/epgsql.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        epgsql:squery(Conn, "select 1").
+    expect_no_match: true
+  description: "epgsql:squery — executes raw SQL string; no parameterization. Use equery with $1 placeholders."
+- id: erlang.sqli.epgsql_squery3
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: erlang
+  tag: sql-injection
+  severity: critical
+  packages: [epgsql]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^epgsql:squery/3$"
+  description: "Disabled — adapter emits callee without arity; squery above already matches."
+- id: erlang.sqli.mysql_query
+  enabled: true
+  language: erlang
+  tag: sql-injection
+  severity: critical
+  packages: [mysql-otp]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^mysql:query$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("mysql-otp/include/mysql-otp.hrl").
+      -export([test/2]).
+      test(Conn, Input) ->
+        mysql:query(Conn, Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -include_lib("mysql-otp/include/mysql-otp.hrl").
+      -export([test/1]).
+      test(Conn) ->
+        mysql:query(Conn, "select 1").
+    expect_no_match: true
+  description: "mysql-otp mysql:query — string concatenation is injectable; use prepared/`?` placeholders."
+- id: erlang.sqli.emysql_execute
+  enabled: true
+  language: erlang
+  tag: sql-injection
+  severity: critical
+  packages: [emysql]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^emysql:execute$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted emysql sql
+    code: |
+      -include_lib("emysql/include/emysql.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        emysql:execute(Input).
+  - name: literal emysql sql negative
+    code: |
+      -include_lib("emysql/include/emysql.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        emysql:execute("select 1").
+    expect_no_match: true
+  description: "emysql:execute — flag when SQL string built from tainted input rather than stmt_id + bindings."
+- id: erlang.sqli.odbc_sql_query
+  enabled: true
+  language: erlang
+  tag: sql-injection
+  severity: critical
+  packages: [odbc]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^odbc:sql_query$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("odbc/include/odbc.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        odbc:sql_query(Conn, Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("odbc/include/odbc.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        odbc:sql_query(Conn, "select 1").
+    expect_no_match: true
+  description: "odbc:sql_query/2 — raw SQL; use param_query with typed bindings instead."
+- id: erlang.sqli.mnesia_match_object
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: erlang
+  tag: sql-injection
+  severity: medium
+  packages: [mnesia]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: "^mnesia:(match_object|select)$"
+  description: "Disabled — mnesia uses term patterns, not SQL; only risk is tainted match_spec (rare)."
+- id: erlang.sqli.eredis_q
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: erlang
+  tag: nosql-injection
+  severity: high
+  packages: [eredis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^eredis:q$"
+  description: "Disabled — covered by erlang.nosql.eredis_q."
+- id: erlang.sqli.mongo_find
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: erlang
+  tag: nosql-injection
+  severity: high
+  packages: [mongodb-erlang]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^mongo:find$"
+  description: "Disabled — duplicates erlang.nosql.mongoc_find."

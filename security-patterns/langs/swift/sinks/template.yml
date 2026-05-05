@@ -1,0 +1,81 @@
+- id: swift.ssti.stencil_render
+  enabled: false
+  language: swift
+  tag: ssti
+  severity: high
+  packages:
+  - Stencil
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Template
+      - render
+  match_examples:
+  - name: declared shape
+    code: 'import Stencil // Stencil
+
+      func test() { let input = "x"; let amount = 1; Template.render(input) }
+
+      '
+  description: Stencil Template.render with tainted template source.
+  disabled_reason:
+    code: over-broad
+- id: swift.ssti.leaf_render
+  enabled: false
+  language: swift
+  tag: ssti
+  severity: high
+  packages:
+  - Leaf
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LeafRenderer
+      - render
+  match_examples:
+  - name: declared shape
+    code: 'import Leaf // Leaf
+
+      func test() { let input = "x"; let amount = 1; LeafRenderer.render(input) }
+
+      '
+  description: Vapor Leaf renderer.
+  disabled_reason:
+    code: over-broad
+- id: swift.template.leaf_unsafe_tag
+  enabled: true
+  language: swift
+  tag: xss
+  severity: high
+  packages:
+  - leaf
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: unsafeHTML
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'import leaf // leaf
+
+      func test(input: String) { unsafeHTML(input) }
+
+      '
+  - name: literal unsafe html negative
+    code: 'import leaf // leaf
+
+      func test() { unsafeHTML("<p>safe</p>") }
+
+      '
+    expect_no_match: true
+  description: "Leaf #unsafeHTML(tainted) \u2014 explicitly bypasses Vapor's autoescape."

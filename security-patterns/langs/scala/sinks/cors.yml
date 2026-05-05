@@ -1,0 +1,23 @@
+# scala CORS misconfiguration sinks (T403).
+- id: scala.cors.wildcard_origin_akka
+  enabled: true
+  language: scala
+  tag: cors
+  severity: medium
+  packages: [ch.megard.akka.http.cors]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CorsSettings, allowedOrigins]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import ch.megard.akka.http.cors._
+      object App {
+        def handle(input: String): Unit = {
+          CorsSettings.allowedOrigins(HttpOriginMatcher.Star)
+        }
+      }
+  description: |-
+    Akka HTTP CorsSettings allowedOrigins HttpOriginMatcher.* — allow-all CORS.

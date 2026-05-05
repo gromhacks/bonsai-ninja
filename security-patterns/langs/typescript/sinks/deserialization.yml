@@ -1,0 +1,270 @@
+# TypeScript insecure-deserialization sinks.
+- id: typescript.deser.node_serialize_unserialize
+  enabled: true
+  language: typescript
+  tag: insecure-deserialization
+  severity: critical
+  packages: [node-serialize]
+  imports: [node-serialize]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^(serialize|nodeSerialize|nodeSerializer)\\.unserialize$|^unserialize$"
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: node serialize unserialize
+    code: |
+      const _u = require("node-serialize");
+      function demo(input, req, obj) {
+        return serialize.unserialize(input);
+      }
+    expect_match_text: [serialize.unserialize]
+  - name: node serialize alias unserialize
+    code: |
+      import nodeSerialize from "node-serialize";
+      function demo(input: string) {
+        return nodeSerialize.unserialize(input);
+      }
+    expect_match_text: [nodeSerialize.unserialize]
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("node-serialize");
+      function demo(input, req, obj) {
+        return serialize.unserialize('{"ok":true}');
+      }
+    expect_no_match: true
+  description: "node-serialize module: `serialize.unserialize(tainted)` — RCE via IIFE trick."
+
+- id: typescript.deser.funcster_deep
+  enabled: true
+  language: typescript
+  tag: insecure-deserialization
+  severity: critical
+  packages: [funcster]
+  imports: [funcster]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [funcster, deepDeserialize]
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: funcster deep
+    code: |
+      const _u = require("funcster");
+      function demo(input, req, obj) {
+        return funcster.deepDeserialize(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("funcster");
+      function demo(input, req, obj) {
+        return funcster.deepDeserialize('{"ok":true}');
+      }
+    expect_no_match: true
+  description: "funcster.deepDeserialize — reconstructs functions = arbitrary JS."
+
+- id: typescript.deser.cryo_parse
+  enabled: true
+  language: typescript
+  tag: insecure-deserialization
+  severity: critical
+  packages: [cryo]
+  imports: [cryo]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [cryo, parse]
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: cryo parse
+    code: |
+      const _u = require("cryo");
+      function demo(input, req, obj) {
+        return cryo.parse(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("cryo");
+      function demo(input, req, obj) {
+        return cryo.parse('{"ok":true}');
+      }
+    expect_no_match: true
+  description: "cryo.parse — deserialises functions."
+
+- id: typescript.deser.serialize_javascript_deserialize
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: insecure-deserialization
+  severity: medium
+  packages: [serialize-javascript]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: deserialize
+  description: "Disabled — bare `deserialize` name is too broad; serialize-javascript's own deserialization uses eval() internally but the library recommends never deserializing untrusted output."
+
+- id: typescript.deser.yaml_load_unsafe
+  enabled: true
+  language: typescript
+  tag: insecure-deserialization
+  severity: high
+  packages: [js-yaml]
+  imports: [js-yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [yaml, load]
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: yaml load unsafe
+    code: |
+      const _u = require("js-yaml");
+      function demo(input, req, obj) {
+        return yaml.load(input);
+      }
+    expect_match_text: [yaml.load]
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("js-yaml");
+      function demo(input, req, obj) {
+        return yaml.load("ok: true");
+      }
+    expect_no_match: true
+  description: "js-yaml yaml.load (pre-v4 default) — permits !!js/function tags = code execution unless SAFE_SCHEMA is used."
+
+- id: typescript.deser.yaml_load_namespace
+  enabled: true
+  language: typescript
+  tag: insecure-deserialization
+  severity: high
+  packages: [yaml, js-yaml]
+  imports: [yaml, js-yaml]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [YAML, load]
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: YAML load namespace
+    code: |
+      const _u = require("yaml");
+      function parse(YAML: any, input: string) {
+        return YAML.load(input);
+      }
+    expect_match_text: [YAML.load]
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("yaml");
+      function parse(YAML: any, input: string) {
+        return YAML.load("ok: true");
+      }
+    expect_no_match: true
+  description: "YAML.load(tainted) — namespace-imported YAML loaders can construct unsafe objects/tags from untrusted YAML."
+
+# Bare-name `unserialize(blob)` shape: node-serialize is sometimes
+# imported as the default export so the call site is just
+# `unserialize(...)` rather than `serialize.unserialize(...)`.
+- id: typescript.deser.node_serialize
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: typescript
+  tag: insecure-deserialization
+  severity: critical
+  packages: [node-serialize]
+  imports: [node-serialize]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unserialize
+  description: "Disabled duplicate — bare `unserialize(...)` and `serialize.unserialize(...)` collapse to the same adapter fact in v1 matching."
+
+- id: typescript.deser.serialize_to_js_deserialize
+  enabled: true
+  language: typescript
+  tag: insecure-deserialization
+  severity: critical
+  packages: [serialize-to-js]
+  imports: [serialize-to-js]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^(serializeToJs|serializeToJS|serializer)\\.deserialize$"
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: serialize-to-js namespace deserialize
+    code: |
+      import serializeToJs from "serialize-to-js";
+      function handle(payload: string) {
+        return serializeToJs.deserialize(payload);
+      }
+    expect_match_text: [serializeToJs.deserialize]
+  - name: serialize-to-js alternate namespace
+    code: |
+      import serializeToJS from "serialize-to-js";
+      function handle(payload: string) {
+        return serializeToJS.deserialize(payload);
+      }
+    expect_match_text: [serializeToJS.deserialize]
+  - name: arg tainted literal negative
+    code: |
+      import serializeToJs from "serialize-to-js";
+      function handle(payload: string) {
+        return serializeToJs.deserialize('{"ok":true}');
+      }
+    expect_no_match: true
+  description: "serialize-to-js .deserialize — reconstructs JavaScript values/functions from strings; unsafe on tainted input."
+
+- id: typescript.deser.msgpack_decode_unpack
+  enabled: true
+  language: typescript
+  tag: insecure-deserialization
+  severity: high
+  packages: [msgpack-lite, "@msgpack/msgpack", msgpack5, msgpackr, "notepack.io"]
+  imports: [msgpack-lite, "@msgpack/msgpack", msgpack5, msgpackr, "notepack.io"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(decode|decodeAsync|unpack|deserialize)$"
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: msgpack decode
+    code: |
+      import * as msgpack from "@msgpack/msgpack";
+      function handle(payload: Uint8Array) {
+        return msgpack.decode(payload);
+      }
+    expect_match_text: [msgpack.decode]
+  - name: msgpackr unpack
+    code: |
+      import * as msgpackr from "msgpackr";
+      function handle(payload: Buffer) {
+        return msgpackr.unpack(payload);
+      }
+    expect_match_text: [msgpackr.unpack]
+  - name: arg tainted literal negative
+    code: |
+      import * as msgpack from "@msgpack/msgpack";
+      function handle(payload: Uint8Array) {
+        return msgpack.decode(new Uint8Array());
+      }
+    expect_no_match: true
+  description: "MessagePack decode/unpack/deserialize APIs — untrusted binary frames can materialize unexpected object graphs and prototype-bearing keys."

@@ -1,0 +1,73 @@
+- id: scala.redos.regex_constructor
+  enabled: true
+  language: scala
+  tag: redos
+  severity: medium
+  packages: [scala]
+  cwe: [CWE-1333]
+  match:
+    kind: new
+    callee:
+      name: Regex
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scala._
+      object App {
+        def handle(input: String): Unit = {
+          new Regex(input)
+        }
+      }
+      class Regex(args: Any*)
+  - name: arg tainted literal negative
+    code: |
+      import scala._
+      object App {
+        def handle(input: String): Unit = {
+          new Regex("^[a-z]+$")
+        }
+      }
+      class Regex(args: Any*)
+    expect_no_match: true
+  description: "new Regex(tainted_pattern) — attacker-controlled regular expressions can trigger catastrophic backtracking."
+
+  imports:
+  - scala
+- id: scala.redos.pattern_compile
+  enabled: true
+  language: scala
+  tag: redos
+  severity: medium
+  packages: ["java.util.regex"]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [Pattern, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.util.regex._
+      // uses java.util.regex
+      object App {
+        def handle(input: String): Unit = {
+          Pattern.compile(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.util.regex._
+      // uses java.util.regex
+      object App {
+        def handle(input: String): Unit = {
+          Pattern.compile("^[a-z]+$")
+        }
+      }
+    expect_no_match: true
+  description: "Pattern.compile(tainted_pattern) — JVM regex compilation from user data can trigger ReDoS."

@@ -1,0 +1,419 @@
+- id: cpp.sqli.sqlite3_exec
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: sqlite3_exec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "#include <sqlite3.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  sqlite3_exec(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        sqlite3_exec("safe", "safe");
+      }
+    expect_no_match: true
+  description: "sqlite3_exec(db, sql, ...) — raw SQL, no binding."
+- id: cpp.sqli.sqlite3_prepare_v2
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: sql-injection
+  severity: medium
+  packages:
+  - sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: sqlite3_prepare_v2
+  description: "Disabled — sqlite3_prepare_v2 uses placeholders safely; flag only when SQL is string-concatenated from tainted data."
+- id: cpp.sqli.sqlite3_get_table
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - sqlite3
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: sqlite3_get_table
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "#include <sqlite3.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  sqlite3_get_table(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        sqlite3_get_table("safe", "safe");
+      }
+    expect_no_match: true
+  description: "sqlite3_get_table — raw SQL, no binding."
+- id: cpp.sqli.mysqlcppconn_execute
+  enabled: false
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - mysqlcppconn
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - execute
+  match_examples:
+  - name: generated direct match
+    code: "#include <mysqlcppconn/mysql_driver.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Statement::execute(\"SELECT \" + query);\n}\n"
+  description: "MySQL Connector/C++ Statement::execute(sql) — raw SQL."
+  disabled_reason:
+    code: over-broad
+- id: cpp.sqli.mysqlcppconn_executequery
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - mysqlcppconn
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <mysqlcppconn/mysql_driver.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Statement::executeQuery(\"SELECT \" + query);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Statement::executeQuery("safe");
+      }
+    expect_no_match: true
+  description: "MySQL Connector/C++ Statement::executeQuery(sql) — raw SQL."
+- id: cpp.sqli.mysqlcppconn_executeupdate
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - mysqlcppconn
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <mysqlcppconn/mysql_driver.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Statement::executeUpdate(\"SELECT \" + query);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Statement::executeUpdate("safe");
+      }
+    expect_no_match: true
+  description: "MySQL Connector/C++ Statement::executeUpdate(sql) — raw SQL."
+- id: cpp.sqli.mysql_query_c
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - libmysqlclient
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: mysql_query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "#include <mysql/mysql.h>\n#include <mysql/mysql.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  mysql_query(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        mysql_query("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libmysqlclient mysql_query — raw SQL."
+  imports:
+  - mysql/mysql.h
+  - mysql
+- id: cpp.sqli.mysql_real_query
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - libmysqlclient
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: mysql_real_query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "#include <mysql/mysql.h>\n#include <mysql/mysql.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  mysql_real_query(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        mysql_real_query("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libmysqlclient mysql_real_query — raw SQL with length."
+  imports:
+  - mysql/mysql.h
+  - mysql
+- id: cpp.sqli.libpqxx_exec
+  enabled: false
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - libpqxx
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - work
+      - exec
+  match_examples:
+  - name: generated direct match
+    code: "#include <libpqxx/pqxx.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  work::exec(\"SELECT \" + query);\n}\n"
+  description: "libpqxx work::exec(sql) — raw SQL; prefer exec_params / prepared."
+  disabled_reason:
+    code: over-broad
+- id: cpp.sqli.libpqxx_exec0
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - libpqxx
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - work
+      - exec0
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <libpqxx/pqxx.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  work::exec0(\"SELECT \" + query);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        work::exec0("safe");
+      }
+    expect_no_match: true
+  description: "libpqxx work::exec0(sql) — raw SQL expecting no rows."
+- id: cpp.sqli.libpqxx_exec1
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - libpqxx
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - work
+      - exec1
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <libpqxx/pqxx.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  work::exec1(\"SELECT \" + query);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        work::exec1("safe");
+      }
+    expect_no_match: true
+  description: "libpqxx work::exec1(sql) — raw SQL expecting one row."
+- id: cpp.sqli.libpq_pqexec
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - libpq
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: PQexec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "#include <libpq-fe.h>\n#include <libpq-fe.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  PQexec(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        PQexec("safe", "safe");
+      }
+    expect_no_match: true
+  description: "libpq PQexec — raw SQL."
+  imports:
+  - libpq-fe.h
+  - libpq-fe
+- id: cpp.sqli.libpq_pqexecparams_string_built
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: sql-injection
+  severity: medium
+  packages:
+  - libpq
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: PQexecParams
+  description: "Disabled — PQexecParams binds $N placeholders; flag only when SQL is concatenated from tainted data."
+- id: cpp.sqli.odbc_sqlexecdirect
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - odbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: SQLExecDirect
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "#include <odbc.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  SQLExecDirect(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        SQLExecDirect("safe", "safe");
+      }
+    expect_no_match: true
+  description: "ODBC SQLExecDirect — raw SQL."
+- id: cpp.sqli.odbc_sqlexecdirectw
+  enabled: true
+  language: cpp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - odbc
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: SQLExecDirectW
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "#include <odbc.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  SQLExecDirectW(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        SQLExecDirectW("safe", "safe");
+      }
+    expect_no_match: true
+  description: "ODBC SQLExecDirectW — raw wide SQL."
+- id: cpp.sqli.qsql_qsqlquery_exec
+  enabled: false
+  language: cpp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Qt
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QSqlQuery
+      - exec
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QSqlQuery::exec(\"SELECT \" + query);\n}\n"
+  description: "Qt QSqlQuery::exec(QString) — flag string-built SQL (prefer prepare + bindValue)."
+  imports:
+  - QtCore
+  - QtCore/Qt
+  disabled_reason:
+    code: over-broad
+- id: cpp.sqli.soci_once
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: cpp
+  tag: sql-injection
+  severity: medium
+  packages:
+  - soci
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - once
+  description: "Disabled — SOCI uses :placeholder syntax; flag only when SQL is concatenated."

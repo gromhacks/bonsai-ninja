@@ -1,0 +1,44 @@
+# C open-redirect.
+- id: c.open_redirect.mg_http_reply_location
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  tag: open-redirect
+  severity: high
+  packages: [mongoose]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: mg_http_reply
+  description: "Disabled — canonical rule is c.xss.mongoose_http_reply in xss.yml (no constraint differentiates Location-header calls from body calls, so we keep a single higher-coverage rule)."
+
+- id: c.open_redirect.nginx_modsec_set_location
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: open-redirect
+  severity: medium
+  packages: [nginx]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: ngx_http_send_redirect
+  description: "Disabled — internal nginx API; flag only in module code."
+
+- id: c.open_redirect.printf_location_header
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  tag: open-redirect
+  severity: low
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: printf
+  description: "Disabled — generic printf; flag with constraint on Location header emission."

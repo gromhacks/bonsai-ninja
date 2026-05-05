@@ -1,0 +1,222 @@
+- id: scala.cmdi.bang
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: ["scala.sys.process"]
+  imports: ["scala.sys.process"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "\\.!$"
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: tainted receiver command
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): Unit = {
+          val cmd = input
+          cmd.!
+        }
+      }
+  - name: literal command negative
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): Unit = {
+          val cmd = "/usr/bin/id"
+          cmd.!
+        }
+      }
+    expect_no_match: true
+  description: "Scala `s.!` runs s as a shell command via scala.sys.process ProcessBuilder implicits."
+- id: scala.cmdi.bang_bang
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  packages: ["scala.sys.process"]
+  imports: ["scala.sys.process"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "\\.!!$"
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: tainted receiver command
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): Unit = {
+          val cmd = input
+          cmd.!!
+        }
+      }
+  - name: literal command negative
+    code: |
+      import scala.sys.process._
+      object App {
+        def handle(input: String): Unit = {
+          val cmd = "/usr/bin/id"
+          cmd.!!
+        }
+      }
+    expect_no_match: true
+  description: "Scala `s.!!` captures stdout — scala.sys.process shell execution."
+- id: scala.cmdi.process_apply_string
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  packages: [scala.sys.process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Process, apply]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import scala.sys.process._
+      // uses scala.sys.process
+      object App {
+        def handle(input: String): Unit = {
+          Process.apply(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: "import scala.sys.process._\n// uses scala.sys.process\nobject App {\n  def handle(input: String): Unit = {\n    Process.apply(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "scala.sys.process.Process(s) — constructs a ProcessBuilder from a string; any tainted arg becomes a shell token when run via `.!`/`.!!`."
+- id: scala.cmdi.runtime_exec
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Runtime, getRuntime, exec]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Runtime.getRuntime.exec(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Runtime.getRuntime.exec(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Runtime.getRuntime().exec(cmd) — JVM process execution via Java interop."
+- id: scala.cmdi.processbuilder_command
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [ProcessBuilder, command]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          ProcessBuilder.command(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          ProcessBuilder.command("safe")
+        }
+      }
+    expect_no_match: true
+  description: "TODO(only-when-packaged): java.lang.ProcessBuilder is auto-imported in Scala/JVM — ProcessBuilder.command(cmd) — tainted command tokens execute directly; no shell escaping performed."
+- id: scala.cmdi.processbuilder_new
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: new
+    callee:
+      name: ProcessBuilder
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          new ProcessBuilder(input)
+        }
+      }
+      class ProcessBuilder(args: Any*)
+  - name: arg tainted literal negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          new ProcessBuilder("safe")
+        }
+      }
+      class ProcessBuilder(args: Any*)
+    expect_no_match: true
+  description: "new java.lang.ProcessBuilder(cmd, ...) constructor — cmd is the tainted sink."
+- id: scala.cmdi.os_proc_call
+  enabled: true
+  language: scala
+  tag: command-injection
+  severity: critical
+  packages: ["com.lihaoyi.os-lib"]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [os, proc, call]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.proc.call(input)
+        }
+      }
+  - name: literal command negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.proc.call("/usr/bin/id")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.proc(cmd).call() — executes cmd; tainted argv tokens run without shell escaping."
+  imports:
+  - com.lihaoyi.oslib
+  - com

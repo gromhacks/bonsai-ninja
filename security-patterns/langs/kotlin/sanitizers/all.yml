@@ -1,0 +1,1145 @@
+- id: kotlin.sanitizer.prepared_statement
+  enabled: true
+  language: kotlin
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      name: prepareStatement
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          prepareStatement(input)
+        }
+      }
+    expect_match_text: [prepareStatement]
+  description: "JDBC Connection.prepareStatement — parameterized query binding prevents SQL injection."
+- id: kotlin.sanitizer.prepared_statement_setstring
+  enabled: true
+  language: kotlin
+  tag: sql-parameter
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setString]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          PreparedStatement.setString(input)
+        }
+      }
+    expect_match_text: [PreparedStatement.setString]
+  description: "PreparedStatement.setString — bound parameter treats value as literal, not SQL."
+- id: kotlin.sanitizer.uri_create
+  enabled: true
+  language: kotlin
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, create]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          URI.create(input)
+        }
+      }
+    expect_match_text: [URI.create]
+  description: "java.net.URI.create — throws on malformed URI; pair with host-allowlist check for SSRF."
+- id: kotlin.sanitizer.url_encoder
+  enabled: true
+  language: kotlin
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^URLEncoder\\.encode$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          URLEncoder.encode(input)
+        }
+      }
+    expect_match_text: [URLEncoder.encode]
+  description: "java.net.URLEncoder.encode — percent-encodes unsafe URL chars."
+- id: kotlin.sanitizer.html_escape_text
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["org.apache.commons.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [StringEscapeUtils, escapeHtml4]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.text.*
+      class App {
+        fun handle(input: String) {
+          StringEscapeUtils.escapeHtml4(input)
+        }
+      }
+    expect_match_text: [StringEscapeUtils.escapeHtml4]
+  description: "Apache Commons Text StringEscapeUtils.escapeHtml4 — HTML-encodes special chars."
+- id: kotlin.sanitizer.owasp_html_sanitizer
+  enabled: true
+  language: kotlin
+  tag: html-sanitize
+  packages: ["com.googlecode.owasp-java-html-sanitizer"]
+  match:
+    kind: call
+    callee:
+      regex: "^HtmlPolicyBuilder\\.sanitize$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.googlecode.owaspjavahtmlsanitizer.*
+      class App {
+        fun handle(input: String) {
+          HtmlPolicyBuilder.sanitize(input)
+        }
+      }
+    expect_match_text: [HtmlPolicyBuilder.sanitize]
+  description: "OWASP Java HTML Sanitizer — policy-driven HTML tag/attr allowlist."
+  imports:
+  - com
+  - com.googlecode.owaspjavahtmlsanitizer
+- id: kotlin.sanitizer.spring_htmlutils_escape
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: [org.springframework.web]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlUtils, htmlEscape]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(input: String) {
+          HtmlUtils.htmlEscape(input)
+        }
+      }
+    expect_match_text: [HtmlUtils.htmlEscape]
+  description: "Spring HtmlUtils.htmlEscape — HTML entity encoding."
+  imports:
+  - org.springframework.web
+- id: kotlin.sanitizer.owasp_encoder
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forHtml]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*
+      class App {
+        fun handle(input: String) {
+          Encode.forHtml(input)
+        }
+      }
+    expect_match_text: [Encode.forHtml]
+  description: "OWASP Java Encoder Encode.forHtml — context-aware HTML encoding."
+- id: kotlin.sanitizer.jsoup_clean
+  enabled: true
+  language: kotlin
+  tag: html-sanitize
+  packages: ["org.jsoup"]
+  match:
+    kind: call
+    callee:
+      regex: "^Jsoup\\.clean$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.jsoup.*
+      class App {
+        fun handle(input: String) {
+          Jsoup.clean(input)
+        }
+      }
+    expect_match_text: [Jsoup.clean]
+  description: "Jsoup.clean with a Safelist — strips unsafe HTML tags/attrs."
+- id: kotlin.sanitizer.esapi_encoder
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [ESAPI, encoder]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.esapi.*
+      class App {
+        fun handle(input: String) {
+          ESAPI.encoder(input)
+        }
+      }
+    expect_match_text: [ESAPI.encoder]
+  description: "OWASP ESAPI encoder — context-specific output encoding."
+- id: kotlin.sanitizer.path_normalize
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, normalize]
+  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component). Marking these as sanitizers produced false negatives on attacker-controlled paths."
+- id: kotlin.sanitizer.path_startswith
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, startsWith]
+  description: "Disabled — startsWith only proves containment with a normalized Path receiver and trusted-root argument; v1 matching cannot verify that shape."
+- id: kotlin.sanitizer.integer_parseint
+  enabled: true
+  language: kotlin
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Integer, parseInt]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          Integer.parseInt(input)
+        }
+      }
+    expect_match_text: [Integer.parseInt]
+  description: "Integer.parseInt — throws NumberFormatException on non-numeric, safe for downstream use."
+- id: kotlin.sanitizer.long_parselong
+  enabled: true
+  language: kotlin
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Long, parseLong]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          Long.parseLong(input)
+        }
+      }
+    expect_match_text: [Long.parseLong]
+  description: "Long.parseLong — rejects non-numeric, safe for SQL/path downstream."
+- id: kotlin.sanitizer.kotlin_toint
+  enabled: true
+  language: kotlin
+  tag: numeric-coerce
+  packages: ["kotlin.text"]
+  match:
+    kind: call
+    callee:
+      name: toInt
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.text.*
+      class App {
+        fun handle(input: String) {
+          toInt(input)
+        }
+      }
+    expect_match_text: [toInt]
+  description: "Kotlin String.toInt / toIntOrNull — coerces to Int, removing injection payloads."
+- id: kotlin.sanitizer.kotlin_tolong
+  enabled: true
+  language: kotlin
+  tag: numeric-coerce
+  packages: ["kotlin.text"]
+  match:
+    kind: call
+    callee:
+      name: toLong
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.text.*
+      class App {
+        fun handle(input: String) {
+          toLong(input)
+        }
+      }
+    expect_match_text: [toLong]
+  description: "Kotlin String.toLong / toLongOrNull — numeric coercion."
+- id: kotlin.sanitizer.uuid_fromstring
+  enabled: true
+  language: kotlin
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [UUID, fromString]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          UUID.fromString(input)
+        }
+      }
+    expect_match_text: [UUID.fromString]
+  description: "UUID.fromString — throws on non-UUID; constrains input to hex+dash shape."
+- id: kotlin.sanitizer.messagedigest_isequal
+  enabled: true
+  language: kotlin
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      attribute: [MessageDigest, isEqual]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          MessageDigest.isEqual(input)
+        }
+      }
+    expect_match_text: [MessageDigest.isEqual]
+  description: "MessageDigest.isEqual — constant-time byte-array compare, avoids timing side channel."
+
+- id: kotlin.sanitizer.ktor_escapehtml
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["io.ktor"]
+  match:
+    kind: call
+    callee:
+      name: escapeHTML
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.ktor.*
+      class App {
+        fun handle(input: String) {
+          escapeHTML(input)
+        }
+      }
+    expect_match_text: [escapeHTML]
+  description: "Ktor io.ktor.util.escapeHTML — encodes &, <, >, \", ' for safe HTML embedding."
+
+- id: kotlin.sanitizer.android_textutils_htmlencode
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["android.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [TextUtils, htmlEncode]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.text.*
+      class App {
+        fun handle(input: String) {
+          TextUtils.htmlEncode(input)
+        }
+      }
+    expect_match_text: [TextUtils.htmlEncode]
+  description: "Android TextUtils.htmlEncode — entity-encodes HTML special chars before WebView/HTML rendering."
+
+- id: kotlin.sanitizer.android_html_escapehtml
+  enabled: true
+  language: kotlin
+  tag: html-encode
+  packages: ["android.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [Html, escapeHtml]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.text.*
+      class App {
+        fun handle(input: String) {
+          Html.escapeHtml(input)
+        }
+      }
+    expect_match_text: [Html.escapeHtml]
+  description: "Android Html.escapeHtml — entity-encodes a string for safe insertion into HTML markup."
+
+- id: kotlin.sanitizer.kotlinx_html_text_plus
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: html-encode
+  packages: ["kotlinx.html"]
+  match:
+    kind: call
+    callee:
+      name: text
+  description: "Disabled — kotlinx.html `+\"text\"` and `text(value)` builders auto-escape (safe vs `unsafe { +raw }`), but the bare `text` name overmatches helpers; enable when the matcher can scope it to the kotlinx.html DSL receiver."
+
+- id: kotlin.sanitizer.okhttp_httpurl_builder
+  enabled: true
+  language: kotlin
+  tag: url-build
+  packages: [okhttp3]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpUrl, parse]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import okhttp3.*
+      class App {
+        fun handle(input: String) {
+          HttpUrl.parse(input)
+        }
+      }
+    expect_match_text: [HttpUrl.parse]
+  description: "OkHttp HttpUrl.parse — strict URL parsing; subsequent .newBuilder().addQueryParameter() escapes path/query segments."
+
+- id: kotlin.sanitizer.okhttp_httpurl_addqueryparameter
+  enabled: true
+  language: kotlin
+  tag: url-encode
+  packages: [okhttp3]
+  match:
+    kind: call
+    callee:
+      attribute: [Builder, addQueryParameter]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import okhttp3.*
+      class App {
+        fun handle(input: String) {
+          Builder.addQueryParameter(input)
+        }
+      }
+    expect_match_text: [Builder.addQueryParameter]
+  description: "OkHttp HttpUrl.Builder.addQueryParameter(name, value) — percent-encodes the query value, preventing CRLF/URL injection."
+
+- id: kotlin.sanitizer.bcrypt_verify
+  enabled: true
+  language: kotlin
+  tag: password-verify
+  packages: ["at.favre.lib:bcrypt", "org.springframework.security.crypto.bcrypt"]
+  match:
+    kind: call
+    callee:
+      attribute: [BCrypt, verifyer]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.crypto.bcrypt.*
+      class App {
+        fun handle(input: String) {
+          BCrypt.verifyer(input)
+        }
+      }
+    expect_match_text: [BCrypt.verifyer]
+  description: "bcrypt verifier path (at.favre.lib `BCrypt.verifyer().verify(...)`) — constant-time hash check, not a string comparison."
+
+- id: kotlin.sanitizer.bcrypt_checkpw
+  enabled: true
+  language: kotlin
+  tag: password-verify
+  packages: ["org.mindrot.jbcrypt", "org.springframework.security.crypto.bcrypt"]
+  match:
+    kind: call
+    callee:
+      attribute: [BCrypt, checkpw]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.mindrot.jbcrypt.*
+      class App {
+        fun handle(input: String) {
+          BCrypt.checkpw(input)
+        }
+      }
+    expect_match_text: [BCrypt.checkpw]
+  description: "jBCrypt / Spring Security BCrypt.checkpw — constant-time bcrypt password verification."
+
+- id: kotlin.sanitizer.spring_passwordencoder_matches
+  enabled: true
+  language: kotlin
+  tag: password-verify
+  packages: ["org.springframework.security.crypto.password"]
+  match:
+    kind: call
+    callee:
+      attribute: [PasswordEncoder, matches]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.crypto.password.*
+      class App {
+        fun handle(input: String) {
+          PasswordEncoder.matches(input)
+        }
+      }
+    expect_match_text: [PasswordEncoder.matches]
+  description: "Spring Security PasswordEncoder.matches — delegates to the encoder's constant-time hash compare (BCrypt/Argon2/PBKDF2)."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: kotlin.passthrough.urldecoder_decode
+  enabled: true
+  language: kotlin
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [URLDecoder, decode]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          URLDecoder.decode(input)
+        }
+      }
+    expect_match_text: [URLDecoder.decode]
+  description: "java.net.URLDecoder.decode(s, charset) — preserves taint (Kotlin via Java interop)."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: kotlin.csrf.spring_security_csrf
+  enabled: true
+  language: kotlin
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      attribute: [http, csrf]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          http.csrf(input)
+        }
+      }
+    expect_match_text: [http.csrf]
+  description: "Spring Security HttpSecurity#csrf() — Kotlin via Spring."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: kotlin.lock.reentrant_lock
+  enabled: true
+  language: kotlin
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [ReentrantLock, lock]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          ReentrantLock.lock(input)
+        }
+      }
+    expect_match_text: [ReentrantLock.lock]
+  description: "kotlinx.coroutines / java.util.concurrent ReentrantLock.lock()."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: kotlin.cookie.cookie_sethttponly_true
+  enabled: true
+  language: kotlin
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [Cookie, setHttpOnly]
+  constraints:
+  - any_arg_matches_regex: |-
+      true
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          Cookie.setHttpOnly(true)
+        }
+      }
+    expect_match_text: [Cookie.setHttpOnly]
+  - name: generated shape example negative constraint boundary
+    code: "class App {\n  fun handle(input: String) {\n    Cookie.setHttpOnly()\n  }\n}\n"
+    expect_no_match: true
+  description: "Kotlin via Java servlet — Cookie.setHttpOnly(true)."
+
+# Rate-limit middleware presence sanitizers (round 2 fill).
+- id: kotlin.ratelimit.bucket4j_consume
+  enabled: true
+  language: kotlin
+  tag: rate-limit
+  packages: [com.bucket4j]
+  match:
+    kind: call
+    callee:
+      attribute: [Bucket, tryConsume]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.bucket4j.*
+      class App {
+        fun handle(input: String) {
+          Bucket.tryConsume(input)
+        }
+      }
+    expect_match_text: [Bucket.tryConsume]
+  description: 'Bucket4j (Kotlin).'
+
+# False-positive audit fill: validators and parameter binding shapes.
+- id: kotlin.sanitizer.same_origin_path_startswith_slash
+  enabled: true
+  language: kotlin
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"/"'
+  - same_receiver_call_count_at_least: 2
+  match_examples:
+  - name: paired same-origin path guard
+    code: |
+      class App {
+        fun allow(next: String): Boolean {
+          return next.startsWith("/") && !next.startsWith("//")
+        }
+      }
+    expect_match_text: [next.startsWith]
+  - name: paired same-origin path guard negative constraint boundary
+    code: "class App {\n  fun allow(next: String): Boolean {\n    return next.startsWith() && !next.startsWith(\"//\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Same-origin redirect path guard paired with a second startsWith call on the same receiver for the `!path.startsWith(\"//\")` scheme-relative rejection shape."
+
+- id: kotlin.sanitizer.same_origin_path_reject_scheme_relative
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"//"'
+  match_examples:
+  - name: reject scheme-relative redirect target
+    code: |
+      class App {
+        fun allow(next: String): Boolean {
+          return next.startsWith("/") && !next.startsWith("//")
+        }
+      }
+    expect_match_text: [next.startsWith]
+  - name: reject scheme-relative redirect target negative constraint boundary
+    code: "class App {\n  fun allow(next: String): Boolean {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"//\") shape in kotlin.sanitizer.same_origin_path_startswith_slash."
+
+- id: kotlin.sanitizer.allowlist_contains
+  enabled: true
+  language: kotlin
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: contains
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 1
+  match_examples:
+  - name: set allowlist contains
+    code: |
+      class App {
+        fun allow(role: String): Boolean {
+          val allowed = setOf("user", "admin")
+          return allowed.contains(role)
+        }
+      }
+    expect_match_text: [allowed.contains]
+  description: "Set/List allowlist membership check on explicitly allowlist-named receivers."
+
+- id: kotlin.sanitizer.map_get_or_default_allowlist
+  enabled: true
+  language: kotlin
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: getOrDefault
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 2
+  match_examples:
+  - name: map default allowlist
+    code: |
+      class App {
+        fun allow(key: String): String {
+          val allowed = mapOf("home" to "/")
+          return allowed.getOrDefault(key, "/")
+        }
+      }
+    expect_match_text: [allowed.getOrDefault]
+  description: "Map.getOrDefault on an allowlist-named mapping bounds attacker input to known values or a safe default."
+
+- id: kotlin.sanitizer.enum_valueof_allowlist
+  enabled: true
+  language: kotlin
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: valueOf
+  constraints:
+  - receiver_name_in: [AllowedRole, SafeRoute, RouteName, SortField, Status]
+  - arg_count: 1
+  match_examples:
+  - name: enum parse allowlist
+    code: |
+      enum class AllowedRole { USER, ADMIN }
+      class App {
+        fun allow(role: String): AllowedRole {
+          return AllowedRole.valueOf(role)
+        }
+      }
+    expect_match_text: [AllowedRole.valueOf]
+  description: "Enum valueOf on narrowly named allowlist enums rejects values outside the enum domain."
+
+- id: kotlin.sanitizer.pattern_matches_safe_shape
+  enabled: true
+  language: kotlin
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      attribute: [Pattern, matches]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^["'']\^?(\[A-Za-z0-9_|\[A-Fa-f0-9)'
+  - min_args: 2
+  match_examples:
+  - name: slug shape validator
+    code: |
+      class App {
+        fun allow(slug: String): Boolean {
+          return Pattern.matches("^[A-Za-z0-9_-]{1,64}$", slug)
+        }
+      }
+    expect_match_text: [Pattern.matches]
+  - name: slug shape validator negative constraint boundary
+    code: "class App {\n  fun allow(slug: String): Boolean {\n    return Pattern.matches()\n  }\n}\n"
+    expect_no_match: true
+  description: "Pattern.matches with a bounded UUID/slug-style allowlist regex validates string shape."
+
+- id: kotlin.sanitizer.regex_replace_char_allowlist_strip
+  enabled: true
+  language: kotlin
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: replace
+  constraints:
+  - any_arg_matches_regex: '\[\^[-A-Za-z0-9_ /]+\]'
+  - any_arg_matches_regex: '^["'']["'']$'
+  match_examples:
+  - name: strip to safe slug chars
+    code: |
+      class App {
+        fun clean(input: String): String {
+          return input.replace(Regex("[^A-Za-z0-9_-]"), "")
+        }
+      }
+    expect_match_text: [input.replace]
+  - name: strip to safe slug chars negative constraint boundary
+    code: "class App {\n  fun clean(input: String): String {\n    return input.replace()\n  }\n}\n"
+    expect_no_match: true
+  description: "String.replace(Regex(negated-safe-class), \"\") strips characters outside the allowlist."
+
+- id: kotlin.sanitizer.prepared_statement_setobject
+  enabled: true
+  language: kotlin
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setObject]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: prepared statement object bind
+    code: |
+      import java.sql.*
+      class App {
+        fun bind(ps: PreparedStatement, input: Any) {
+          ps.setObject(1, input)
+        }
+      }
+    expect_match_text: [ps.setObject]
+  description: "PreparedStatement.setObject binds a value as a JDBC parameter rather than SQL text."
+
+- id: kotlin.sanitizer.jdbctemplate_query_rowmapper_params
+  enabled: true
+  language: kotlin
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, query]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 3
+  match_examples:
+  - name: jdbc template rowmapper varargs
+    code: |
+      import org.springframework.jdbc.core.*
+      class App {
+        fun load(jdbcTemplate: JdbcTemplate, sql: String, mapper: RowMapper, input: String) {
+          jdbcTemplate.query(sql, mapper, input)
+        }
+      }
+    expect_match_text: [jdbcTemplate.query]
+  description: "JdbcTemplate.query(sql, RowMapper, params...) binds trailing arguments as JDBC parameters."
+
+- id: kotlin.sanitizer.jdbctemplate_update_params
+  enabled: true
+  language: kotlin
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, update]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 2
+  match_examples:
+  - name: jdbc template update varargs
+    code: |
+      import org.springframework.jdbc.core.*
+      class App {
+        fun update(jdbcTemplate: JdbcTemplate, sql: String, input: String) {
+          jdbcTemplate.update(sql, input)
+        }
+      }
+    expect_match_text: [jdbcTemplate.update]
+  description: "JdbcTemplate.update(sql, params...) binds arguments after the SQL string as JDBC parameters."
+
+- id: kotlin.sanitizer.xpath_variable_resolver
+  enabled: true
+  language: kotlin
+  tag: xpath-parameter
+  packages: ["javax.xml.xpath"]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, setXPathVariableResolver]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: xpath variable resolver
+    code: |
+      import javax.xml.xpath.*
+      class App {
+        fun configure(xpath: XPath, resolver: XPathVariableResolver) {
+          xpath.setXPathVariableResolver(resolver)
+        }
+      }
+    expect_match_text: [xpath.setXPathVariableResolver]
+  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath text."
+
+- id: kotlin.sanitizer.xpath_evaluate_variable_placeholder
+  enabled: true
+  language: kotlin
+  tag: xpath-parameter
+  packages: ["javax.xml.xpath"]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, evaluate]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '\$[A-Za-z_][A-Za-z0-9_]*'
+  - min_args: 2
+  match_examples:
+  - name: xpath evaluate placeholder
+    code: |
+      import javax.xml.xpath.*
+      class App {
+        fun find(xpath: XPath, doc: Any): Any {
+          return xpath.evaluate("/users/user[@id=$id]", doc)
+        }
+      }
+    expect_match_text: [xpath.evaluate]
+  - name: xpath evaluate placeholder negative constraint boundary
+    code: "import javax.xml.xpath.*\nclass App {\n  fun find(xpath: XPath, doc: Any): Any {\n    return xpath.evaluate()\n  }\n}\n"
+    expect_no_match: true
+  description: "XPath.evaluate with `$name` placeholders is the parameterized side of XPath variable binding."
+
+- id: kotlin.sanitizer.jdbctemplate_queryforobject_params
+  enabled: true
+  language: kotlin
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, queryForObject]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 3
+  match_examples:
+  - name: jdbc template query for object varargs
+    code: |
+      import org.springframework.jdbc.core.*
+      class App {
+        fun load(jdbcTemplate: JdbcTemplate, sql: String, type: Class<*>, input: String): Any? {
+          return jdbcTemplate.queryForObject(sql, type, input)
+        }
+      }
+    expect_match_text: [jdbcTemplate.queryForObject]
+  description: "JdbcTemplate.queryForObject(sql, requiredType, params...) binds trailing values as JDBC parameters."
+
+- id: kotlin.sanitizer.namedparameterjdbctemplate_params
+  enabled: true
+  language: kotlin
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core.namedparam"]
+  match:
+    kind: call
+    callee:
+      name: addValue
+  constraints:
+  - receiver_name_in: [params, parameters, sqlParams, paramSource]
+  - min_args: 2
+  match_examples:
+  - name: named parameter source add value
+    code: |
+      import org.springframework.jdbc.core.namedparam.*
+      class App {
+        fun bind(params: MapSqlParameterSource, input: String) {
+          params.addValue("name", input)
+        }
+      }
+      class MapSqlParameterSource {
+        fun addValue(vararg args: Any?) {}
+      }
+    expect_match_text: [params.addValue]
+  description: "MapSqlParameterSource.addValue(name, value) binds a named JDBC parameter rather than interpolating the value into SQL."
+
+- id: kotlin.sanitizer.bean_validation_pattern_param
+  enabled: true
+  language: kotlin
+  tag: schema-validate
+  packages: ["jakarta.validation", "javax.validation"]
+  match:
+    kind: param
+    target:
+      annotation: Pattern
+  match_examples:
+  - name: bean validation pattern parameter
+    code: |
+      import jakarta.validation.*
+      class App {
+        fun handle(@Pattern slug: String) {
+        }
+      }
+  description: "Bean Validation @Pattern annotated parameter — framework validation constrains the accepted input shape."
+
+- id: kotlin.sanitizer.spring_ldap_filter_encode
+  enabled: true
+  language: kotlin
+  tag: ldap-escape
+  packages: ["org.springframework.ldap"]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapEncoder, filterEncode]
+  match_examples:
+  - name: spring ldap filter encode
+    code: |
+      import org.springframework.ldap.*
+      class App {
+        fun filter(input: String): String {
+          return LdapEncoder.filterEncode(input)
+        }
+      }
+    expect_match_text: [LdapEncoder.filterEncode]
+  description: "Spring LDAP LdapEncoder.filterEncode — escapes LDAP filter metacharacters."
+
+- id: kotlin.sanitizer.rdn_escape_value
+  enabled: true
+  language: kotlin
+  tag: ldap-escape
+  packages: ["javax.naming.ldap"]
+  match:
+    kind: call
+    callee:
+      attribute: [Rdn, escapeValue]
+  match_examples:
+  - name: rdn escape value
+    code: |
+      import javax.naming.ldap.*
+      class App {
+        fun dn(input: String): String {
+          return Rdn.escapeValue(input)
+        }
+      }
+    expect_match_text: [Rdn.escapeValue]
+  description: "javax.naming.ldap.Rdn.escapeValue — escapes attacker input for an LDAP RDN value."
+
+- id: kotlin.sanitizer.uri_host_allowlist
+  enabled: true
+  language: kotlin
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: contains
+  constraints:
+  - receiver_name_in: [allowedHosts, safeHosts, permittedHosts]
+  - arg_matches_regex:
+      index: 0
+      regex: 'host|getHost'
+  match_examples:
+  - name: uri host allowlist
+    code: |
+      class App {
+        fun allow(uri: java.net.URI, allowedHosts: Set<String>): Boolean {
+          return allowedHosts.contains(uri.host)
+        }
+      }
+    expect_match_text: [allowedHosts.contains]
+  - name: uri host allowlist negative constraint boundary
+    code: "class App {\n  fun allow(uri: java.net.URI, allowedHosts: Set<String>): Boolean {\n    return allowedHosts.contains()\n  }\n}\n"
+    expect_no_match: true
+  description: "URI host allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+
+- id: kotlin.sanitizer.xml_factory_disallow_doctype_true
+  enabled: true
+  language: kotlin
+  tag: xxe-sanitizer
+  packages: ["javax.xml.parsers", "jakarta.xml.parsers"]
+  match:
+    kind: call
+    callee:
+      name: setFeature
+  constraints:
+  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - arg_matches_regex:
+      index: 0
+      regex: 'disallow-doctype-decl'
+  - arg_matches_regex:
+      index: 1
+      regex: 'true|TRUE'
+  match_examples:
+  - name: document builder disallow doctype
+    code: |
+      import javax.xml.parsers.*
+      class App {
+        fun configure(factory: DocumentBuilderFactory) {
+          factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }
+      }
+      class DocumentBuilderFactory {
+        fun setFeature(vararg args: Any?) {}
+      }
+    expect_match_text: [factory.setFeature]
+  - name: document builder disallow doctype negative constraint boundary
+    code: "import javax.xml.parsers.*\nclass App {\n  fun configure(factory: DocumentBuilderFactory) {\n    factory.setFeature()\n  }\n}\nclass DocumentBuilderFactory {\n  fun setFeature(vararg args: Any?) {}\n}\n"
+    expect_no_match: true
+  description: "XML parser feature hardening — disallows DOCTYPE declarations to block XXE payloads."
+
+- id: kotlin.sanitizer.xml_factory_restrict_external_access
+  enabled: true
+  language: kotlin
+  tag: xxe-sanitizer
+  packages: ["javax.xml.XMLConstants"]
+  match:
+    kind: call
+    callee:
+      name: setAttribute
+  constraints:
+  - receiver_name_in: [factory, dbf, schemaFactory, transformerFactory]
+  - arg_matches_regex:
+      index: 0
+      regex: 'ACCESS_EXTERNAL_DTD|ACCESS_EXTERNAL_SCHEMA|ACCESS_EXTERNAL_STYLESHEET'
+  - arg_matches_regex:
+      index: 1
+      regex: '^""$'
+  match_examples:
+  - name: restrict external dtd access
+    code: |
+      import javax.xml.XMLConstants.*
+      class App {
+        fun configure(factory: DocumentBuilderFactory) {
+          factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
+        }
+      }
+      class DocumentBuilderFactory {
+        fun setAttribute(vararg args: Any?) {}
+      }
+      object XMLConstants {
+        const val ACCESS_EXTERNAL_DTD = ""
+      }
+    expect_match_text: [factory.setAttribute]
+  - name: restrict external dtd access negative constraint boundary
+    code: "import javax.xml.XMLConstants.*\nclass App {\n  fun configure(factory: DocumentBuilderFactory) {\n    factory.setAttribute()\n  }\n}\nclass DocumentBuilderFactory {\n  fun setAttribute(vararg args: Any?) {}\n}\nobject XMLConstants {\n  const val ACCESS_EXTERNAL_DTD = \"\"\n}\n"
+    expect_no_match: true
+  description: "XMLConstants ACCESS_EXTERNAL_* set to empty string — blocks external DTD/schema/stylesheet resolution."

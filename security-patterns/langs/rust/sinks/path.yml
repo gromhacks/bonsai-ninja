@@ -1,0 +1,381 @@
+- id: rust.path.fs_read_to_string
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std, tokio]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, read_to_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted read_to_string path
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          fs::read_to_string(target);
+      }
+  - name: literal read_to_string path negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          fs::read_to_string("/var/app/config.txt");
+      }
+    expect_no_match: true
+  description: "std::fs::read_to_string (and tokio::fs::read_to_string via suffix) — tainted path reads arbitrary files."
+- id: rust.path.fs_read
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std, tokio]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, read]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted fs read path
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          fs::read(target);
+      }
+  - name: literal fs read path negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          fs::read("/var/app/config.txt");
+      }
+    expect_no_match: true
+  description: "std::fs::read (and tokio::fs::read via suffix) — tainted path reads arbitrary files."
+- id: rust.path.fs_write
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std, tokio]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted fs write path
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          fs::write(target, "safe contents");
+      }
+  - name: literal fs write path negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          fs::write("/var/app/output.txt", "safe contents");
+      }
+    expect_no_match: true
+  description: "std::fs::write (and tokio::fs::write via suffix) — tainted path overwrites arbitrary files."
+- id: rust.path.fs_remove_file
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, remove_file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted remove_file path
+    code: |
+      fn example(target: &str) {
+          fs::remove_file(target);
+      }
+  - name: literal remove_file path negative
+    code: |
+      fn example() {
+          fs::remove_file("/var/app/cache.tmp");
+      }
+    expect_no_match: true
+  description: "std::fs::remove_file."
+- id: rust.path.fs_remove_dir_all
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, remove_dir_all]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted remove_dir_all path
+    code: |
+      fn example(target: &str) {
+          fs::remove_dir_all(target);
+      }
+  - name: literal remove_dir_all path negative
+    code: |
+      fn example() {
+          fs::remove_dir_all("/var/app/tmp");
+      }
+    expect_no_match: true
+  description: "std::fs::remove_dir_all."
+- id: rust.path.file_open
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file open path
+    code: |
+      fn example(target: &str) {
+          File::open(target);
+      }
+  - name: literal file open path negative
+    code: |
+      fn example() {
+          File::open("/var/app/config.txt");
+      }
+    expect_no_match: true
+  description: "File::open with tainted path — attacker-controlled paths read arbitrary files on disk."
+- id: rust.path.file_create
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file create path
+    code: |
+      use std::fs::File;
+      fn example(target: &str) {
+          File::create(target);
+      }
+  - name: literal file create path negative
+    code: |
+      use std::fs::File;
+      fn example() {
+          File::create("/var/app/output.txt");
+      }
+    expect_no_match: true
+  description: "File::create with tainted path — attacker-controlled paths create / overwrite arbitrary files."
+- id: rust.path.tokio_fs_read
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [tokio]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [tokio, fs, read]
+  description: "Disabled — suffix-matches against rust.path.fs_read (`[fs, read]`). Leaving both enabled double-fires on every tokio::fs::read call."
+- id: rust.path.tokio_fs_read_to_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [tokio]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [tokio, fs, read_to_string]
+  description: "Disabled — suffix-matches against rust.path.fs_read_to_string. The std rule already catches tokio::fs::read_to_string via suffix."
+- id: rust.path.tokio_fs_write
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [tokio]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [tokio, fs, write]
+  description: "Disabled — suffix-matches against rust.path.fs_write. The std rule already catches tokio::fs::write via suffix."
+- id: rust.path.fs_rename
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rename source
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          fs::rename(target, "/var/app/output.txt");
+      }
+  - name: literal rename source negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          fs::rename("/var/app/input.txt", "/var/app/output.txt");
+      }
+    expect_no_match: true
+  description: "std::fs::rename — tainted source/dest enables arbitrary-file overwrite."
+- id: rust.path.fs_rename_dest
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [std]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, rename]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted rename destination
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          fs::rename("/var/app/input.txt", target);
+      }
+  - name: literal rename destination negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          fs::rename("/var/app/input.txt", "/var/app/output.txt");
+      }
+    expect_no_match: true
+  description: "std::fs::rename(src, dest) — tainted destination enables arbitrary-file overwrite or moves outside the intended directory."
+- id: rust.path.fs_create_dir_all
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: medium
+  packages: [std]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [fs, create_dir_all]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted create_dir_all path
+    code: |
+      use std::process::Command;
+      fn example(target: &str) {
+          fs::create_dir_all(target);
+      }
+  - name: literal create_dir_all path negative
+    code: |
+      use std::process::Command;
+      fn example() {
+          fs::create_dir_all("/var/app/uploads");
+      }
+    expect_no_match: true
+  description: "std::fs::create_dir_all — tainted path can create directories outside intended root."
+- id: rust.path.tar_unpack
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [tar]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Archive, unpack]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted tar unpack destination
+    code: |
+      use tar::dummy;
+      fn example(target: &str) {
+          Archive::unpack(target);
+      }
+  - name: literal tar unpack destination negative
+    code: |
+      use tar::dummy;
+      fn example() {
+          Archive::unpack("/var/app/extract");
+      }
+    expect_no_match: true
+  description: "tar::Archive::unpack — tar-slip: entries with `../` escape the target dir."
+- id: rust.path.zip_extract
+  enabled: true
+  language: rust
+  tag: path-traversal
+  severity: high
+  packages: [zip]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [ZipArchive, extract]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted zip extract destination
+    code: |
+      use zip::dummy;
+      fn example(target: &str) {
+          ZipArchive::extract(target);
+      }
+  - name: literal zip extract destination negative
+    code: |
+      use zip::dummy;
+      fn example() {
+          ZipArchive::extract("/var/app/extract");
+      }
+    expect_no_match: true
+  description: "zip::read::ZipArchive::extract — zip-slip: member names with `../` write outside dest."

@@ -1,0 +1,29 @@
+- id: rust.redos.regex_new
+  enabled: true
+  language: rust
+  tag: redos
+  severity: medium
+  packages: [regex]
+  cwe: [CWE-1333]
+  match:
+    kind: call
+    callee:
+      attribute: [Regex, new]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted regex pattern
+    code: |
+      use regex::dummy;
+      fn example(target: &str) {
+          Regex::new(target);
+      }
+  - name: literal regex pattern negative
+    code: |
+      use regex::dummy;
+      fn example() {
+          Regex::new("^[a-z]+$");
+      }
+    expect_no_match: true
+  description: "regex::Regex::new(tainted_pattern) — attacker-controlled regex strings can consume excessive CPU during matching."

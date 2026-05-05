@@ -1,0 +1,876 @@
+- id: csharp.sqli.sqlcommand_ctor
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: new
+    callee:
+      name: SqlCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class SqlCommand { public SqlCommand(dynamic input) { } } class App { void
+      Test() { dynamic input = "x"; var result = new SqlCommand(input); } }
+
+      '
+  - name: literal sqlcommand text negative
+    code: |
+      class SqlCommand { public SqlCommand(dynamic input) { } } class App { void Test() { var result = new SqlCommand("select 1"); } }
+    expect_no_match: true
+  description: "new SqlCommand(tainted) \u2014 System.Data.SqlClient/Microsoft.Data.SqlClient;\
+    \ flag if first arg is interpolated SQL."
+- id: csharp.sqli.sqlcommand_executereader
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlCommand
+      - ExecuteReader
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; SqlCommand.ExecuteReader(input); } }
+
+      '
+  description: "Disabled — SqlCommand.ExecuteReader() executes SQL stored on CommandText/constructor state; use the CommandText/SqlCommand constructor sinks until receiver-state tracking exists."
+- id: csharp.sqli.sqlcommand_executenonquery
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlCommand
+      - ExecuteNonQuery
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; SqlCommand.ExecuteNonQuery(input); } }
+
+      '
+  description: "Disabled — SqlCommand.ExecuteNonQuery() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
+- id: csharp.sqli.sqlcommand_executescalar
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlCommand
+      - ExecuteScalar
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; SqlCommand.ExecuteScalar(input); } }
+
+      '
+  description: "Disabled — SqlCommand.ExecuteScalar() has no SQL string argument; use CommandText/constructor sinks until receiver-state tracking exists."
+- id: csharp.sqli.sqlcommand_commandtext
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: write
+    target:
+      name: CommandText
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; CommandText = input; } }
+
+      '
+  description: Command.CommandText = tainted SQL.
+- id: csharp.sqli.oracle_command_executenonquery
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - OracleCommand
+      - ExecuteNonQuery
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; OracleCommand.ExecuteNonQuery(input); } }
+
+      '
+  description: "Disabled — OracleCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.npgsql_command_executenonquery
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - Npgsql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NpgsqlCommand
+      - ExecuteNonQuery
+  match_examples:
+  - name: declared shape
+    code: 'using Npgsql;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; NpgsqlCommand.ExecuteNonQuery(input); } }
+
+      '
+  description: "Disabled — NpgsqlCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.mysql_command_executereader
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - MySql.Data
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MySqlCommand
+      - ExecuteReader
+  match_examples:
+  - name: declared shape
+    code: 'using MySql.Data;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; MySqlCommand.ExecuteReader(input); } }
+
+      '
+  description: "Disabled — MySqlCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.sqlite_command_executereader
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - System.Data.SQLite
+  - Microsoft.Data.Sqlite
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SQLiteCommand
+      - ExecuteReader
+  match_examples:
+  - name: declared shape
+    code: 'using System.Data.SQLite;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; SQLiteCommand.ExecuteReader(input); } }
+
+      '
+  description: "Disabled — SQLiteCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.oledb_command_executereader
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - OleDbCommand
+      - ExecuteReader
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; OleDbCommand.ExecuteReader(input); } }
+
+      '
+  description: "Disabled — OleDbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.ef_database_executesqlraw
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - Microsoft.EntityFrameworkCore
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - ExecuteSqlRaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using Microsoft.EntityFrameworkCore;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; Database.ExecuteSqlRaw(input); } }
+
+      '
+  - name: literal executesqlraw negative
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test() { Database.ExecuteSqlRaw("select 1"); } }
+    expect_no_match: true
+  description: "EF Core Database.ExecuteSqlRaw \u2014 flag if string built."
+- id: csharp.sqli.ef_database_executesqlrawasync
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - Microsoft.EntityFrameworkCore
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - ExecuteSqlRawAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using Microsoft.EntityFrameworkCore;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; Database.ExecuteSqlRawAsync(input); } }
+
+      '
+  - name: literal executesqlrawasync negative
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test() { Database.ExecuteSqlRawAsync("select 1"); } }
+    expect_no_match: true
+  description: EF Core ExecuteSqlRawAsync.
+- id: csharp.sqli.ef_database_sqlquery_raw
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - Microsoft.EntityFrameworkCore
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - SqlQueryRaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using Microsoft.EntityFrameworkCore;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; Database.SqlQueryRaw(input); } }
+
+      '
+  - name: literal sqlqueryraw negative
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test() { Database.SqlQueryRaw("select 1"); } }
+    expect_no_match: true
+  description: EF Core SqlQueryRaw.
+- id: csharp.sqli.ef_dbset_fromsqlraw
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - Microsoft.EntityFrameworkCore
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: FromSqlRaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using Microsoft.EntityFrameworkCore;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; FromSqlRaw(input); } }
+
+      '
+  - name: literal fromsqlraw negative
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test() { FromSqlRaw("select 1"); } }
+    expect_no_match: true
+  description: "EF Core DbSet.FromSqlRaw \u2014 string-built variant."
+- id: csharp.sqli.ef_database_executesqlcommand
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - EntityFramework
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - ExecuteSqlCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using EntityFramework;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; Database.ExecuteSqlCommand(input); } }
+
+      '
+  - name: literal executesqlcommand negative
+    code: |
+      using EntityFramework;
+      class App { void Test() { Database.ExecuteSqlCommand("select 1"); } }
+    expect_no_match: true
+  description: EF6 Database.ExecuteSqlCommand (string overload).
+- id: csharp.sqli.dapper_query
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: Query
+  description: "Disabled \u2014 bare Query collides with LINQ/IQueryable.Query; enable\
+    \ only when Dapper import confirmed and first arg is string."
+- id: csharp.sqli.dapper_execute
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: Execute
+  description: "Disabled \u2014 bare Execute is ubiquitous (Command, MediatR, etc.);\
+    \ rely on dedicated ADO.NET ExecuteNonQuery/Reader sinks."
+- id: csharp.sqli.dapper_queryasync
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: QueryAsync
+  description: "Disabled \u2014 bare QueryAsync too broad; re-enable when Dapper import\
+    \ + string first arg can be constrained."
+- id: csharp.sqli.dapper_execute_async
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: ExecuteAsync
+  description: "Disabled \u2014 bare ExecuteAsync is ubiquitous outside Dapper."
+- id: csharp.sqli.nhibernate_createsqlquery
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - NHibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ISession
+      - CreateSQLQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using NHibernate;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; ISession.CreateSQLQuery(input); } }
+
+      '
+  - name: literal nhibernate sql query negative
+    code: |
+      using NHibernate;
+      class App { void Test() { ISession.CreateSQLQuery("select 1"); } }
+    expect_no_match: true
+  description: "NHibernate ISession.CreateSQLQuery \u2014 raw SQL."
+- id: csharp.sqli.nhibernate_createquery_string
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - NHibernate
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ISession
+      - CreateQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using NHibernate;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; ISession.CreateQuery(input); } }
+
+      '
+  - name: literal nhibernate hql negative
+    code: |
+      using NHibernate;
+      class App { void Test() { ISession.CreateQuery("from User"); } }
+    expect_no_match: true
+  description: "NHibernate CreateQuery(HQL) \u2014 string-built HQL."
+- id: csharp.sqli.linq2db_query
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - linq2db
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: Query
+  description: "Disabled \u2014 bare Query collides with Dapper / LINQ; enable only\
+    \ when linq2db DataConnection receiver confirmed."
+- id: csharp.sqli.dbcommand_executenonquery
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DbCommand
+      - ExecuteNonQuery
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; DbCommand.ExecuteNonQuery(input); } }
+
+      '
+  description: "Disabled — DbCommand.ExecuteNonQuery() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.dbcommand_executereader
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DbCommand
+      - ExecuteReader
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; DbCommand.ExecuteReader(input); } }
+
+      '
+  description: "Disabled — DbCommand.ExecuteReader() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.dbcommand_executescalar
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DbCommand
+      - ExecuteScalar
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; DbCommand.ExecuteScalar(input); } }
+
+      '
+  description: "Disabled — DbCommand.ExecuteScalar() executes receiver CommandText state, not a taintable SQL argument."
+- id: csharp.sqli.ef_database_sqlquery
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - EntityFramework
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Database
+      - SqlQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using EntityFramework;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; Database.SqlQuery(input); } }
+
+      '
+  - name: literal database sqlquery negative
+    code: |
+      using EntityFramework;
+      class App { void Test() { Database.SqlQuery("select 1"); } }
+    expect_no_match: true
+  description: "EF6 Database.SqlQuery<T>(string sql, ...) \u2014 string-built variant;\
+    \ FromSqlInterpolated/SqlQuery<T>(FormattableString) is the safe form (covered\
+    \ as sanitizer)."
+- id: csharp.sqli.ef_dbset_sqlquery
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - EntityFramework
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DbSet
+      - SqlQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using EntityFramework;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; DbSet.SqlQuery(input); } }
+
+      '
+  - name: literal dbset sqlquery negative
+    code: |
+      using EntityFramework;
+      class App { void Test() { DbSet.SqlQuery("select 1"); } }
+    expect_no_match: true
+  description: "EF6 DbSet<T>.SqlQuery \u2014 raw SQL on entity set."
+- id: csharp.sqli.ef_relationaldatabasefacade_sqlqueryraw
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - Microsoft.EntityFrameworkCore
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: SqlQueryRaw
+  match_examples:
+  - name: declared shape
+    code: 'using Microsoft.EntityFrameworkCore;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; SqlQueryRaw(input); } }
+
+      '
+  description: "Disabled \u2014 duplicate of csharp.sqli.ef_database_sqlquery_raw\
+    \ under the current bare-name matcher."
+- id: csharp.sqli.ef_dbset_fromsql
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: critical
+  packages:
+  - Microsoft.EntityFrameworkCore
+  - EntityFramework
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: FromSql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using Microsoft.EntityFrameworkCore;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; FromSql(input); } }
+
+      '
+  - name: literal fromsql negative
+    code: |
+      using Microsoft.EntityFrameworkCore;
+      class App { void Test() { FromSql("select 1"); } }
+    expect_no_match: true
+  description: "EF Core DbSet.FromSql (legacy 2.x) \u2014 string-built variant; FromSqlInterpolated\
+    \ is the safe form."
+- id: csharp.sqli.dapper_query_attr
+  enabled: false
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlMapper
+      - Query
+  match_examples:
+  - name: declared shape
+    code: 'using Dapper;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; SqlMapper.Query(input); } }
+
+      '
+  description: "Dapper SqlMapper.Query (extension call form) \u2014 flag when SQL\
+    \ string is built from taint; parameter object should be used instead of concat."
+  disabled_reason:
+    code: over-broad
+- id: csharp.sqli.dapper_execute_attr
+  enabled: false
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlMapper
+      - Execute
+  match_examples:
+  - name: declared shape
+    code: 'using Dapper;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; SqlMapper.Execute(input); } }
+
+      '
+  description: Dapper SqlMapper.Execute (extension call form).
+  disabled_reason:
+    code: over-broad
+- id: csharp.sqli.dapper_queryasync_attr
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlMapper
+      - QueryAsync
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: 'using Dapper;
+
+      class App { void Test(object conn, string input) { SqlMapper.QueryAsync(conn,
+      input); } }
+
+      '
+  - name: literal dapper queryasync sql negative
+    code: |
+      using Dapper;
+      class App { void Test(object conn) { SqlMapper.QueryAsync(conn, "select 1"); } }
+    expect_no_match: true
+  description: Dapper SqlMapper.QueryAsync.
+- id: csharp.sqli.dapper_executeasync_attr
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - Dapper
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SqlMapper
+      - ExecuteAsync
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: 'using Dapper;
+
+      class App { void Test(object conn, string input) { SqlMapper.ExecuteAsync(conn,
+      input); } }
+
+      '
+  - name: literal dapper executeasync sql negative
+    code: |
+      using Dapper;
+      class App { void Test(object conn) { SqlMapper.ExecuteAsync(conn, "select 1"); } }
+    expect_no_match: true
+  description: Dapper SqlMapper.ExecuteAsync.
+- id: csharp.sqli.servicestack_ormlite_sqllist
+  enabled: true
+  language: csharp
+  tag: sql-injection
+  severity: high
+  packages:
+  - ServiceStack.OrmLite
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: SqlList
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using ServiceStack.OrmLite;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; SqlList(input); } }
+
+      '
+  - name: literal servicestack sql negative
+    code: |
+      using ServiceStack.OrmLite;
+      class App { void Test() { SqlList("select 1"); } }
+    expect_no_match: true
+  description: "ServiceStack OrmLite IDbConnection.SqlList(rawSql) \u2014 raw SQL\
+    \ execution."

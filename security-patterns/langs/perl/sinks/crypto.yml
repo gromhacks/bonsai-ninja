@@ -1,0 +1,125 @@
+# Perl weak-crypto sinks.
+# Called as exported subs: `md5_hex($x)` or `sha1_hex($x)` — bare name.
+- id: perl.crypto.digest_md5
+  enabled: true
+  language: perl
+  tag: weak-crypto
+  severity: low
+  packages: ["Digest::MD5"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: md5_hex
+  match_examples:
+  - name: perl.crypto.digest_md5 example
+    code: |
+      use Digest::MD5;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        md5_hex($input)
+      }
+  description: "Digest::MD5 md5_hex — collision-broken; never use for password hashing or integrity."
+
+- id: perl.crypto.digest_md5_base64
+  enabled: true
+  language: perl
+  tag: weak-crypto
+  severity: low
+  packages: ["Digest::MD5"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: md5_base64
+  match_examples:
+  - name: perl.crypto.digest_md5_base64 example
+    code: |
+      use Digest::MD5;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        md5_base64($input)
+      }
+  description: "Digest::MD5 md5_base64 — same MD5 primitive, base64 output; collision-broken."
+
+- id: perl.crypto.digest_sha1
+  enabled: true
+  language: perl
+  tag: weak-crypto
+  severity: low
+  packages: ["Digest::SHA"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: sha1_hex
+  match_examples:
+  - name: perl.crypto.digest_sha1 example
+    code: |
+      use Digest::SHA;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        sha1_hex($input)
+      }
+  description: "Digest::SHA sha1_hex — collision attacks published (SHAttered); use SHA-256+ for integrity, argon2/bcrypt for passwords."
+
+- id: perl.crypto.crypt_des
+  enabled: true
+  language: perl
+  tag: weak-crypto
+  severity: high
+  packages: ["Crypt::DES"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: ["Crypt::DES", "new"]
+  match_examples:
+  - name: perl.crypto.crypt_des example
+    code: |
+      use Crypt::DES;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Crypt::DES->new($input)
+      }
+  description: "Crypt::DES — 56-bit key, brute-forceable in hours; do not use."
+
+- id: perl.crypto.crypt_rc4
+  enabled: true
+  language: perl
+  tag: weak-crypto
+  severity: high
+  packages: ["Crypt::RC4"]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      name: RC4
+  match_examples:
+  - name: perl.crypto.crypt_rc4 example
+    code: |
+      use Crypt::RC4;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        RC4($input)
+      }
+  description: "Crypt::RC4 — biased keystream; broken for TLS and WEP. Do not use."
+
+- id: perl.crypto.rand
+  enabled: true
+  language: perl
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      name: rand
+  match_examples:
+  - name: perl.crypto.rand example
+    code: |
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        rand($input)
+      }
+  description: "rand() — non-crypto linear PRNG; predictable output. For tokens/keys use Crypt::URandom or Bytes::Random::Secure."

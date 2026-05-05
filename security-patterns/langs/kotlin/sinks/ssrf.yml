@@ -1,0 +1,648 @@
+- id: kotlin.ssrf.urlconnection_openconnection
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - URL
+      - openConnection
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    URL.openConnection(input)\n\
+      \  }\n}\n"
+  description: "Disabled — URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+- id: kotlin.ssrf.url_ctor
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: URL
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    URL(input)\n  }\n}\nclass\
+      \ URL(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: "class App {\nfun handle(input: String) {\n  URL(\"safe\")\n}\n}\nclass\
+      \ URL(vararg args: Any?)\n"
+    expect_no_match: true
+  description: "new URL(tainted) \u2014 flag construction of URLs from user input."
+- id: kotlin.ssrf.uri_ctor
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: low
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: URI
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    URI(input)\n  }\n}\nclass\
+      \ URI(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: "class App {\nfun handle(input: String) {\n  URI(\"safe\")\n}\n}\nclass\
+      \ URI(vararg args: Any?)\n"
+    expect_no_match: true
+  description: "new URI(tainted) \u2014 construction only; open when passed to a client."
+- id: kotlin.ssrf.httpclient_execute
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.apache.httpcomponents
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.apache.httpcomponents.*\n// uses org.apache.httpcomponents\n\
+      class App {\n  fun handle(input: String) {\n    HttpClient.execute(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.apache.httpcomponents.*\n// uses org.apache.httpcomponents\n\
+      class App {\nfun handle(input: String) {\n  HttpClient.execute(\"safe\")\n}\n\
+      }\n"
+    expect_no_match: true
+  description: Apache HttpClient execute with tainted URL.
+- id: kotlin.ssrf.closeable_httpclient_execute
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.apache.httpcomponents
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CloseableHttpClient
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.apache.httpcomponents.*\n// uses org.apache.httpcomponents\n\
+      class App {\n  fun handle(input: String) {\n    CloseableHttpClient.execute(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.apache.httpcomponents.*\n// uses org.apache.httpcomponents\n\
+      class App {\nfun handle(input: String) {\n  CloseableHttpClient.execute(\"safe\"\
+      )\n}\n}\n"
+    expect_no_match: true
+  description: Apache CloseableHttpClient.execute.
+- id: kotlin.ssrf.resttemplate_getforobject
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - getForObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.web.client.*\nclass App {\n  fun handle(input:\
+      \ String) {\n    RestTemplate.getForObject(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.web.client.*\nclass App {\nfun handle(input:\
+      \ String) {\n  RestTemplate.getForObject(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Spring RestTemplate getForObject.
+- id: kotlin.ssrf.resttemplate_getforentity
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - getForEntity
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.web.client.*\nclass App {\n  fun handle(input:\
+      \ String) {\n    RestTemplate.getForEntity(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.web.client.*\nclass App {\nfun handle(input:\
+      \ String) {\n  RestTemplate.getForEntity(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Spring RestTemplate.getForEntity.
+- id: kotlin.ssrf.resttemplate_postforobject
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - postForObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.web.client.*\nclass App {\n  fun handle(input:\
+      \ String) {\n    RestTemplate.postForObject(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.web.client.*\nclass App {\nfun handle(input:\
+      \ String) {\n  RestTemplate.postForObject(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Spring RestTemplate.postForObject.
+- id: kotlin.ssrf.resttemplate_exchange
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - exchange
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.web.client.*\n// uses org.springframework.web.client\n\
+      class App {\n  fun handle(input: String) {\n    RestTemplate.exchange(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.web.client.*\n// uses org.springframework.web.client\n\
+      class App {\nfun handle(input: String) {\n  RestTemplate.exchange(\"safe\")\n\
+      }\n}\n"
+    expect_no_match: true
+  description: Spring RestTemplate.exchange.
+- id: kotlin.ssrf.webclient_uri
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - uri
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.springframework.web.reactive.function.client.*\nclass App {\n\
+      \  fun handle(input: String) {\n    WebClient.uri(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.web.reactive.function.client.*\nclass App {\n\
+      fun handle(input: String) {\n  WebClient.uri(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Spring WebClient.uri.
+- id: kotlin.ssrf.webclient_retrieve
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: retrieve
+  match_examples:
+  - name: webclient retrieve request
+    code: "import org.springframework.web.reactive.function.client.*\nclass App {\n\
+      \  fun handle(requestSpec: RequestSpec): Any? {\n    return requestSpec.retrieve()\n\
+      \  }\n}\nclass RequestSpec {\n  fun retrieve(vararg args: Any?): Any? = null\n\
+      }\n"
+    expect_match_text:
+    - requestSpec.retrieve
+  description: "Disabled — WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
+- id: kotlin.ssrf.play_wsclient_url
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - com.typesafe.play
+  - play.libs.ws
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WSClient
+      - url
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: play wsclient url
+    code: "import com.typesafe.play.*\nclass App {\n  fun handle(url: String): Any?\
+      \ {\n    return WSClient.url(url)\n  }\n}\n"
+    expect_match_text:
+    - WSClient.url
+  - name: arg tainted literal negative
+    code: "import com.typesafe.play.*\nclass App {\nfun handle(url: String): Any?\
+      \ {\n  return WSClient.url(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "Play WSClient.url(url) \u2014 asynchronous server-side request target\
+    \ controlled by attacker input."
+- id: kotlin.ssrf.okhttp_builder_url
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - okhttp3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Builder
+      - url
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import okhttp3.*\nclass App {\n  fun handle(input: String) {\n    Builder.url(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import okhttp3.*\nclass App {\nfun handle(input: String) {\n  Builder.url(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "OkHttp Request.Builder().url(tainted) \u2014 tainted URL."
+- id: kotlin.ssrf.okhttp_call_execute
+  enabled: false
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - okhttp3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Call
+      - execute
+  match_examples:
+  - name: generated shape example
+    code: "import okhttp3.*\n// uses okhttp3\nclass App {\n  fun handle(input: String)\
+      \ {\n    Call.execute(input)\n  }\n}\n"
+  description: "OkHttp Call.execute \u2014 dispatches Request to tainted URL."
+  disabled_reason:
+    code: over-broad
+- id: kotlin.ssrf.ktor_httpclient_request
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - io.ktor:ktor-client-core
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import io.ktor.ktorclientcore.*\n// uses io.ktor:ktor-client-core\nclass\
+      \ App {\n  fun handle(input: String) {\n    HttpClient.request(input)\n  }\n\
+      }\n"
+  - name: arg tainted literal negative
+    code: "import io.ktor.ktorclientcore.*\n// uses io.ktor:ktor-client-core\nclass\
+      \ App {\nfun handle(input: String) {\n  HttpClient.request(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Ktor HttpClient.request(tainted URL).
+  imports:
+  - io
+  - io.ktor.ktorclientcore
+- id: kotlin.ssrf.java_httpclient_send
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - send
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    HttpClient.send(input)\n\
+      \  }\n}\n"
+  description: "Disabled duplicate \u2014 same matcher as canonical kotlin.ssrf.jdk_httpclient_send."
+- id: kotlin.ssrf.java_httpclient_sendasync
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - sendAsync
+  match_examples:
+  - name: generated shape example
+    code: "import java.net.http.*\nclass App {\n  fun handle(input: String) {\n  \
+      \  HttpClient.sendAsync(input)\n  }\n}\n"
+  description: "Disabled duplicate \u2014 same matcher as canonical kotlin.ssrf.jdk_httpclient_sendasync."
+  imports:
+  - java
+- id: kotlin.ssrf.url_openstream
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - URL
+      - openStream
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    URL.openStream(input)\n\
+      \  }\n}\n"
+  description: "Disabled — URL.openStream() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+- id: kotlin.ssrf.jsoup_connect
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.jsoup
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jsoup
+      - connect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.jsoup.*\n// uses org.jsoup\nclass App {\n  fun handle(input:\
+      \ String) {\n    Jsoup.connect(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.jsoup.*\n// uses org.jsoup\nclass App {\nfun handle(input: String)\
+      \ {\n  Jsoup.connect(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Jsoup.connect(tainted URL).
+- id: kotlin.ssrf.async_httpclient_prepareget
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - org.asynchttpclient
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncHttpClient
+      - prepareGet
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import org.asynchttpclient.*\nclass App {\n  fun handle(input: String)\
+      \ {\n    AsyncHttpClient.prepareGet(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.asynchttpclient.*\nclass App {\nfun handle(input: String) {\n\
+      \  AsyncHttpClient.prepareGet(\"safe\")\n}\n}\n"
+    expect_no_match: true
+  description: Ning/AsyncHttpClient prepareGet(tainted URL).
+- id: kotlin.ssrf.okhttp_client_newcall
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - okhttp3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - OkHttpClient
+      - newCall
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import okhttp3.*\nclass App {\n  fun handle(input: String) {\n    OkHttpClient.newCall(input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import okhttp3.*\nclass App {\nfun handle(input: String) {\n  OkHttpClient.newCall(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "OkHttpClient.newCall(request) \u2014 dispatches a Request whose URL\
+    \ may be tainted (SSRF)."
+- id: kotlin.ssrf.okhttp_call_enqueue
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - okhttp3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Call
+      - enqueue
+  match_examples:
+  - name: generated shape example
+    code: "import okhttp3.*\n// uses okhttp3\nclass App {\n  fun handle(input: String)\
+      \ {\n    Call.enqueue(input)\n  }\n}\n"
+  description: "Disabled — OkHttp Call.enqueue(callback) dispatches receiver Request state; Request.Builder.url(tainted) and OkHttpClient.newCall(tainted) carry the tainted arguments."
+- id: kotlin.ssrf.jdk_httpclient_send
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - send
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdk httpclient send
+    code: "import java.net.http.*\nclass App {\n  fun handle(input: String) {\n  \
+      \  HttpClient.send(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import java.net.http.*\nclass App {\nfun handle(input: String) {\n  HttpClient.send(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "java.net.http.HttpClient.send(request) \u2014 dispatches an HTTP request\
+    \ whose URI may be attacker-controlled."
+- id: kotlin.ssrf.jdk_httpclient_sendasync
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - sendAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdk httpclient send async
+    code: "import java.net.http.*\nclass App {\n  fun handle(input: String) {\n  \
+      \  HttpClient.sendAsync(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import java.net.http.*\nclass App {\nfun handle(input: String) {\n  HttpClient.sendAsync(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "java.net.http.HttpClient.sendAsync(request) \u2014 async dispatch\
+    \ of an attacker-influenced request URI."
+- id: kotlin.ssrf.jdk_httprequest_builder_uri
+  enabled: true
+  language: kotlin
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Builder
+      - uri
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdk http request builder uri
+    code: "import java.net.http.*\nclass App {\n  fun handle(input: String) {\n  \
+      \  Builder.uri(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import java.net.http.*\nclass App {\nfun handle(input: String) {\n  Builder.uri(\"\
+      safe\")\n}\n}\n"
+    expect_no_match: true
+  description: "java.net.http.HttpRequest.Builder.uri(tainted URI) \u2014 request\
+    \ target controlled by attacker input."

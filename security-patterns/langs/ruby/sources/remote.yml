@@ -1,0 +1,314 @@
+# Ruby HTTP / RPC / external sources. Rails, Sinatra, Grape, Hanami, Rack, Roda.
+# trust: remote — network-reachable, attacker-controlled.
+
+# `params` is implicit-receiver in every Rack-based controller (Rails,
+# Sinatra, Grape, Hanami, Roda). A single rule avoids duplicate firing.
+- id: ruby.source.params
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack, sinatra, grape, hanami, roda]
+  match:
+    kind: call
+    callee:
+      name: params
+  constraints:
+  - top_level: true
+  match_examples:
+  - name: ruby.source.params example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        params(input)
+      end
+  description: "Controller/action `params` — HTTP request parameters (Rails, Sinatra, Grape, Hanami, Roda)."
+
+- id: ruby.source.params_read
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  payload_types: [query, form, json]
+  packages: [actionpack, sinatra, grape, hanami, roda]
+  match:
+    kind: read
+    target:
+      name: params
+  match_examples:
+  - name: ruby params subscript read
+    code: |
+      require "actionpack"
+      def example
+        value = params["name"]
+      end
+    expect_match_text: [params]
+  description: "Controller/action params hash read — covers `params[:id]` / `params[\"id\"]` source use where the adapter emits a read rather than a call."
+
+- id: ruby.source.rails_request_body
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, body]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_body example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.body()
+      end
+  description: "Rails/Sinatra request.body — raw HTTP body IO. Property-style getter (no args); `max_args: 0` rejects unrelated `request.body(...)` setter/builder decoys."
+
+- id: ruby.source.rails_request_raw_post
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, raw_post]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_raw_post example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.raw_post()
+      end
+  description: "Rails request.raw_post — raw request body as String. Property-style getter (no args)."
+
+- id: ruby.source.rails_request_query_parameters
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, query_parameters]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_query_parameters example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.query_parameters()
+      end
+  description: "Rails request.query_parameters. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+
+- id: ruby.source.rails_request_path_parameters
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, path_parameters]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_path_parameters example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.path_parameters()
+      end
+  description: "Rails request.path_parameters. Property-style getter (no args)."
+
+- id: ruby.source.rails_request_headers
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      attribute: [request, headers]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.rails_request_headers example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        request.headers()
+      end
+  description: "Rails request.headers — attacker-controlled when crossing trust boundary. Property-style getter (no args)."
+
+- id: ruby.source.rails_cookies
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      name: cookies
+  match_examples:
+  - name: ruby.source.rails_cookies example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        cookies(input)
+      end
+  description: "Rails cookies — client-controlled."
+
+- id: ruby.source.rails_session
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      name: session
+  description: "Disabled — Rails session is integrity-protected (signed cookie/encrypted store) by default."
+
+- id: ruby.source.rack_request_params
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [rack]
+  match:
+    kind: call
+    callee:
+      attribute: [Rack::Request, params]
+  match_examples:
+  - name: ruby.source.rack_request_params example
+    code: |
+      require "rack"
+      def example(input, url, id, item, req_obj, options)
+        Rack::Request.params(input)
+      end
+  description: "Rack::Request#params."
+
+- id: ruby.source.rack_env_query_string
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [rack]
+  match:
+    kind: read
+    target:
+      name: QUERY_STRING
+  match_examples:
+  - name: ruby.source.rack_env_query_string example
+    code: |
+      require "rack"
+      def example(input, url, id, item, req_obj, options)
+        value = env["QUERY_STRING"]
+      end
+  description: "Rack env QUERY_STRING read."
+
+# UploadedFile.original_filename is client-controlled metadata — it is a
+# SOURCE, not a sink. Keeps taint through path-construction into file sinks.
+- id: ruby.source.rails_uploaded_file_filename
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      name: original_filename
+  match_examples:
+  - name: ruby.source.rails_uploaded_file_filename example
+    code: |
+      require "actionpack"
+      def example(input, url, id, item, req_obj, options)
+        original_filename(input)
+      end
+  description: "ActionDispatch::Http::UploadedFile#original_filename — client-controlled filename."
+
+- id: ruby.source.actioncable_receive
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [actioncable]
+  match:
+    kind: param
+    target:
+      name: data
+  description: "Disabled — bare `data` param matches ordinary helper methods; needs class/context-aware ActionCable receive matching."
+
+- id: ruby.source.graphql_resolver_args
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [graphql]
+  match:
+    kind: param
+    target:
+      name: resolve
+  description: "Disabled — bare `resolve` param overmatches helper methods; enable only with class-context narrowing for graphql-ruby Resolver / Field#resolve(args)."
+
+- id: ruby.source.hanami_request_params
+  enabled: true
+  language: ruby
+  tag: http-input
+  trust: remote
+  packages: [hanami]
+  match:
+    kind: call
+    callee:
+      attribute: [request, params]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: ruby.source.hanami_request_params example
+    code: |
+      require "hanami"
+      def example(input, url, id, item, req_obj, options)
+        request.params()
+      end
+  description: "Hanami action request.params — HTTP parameters via Hanami request object. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+
+# Generic untrusted-blob parameter for YAML.load / Marshal.load /
+# Oj.load deserialization-style entry points. The canonical shape is
+# `def import(blob); YAML.load(blob); end`. Bare-name match
+# overmatches, but the deser sinks are the second gate.
+- id: ruby.source.bytes_blob_param
+  enabled: true
+  language: ruby
+  trust: remote
+  tag: caller-input
+  payload_types: [binary]
+  match:
+    kind: param
+    target:
+      regex: "^(blob|payload|data|raw|bytes)$"
+  match_examples:
+  - name: ruby.source.bytes_blob_param example
+    code: |
+      def handler(payload)
+        payload
+      end
+  description: "Generic `blob | payload | data | raw | bytes` parameter on deserialization-style entry points. Pairs with ruby.deser.* sinks (YAML.load, Marshal.load, Oj.load). Engine taint flow + sink shape are the second gate."

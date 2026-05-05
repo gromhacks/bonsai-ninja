@@ -1,0 +1,34 @@
+- id: ruby.xpath.nokogiri_xpath
+  enabled: true
+  language: ruby
+  tag: xpath-injection
+  severity: high
+  packages: ["nokogiri"]
+  imports: ["nokogiri"]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.xpath$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nokogiri xpath query
+    code: |
+      require "nokogiri"
+      def handle(name)
+        doc = Nokogiri::XML("<root></root>")
+        expr = "//user[name=\"#{name}\"]"
+        doc.xpath(expr)
+      end
+    expect_match_text: [doc.xpath]
+  - name: literal xpath negative
+    code: |
+      require "nokogiri"
+      def handle
+        doc = Nokogiri::XML("<root></root>")
+        doc.xpath("//safe")
+      end
+    expect_no_match: true
+  description: "Nokogiri document `xpath` query with user-controlled expression."

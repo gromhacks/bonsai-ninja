@@ -1,0 +1,193 @@
+# Go deserialization sinks. gob can instantiate arbitrary registered
+# types from a tainted stream (gadget chain). YAML on tainted bytes is
+# dangerous because custom UnmarshalYAML implementations can run code.
+# JSON/XML/TOML/msgpack are type-bounded by default — kept disabled.
+- id: go.deser.gob_newdecoder
+  enabled: true
+  language: go
+  tag: insecure-deserialization
+  severity: medium
+  packages: ["encoding/gob"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [gob, NewDecoder]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted gob reader
+    code: |
+      package main
+      import (
+        "encoding/gob"
+        "io"
+      )
+
+      func decode(r io.Reader) {
+        gob.NewDecoder(r)
+      }
+    expect_match_text: [gob.NewDecoder]
+  - name: literal gob reader negative
+    code: |
+      package main
+      import (
+        "encoding/gob"
+        "strings"
+      )
+
+      func decode() {
+        gob.NewDecoder(strings.NewReader("safe"))
+      }
+    expect_no_match: true
+  description: "encoding/gob.NewDecoder(tainted reader) — any registered concrete type can be instantiated; real gadget-chain risk."
+
+- id: go.deser.gob_decoder_decode
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: insecure-deserialization
+  severity: medium
+  packages: ["encoding/gob"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Decode$"
+  description: "Disabled — Decoder.Decode(out) has no tainted data argument; needs receiver state from gob.NewDecoder(tainted reader)."
+
+- id: go.deser.yaml_unmarshal
+  enabled: true
+  language: go
+  tag: insecure-deserialization
+  severity: high
+  packages: ["gopkg.in/yaml.v2", "gopkg.in/yaml.v3"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [yaml, Unmarshal]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaml bytes
+    code: |
+      package main
+      import "gopkg.in/yaml.v2"
+
+      func decode(data []byte) {
+        var out any
+        yaml.Unmarshal(data, &out)
+      }
+    expect_match_text: [yaml.Unmarshal]
+  - name: literal yaml bytes negative
+    code: |
+      package main
+      import "gopkg.in/yaml.v2"
+
+      func decode() {
+        var out any
+        yaml.Unmarshal([]byte("name: alice"), &out)
+      }
+    expect_no_match: true
+  description: "yaml.Unmarshal(tainted, …) — custom UnmarshalYAML methods on the target type execute attacker-chosen logic."
+
+- id: go.deser.yaml_unmarshalstrict
+  enabled: true
+  language: go
+  tag: insecure-deserialization
+  severity: high
+  packages: ["gopkg.in/yaml.v2", "gopkg.in/yaml.v3"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [yaml, UnmarshalStrict]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted yaml strict bytes
+    code: |
+      package main
+      import "gopkg.in/yaml.v2"
+
+      func decode(data []byte) {
+        var out any
+        yaml.UnmarshalStrict(data, &out)
+      }
+    expect_match_text: [yaml.UnmarshalStrict]
+  - name: literal yaml strict bytes negative
+    code: |
+      package main
+      import "gopkg.in/yaml.v2"
+
+      func decode() {
+        var out any
+        yaml.UnmarshalStrict([]byte("name: alice"), &out)
+      }
+    expect_no_match: true
+  description: "yaml.UnmarshalStrict(tainted, …) — same exposure as Unmarshal; strictness does not prevent UnmarshalYAML execution."
+
+- id: go.deser.json_unmarshal
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: insecure-deserialization
+  severity: low
+  packages: ["encoding/json"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [json, Unmarshal]
+  description: "Disabled — json.Unmarshal is type-bounded; enable when target has a risky custom UnmarshalJSON."
+
+- id: go.deser.xml_unmarshal
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: insecure-deserialization
+  severity: low
+  packages: ["encoding/xml"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [xml, Unmarshal]
+  description: "Disabled — encoding/xml is generally type-bounded; XXE is handled under sinks/xxe.yml."
+
+- id: go.deser.toml_unmarshal
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: insecure-deserialization
+  severity: low
+  packages: ["github.com/BurntSushi/toml"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [toml, Unmarshal]
+  description: "Disabled — TOML is type-bounded."
+
+- id: go.deser.msgpack_unmarshal
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: insecure-deserialization
+  severity: low
+  packages: ["github.com/vmihailenco/msgpack"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [msgpack, Unmarshal]
+  description: "Disabled — msgpack is type-bounded."

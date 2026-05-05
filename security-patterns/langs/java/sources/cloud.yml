@@ -1,0 +1,16 @@
+# Java cloud-function handlers (event-driven/serverless payloads).
+# HTTP-triggered functions live in remote.yml because they are
+# network-attacker reachable.
+- id: java.source.aws_lambda_handler
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: service
+  tag: cloud-event
+  packages: ["com.amazonaws:aws-lambda-java-core"]
+  match:
+    kind: param
+    target:
+      name: handleRequest
+  description: "Disabled — `handleRequest` is the handler method name; `kind: param` only matches parameter identifiers."

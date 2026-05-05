@@ -1,0 +1,298 @@
+- id: javascript.open_redirect.express_res_redirect
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  packages:
+  - express
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express res redirect
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.redirect(input);
+      }
+  - name: literal express res redirect negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: Express res.redirect(tainted).
+- id: javascript.open_redirect.express_res_location
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  packages:
+  - express
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - location
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express res location
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.location(input);
+      }
+  - name: literal express res location negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.location("/dashboard");
+      }
+    expect_no_match: true
+  description: "Express res.location(tainted) — sets Location header."
+- id: javascript.open_redirect.koa_redirect
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  packages:
+  - koa
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ctx
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: koa redirect
+    code: |
+      const _u = require("koa");
+      function demo(input, req, obj) {
+        return ctx.redirect(input);
+      }
+  - name: literal koa redirect negative
+    code: |
+      const _u = require("koa");
+      function demo() {
+        return ctx.redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: Koa ctx.redirect(tainted).
+- id: javascript.open_redirect.fastify_redirect
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  packages:
+  - fastify
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - reply
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: fastify redirect
+    code: |
+      const _u = require("fastify");
+      function demo(input, req, obj) {
+        return reply.redirect(input);
+      }
+  - name: literal fastify redirect negative
+    code: |
+      const _u = require("fastify");
+      function demo() {
+        return reply.redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: Fastify reply.redirect(tainted).
+- id: javascript.open_redirect.hapi_redirect
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  packages:
+  - '@hapi/hapi'
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - h
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: hapi redirect
+    code: |
+      const _u = require("@hapi/hapi");
+      function demo(input, req, obj) {
+        return h.redirect(input);
+      }
+  - name: literal hapi redirect negative
+    code: |
+      const _u = require("@hapi/hapi");
+      function demo() {
+        return h.redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: Hapi h.redirect(tainted).
+- id: javascript.open_redirect.next_response_redirect
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  packages:
+  - next
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - NextResponse
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: next response redirect
+    code: |
+      const _u = require("next");
+      function demo(input, req, obj) {
+        return NextResponse.redirect(input);
+      }
+  - name: literal next response redirect negative
+    code: |
+      const _u = require("next");
+      function demo() {
+        return NextResponse.redirect("/dashboard");
+      }
+    expect_no_match: true
+  description: Next.js NextResponse.redirect(tainted).
+- id: javascript.open_redirect.window_location_assign
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - location
+      - assign
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: window location assign
+    code: "function demo(input, req, obj) {\n  return location.assign(input);\n}\n"
+  - name: literal window location assign negative
+    code: |
+      function demo() {
+        return location.assign("/dashboard");
+      }
+    expect_no_match: true
+  description: window.location.assign(tainted).
+- id: javascript.open_redirect.window_location_replace
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - location
+      - replace
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: window location replace
+    code: "function demo(input, req, obj) {\n  return location.replace(input);\n}\n"
+  - name: literal window location replace negative
+    code: |
+      function demo() {
+        return location.replace("/dashboard");
+      }
+    expect_no_match: true
+  description: window.location.replace(tainted).
+- id: javascript.open_redirect.window_location_href_assign
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: open-redirect
+  severity: medium
+  cwe:
+  - CWE-601
+  match:
+    kind: write
+    target:
+      name: location
+  description: "Disabled — bare `.location = ...` fires on any field named `location` (very common in config objects); enable with receiver narrowing to `window`/`document`."
+
+- id: javascript.open_redirect.simple_oauth2_redirect_tainted
+  enabled: true
+  language: javascript
+  tag: open-redirect
+  severity: high
+  packages: [simple-oauth2]
+  imports: [simple-oauth2]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.authorizeURL$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: simple-oauth2 authorizeURL tainted redirect_uri
+    code: |
+      const _u = require("simple-oauth2");
+      function login(client, input) {
+        return client.authorizeURL({ redirect_uri: input, scope: "read" });
+      }
+      login({ authorizeURL: () => null }, "");
+    expect_match_text: [client.authorizeURL]
+  - name: simple-oauth2 authorizeURL literal negative
+    code: |
+      const _u = require("simple-oauth2");
+      function login(client) {
+        return client.authorizeURL({ redirect_uri: "https://app.example.com/cb", scope: "read" });
+      }
+      login({ authorizeURL: () => null });
+    expect_no_match: true
+  description: "simple-oauth2 client.authorizeURL({redirect_uri: tainted}) — attacker-controlled redirect_uri leaks the auth code or token to a malicious endpoint."

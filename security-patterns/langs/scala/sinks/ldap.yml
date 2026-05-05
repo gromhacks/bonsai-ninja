@@ -1,0 +1,136 @@
+- id: scala.ldap.initial_dir_context_search
+  enabled: false
+  language: scala
+  tag: ldap-injection
+  severity: high
+  packages:
+  - javax.naming.directory
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - InitialDirContext
+      - search
+  match_examples:
+  - name: generated shape example
+    code: "import javax.naming.directory._\n// uses javax.naming.directory\nobject\
+      \ App {\n  def handle(input: String): Unit = {\n    InitialDirContext.search(\"\
+      (uid=\" + input)\n  }\n}\n"
+  description: "JNDI InitialDirContext.search \u2014 tainted filter string splices\
+    \ into LDAP query, enabling LDAP injection (CWE-90)."
+  disabled_reason:
+    code: over-broad
+- id: scala.ldap.initial_dir_context_lookup
+  enabled: true
+  language: scala
+  tag: ldap-injection
+  severity: critical
+  packages:
+  - javax.naming.directory
+  cwe:
+  - CWE-90
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - InitialDirContext
+      - lookup
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import javax.naming.directory._\n// uses javax.naming.directory\nobject\
+      \ App {\n  def handle(input: String): Unit = {\n    InitialDirContext.lookup(\"\
+      (uid=\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import javax.naming.directory._\n// uses javax.naming.directory\nobject\
+      \ App {\n  def handle(input: String): Unit = {\n    InitialDirContext.lookup(\"\
+      safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "InitialDirContext.lookup \u2014 JNDI lookup vector."
+- id: scala.ldap.dircontext_search
+  enabled: false
+  language: scala
+  tag: ldap-injection
+  severity: high
+  packages:
+  - javax.naming.directory
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DirContext
+      - search
+  match_examples:
+  - name: generated shape example
+    code: "import javax.naming.directory._\n// uses javax.naming.directory\nobject\
+      \ App {\n  def handle(input: String): Unit = {\n    DirContext.search(\"(uid=\"\
+      \ + input)\n  }\n}\n"
+  description: "javax.naming.directory.DirContext.search \u2014 tainted filter enables\
+    \ LDAP injection; only filterExpr+filterArgs overload is safe."
+  disabled_reason:
+    code: over-broad
+- id: scala.ldap.unboundid_search
+  enabled: false
+  language: scala
+  tag: ldap-injection
+  severity: high
+  packages:
+  - com.unboundid.ldap.sdk
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LDAPConnection
+      - search
+  match_examples:
+  - name: generated shape example
+    code: "import com.unboundid.ldap.sdk._\n// uses com.unboundid.ldap.sdk\nobject App {\n  def\
+      \ handle(input: String): Unit = {\n    LDAPConnection.search(\"(uid=\" + input)\n\
+      \  }\n}\n"
+  description: "unboundid-ldapsdk LDAPConnection.search \u2014 tainted filter enables\
+    \ LDAP injection unless built via Filter.create*()."
+  imports:
+  - com.unboundid.ldap.sdk
+  disabled_reason:
+    code: over-broad
+- id: scala.ldap.unboundid_modify
+  enabled: true
+  language: scala
+  tag: ldap-injection
+  severity: high
+  packages:
+  - com.unboundid.ldap.sdk
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LDAPConnection
+      - modify
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import com.unboundid.ldap.sdk._\n// uses com.unboundid.ldap.sdk\nobject App {\n  def\
+      \ handle(input: String): Unit = {\n    LDAPConnection.modify(\"(uid=\" + input)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import com.unboundid.ldap.sdk._\n// uses com.unboundid.ldap.sdk\nobject App {\n  def\
+      \ handle(input: String): Unit = {\n    LDAPConnection.modify(\"uid=alice,dc=example,dc=com\"\
+      )\n  }\n}\n"
+    expect_no_match: true
+  description: "unboundid-ldapsdk LDAPConnection.modify \u2014 tainted DN/attribute\
+    \ enables LDAP-injection / unauthorized mutation."
+  imports:
+  - com.unboundid.ldap.sdk

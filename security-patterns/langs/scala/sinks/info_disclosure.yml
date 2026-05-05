@@ -1,0 +1,129 @@
+# Scala information-disclosure sinks (stdout, logging, HTTP error bodies).
+- id: scala.info_disclosure.println_secret
+  enabled: true
+  language: scala
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [Console, out, println]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Console.out.println("password=" + input)
+        }
+      }
+    expect_match_text: [Console.out.println]
+  - name: literal println negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Console.out.println("startup ok")
+        }
+      }
+    expect_no_match: true
+  description: "TODO(only-when-packaged): scala.Console / java.lang.System is auto-imported in Scala — Console.out.println of secret-shaped values can disclose credentials through stdout logs."
+
+- id: scala.info_disclosure.console_err_secret
+  enabled: true
+  language: scala
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [Console, err, println]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Console.err.println("api_key=" + input)
+        }
+      }
+    expect_match_text: [Console.err.println]
+  - name: literal console err negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Console.err.println("startup ok")
+        }
+      }
+    expect_no_match: true
+  description: "TODO(only-when-packaged): scala.Console is auto-imported in Scala — Console.err.println of secret-shaped values leaks sensitive data into error logs."
+
+- id: scala.info_disclosure.logger_error_secret
+  enabled: true
+  language: scala
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [logger, error]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          logger.error("token=" + input)
+        }
+      }
+    expect_match_text: [logger.error]
+  - name: literal logger error negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          logger.error("startup ok")
+        }
+      }
+    expect_no_match: true
+  description: "logger.error with secret-shaped values persists sensitive data in application logs."
+
+- id: scala.info_disclosure.play_internalservererror_exception
+  enabled: true
+  language: scala
+  tag: information-disclosure
+  severity: high
+  frameworks: [play]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [Results, InternalServerError]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Results.InternalServerError("Exception stack trace: " + input)
+        }
+      }
+    expect_match_text: [Results.InternalServerError]
+  - name: literal internal server error negative
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          Results.InternalServerError("Internal Server Error")
+        }
+      }
+    expect_no_match: true
+  description: "Play Results.InternalServerError with exception or stack details exposes internals to clients."

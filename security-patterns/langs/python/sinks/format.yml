@@ -1,0 +1,28 @@
+# Python format-string injection.
+#
+# Python `"{}".format(...)` and `"%s" % args` both substitute values
+# into a format string. Distinct from C printf-family because Python
+# raises on arg-count mismatch and `%n`-style memory writes don't
+# exist. The real risk is attacker-controlled FORMAT TEMPLATES
+# pulling out attribute/dict access via `{0.__class__}` /
+# `{user.private_field}`. The matcher needs to detect calls with a
+# tainted FORMAT STRING (not tainted arguments).
+# Python format-string injection is hard to express as a generic
+# `template.format()` rule because the receiver name is arbitrary.
+# This rule is disabled until either:
+#   - a constraint type that checks "receiver expression is tainted"
+#     (rather than an argument) is added, or
+#   - rule authors enumerate per-template-variable receivers.
+- id: python.format.str_format_tainted_template
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: format-string
+  severity: medium
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [template, format]
+  description: "Tainted template `.format(**fields)` — disabled pending receiver-tainted constraint support."

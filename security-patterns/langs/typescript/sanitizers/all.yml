@@ -1,0 +1,1173 @@
+# TypeScript sanitizers — tag names use the spec-canonical vocabulary
+# (html-encode / html-sanitize / url-encode / url-parse / shell-escape /
+# sql-parameter / constant-time / jwt-verify / path-sanitize / ldap-escape /
+# numeric-coerce / validation).
+
+# ── HTML ────────────────────────────────────────────────────────────────────
+- id: typescript.sanitizer.dompurify_sanitize
+  enabled: true
+  language: typescript
+  tag: html-sanitize
+  packages: [dompurify, "isomorphic-dompurify"]
+  imports: [dompurify]
+  match:
+    kind: call
+    callee:
+      regex: "^DOMPurify\\.sanitize$"
+  match_examples:
+  - name: dompurify namespace sanitize
+    code: |
+      import DOMPurify from "dompurify";
+      function clean(input: string) {
+        return DOMPurify.sanitize(input);
+      }
+    expect_match_text: [DOMPurify.sanitize]
+  description: "DOMPurify.sanitize — strips executable HTML/SVG, returns XSS-safe fragment."
+
+- id: typescript.sanitizer.xss_library
+  enabled: true
+  language: typescript
+  tag: html-sanitize
+  packages: [xss]
+  imports: [xss]
+  match:
+    kind: call
+    callee:
+      name: xss
+  match_examples:
+  - name: xss module filter
+    code: |
+      import xss from "xss";
+      function clean(input: string) {
+        return xss(input);
+      }
+    expect_match_text: [xss]
+  description: "`xss` library filter — whitelists tags/attrs, escapes the rest."
+
+- id: typescript.sanitizer.he_encode
+  enabled: true
+  language: typescript
+  tag: html-encode
+  packages: [he]
+  match:
+    kind: call
+    callee:
+      regex: "^he\\.encode$"
+  match_examples:
+  - name: he encode
+    code: |
+      import * as he from "he";
+      function clean(input: string) {
+        return he.encode(input);
+      }
+    expect_match_text: [he.encode]
+  description: "he.encode — HTML entity encode (named + numeric refs)."
+
+- id: typescript.sanitizer.he_escape
+  enabled: true
+  language: typescript
+  tag: html-encode
+  packages: [he]
+  match:
+    kind: call
+    callee:
+      regex: "^he\\.escape$"
+  match_examples:
+  - name: he escape
+    code: |
+      import * as he from "he";
+      function clean(input: string) {
+        return he.escape(input);
+      }
+    expect_match_text: [he.escape]
+  description: "he.escape — escapes &<>\"' to HTML entities."
+
+- id: typescript.sanitizer.validator_escape
+  enabled: true
+  language: typescript
+  tag: html-encode
+  packages: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.escape$"
+  match_examples:
+  - name: validator escape
+    code: |
+      import validator from "validator";
+      function clean(input: string) {
+        return validator.escape(input);
+      }
+    expect_match_text: [validator.escape]
+  description: "validator.escape — replaces HTML-unsafe characters with entity refs."
+
+# ── URL ─────────────────────────────────────────────────────────────────────
+- id: typescript.sanitizer.validator_is_url
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.isURL$"
+  match_examples:
+  - name: validator isURL
+    code: |
+      import validator from "validator";
+      function ok(input: string) {
+        return validator.isURL(input);
+      }
+    expect_match_text: [validator.isURL]
+  description: "validator.isURL — URL format check; pair with allowlist to block open-redirect."
+
+- id: typescript.sanitizer.validator_is_numeric
+  enabled: true
+  language: typescript
+  tag: numeric-coerce
+  packages: [validator]
+  match:
+    kind: call
+    callee:
+      regex: "^validator\\.isNumeric$"
+  match_examples:
+  - name: validator isNumeric
+    code: |
+      import validator from "validator";
+      function ok(input: string) {
+        return validator.isNumeric(input);
+      }
+    expect_match_text: [validator.isNumeric]
+  description: "validator.isNumeric — digits-only check; neutralises tainted numeric paths."
+
+# ── SQL ─────────────────────────────────────────────────────────────────────
+- id: typescript.sanitizer.sqlstring_escape
+  enabled: true
+  language: typescript
+  tag: sql-parameter
+  packages: [sqlstring, mysql, mysql2]
+  match:
+    kind: call
+    callee:
+      regex: "^SqlString\\.escape$"
+  match_examples:
+  - name: SqlString escape
+    code: |
+      import * as SqlString from "sqlstring";
+      function clean(input: string) {
+        return SqlString.escape(input);
+      }
+    expect_match_text: [SqlString.escape]
+  description: "sqlstring.escape — MySQL-quotes the value for direct interpolation."
+
+- id: typescript.sanitizer.sql_template_strings
+  enabled: true
+  language: typescript
+  tag: sql-parameter
+  packages: [sql-template-strings]
+  match:
+    kind: call
+    callee:
+      name: SQL
+  match_examples:
+  - name: sql-template-strings tag
+    code: |
+      import SQL from "sql-template-strings";
+      function byId(id: string) {
+        return SQL`SELECT * FROM users WHERE id = ${id}`;
+      }
+    expect_match_text: [SQL]
+  description: "sql-template-strings tagged template — parametrises interpolations."
+
+- id: typescript.sanitizer.mysql_escape
+  enabled: true
+  language: typescript
+  tag: sql-parameter
+  packages: [mysql, mysql2]
+  match:
+    kind: call
+    callee:
+      regex: "^mysql\\.escape$"
+  match_examples:
+  - name: mysql escape
+    code: |
+      import mysql from "mysql2";
+      function clean(input: string) {
+        return mysql.escape(input);
+      }
+    expect_match_text: [mysql.escape]
+  description: "mysql / mysql2 .escape() — quotes literals for raw SQL."
+
+- id: typescript.sanitizer.pg_format
+  enabled: true
+  language: typescript
+  tag: sql-parameter
+  packages: [pg-format]
+  match:
+    kind: call
+    callee:
+      name: format
+  match_examples:
+  - name: pg-format call
+    code: |
+      import format from "pg-format";
+      function clean(input: string) {
+        return format("%L", input);
+      }
+    expect_match_text: [format]
+  description: "pg-format format() — quotes with %I / %L specifiers (bare `format` name; narrow in audit)."
+
+# ── Shell ───────────────────────────────────────────────────────────────────
+- id: typescript.sanitizer.shell_quote
+  enabled: true
+  language: typescript
+  tag: shell-escape
+  packages: [shell-quote]
+  match:
+    kind: call
+    callee:
+      regex: "^shellQuote\\.quote$"
+  match_examples:
+  - name: shell-quote quote
+    code: |
+      import * as shellQuote from "shell-quote";
+      function quote(argv: string[]) {
+        return shellQuote.quote(argv);
+      }
+    expect_match_text: [shellQuote.quote]
+  description: "shell-quote.quote — produces a POSIX-safe shell-escaped string."
+- id: typescript.sanitizer.shell_escape_default
+  enabled: true
+  language: typescript
+  tag: shell-escape
+  packages: [shell-escape]
+  match:
+    kind: call
+    callee:
+      name: shellescape
+  match_examples:
+  - name: shell-escape default import
+    code: |
+      import shellescape from "shell-escape";
+      function quote(argv: string[]) {
+        return shellescape(argv);
+      }
+    expect_match_text: [shellescape]
+  description: "shell-escape default export — produces a POSIX-safe shell-escaped string."
+
+# ── Validation (zod / joi / yup / class-validator) ──────────────────────────
+- id: typescript.sanitizer.zod_parse
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [zod]
+  match:
+    kind: call
+    callee:
+      regex: "^schema\\.parse$"
+  match_examples:
+  - name: schema parse
+    code: |
+      const _u = require("zod");
+      function clean(schema: any, input: unknown) {
+        return schema.parse(input);
+      }
+    expect_match_text: [schema.parse]
+  description: "zod schema.parse — throws on shape mismatch; coerced output is schema-constrained."
+
+- id: typescript.sanitizer.zod_safeparse
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [zod]
+  match:
+    kind: call
+    callee:
+      regex: "^schema\\.safeParse$"
+  match_examples:
+  - name: schema safeParse
+    code: |
+      const _u = require("zod");
+      function clean(schema: any, input: unknown) {
+        return schema.safeParse(input);
+      }
+    expect_match_text: [schema.safeParse]
+  description: "zod schema.safeParse — non-throwing schema validation."
+
+- id: typescript.sanitizer.yup_validate
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [yup]
+  match:
+    kind: call
+    callee:
+      regex: "^yupSchema\\.validate(Sync)?$"
+  match_examples:
+  - name: schema validate
+    code: |
+      const _u = require("yup");
+      function clean(yupSchema: any, input: unknown) {
+        return yupSchema.validate(input);
+      }
+    expect_match_text: [yupSchema.validate]
+  description: "yup schema.validate / validateSync — schema validation."
+
+- id: typescript.sanitizer.joi_validate
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [joi, "@hapi/joi"]
+  match:
+    kind: call
+    callee:
+      regex: "^joiSchema\\.validate$"
+  match_examples:
+  - name: joi schema validate
+    code: |
+      const _u = require("joi");
+      function clean(joiSchema: any, input: unknown) {
+        return joiSchema.validate(input);
+      }
+    expect_match_text: [joiSchema.validate]
+  description: "Joi schema.validate — validates and coerces input against a declared schema."
+
+- id: typescript.sanitizer.class_validator_validate
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: validation
+  packages: [class-validator]
+  match:
+    kind: call
+    callee:
+      name: validate
+  description: "Disabled — bare validate overmatches unrelated functions; enable when import-aware matching can prove class-validator."
+
+# ── JWT ─────────────────────────────────────────────────────────────────────
+- id: typescript.sanitizer.jwt_verify
+  enabled: true
+  language: typescript
+  tag: jwt-verify
+  packages: [jsonwebtoken]
+  match:
+    kind: call
+    callee:
+      regex: "^jwt\\.verify$"
+  match_examples:
+  - name: jwt verify
+    code: |
+      import jwt from "jsonwebtoken";
+      function verify(token: string, key: string) {
+        return jwt.verify(token, key);
+      }
+    expect_match_text: [jwt.verify]
+  description: "jsonwebtoken.verify — asserts signature & expiry (pin `algorithms`)."
+
+- id: typescript.sanitizer.jose_jwtverify
+  enabled: true
+  language: typescript
+  tag: jwt-verify
+  packages: [jose]
+  match:
+    kind: call
+    callee:
+      name: jwtVerify
+  match_examples:
+  - name: jose jwtVerify
+    code: |
+      import { jwtVerify } from "jose";
+      async function verify(token: string, key: CryptoKey) {
+        return jwtVerify(token, key);
+      }
+    expect_match_text: [jwtVerify]
+  description: "jose.jwtVerify — verifies JWS signature + claims."
+
+# ── Constant-time compare ───────────────────────────────────────────────────
+- id: typescript.sanitizer.crypto_timingsafeequal
+  enabled: true
+  language: typescript
+  tag: constant-time
+  packages: [crypto]
+  match:
+    kind: call
+    callee:
+      regex: "^crypto\\.timingSafeEqual$"
+  match_examples:
+  - name: crypto timingSafeEqual
+    code: |
+      import crypto from "crypto";
+      function same(a: Buffer, b: Buffer) {
+        return crypto.timingSafeEqual(a, b);
+      }
+    expect_match_text: [crypto.timingSafeEqual]
+  description: "crypto.timingSafeEqual — constant-time buffer comparison (anti-timing-oracle)."
+
+# ── Path ────────────────────────────────────────────────────────────────────
+- id: typescript.sanitizer.path_normalize
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: path-sanitize
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      attribute: [path, normalize]
+  description: "Disabled — path.normalize alone does NOT prevent traversal; requires path.resolve + prefix check."
+
+# ── NoSQL operator stripping ────────────────────────────────────────────────
+- id: typescript.sanitizer.mongo_sanitize
+  enabled: true
+  language: typescript
+  tag: nosql-sanitize
+  packages: [mongo-sanitize, express-mongo-sanitize]
+  match:
+    kind: call
+    callee:
+      name: mongoSanitize
+  match_examples:
+  - name: mongo-sanitize call
+    code: |
+      import mongoSanitize from "mongo-sanitize";
+      function clean(input: unknown) {
+        return mongoSanitize(input);
+      }
+    expect_match_text: [mongoSanitize]
+  description: "mongo-sanitize — strips top-level $-prefixed and dot-containing keys, neutralising operator injection."
+
+- id: typescript.sanitizer.express_mongo_sanitize
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.sanitizer.mongo_sanitize
+  language: typescript
+  tag: nosql-sanitize
+  packages: [express-mongo-sanitize]
+  match:
+    kind: call
+    callee:
+      name: mongoSanitize
+  description: "Disabled duplicate — same `mongoSanitize()` call shape is covered by typescript.sanitizer.mongo_sanitize with express-mongo-sanitize package metadata merged."
+
+# ── Schema validation gates ────────────────────────────────────────────────
+- id: typescript.sanitizer.iots_decode
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: ["io-ts"]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z]+\\.decode$"
+  match_examples:
+  - name: io-ts decoder decode
+    code: |
+      const _u = require("io-ts");
+      function clean(User: any, input: unknown) {
+        return User.decode(input);
+      }
+    expect_match_text: [User.decode]
+  description: "io-ts decoder.decode — fp-ts/io-ts runtime type validation; right side of Either is schema-constrained."
+
+- id: typescript.sanitizer.class_validator_validate_or_reject
+  enabled: true
+  language: typescript
+  tag: validation
+  packages: [class-validator]
+  match:
+    kind: call
+    callee:
+      name: validateOrReject
+  match_examples:
+  - name: class-validator validateOrReject
+    code: |
+      import { validateOrReject } from "class-validator";
+      function clean(input: object) {
+        return validateOrReject(input);
+      }
+    expect_match_text: [validateOrReject]
+  description: "class-validator validateOrReject — throws on schema mismatch."
+
+- id: typescript.sanitizer.bcrypt_compare
+  enabled: true
+  language: typescript
+  tag: constant-time
+  packages: [bcrypt, bcryptjs]
+  match:
+    kind: call
+    callee:
+      regex: "^bcrypt\\.compare(Sync)?$"
+  match_examples:
+  - name: bcrypt compare
+    code: |
+      import bcrypt from "bcrypt";
+      function verify(input: string, hash: string) {
+        return bcrypt.compare(input, hash);
+      }
+    expect_match_text: [bcrypt.compare]
+  description: "bcrypt.compare / compareSync — constant-time hash verification."
+
+- id: typescript.sanitizer.argon2_verify
+  enabled: true
+  language: typescript
+  tag: constant-time
+  packages: [argon2]
+  match:
+    kind: call
+    callee:
+      regex: "^argon2\\.verify$"
+  match_examples:
+  - name: argon2 verify
+    code: |
+      import argon2 from "argon2";
+      function verify(hash: string, input: string) {
+        return argon2.verify(hash, input);
+      }
+    expect_match_text: [argon2.verify]
+  description: "argon2.verify - Argon2id constant-time verification."
+
+# -- Open-redirect mitigations -------------------------------------------------
+- id: typescript.sanitizer.is_url_module
+  enabled: true
+  language: typescript
+  tag: open-redirect-sanitize
+  packages: [is-url, is-url-superb]
+  match:
+    kind: call
+    callee:
+      regex: "^isURL$"
+  match_examples:
+  - name: is-url call
+    code: |
+      import isURL from "is-url";
+      function ok(input: string) {
+        return isURL(input);
+      }
+    expect_match_text: [isURL]
+  description: "is-url(input) - boolean URL validator; pair with allowlist."
+
+- id: typescript.sanitizer.valid_url_iswebui
+  enabled: true
+  language: typescript
+  tag: open-redirect-sanitize
+  packages: [valid-url]
+  match:
+    kind: call
+    callee:
+      attribute: [validUrl, isWebUri]
+  match_examples:
+  - name: valid-url isWebUri
+    code: |
+      import validUrl from "valid-url";
+      function ok(input: string) {
+        return validUrl.isWebUri(input);
+      }
+    expect_match_text: [validUrl.isWebUri]
+  description: "valid-url isWebUri - returns the URL if it is valid http(s); rejects javascript:/data:/file:."
+
+- id: typescript.sanitizer.same_origin_path_startswith
+  enabled: true
+  language: typescript
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      regex: "^(path|pathname|next|returnTo|redirect|redirectTo|redirectUrl|url)\\.startsWith$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]\\/['\"]$"
+  match_examples:
+  - name: same-origin redirect path guard
+    code: |
+      function safeRedirect(next: string): string {
+        if (next.startsWith("/") && !next.startsWith("//")) {
+          return next;
+        }
+        return "/";
+      }
+    expect_match_text: [next.startsWith]
+  - name: same-origin redirect path guard negative constraint boundary
+    code: "function safeRedirect(next: string): string {\n  if (next.startsWith() && !next.startsWith(\"//\")) {\n    return next;\n  }\n  return \"/\";\n}\n"
+    expect_no_match: true
+  description: "startsWith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with a sibling `!startsWith(\"//\")` network-path guard."
+
+# -- Focused allowlist / regex / SQL binding validators -----------------------
+- id: typescript.sanitizer.allowlist_set_has
+  enabled: true
+  language: typescript
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\.has$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: named Set allowlist has
+    code: |
+      const allowedRoles = new Set(["user", "admin"]);
+      function ok(role: string): boolean {
+        return allowedRoles.has(role);
+      }
+    expect_match_text: [allowedRoles.has]
+  description: "Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
+
+- id: typescript.sanitizer.allowlist_array_includes
+  enabled: true
+  language: typescript
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\.includes$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: named array allowlist includes
+    code: |
+      const allowedRoutes = ["/home", "/profile"];
+      function ok(next: string): boolean {
+        return allowedRoutes.includes(next);
+      }
+    expect_match_text: [allowedRoutes.includes]
+  description: "Named Array.includes allowlists - validates that input is one of a finite literal set."
+
+- id: typescript.sanitizer.allowlist_object_hasown
+  enabled: true
+  language: typescript
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^Object\\.(hasOwn|hasOwnProperty)$|^Object\\.prototype\\.hasOwnProperty\\.call$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(allowed|allowlist|allowedMap|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)$"
+  - min_args: 2
+  match_examples:
+  - name: object map allowlist hasOwn
+    code: |
+      const allowedRoutes: Record<string, string> = { home: "/home", profile: "/profile" };
+      function pick(name: string): string {
+        if (Object.hasOwn(allowedRoutes, name)) {
+          return allowedRoutes[name];
+        }
+        return "/";
+      }
+    expect_match_text: [Object.hasOwn]
+  - name: object map allowlist hasOwn negative constraint boundary
+    code: "const allowedRoutes: Record<string, string> = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name: string): string {\n  if (Object.hasOwn()) {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
+    expect_no_match: true
+  description: "Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before selecting a trusted mapped value."
+
+- id: typescript.sanitizer.named_regex_test
+  enabled: true
+  language: typescript
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))\\.test$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: safe named regex test
+    code: |
+      const uuidRe = /^[0-9a-f-]{36}$/i;
+      function ok(id: string): boolean {
+        return uuidRe.test(id);
+      }
+    expect_match_text: [uuidRe.test]
+  description: "Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
+
+- id: typescript.sanitizer.db_placeholder_query
+  enabled: true
+  language: typescript
+  tag: sql-parameter
+  packages: [mysql, mysql2, pg]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(query|execute)$"
+  constraints:
+  - min_args: 2
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"`][^'\"`]*(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|VALUES)[^'\"`]*(\\?|\\$[0-9]+)"
+  - arg_not_matches_regex:
+      index: 0
+      regex: "\\$\\{|\\+"
+  match_examples:
+  - name: pg pool query with bind args
+    code: |
+      const _u = require("mysql");
+      function byId(pool: any, id: string) {
+        return pool.query("SELECT * FROM users WHERE id = $1", [id]);
+      }
+    expect_match_text: [pool.query]
+  - name: pg pool query with bind args negative constraint boundary
+    code: "const _u = require(\"mysql\");\nfunction byId(pool: any, id: string) {\n  return pool.query();\n}\n"
+    expect_no_match: true
+  description: "mysql/mysql2/pg query or execute calls with a literal placeholder SQL string and separate bind args. Receiver-agnostic; OnlyWhenPackaged gate on the driver list prevents over-matching."
+
+- id: typescript.sanitizer.char_allowlist_replace_strip
+  enabled: true
+  language: typescript
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.replace$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^\\/\\[\\^[A-Za-z0-9_\\\\\\- .:@\\/]+\\]\\+?\\/g$"
+  - arg_equals:
+      index: 1
+      value: '""'
+  match_examples:
+  - name: regex character allowlist strip
+    code: |
+      function cleanName(input: string): string {
+        return input.replace(/[^a-zA-Z0-9_-]/g, "");
+      }
+    expect_match_text: [input.replace]
+  - name: regex character allowlist strip negative constraint boundary
+    code: "function cleanName(input: string): string {\n  return input.replace();\n}\n"
+    expect_no_match: true
+  description: "String.replace(/[^allowlist]/g, \"\") - strips every character outside a small explicit allowlist."
+
+# -- Additional focused validation, containment, binding, and escaping --------
+- id: typescript.sanitizer.sanitize_html
+  enabled: true
+  language: typescript
+  tag: html-sanitize
+  packages: [sanitize-html]
+  match:
+    kind: call
+    callee:
+      name: sanitizeHtml
+  match_examples:
+  - name: sanitize-html import
+    code: |
+      import sanitizeHtml from "sanitize-html";
+      function clean(input: string) {
+        return sanitizeHtml(input);
+      }
+    expect_match_text: [sanitizeHtml]
+  description: "sanitize-html — tag/attribute allowlist stripping."
+
+- id: typescript.sanitizer.escape_html_module
+  enabled: true
+  language: typescript
+  tag: html-encode
+  packages: [escape-html]
+  match:
+    kind: call
+    callee:
+      name: escapeHtml
+  match_examples:
+  - name: escape-html import
+    code: |
+      import escapeHtml from "escape-html";
+      function clean(input: string) {
+        return escapeHtml(input);
+      }
+    expect_match_text: [escapeHtml]
+  description: "escape-html module — returns an HTML-encoded copy of the input."
+
+- id: typescript.sanitizer.named_regex_match
+  enabled: true
+  language: typescript
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.match$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))$"
+  match_examples:
+  - name: input match slug regex
+    code: |
+      function ok(input: string, slugRe: RegExp) {
+        return input.match(slugRe);
+      }
+    expect_match_text: [input.match]
+  - name: value match allowed pattern
+    code: |
+      function ok(value: string, allowedPattern: RegExp) {
+        return value.match(allowedPattern);
+      }
+    expect_match_text: [value.match]
+  - name: input match slug regex negative constraint boundary
+    code: "function ok(input: string, slugRe: RegExp) {\n  return input.match();\n}\n"
+    expect_no_match: true
+  description: "String.match(named allowlist regex) gates — regex object must be named for safe/id/slug/uuid/allowed validation."
+
+- id: typescript.sanitizer.path_containment_startswith
+  enabled: true
+  language: typescript
+  tag: path-sanitize
+  packages: [path]
+  match:
+    kind: call
+    callee:
+      regex: "^(resolved|resolvedPath|fullPath|candidate|targetPath|filePath)\\.startsWith$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(root|base|baseDir|uploadDir|publicDir|safeRoot|allowedRoot)"
+  match_examples:
+  - name: resolved path startsWith uploadDir
+    code: |
+      const _u = require("path");
+      function ok(resolved: string, uploadDir: string) {
+        return resolved.startsWith(uploadDir);
+      }
+    expect_match_text: [resolved.startsWith]
+  - name: fullPath startsWith safeRoot
+    code: |
+      const _u = require("path");
+      function ok(fullPath: string, safeRoot: string) {
+        return fullPath.startsWith(safeRoot);
+      }
+    expect_match_text: [fullPath.startsWith]
+  - name: resolved path startsWith uploadDir negative constraint boundary
+    code: "const _u = require(\"path\");\nfunction ok(resolved: string, uploadDir: string) {\n  return resolved.startsWith();\n}\n"
+    expect_no_match: true
+  description: "Canonical path containment guard after path.resolve/normalize — validates the resolved candidate remains under a trusted root."
+
+- id: typescript.sanitizer.url_origin_host_allowlist
+  enabled: true
+  language: typescript
+  tag: open-redirect-sanitize
+  match:
+    kind: call
+    callee:
+      regex: "^(allowedOrigins|allowedHosts|allowedRedirectHosts|trustedOrigins|trustedHosts|ALLOWED_(ORIGINS|HOSTS))\\.(has|includes)$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(url\\.)?(origin|host|hostname)|parsed\\.(origin|host|hostname)$"
+  match_examples:
+  - name: allowed origins has url origin
+    code: |
+      function ok(url: URL, allowedOrigins: Set<string>) {
+        return allowedOrigins.has(url.origin);
+      }
+    expect_match_text: [allowedOrigins.has]
+  - name: allowed hosts includes parsed hostname
+    code: |
+      function ok(parsed: URL, allowedHosts: string[]) {
+        return allowedHosts.includes(parsed.hostname);
+      }
+    expect_match_text: [allowedHosts.includes]
+  - name: allowed origins has url origin negative constraint boundary
+    code: "function ok(url: URL, allowedOrigins: Set<string>) {\n  return allowedOrigins.has();\n}\n"
+    expect_no_match: true
+  description: "URL origin/host allowlist membership — credits finite allowlists over parsed URL origin/host/hostname values."
+
+- id: typescript.sanitizer.prisma_tagged_raw_query
+  enabled: true
+  language: typescript
+  tag: sql-parameter
+  packages: ["@prisma/client"]
+  imports: ["@prisma/client"]
+  match:
+    kind: call
+    callee:
+      regex: "^prisma\\.\\$(queryRaw|executeRaw)$"
+  constraints:
+  - arg_not_matches_regex:
+      index: 0
+      regex: "Prisma\\.raw|\\$\\{|\\+"
+  match_examples:
+  - name: prisma queryRaw tagged template literal placeholder
+    code: |
+      const _u = require("@prisma/client");
+      async function byId(prisma: any, id: string) {
+        return prisma.$queryRaw`SELECT * FROM users WHERE id = ${id}`;
+      }
+    expect_match_text: [prisma.$queryRaw]
+  - name: prisma executeRaw tagged template literal placeholder
+    code: |
+      const _u = require("@prisma/client");
+      async function update(prisma: any, id: string) {
+        return prisma.$executeRaw`UPDATE users SET seen = true WHERE id = ${id}`;
+      }
+    expect_match_text: [prisma.$executeRaw]
+  - name: prisma queryRaw tagged template literal placeholder negative constraint boundary
+    code: |
+      import { Prisma } from "@prisma/client";
+      async function example(prisma: any, table: string) {
+        return prisma.$queryRaw(Prisma.raw("SELECT * FROM " + table));
+      }
+    expect_no_match: true
+  description: "Prisma $queryRaw/$executeRaw tagged-template form — interpolations are parameterized unless Prisma.raw/string concatenation is used."
+
+- id: typescript.sanitizer.sequelize_query_bindings
+  enabled: true
+  language: typescript
+  tag: sql-parameter
+  packages: [sequelize]
+  match:
+    kind: call
+    callee:
+      regex: "^sequelize\\.query$"
+  constraints:
+  - any_arg_matches_regex: "\\b(replacements|bind)\\s*:"
+  - arg_not_matches_regex:
+      index: 0
+      regex: "\\$\\{|\\+"
+  match_examples:
+  - name: sequelize replacements
+    code: |
+      const _u = require("sequelize");
+      function byId(sequelize: any, id: string) {
+        return sequelize.query("SELECT * FROM users WHERE id = :id", { replacements: { id } });
+      }
+    expect_match_text: [sequelize.query]
+  - name: sequelize bind
+    code: |
+      const _u = require("sequelize");
+      function byId(sequelize: any, id: string) {
+        return sequelize.query("SELECT * FROM users WHERE id = $id", { bind: { id } });
+      }
+    expect_match_text: [sequelize.query]
+  - name: sequelize replacements negative constraint boundary
+    code: "const _u = require(\"sequelize\");\nfunction byId(sequelize: any, id: string) {\n  return sequelize.query();\n}\n"
+    expect_no_match: true
+  description: "Sequelize raw query with replacements/bind options and literal SQL text — parameterized form."
+
+- id: typescript.sanitizer.ldap_escape_variants
+  enabled: true
+  language: typescript
+  tag: ldap-escape
+  packages: [ldap-escape, ldapjs]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldapEscape|ldapjs|ldap)\\.(filter|escapeFilter|escape)$"
+  match_examples:
+  - name: ldap escape filter variant
+    code: |
+      const _u = require("ldap-escape");
+      function clean(ldapjs: any, input: string) {
+        return ldapjs.escapeFilter(input);
+      }
+    expect_match_text: [ldapjs.escapeFilter]
+  - name: ldap escape namespace filter
+    code: |
+      const _u = require("ldap-escape");
+      function clean(ldapEscape: any, input: string) {
+        return ldapEscape.filter(input);
+      }
+    expect_match_text: [ldapEscape.filter]
+  description: "LDAP filter escaping variants — RFC 4515 escaping before LDAP search filter interpolation."
+
+- id: typescript.sanitizer.xpath_literal_escape
+  enabled: true
+  language: typescript
+  tag: xpath-parameter
+  packages: [xpath-escape, xpath]
+  match:
+    kind: call
+    callee:
+      regex: "^(xpathEscape|xpathLiteral|xpath\\.literal)$"
+  match_examples:
+  - name: xpath-escape call
+    code: |
+      import xpathEscape from "xpath-escape";
+      function clean(input: string) {
+        return xpathEscape(input);
+      }
+    expect_match_text: [xpathEscape]
+  - name: xpath literal namespace
+    code: |
+      const _u = require("xpath-escape");
+      function clean(xpath: any, input: string) {
+        return xpath.literal(input);
+      }
+    expect_match_text: [xpath.literal]
+  description: "XPath literal escaping — quotes attacker-controlled strings before XPath expression interpolation."
+
+- id: typescript.sanitizer.xml_escape
+  enabled: true
+  language: typescript
+  tag: xxe-sanitizer
+  packages: [entities, "html-entities"]
+  match:
+    kind: call
+    callee:
+      regex: "^(entities|htmlEntities)\\.(encodeXML|encodeNonAsciiHTML)$"
+  match_examples:
+  - name: entities encodeXML
+    code: |
+      const _u = require("entities");
+      function clean(entities: any, input: string) {
+        return entities.encodeXML(input);
+      }
+    expect_match_text: [entities.encodeXML]
+  description: "XML entity escaping for text nodes and attributes; HTML encoders such as he.escape/escapeHtml are owned by the HTML sanitizer rules to avoid duplicate sanitizer evidence."
+
+- id: typescript.sanitizer.libxmljs_safe_options
+  enabled: true
+  language: typescript
+  tag: xxe-sanitizer
+  packages: [libxmljs, libxmljs2]
+  match:
+    kind: call
+    callee:
+      regex: "^libxmljs\\.(parseXml|parseXmlString|loadXml)$"
+  constraints:
+  - any_arg_matches_regex: "noent\\s*:\\s*false|dtdload\\s*:\\s*false|nonet\\s*:\\s*true"
+  match_examples:
+  - name: libxmljs parseXml safe noent false
+    code: |
+      const _u = require("libxmljs");
+      function parse(libxmljs: any, input: string) {
+        return libxmljs.parseXml(input, { noent: false, nonet: true });
+      }
+    expect_match_text: [libxmljs.parseXml]
+  - name: libxmljs loadXml safe dtdload false
+    code: |
+      const _u = require("libxmljs");
+      function parse(libxmljs: any, input: string) {
+        return libxmljs.loadXml(input, { dtdload: false, nonet: true });
+      }
+    expect_match_text: [libxmljs.loadXml]
+  - name: libxmljs parseXml safe noent false negative constraint boundary
+    code: "const _u = require(\"libxmljs\");\nfunction parse(libxmljs: any, input: string) {\n  return libxmljs.parseXml();\n}\n"
+    expect_no_match: true
+  description: "libxmljs parser calls with safe XXE options — entity expansion/DTD loading disabled and network access blocked."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: typescript.passthrough.decode_uri_component
+  enabled: true
+  language: typescript
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: decodeURIComponent
+  match_examples:
+  - name: decodeURIComponent passthrough
+    code: |
+      function decode(input: string) {
+        return decodeURIComponent(input);
+      }
+    expect_match_text: [decodeURIComponent]
+  description: "decodeURIComponent(s) — preserves taint."
+- id: typescript.passthrough.decode_uri
+  enabled: true
+  language: typescript
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: decodeURI
+  match_examples:
+  - name: decodeURI passthrough
+    code: |
+      function decode(input: string) {
+        return decodeURI(input);
+      }
+    expect_match_text: [decodeURI]
+  description: "decodeURI(s) — preserves taint."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: typescript.csrf.csurf_middleware
+  enabled: true
+  language: typescript
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: csurf
+  match_examples:
+  - name: csurf middleware
+    code: |
+      import csurf from "csurf";
+      function protection() {
+        return csurf();
+      }
+    expect_match_text: [csurf]
+  description: "csurf() — Express/Koa CSRF middleware factory."
+- id: typescript.csrf.koa_csrf
+  enabled: true
+  language: typescript
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      attribute: [koa, csrf]
+  match_examples:
+  - name: koa csrf
+    code: |
+      function protection(koa: any) {
+        return koa.csrf();
+      }
+    expect_match_text: [koa.csrf]
+  description: "Koa CSRF middleware setup."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: typescript.lock.mutex_acquire
+  enabled: true
+  language: typescript
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [mutex, acquire]
+  match_examples:
+  - name: mutex acquire
+    code: |
+      async function locked(mutex: any) {
+        return mutex.acquire();
+      }
+    expect_match_text: [mutex.acquire]
+  description: "async-mutex Mutex.acquire() (TS via @types/async-mutex)."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: typescript.cookie.set_with_httponly_secure
+  enabled: true
+  language: typescript
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [res, cookie]
+  constraints:
+  - any_arg_matches_regex: |-
+      httpOnly.*true|secure.*true
+  match_examples:
+  - name: secure httponly cookie
+    code: |
+      function setCookie(res: any, token: string) {
+        return res.cookie("sid", token, { httpOnly: true, secure: true });
+      }
+    expect_match_text: [res.cookie]
+  - name: secure httponly cookie negative constraint boundary
+    code: "function setCookie(res: any, token: string) {\n  return res.cookie();\n}\n"
+    expect_no_match: true
+  description: "res.cookie(name, val, {httpOnly: true, secure: true}) — TS via @types/express."

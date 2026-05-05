@@ -1,0 +1,118 @@
+# Erlang XSS sinks (cowboy raw HTML responses + mochiweb).
+- id: erlang.xss.cowboy_html_response
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: erlang
+  tag: xss
+  severity: medium
+  packages: [cowboy]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:reply"
+  description: "Disabled — shares regex with open_redirect.cowboy_reply_location; distinguishing XSS vs redirect needs header/body map inspection."
+
+- id: erlang.xss.mochiweb_response_write
+  enabled: true
+  language: erlang
+  tag: xss
+  severity: high
+  packages: [mochiweb]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      regex: "^mochiweb_response:write"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("mochiweb/include/mochiweb.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        mochiweb_response:write(Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("mochiweb/include/mochiweb.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        mochiweb_response:write(<<"ok">>).
+    expect_no_match: true
+  description: "mochiweb_response:write — writes HTML body unescaped; tainted content reflects as XSS."
+
+# Cowboy binary-concat HTML response: `cowboy_req:reply(Status, #{}, <<"<p>", Q/binary, "</p>">>, Req)`.
+# The disabled erlang.xss.cowboy_html_response above shares regex with
+# open_redirect; this distinct ID requires HTML-tag literals in the
+# args to scope to the XSS shape.
+- id: erlang.xss.cowboy_binary_concat
+  aliases:
+  - erlang.info_disclosure.cowboy_reply_error_body
+  enabled: true
+  language: erlang
+  tag: xss
+  severity: high
+  packages: [cowboy]
+  cwe: [CWE-79, CWE-209]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:reply"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Req, Input) ->
+        cowboy_req:reply(200, #{}, Input, Req).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Req) ->
+        cowboy_req:reply(200, #{}, <<"<h1>ok</h1>">>, Req).
+    expect_no_match: true
+  description: 'cowboy_req:reply with binary-concat HTML body (`<<"<p>", Q/binary, "</p>">>`) — tainted Q reflects in unescaped HTML. Constraint requires `<<` binary-concat with HTML tag literal to skip non-HTML reply shapes. Also covers merged aliases: erlang.info_disclosure.cowboy_reply_error_body.'
+
+- id: erlang.xss.yaws_out_html
+  enabled: true
+  language: erlang
+  tag: xss
+  severity: high
+  packages: [yaws]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      regex: "^yaws_api:htmlize"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: erlang yaws htmlize output
+    code: |
+      -include_lib("yaws/include/yaws.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        yaws_api:htmlize(Input).
+    expect_match_text: ["yaws_api:htmlize"]
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("yaws/include/yaws.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        yaws_api:htmlize(<<"ok">>).
+    expect_no_match: true
+  description: "yaws_api:htmlize / Yaws HTML response helpers — flag tainted content that is prepared for raw HTML output."

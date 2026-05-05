@@ -1,0 +1,62 @@
+- id: swift.access.aws_get_object
+  enabled: true
+  language: swift
+  tag: access-control
+  severity: high
+  packages: [AWSClientRuntime]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: getObject
+  match_examples:
+  - name: declared shape
+    code: |
+      import AWSCore // aws-sdk-swift
+      import AWSCore // aws-sdk-swift
+      func test() { let input = "x"; let amount = 1; getObject(input) }
+  description: "AWS SDK for Swift getObject — tainted bucket/key selector reads arbitrary object data."
+
+  imports:
+  - AWSCore
+- id: swift.access.aws_put_object
+  enabled: true
+  language: swift
+  tag: access-control
+  severity: high
+  packages: [AWSClientRuntime]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: putObject
+  match_examples:
+  - name: declared shape
+    code: |
+      import AWSCore // aws-sdk-swift
+      import AWSCore // aws-sdk-swift
+      func test() { let input = "x"; let amount = 1; putObject(input) }
+  description: "AWS SDK for Swift putObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+
+  imports:
+  - AWSCore
+- id: swift.access.aws_get_secret_value
+  enabled: true
+  language: swift
+  tag: access-control
+  severity: high
+  packages: [AWSClientRuntime]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      name: getSecretValue
+  match_examples:
+  - name: declared shape
+    code: |
+      import AWSCore // aws-sdk-swift
+      import AWSCore // aws-sdk-swift
+      func test() { let input = "x"; let amount = 1; getSecretValue(input) }
+  description: "AWS SDK for Swift getSecretValue — tainted secret id reads arbitrary secret material."
+  imports:
+  - AWSCore

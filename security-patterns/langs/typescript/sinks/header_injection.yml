@@ -1,0 +1,425 @@
+- id: typescript.header.express_res_set
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - express
+  - restify
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - set
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: express res set value
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.set("Content-Disposition", input);
+      }
+  - name: literal express res set negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.set("Content-Disposition", "attachment; filename=safe.txt");
+      }
+    expect_no_match: true
+  description: 'Express/Restify res.set(name, tainted). Merged aliases: typescript.open_redirect.express_res_set_location.'
+  aliases:
+  - typescript.open_redirect.express_res_set_location
+- id: typescript.header.express_res_set_object
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - express
+  - restify
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - set
+  constraints:
+  - max_args: 1
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express res set object
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.set(input);
+      }
+  - name: literal express res set object negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.set({ "Content-Disposition": "attachment; filename=safe.txt" });
+      }
+    expect_no_match: true
+  description: "Express/Restify res.set(headersObject) — tainted header map can inject response headers or Location values."
+- id: typescript.header.express_res_header
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - express
+  - restify
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: express res header
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.header("Content-Disposition", input);
+      }
+  - name: literal express res header negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.header("Content-Disposition", "attachment; filename=safe.txt");
+      }
+    expect_no_match: true
+  description: "Express/Restify res.header(name, tainted) — alias of res.set. Merged collision aliases: typescript.open_redirect.express_res_header_location."
+  aliases:
+  - typescript.open_redirect.express_res_header_location
+- id: typescript.header.node_setheader
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.setHeader$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: node setheader
+    code: |
+      const _u = require("@nestjs/common");
+      function demo(input, req, obj) {
+        return res.setHeader("X-User", input + "\r\nX-Injected: 1");
+      }
+  - name: literal node setheader negative
+    code: |
+      const _u = require("@nestjs/common");
+      function demo() {
+        return res.setHeader("X-User", "safe");
+      }
+    expect_no_match: true
+  description: "Node res.setHeader(name, value with CRLF) — response splitting. Merged aliases: typescript.open_redirect.node_setheader_location."
+  aliases:
+  - typescript.open_redirect.node_setheader_location
+  - typescript.header.node_content_disposition_setheader
+  - typescript.header.nest_res_setheader
+  packages:
+  - '@nestjs/common'
+- id: typescript.header.express_res_cookie
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: medium
+  packages:
+  - express
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - cookie
+  constraints:
+  - max_args: 2
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: express res cookie
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.cookie(input);
+      }
+  - name: literal express res cookie negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.cookie("session");
+      }
+    expect_no_match: true
+  description: "Express res.cookie(name, tainted) — cookie value CRLF/flags injection."
+- id: typescript.header.express_res_cookie_value
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: medium
+  packages:
+  - express
+  cwe:
+  - CWE-113
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - cookie
+  constraints:
+  - max_args: 2
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: express res cookie value
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return res.cookie("session", input);
+      }
+  - name: literal express res cookie value negative
+    code: |
+      const _u = require("express");
+      function demo() {
+        return res.cookie("session", "safe");
+      }
+    expect_no_match: true
+  description: "Express res.cookie(name, value) — tainted cookie value reflects in Set-Cookie."
+- id: typescript.header.koa_set
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - koa
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ctx
+      - set
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: koa set
+    code: |
+      const _u = require("koa");
+      function demo(input, req, obj) {
+        return ctx.set(input, input);
+      }
+    expect_match_text:
+    - ctx.set
+  - name: literal koa set negative
+    code: |
+      const _u = require("koa");
+      function demo() {
+        return ctx.set("Content-Disposition", "attachment; filename=safe.txt");
+      }
+    expect_no_match: true
+  description: 'Koa ctx.set(name, tainted). Koa''s `ctx.set(field, val)` is the 2-arg overload (or `ctx.set(obj)` 1-arg). `min_args: 2` rejects unrelated `ctx.set(x)` decoys (Map.set, custom-context single-arg setters). Merged aliases: typescript.open_redirect.koa_set_location.'
+  aliases:
+  - typescript.open_redirect.koa_set_location
+- id: typescript.header.koa_set_object
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - koa
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ctx
+      - set
+  constraints:
+  - max_args: 1
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: koa set object
+    code: |
+      const _u = require("koa");
+      function demo(input, req, obj) {
+        return ctx.set(input);
+      }
+    expect_match_text:
+    - ctx.set
+  - name: literal koa set object negative
+    code: |
+      const _u = require("koa");
+      function demo() {
+        return ctx.set({ "Content-Disposition": "attachment; filename=safe.txt" });
+      }
+    expect_no_match: true
+  description: "Koa ctx.set(headersObject) — tainted header map can inject response headers or Location values."
+- id: typescript.header.fastify_header
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - fastify
+  cwe:
+  - CWE-113
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - reply
+      - header
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: fastify header
+    code: |
+      const _u = require("fastify");
+      function demo(input, req, obj) {
+        return reply.header("Content-Disposition", input);
+      }
+  - name: literal fastify header negative
+    code: |
+      const _u = require("fastify");
+      function demo() {
+        return reply.header("Content-Disposition", "attachment; filename=safe.txt");
+      }
+    expect_no_match: true
+  description: 'Fastify reply.header(name, tainted). Merged aliases: typescript.open_redirect.fastify_header_location.'
+  aliases:
+  - typescript.open_redirect.fastify_header_location
+- id: typescript.header.bun_response_content_disposition
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - bun
+  - next
+  cwe:
+  - CWE-113
+  - CWE-79
+  - CWE-601
+  match:
+    kind: new
+    callee:
+      name: Response
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: bun response content disposition
+    code: |
+      const _u = require("bun");
+      function download(filename: string) {
+        return new Response("ok", { headers: { "Content-Disposition": filename } });
+      }
+    expect_match_text:
+    - Response
+  - name: literal bun response content disposition negative
+    code: |
+      const _u = require("bun");
+      function download() {
+        return new Response("ok", { headers: { "Content-Disposition": "attachment; filename=safe.txt" } });
+      }
+    expect_no_match: true
+  description: "Bun/fetch Response headers Content-Disposition value — tainted filename can inject response headers. Merged aliases: typescript.xss.bun_response_html_body."
+  aliases:
+  - typescript.xss.bun_response_html_body
+  - typescript.open_redirect.fetch_response_location
+- id: typescript.header.hapi_content_disposition
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: high
+  packages:
+  - '@hapi/hapi'
+  cwe:
+  - CWE-113
+  - CWE-601
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.response\([^)]*\)\.header$|^[A-Za-z_$][A-Za-z0-9_$]*\.response\.header$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: hapi response content disposition
+    code: |
+      const _u = require("@hapi/hapi");
+      function download(h: any, filename: string) {
+        return h.response("ok").header("Content-Disposition", filename);
+      }
+    expect_match_text:
+    - h.response("ok").header
+  - name: literal hapi response content disposition negative
+    code: |
+      const _u = require("@hapi/hapi");
+      function download(h: any) {
+        return h.response("ok").header("Content-Disposition", "attachment; filename=safe.txt");
+      }
+    expect_no_match: true
+  description: "Hapi <h>.response(...).header('Content-Disposition', tainted) — filename/header value can inject response headers. The bare `response.header(...)` shape is intentionally not matched here to avoid colliding with express/fastify; rely on the response()-prefixed shape and the package gate. Merged aliases: typescript.open_redirect.hapi_response_header_location, typescript.xss.hapi_response_html_body."
+  aliases:
+  - typescript.open_redirect.hapi_response_header_location
+  - typescript.xss.hapi_response_html_body
+- id: typescript.header.nest_header_xss_protection_disabled
+  enabled: true
+  language: typescript
+  tag: header-injection
+  severity: low
+  packages:
+  - '@nestjs/common'
+  cwe:
+  - CWE-693
+  match:
+    kind: call
+    callee:
+      name: Header
+  match_examples:
+  - name: nest header xss protection disabled
+    code: |
+      const _u = require("@nestjs/common");
+      function routeHeader(Header: any) {
+        return Header("X-XSS-Protection", "0");
+      }
+    expect_match_text:
+    - Header
+  description: NestJS @Header('X-XSS-Protection', '0') disables the legacy browser XSS filter.

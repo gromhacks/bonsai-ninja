@@ -1,0 +1,131 @@
+# Elixir weak-crypto / weak-randomness sinks. Erlang :crypto.* dispatches
+# on an atom first argument; constrain arg_equals to the broken algo.
+- id: elixir.crypto.hash_md5
+  aliases:
+  - elixir.crypto.hash_sha1
+  enabled: true
+  language: elixir
+  tag: weak-crypto
+  severity: low
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^:crypto\\.hash$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :crypto.hash(:md5)
+        end
+      end
+  description: ":crypto.hash(:md5, _) — MD5 is collision-broken; forbidden for integrity, signatures, or password hashing. Also covers merged aliases: elixir.crypto.hash_sha1."
+
+- id: elixir.crypto.hmac_md5
+  aliases:
+  - elixir.crypto.hmac_sha1
+  enabled: true
+  language: elixir
+  tag: weak-crypto
+  severity: medium
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^:crypto\\.mac$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :crypto.mac(input, :md5)
+        end
+      end
+  description: ":crypto.mac(:hmac, :md5, _, _) — HMAC-MD5 is not collision-resistant and leaks key under chosen-prefix; use :sha256. Also covers merged aliases: elixir.crypto.hmac_sha1."
+
+- id: elixir.crypto.block_encrypt_des
+  aliases:
+  - elixir.crypto.block_encrypt_rc4
+  - elixir.crypto.block_encrypt_aes_ecb
+  - elixir.crypto.block_encrypt_aes_ecb_256
+  enabled: true
+  language: elixir
+  tag: weak-crypto
+  severity: high
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      regex: "^:crypto\\.crypto_one_time$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :crypto.crypto_one_time(:des_cbc)
+        end
+      end
+  description: ":crypto.crypto_one_time(:des_cbc, _, _, _, _) — DES has a 56-bit key, brute-forceable in hours. Also covers merged aliases: elixir.crypto.block_encrypt_rc4, elixir.crypto.block_encrypt_aes_ecb, elixir.crypto.block_encrypt_aes_ecb_256."
+
+- id: elixir.crypto.rand_uniform
+  enabled: true
+  language: elixir
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      regex: "^:rand\\.uniform$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :rand.uniform(input)
+        end
+      end
+  description: "Erlang :rand.uniform — PRNG, not CSPRNG; unsafe for session IDs, tokens, password reset links. Use :crypto.strong_rand_bytes/1."
+
+- id: elixir.crypto.random_uniform
+  enabled: true
+  language: elixir
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      regex: "^:random\\.uniform$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :random.uniform(input)
+        end
+      end
+  description: "Erlang :random.uniform — legacy, non-crypto PRNG (replaced by :rand); unsafe for any secret value."
+
+- id: elixir.crypto.enum_random
+  enabled: true
+  language: elixir
+  tag: weak-randomness
+  severity: medium
+  modules: [Enum]
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      attribute: [Enum, random]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Enum
+      defmodule App do
+        def test(input) do
+          Enum.random(input)
+        end
+      end
+  description: "Enum.random/1 — backed by :rand (non-CSPRNG); unsafe for tokens, secrets, or session IDs."

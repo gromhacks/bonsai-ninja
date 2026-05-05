@@ -1,0 +1,48 @@
+# Go IPC / subprocess-output sources.
+- id: go.ipc.cmd_stdoutpipe
+  enabled: true
+  language: go
+  trust: ipc
+  tag: ipc-input
+  packages: ["os/exec"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.StdoutPipe$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "os/exec"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.StdoutPipe(target)
+      }
+  description: "exec.Cmd.StdoutPipe — subprocess stdout; tail-match across local receiver names like `cmd.StdoutPipe()`."
+
+- id: go.ipc.cmd_stderrpipe
+  enabled: true
+  language: go
+  trust: ipc
+  tag: ipc-input
+  packages: ["os/exec"]
+  match:
+    kind: call
+    callee:
+      regex: "\\.StderrPipe$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "os/exec"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.StderrPipe(target)
+      }
+  description: "exec.Cmd.StderrPipe — subprocess stderr; tail-match across local receiver names like `cmd.StderrPipe()`."

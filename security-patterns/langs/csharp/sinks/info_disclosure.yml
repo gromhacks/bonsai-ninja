@@ -1,0 +1,55 @@
+# C# information-disclosure sinks (Console, logging, ASP.NET responses).
+- id: csharp.info_disclosure.console_writeline_secret
+  aliases:
+  - csharp.log_injection.console_writeline_newline
+  enabled: true
+  language: csharp
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200, CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [Console, WriteLine]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; Console.WriteLine("password=" + input); } }
+    expect_match_text: [Console.WriteLine]
+  - name: literal console output negative
+    code: |
+      class App { void Test() { Console.WriteLine("password=redacted"); } }
+    expect_no_match: true
+  description: "Console.WriteLine of secret-shaped values can disclose credentials through stdout logs. Also covers merged aliases: csharp.log_injection.console_writeline_newline."
+
+- id: csharp.info_disclosure.ilogger_logerror_secret
+  aliases:
+  - csharp.log_injection.logger_logerror_concat
+  enabled: true
+  language: csharp
+  tag: information-disclosure
+  severity: medium
+  packages: [Microsoft.Extensions.Logging]
+  cwe: [CWE-200, CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [ILogger, LogError]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.Extensions.Logging;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ILogger.LogError("api_key={Key}", input); } }
+    expect_match_text: [ILogger.LogError]
+  - name: literal structured log value negative
+    code: |
+      using Microsoft.Extensions.Logging;
+      class App { void Test() { ILogger.LogError("api_key={Key}", "redacted"); } }
+    expect_no_match: true
+  description: "ILogger.LogError with secret-shaped data persists sensitive values in application logs. Also covers merged aliases: csharp.log_injection.logger_logerror_concat."

@@ -1,0 +1,179 @@
+# Objective-C code-injection sinks (NSPredicate/NSExpression format, JSContext, WKWebView JS).
+- id: objc.eval.nspredicate_format
+  enabled: true
+  language: objc
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: predicateWithFormat
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; predicateWithFormat(input); }
+  - name: literal predicate format negative
+    code: |
+      void test(void) { predicateWithFormat(@"name == 'safe'"); }
+    expect_no_match: true
+  description: "NSPredicate +predicateWithFormat: with tainted format — KVC key paths / SELF evaluation allow arbitrary object access."
+
+- id: objc.eval.nsexpression_format
+  enabled: true
+  language: objc
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: expressionWithFormat
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; expressionWithFormat(input); }
+  - name: literal expression format negative
+    code: |
+      void test(void) { expressionWithFormat(@"1 + 1"); }
+    expect_no_match: true
+  description: "NSExpression +expressionWithFormat: — tainted format allows FUNCTION() invocation of arbitrary selectors."
+
+- id: objc.eval.evaluate_javascript
+  enabled: true
+  language: objc
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: evaluateJavaScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [WKWebView evaluateJavaScript:input]; }
+  - name: literal javascript negative
+    code: |
+      void test(void) { [WKWebView evaluateJavaScript:@"1 + 1"]; }
+    expect_no_match: true
+  description: "WKWebView -evaluateJavaScript:completionHandler: with tainted JS — executes in webview origin. Constrained to WKWebView receivers."
+
+- id: objc.eval.jscontext_evaluatescript
+  enabled: true
+  language: objc
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: evaluateScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { [JSContext evaluateScript:input]; }
+  - name: literal evaluateScript negative
+    code: |
+      void test(void) { [JSContext evaluateScript:@"1 + 1"]; }
+    expect_no_match: true
+  description: "JavaScriptCore JSContext -evaluateScript: — executes arbitrary JS in-process. Constrained to JSContext receivers."
+
+- id: objc.eval.nsinvocation_set_selector
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: setSelector
+  description: "Disabled — NSInvocation -setSelector: with tainted SEL name enables forwardInvocation: dispatch to arbitrary method. Enable when SEL originates from user input."
+
+- id: objc.eval.nsselectorfromstring
+  enabled: true
+  language: objc
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: NSSelectorFromString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; NSSelectorFromString(input); }
+  - name: literal selector negative
+    code: |
+      void test(void) { NSSelectorFromString(@"description"); }
+    expect_no_match: true
+  description: "NSSelectorFromString(tainted) — constructs selector from attacker string; used with -performSelector: yields arbitrary method dispatch."
+
+- id: objc.eval.stringwithformat
+  enabled: true
+  language: objc
+  tag: format-string
+  severity: medium
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      regex: "^(stringWithFormat|stringByAppendingFormat|initWithFormat|localizedStringWithFormat)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; stringWithFormat(input); }
+  - name: literal string format negative
+    code: |
+      void test(id input) { stringWithFormat(@"%@", input); }
+    expect_no_match: true
+  description: "NSString +stringWithFormat: / -initWithFormat: / +localizedStringWithFormat: — when the FORMAT argument is tainted (not the value args), `%@` / `%n` / `%s` parses attacker-controlled conversions; commonly observed downstream of SQL/HTML/JS string assembly."
+
+- id: objc.eval.nslog_format
+  aliases:
+  - objc.info_disclosure.nslog_secret
+  enabled: true
+  language: objc
+  tag: format-string
+  severity: low
+  cwe: [CWE-134, CWE-117, CWE-200]
+  match:
+    kind: call
+    callee:
+      regex: "^(NSLog|os_log|os_log_with_type|asl_log)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; NSLog(input); }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        nslog_format("safe");
+      }
+    expect_no_match: true
+  description: "NSLog / os_log with tainted format string — log injection (CWE-117) and format-string conversion abuse (CWE-134). Sink emits when the format-string slot is tainted. Also covers merged aliases: objc.info_disclosure.nslog_secret."

@@ -1,0 +1,294 @@
+# C++ hardware-control / bus-write sinks (GPIO, PWM, I2C/SMBus, SPI, UART).
+- id: cpp.hardware.gpio_set_value
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [linux-gpio]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: gpio_set_value
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/gpio.h>
+      #include <linux/gpio.h>
+      #include <linux/gpio.h> /* linux-gpio */
+      #include <linux/gpio.h> /* linux-gpio */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        gpio_set_value(arg);
+      }
+  description: "gpio_set_value — tainted pin/value drives a physical output."
+
+  imports:
+  - linux
+  - linux/gpio.h
+- id: cpp.hardware.gpiod_line_set_value
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [libgpiod]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: gpiod_line_set_value
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libgpiod.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        gpiod_line_set_value(arg);
+      }
+  description: "gpiod_line_set_value — tainted line/value actuates GPIO-backed hardware."
+
+- id: cpp.hardware.digitalwrite
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [arduino, wiringpi]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: digitalWrite
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Arduino.h>
+      #include <Arduino.h>
+      #include <Arduino.h> /* arduino */
+      #include <Arduino.h> /* arduino */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        digitalWrite(arg);
+      }
+  description: "digitalWrite — tainted pin/value toggles a physical output."
+
+  imports:
+  - Arduino.h
+  - Arduino
+- id: cpp.hardware.analogwrite
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [arduino]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: analogWrite
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Arduino.h>
+      #include <Arduino.h>
+      #include <Arduino.h> /* arduino */
+      #include <Arduino.h> /* arduino */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        analogWrite(arg);
+      }
+  description: "analogWrite — tainted PWM duty or pin selection drives an actuator."
+
+  imports:
+  - Arduino.h
+  - Arduino
+- id: cpp.hardware.i2c_smbus_write_byte_data
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [linux-i2c]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: i2c_smbus_write_byte_data
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        i2c_smbus_write_byte_data(arg);
+      }
+  description: "i2c_smbus_write_byte_data — tainted register/value mutates an attached device over I2C."
+
+  imports:
+  - linux
+  - linux/i2c-dev.h
+- id: cpp.hardware.i2c_smbus_write_word_data
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [linux-i2c]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: i2c_smbus_write_word_data
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        i2c_smbus_write_word_data(arg);
+      }
+  description: "i2c_smbus_write_word_data — tainted 16-bit write controls peripheral state."
+
+  imports:
+  - linux
+  - linux/i2c-dev.h
+- id: cpp.hardware.wiringpi_i2c_write_reg8
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [wiringpi]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: wiringPiI2CWriteReg8
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        wiringPiI2CWriteReg8(arg);
+      }
+  description: "wiringPiI2CWriteReg8 — tainted register/value drives a chip-to-chip I2C peripheral."
+
+- id: cpp.hardware.wiringpi_i2c_write_reg16
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [wiringpi]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: wiringPiI2CWriteReg16
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        wiringPiI2CWriteReg16(arg);
+      }
+  description: "wiringPiI2CWriteReg16 — tainted 16-bit write mutates peripheral hardware state."
+
+- id: cpp.hardware.serial_putchar
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [wiringpi]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: serialPutchar
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        serialPutchar(arg);
+      }
+  description: "serialPutchar — tainted byte is emitted onto a UART/serial link."
+
+- id: cpp.hardware.serialport_blocking_write
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [libserialport]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: sp_blocking_write
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libserialport.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        sp_blocking_write(arg);
+      }
+  description: "sp_blocking_write — tainted bytes are transmitted to a serial-attached device."
+
+- id: cpp.hardware.wiringpi_spi_data_rw
+  enabled: true
+  language: cpp
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [wiringpi]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      name: wiringPiSPIDataRW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        wiringPiSPIDataRW(arg);
+      }
+  description: "wiringPiSPIDataRW — tainted SPI frame bytes are sent to an attached peripheral."

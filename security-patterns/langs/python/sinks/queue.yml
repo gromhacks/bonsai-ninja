@@ -1,0 +1,119 @@
+- id: python.celery.delay_dynamic
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: queue-injection
+  severity: medium
+  cwe: [CWE-94, CWE-915]
+  owasp: [A03-2021]
+  frameworks: [celery]
+  packages: [celery]
+  match:
+    kind: call
+    callee:
+      name: delay
+  description: "Disabled — flag with dynamic-task-name analysis."
+
+- id: python.queue.boto3_send_message
+  enabled: true
+  language: python
+  tag: queue-injection
+  severity: high
+  packages: [boto3]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: send_message
+  constraints:
+  - arg_tainted:
+      kw: MessageBody
+  match_examples:
+  - name: queue boto3 send message body kw
+    code: |
+      import boto3
+      def example(user_input):
+          return send_message(MessageBody=user_input)
+    expect_match_text: [send_message]
+  - name: boto3 send message body literal negative
+    code: |
+      import boto3
+      def example(user_input):
+          return send_message(MessageBody="safe")
+    expect_no_match: true
+  description: "boto3 SQS Queue.send_message / client.send_message with MessageBody=tainted — attacker-controlled queue payload injects arbitrary messages."
+
+- id: python.queue.boto3_send_message_queue_url
+  enabled: true
+  language: python
+  tag: queue-injection
+  severity: high
+  packages: [boto3]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: send_message
+  constraints:
+  - arg_tainted:
+      kw: QueueUrl
+  match_examples:
+  - name: queue boto3 send message queue url kw
+    code: |
+      import boto3
+      def example(user_input):
+          return send_message(QueueUrl=user_input, MessageBody="safe")
+    expect_match_text: [send_message]
+  - name: boto3 send message queue url literal negative
+    code: |
+      import boto3
+      def example(user_input):
+          return send_message(QueueUrl="https://sqs.us-east-1.amazonaws.com/123/q", MessageBody="safe")
+    expect_no_match: true
+  description: "boto3 SQS send_message(QueueUrl=tainted_url, MessageBody) — attacker-controlled queue target can redirect messages to unintended queues."
+
+- id: python.queue.azure_servicebus_send_messages
+  enabled: true
+  language: python
+  tag: queue-injection
+  severity: high
+  packages: [azure.servicebus]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: send_messages
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: queue azure servicebus send messages
+    code: |
+      import azureservicebus
+      def example(user_input):
+          return send_messages(user_input)
+  - name: azure servicebus send messages literal negative
+    code: |
+      import azureservicebus
+      def example(user_input):
+          return send_messages("safe")
+    expect_no_match: true
+  description: "ServiceBusSender.send_messages — tainted queue target/body injects arbitrary Service Bus payloads."
+
+  imports:
+  - azureservicebus
+- id: python.queue.gcp_pubsub_publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: queue-injection
+  severity: high
+  packages: [google.cloud.pubsub_v1]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: publish
+  description: "Disabled — Pub/Sub Topic.publish and many non-queue APIs share the bare `publish` name; enable only in Pub/Sub-focused audits."

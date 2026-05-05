@@ -1,0 +1,176 @@
+# Swift response header / CRLF injection (Vapor + URLRequest).
+- id: swift.header.vapor_response_headers_replace_or_add
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: high
+  packages: [vapor]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: replaceOrAdd
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test(input: String) { replaceOrAdd(name: "X-Name", value: input) }
+  - name: literal vapor replace header negative
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test() { replaceOrAdd(name: "X-Name", value: "safe") }
+    expect_no_match: true
+  description: "Vapor Response.headers.replaceOrAdd(name:value: tainted) — CRLF risk if value unchecked."
+- id: swift.header.vapor_response_headers_replace_or_add_name
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: high
+  packages: [vapor]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: replaceOrAdd
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted vapor replace header name
+    code: |
+      import vapor
+      import Vapor // vapor
+      func test(input: String) { replaceOrAdd(name: input, value: "safe") }
+  - name: literal vapor replace header name negative
+    code: |
+      import vapor
+      import Vapor // vapor
+      func test() { replaceOrAdd(name: "X-Name", value: "safe") }
+    expect_no_match: true
+  description: "Vapor Response.headers.replaceOrAdd(name:value:) — tainted header names can corrupt response headers."
+
+- id: swift.header.vapor_response_headers_add
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: high
+  packages: [vapor]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.add$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test(input: String) { headers.add(name: "X-Name", value: input) }
+  - name: literal vapor add header negative
+    code: |
+      import vapor
+      import Vapor // vapor
+      import Vapor // vapor
+      func test() { headers.add(name: "X-Name", value: "safe") }
+    expect_no_match: true
+  description: "Vapor Response.headers.add(name:value:). Suffix-match via `headers.add` — reduces FP vs bare `add`."
+- id: swift.header.vapor_response_headers_add_name
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: high
+  packages: [vapor]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.add$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted vapor add header name
+    code: |
+      import vapor
+      import Vapor // vapor
+      func test(input: String) { headers.add(name: input, value: "safe") }
+  - name: literal vapor add header name negative
+    code: |
+      import vapor
+      import Vapor // vapor
+      func test() { headers.add(name: "X-Name", value: "safe") }
+    expect_no_match: true
+  description: "Vapor Response.headers.add(name:value:) — tainted header names can corrupt response headers."
+
+- id: swift.header.urlrequest_addvalue
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: addValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { addValue(input, forHTTPHeaderField: "X-Name") }
+  - name: literal add value header negative
+    code: |
+      func test() { addValue("safe", forHTTPHeaderField: "X-Name") }
+    expect_no_match: true
+  description: "URLRequest.addValue(_:forHTTPHeaderField:) — outbound CRLF."
+
+- id: swift.header.urlrequest_setvalue
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      name: setValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted URLRequest setValue
+    code: |
+      func test(input: String) { setValue(input, forHTTPHeaderField: "X-Name") }
+  - name: literal URLRequest setValue negative
+    code: |
+      func test() { setValue("safe", forHTTPHeaderField: "X-Name") }
+    expect_no_match: true
+  description: "URLRequest.setValue(_:forHTTPHeaderField:) — outbound CRLF. Note: `setValue` also exists on NSDictionary."
+
+- id: swift.header.urlrequest_allhttpheaderfields
+  enabled: true
+  language: swift
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-113]
+  match:
+    kind: write
+    target:
+      name: allHTTPHeaderFields
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; allHTTPHeaderFields = input }
+  description: "URLRequest.allHTTPHeaderFields = tainted dict."

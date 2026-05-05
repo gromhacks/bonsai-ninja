@@ -1,0 +1,265 @@
+- id: scala.template.scalate_layout
+  enabled: true
+  language: scala
+  tag: ssti
+  severity: critical
+  packages:
+  - scalate
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TemplateEngine
+      - layout
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import scalate._\n// uses scalate\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    TemplateEngine.layout(\"{{\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import scalate._\n// uses scalate\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    TemplateEngine.layout(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Scalate TemplateEngine.layout(tainted) \u2014 SSTI."
+- id: scala.template.scalate_renderstring
+  enabled: true
+  language: scala
+  tag: ssti
+  severity: critical
+  packages:
+  - scalate
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TemplateEngine
+      - renderString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import scalate._\nobject App {\n  def handle(input: String): Unit = {\n\
+      \    TemplateEngine.renderString(\"{{\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import scalate._\nobject App {\n  def handle(input: String): Unit = {\n\
+      \    TemplateEngine.renderString(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Scalate TemplateEngine.renderString(tainted) \u2014 compiles & runs\
+    \ string."
+- id: scala.template.velocity_evaluate
+  enabled: true
+  language: scala
+  tag: ssti
+  severity: critical
+  packages:
+  - velocity
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Velocity
+      - evaluate
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: generated shape example
+    code: "import velocity._\n// uses velocity\nobject App {\n  def handle(ctx: Any,\
+      \ writer: Any, template: String): Unit = {\n    Velocity.evaluate(ctx, writer,\
+      \ \"log\", \"{{\" + template)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import velocity._\n// uses velocity\nobject App {\n  def handle(ctx: Any,\
+      \ writer: Any, template: String): Unit = {\n    Velocity.evaluate(ctx, writer,\
+      \ template, \"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Velocity.evaluate(tainted template) \u2014 RCE."
+- id: scala.template.freemarker_process
+  enabled: false
+  language: scala
+  tag: ssti
+  severity: high
+  packages:
+  - freemarker
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Template
+      - process
+  match_examples:
+  - name: generated shape example
+    code: "import freemarker._\n// uses freemarker\nobject App {\n  def handle(input:\
+      \ String): Unit = {\n    Template.process(\"{{\" + input)\n  }\n}\n"
+  description: "Freemarker Template.process \u2014 SSTI if template text is tainted."
+  disabled_reason:
+    code: over-broad
+- id: scala.template.freemarker_template_process_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: ssti
+  severity: high
+  packages:
+  - freemarker
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - process
+  match_examples:
+  - name: freemarker local template process
+    code: "import freemarker._\nobject App {\n  def handle(template: Template, model:\
+      \ Any, out: Any): Unit = {\n    template.process(model, out)\n  }\n}\nclass\
+      \ Template {\n  def process(args: Any*): Unit = {}\n}\n"
+    expect_match_text:
+    - template.process
+  description: "Disabled \u2014 bare `template.process` overmatches any object named `template` with a `process` method; no canonical exists (scala.template.freemarker_process is also disabled). Re-enable when adapter supports receiver-type narrowing for FreeMarker Template instances."
+- id: scala.template.spel_parseexpression
+  enabled: true
+  language: scala
+  tag: ssti
+  severity: critical
+  packages:
+  - org.springframework.expression
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SpelExpressionParser
+      - parseExpression
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spel parse expression
+    code: "import org.springframework.expression._\nobject App {\n  def handle(template: String):\
+      \ Unit = {\n    SpelExpressionParser.parseExpression(template)\n  }\n}\n"
+    expect_match_text:
+    - SpelExpressionParser.parseExpression
+  - name: arg tainted literal negative
+    code: "import org.springframework.expression._\nobject App {\n  def handle(template: String):\
+      \ Unit = {\n    SpelExpressionParser.parseExpression(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Spring SpEL parseExpression(template) \u2014 server-side template\
+    \ expression parsing from attacker-controlled text."
+  imports:
+  - org.springframework.expression
+- id: scala.template.thymeleaf_fragment_concat
+  enabled: true
+  language: scala
+  tag: ssti
+  severity: high
+  packages:
+  - org.thymeleaf
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TemplateEngine
+      - process
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: thymeleaf fragment expression concat
+    code: "import org.thymeleaf._\n// uses org.thymeleaf\nobject App {\n  def handle(fragment:\
+      \ String, ctx: Any): Any = {\n    TemplateEngine.process(\"layout :: \" + fragment,\
+      \ ctx)\n  }\n}\n"
+    expect_match_text:
+    - TemplateEngine.process
+  - name: arg tainted literal negative
+    code: "import org.thymeleaf._\n// uses org.thymeleaf\nobject App {\n  def handle(fragment:\
+      \ String, ctx: Any): Any = {\n    TemplateEngine.process(\"layout :: safe\"\
+      , ctx)\n  }\n}\n"
+    expect_no_match: true
+  description: "Thymeleaf TemplateEngine.process(\"layout :: \" + fragment, ctx) \u2014\
+    \ attacker-controlled fragment expressions can become server-side template injection."
+- id: scala.template.mustache_compile
+  enabled: true
+  language: scala
+  tag: ssti
+  severity: high
+  packages:
+  - mustache
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MustacheFactory
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import mustache._\n// uses mustache\nobject App {\n  def handle(input:\
+      \ String): Unit = {\n    MustacheFactory.compile(\"{{\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import mustache._\n// uses mustache\nobject App {\n  def handle(input:\
+      \ String): Unit = {\n    MustacheFactory.compile(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: Mustache MustacheFactory.compile(tainted).
+- id: scala.template.twirl_format
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: ssti
+  severity: medium
+  frameworks:
+  - play
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Twirl
+      - format
+  description: "Disabled \u2014 Twirl templates are compiled at build time; only dynamic\
+    \ template loaders are risky."
+- id: scala.template.freemarker_autoesc_off
+  enabled: true
+  language: scala
+  tag: ssti
+  severity: high
+  packages:
+  - freemarker
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Configuration
+      - setAutoEscapingPolicy
+  match_examples:
+  - name: generated shape example
+    code: "import freemarker._\nobject App {\n  def handle(input: String): Unit =\
+      \ {\n    Configuration.setAutoEscapingPolicy(DISABLE_AUTO_ESCAPING_POLICY)\n\
+      \  }\n}\n"
+  description: "FreeMarker (via Java interop) \u2014 autoescape disabled at config."

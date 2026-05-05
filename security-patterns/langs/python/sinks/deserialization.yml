@@ -1,0 +1,1166 @@
+- id: python.deser.pickle_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  category: deserialize
+  packages:
+  - pickle
+  imports:
+  - pickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pickle
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser pickle loads
+    code: |
+      import pickle
+      def example(user_input):
+          return pickle.loads(user_input)
+  - name: arg tainted literal negative
+    code: "import pickle\ndef example(user_input):\n    return pickle.loads(\"safe\")\n"
+    expect_no_match: true
+  description: "pickle.loads(tainted bytes) — arbitrary code execution via __reduce__."
+- id: python.deser.pickle_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  category: deserialize
+  packages:
+  - pickle
+  imports:
+  - pickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pickle
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser pickle load
+    code: |
+      import pickle
+      def example(user_input):
+          return pickle.load(user_input)
+  - name: pickle load literal negative
+    code: |
+      import pickle
+
+      def example(user_input):
+          return pickle.load('safe')
+    expect_no_match: true
+  description: "pickle.load(file) — same RCE as pickle.loads."
+- id: python.deser.pickle_unpickler
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - pickle
+  cwe:
+  - CWE-502
+  match:
+    kind: new
+    callee:
+      attribute:
+      - pickle
+      - Unpickler
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser pickle unpickler
+    code: |
+      import pickle
+      class Unpickler:
+          pass
+
+      def example(user_input):
+          return pickle.Unpickler(user_input)
+  - name: pickle unpickler literal negative
+    code: |
+      import pickle
+
+      class Unpickler:
+          pass
+
+      def example(user_input):
+          return pickle.Unpickler('safe')
+    expect_no_match: true
+  description: "pickle.Unpickler(file) — RCE via subsequent .load()."
+- id: python.deser._pickle_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - pickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - _pickle
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser  pickle loads
+    code: |
+      import pickle
+      def example(user_input):
+          return _pickle.loads(user_input)
+  - name: ' pickle loads literal negative'
+    code: |
+      import pickle
+
+      def example(user_input):
+          return _pickle.loads('safe')
+    expect_no_match: true
+  description: "_pickle.loads — C-accelerated pickle, same risk."
+- id: python.deser._pickle_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - pickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - _pickle
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser  pickle load
+    code: |
+      import pickle
+      def example(user_input):
+          return _pickle.load(user_input)
+  - name: ' pickle load literal negative'
+    code: |
+      import pickle
+
+      def example(user_input):
+          return _pickle.load('safe')
+    expect_no_match: true
+  description: "_pickle.load() — C-accelerated pickle deserialization; attacker-controlled stream deserializes into arbitrary code via __reduce__."
+- id: python.deser.cpickle_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - cPickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - cPickle
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser cpickle loads
+    code: |
+      import cPickle
+      def example(user_input):
+          return cPickle.loads(user_input)
+  - name: cpickle loads literal negative
+    code: |
+      import cPickle
+
+      def example(user_input):
+          return cPickle.loads('safe')
+    expect_no_match: true
+  description: "Python 2 cPickle.loads — legacy code path."
+- id: python.deser.cpickle_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - cPickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - cPickle
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser cpickle load
+    code: |
+      import cPickle
+      def example(user_input):
+          return cPickle.load(user_input)
+  - name: cpickle load literal negative
+    code: |
+      import cPickle
+
+      def example(user_input):
+          return cPickle.load('safe')
+    expect_no_match: true
+  description: Python 2 cPickle.load.
+- id: python.deser.copyreg
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: insecure-deserialization
+  severity: medium
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - copyreg
+      - __reduce_ex__
+  description: "Disabled — copyreg helpers; rarely a direct sink."
+- id: python.deser.dill_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - dill
+  imports:
+  - dill
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dill
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser dill loads
+    code: |
+      import dill
+      def example(user_input):
+          return dill.loads(user_input)
+  - name: dill loads literal negative
+    code: |
+      import dill
+
+      def example(user_input):
+          return dill.loads('safe')
+    expect_no_match: true
+  description: "dill.loads — extended pickle."
+- id: python.deser.dill_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - dill
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dill
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser dill load
+    code: |
+      import dill
+      def example(user_input):
+          return dill.load(user_input)
+  - name: dill load literal negative
+    code: |
+      import dill
+
+      def example(user_input):
+          return dill.load('safe')
+    expect_no_match: true
+  description: "dill.load() — extended pickle protocol; RCE on untrusted input."
+- id: python.deser.dill_unpickler
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - dill
+  cwe:
+  - CWE-502
+  match:
+    kind: new
+    callee:
+      attribute:
+      - dill
+      - Unpickler
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser dill unpickler
+    code: |
+      import dill
+      class Unpickler:
+          pass
+
+      def example(user_input):
+          return dill.Unpickler(user_input)
+  - name: dill unpickler literal negative
+    code: |
+      import dill
+
+      class Unpickler:
+          pass
+
+      def example(user_input):
+          return dill.Unpickler('safe')
+    expect_no_match: true
+  description: dill.Unpickler.
+- id: python.deser.cloudpickle_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - cloudpickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - cloudpickle
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser cloudpickle loads
+    code: |
+      import cloudpickle
+      def example(user_input):
+          return cloudpickle.loads(user_input)
+  - name: cloudpickle loads literal negative
+    code: |
+      import cloudpickle
+
+      def example(user_input):
+          return cloudpickle.loads('safe')
+    expect_no_match: true
+  description: "cloudpickle.loads — distributed-Python pickle wrapper."
+- id: python.deser.cloudpickle_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - cloudpickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - cloudpickle
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser cloudpickle load
+    code: |
+      import cloudpickle
+      def example(user_input):
+          return cloudpickle.load(user_input)
+  - name: cloudpickle load literal negative
+    code: |
+      import cloudpickle
+
+      def example(user_input):
+          return cloudpickle.load('safe')
+    expect_no_match: true
+  description: cloudpickle.load.
+- id: python.deser.jsonpickle_decode
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - jsonpickle
+  imports:
+  - jsonpickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jsonpickle
+      - decode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser jsonpickle decode
+    code: |
+      import jsonpickle
+      def example(user_input):
+          return jsonpickle.decode(user_input)
+  - name: jsonpickle decode literal negative
+    code: |
+      import jsonpickle
+
+      def example(user_input):
+          return jsonpickle.decode('safe')
+    expect_no_match: true
+  description: "jsonpickle.decode — can invoke constructors."
+- id: python.deser.jsonpickle_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - jsonpickle
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - jsonpickle
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser jsonpickle loads
+    code: |
+      import jsonpickle
+      def example(user_input):
+          return jsonpickle.loads(user_input)
+  - name: jsonpickle loads literal negative
+    code: |
+      import jsonpickle
+
+      def example(user_input):
+          return jsonpickle.loads('safe')
+    expect_no_match: true
+  description: "jsonpickle.loads — alias of decode."
+- id: python.deser.marshal_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  imports:
+  - marshal
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - marshal
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser marshal loads
+    code: |
+      import marshal
+      def example(user_input):
+          return marshal.loads(user_input)
+  - name: marshal loads literal negative
+    code: |
+      import marshal
+
+      def example(user_input):
+          return marshal.loads('safe')
+    expect_no_match: true
+  description: "marshal.loads — arbitrary bytecode."
+- id: python.deser.marshal_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  imports:
+  - marshal
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - marshal
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser marshal load
+    code: |
+      import marshal
+      def example(user_input):
+          return marshal.load(user_input)
+  - name: marshal load literal negative
+    code: |
+      import marshal
+
+      def example(user_input):
+          return marshal.load('safe')
+    expect_no_match: true
+  description: "marshal.load — file-based bytecode."
+- id: python.deser.shelve_open
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: high
+  imports:
+  - shelve
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - shelve
+      - open
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser shelve open
+    code: |
+      import shelve
+      def example(user_input):
+          return shelve.open(user_input)
+  - name: shelve open literal negative
+    code: |
+      import shelve
+
+      def example(user_input):
+          return shelve.open('safe')
+    expect_no_match: true
+  description: "shelve.open — uses pickle under the hood."
+- id: python.deser.dbm_open
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: insecure-deserialization
+  severity: medium
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dbm
+      - open
+  description: "Disabled — dbm itself is bytes; pickling depends on caller."
+- id: python.deser.yaml_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  category: deserialize
+  packages:
+  - yaml
+  imports:
+  - yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - yaml
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser yaml load
+    code: |
+      import yaml
+      def example(user_input):
+          return yaml.load(user_input)
+  - name: yaml load literal negative
+    code: |
+      import yaml
+
+      def example(user_input):
+          return yaml.load('safe')
+    expect_no_match: true
+  description: "yaml.load without SafeLoader — arbitrary Python."
+- id: python.deser.yaml_unsafe_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - yaml
+      - unsafe_load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser yaml unsafe load
+    code: |
+      import yaml
+      def example(user_input):
+          return yaml.unsafe_load(user_input)
+  - name: yaml unsafe load literal negative
+    code: |
+      import yaml
+
+      def example(user_input):
+          return yaml.unsafe_load('safe')
+    expect_no_match: true
+  description: "yaml.unsafe_load — explicit unsafe loader."
+- id: python.deser.yaml_load_all
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - yaml
+      - load_all
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser yaml load all
+    code: |
+      import yaml
+      def example(user_input):
+          return yaml.load_all(user_input)
+  - name: yaml load all literal negative
+    code: |
+      import yaml
+
+      def example(user_input):
+          return yaml.load_all('safe')
+    expect_no_match: true
+  description: "yaml.load_all — multi-doc unsafe loader."
+- id: python.deser.yaml_full_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - yaml
+      - full_load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser yaml full load
+    code: |
+      import yaml
+      def example(user_input):
+          return yaml.full_load(user_input)
+  - name: yaml full load literal negative
+    code: |
+      import yaml
+
+      def example(user_input):
+          return yaml.full_load('safe')
+    expect_no_match: true
+  description: "yaml.full_load — full loader (constructs Python objects)."
+- id: python.deser.ruamel_yaml_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - ruamel.yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - YAML
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser ruamel yaml load
+    code: |
+      import ruamel.yaml
+      def example(user_input):
+          return YAML.load(user_input)
+  - name: ruamel yaml load literal negative
+    code: |
+      import ruamel.yaml
+
+      def example(user_input):
+          return YAML.load('safe')
+    expect_no_match: true
+  description: "ruamel.yaml YAML(typ='unsafe').load — arbitrary objects."
+- id: python.deser.numpy_load_allow_pickle
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - numpy
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - numpy
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser numpy load allow pickle
+    code: |
+      import numpy
+      def example(user_input):
+          return numpy.load(user_input, allow_pickle=True)
+  - name: numpy load allow pickle literal negative
+    code: |
+      import numpy
+
+      def example(user_input):
+          return numpy.load('safe', allow_pickle=True)
+    expect_no_match: true
+  description: "numpy.load(allow_pickle=True) — npy/npz that pickles."
+- id: python.deser.np_load_allow_pickle
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - numpy
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - np
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser np load allow pickle
+    code: |
+      import numpy
+      def example(user_input):
+          return np.load(user_input, allow_pickle=True)
+  - name: np load allow pickle literal negative
+    code: |
+      import numpy
+
+      def example(user_input):
+          return np.load('safe', allow_pickle=True)
+    expect_no_match: true
+  description: "np.load(allow_pickle=True) — common alias."
+- id: python.deser.joblib_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - joblib
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - joblib
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser joblib load
+    code: |
+      import joblib
+      def example(user_input):
+          return joblib.load(user_input)
+  - name: joblib load literal negative
+    code: |
+      import joblib
+
+      def example(user_input):
+          return joblib.load('safe')
+    expect_no_match: true
+  description: "joblib.load — sklearn model files; pickle under the hood."
+- id: python.deser.pandas_read_pickle
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - pandas
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pd
+      - read_pickle
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser pandas read pickle
+    code: |
+      import pandas
+      def example(user_input):
+          return pd.read_pickle(user_input)
+  - name: pandas read pickle literal negative
+    code: |
+      import pandas
+
+      def example(user_input):
+          return pd.read_pickle('safe')
+    expect_no_match: true
+  description: "pd.read_pickle — pandas DataFrame pickle loader."
+- id: python.deser.pandas_read_pickle_full
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - pandas
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pandas
+      - read_pickle
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser pandas read pickle full
+    code: |
+      import pandas
+      def example(user_input):
+          return pandas.read_pickle(user_input)
+  - name: pandas read pickle full literal negative
+    code: |
+      import pandas
+
+      def example(user_input):
+          return pandas.read_pickle('safe')
+    expect_no_match: true
+  description: pandas.read_pickle (without `as pd`).
+- id: python.deser.pytorch_load
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - torch
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - torch
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser pytorch load
+    code: |
+      import torch
+      def example(user_input):
+          return torch.load(user_input)
+  - name: pytorch load literal negative
+    code: |
+      import torch
+
+      def example(user_input):
+          return torch.load('safe')
+    expect_no_match: true
+  description: "torch.load — PyTorch model pickle loader (pre-2.4 default)."
+- id: python.deser.tf_load_model
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - tensorflow
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - keras
+      - load_model
+  description: "Disabled — tf.keras.models.load_model can pickle Lambda layers."
+- id: python.deser.xmlrpc_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - xmlrpc
+  cwe:
+  - CWE-502
+  - CWE-91
+  match:
+    kind: call
+    callee:
+      attribute:
+      - xmlrpc
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser xmlrpc loads
+    code: |
+      import xmlrpc
+      def example(user_input):
+          return xmlrpc.loads(user_input)
+  - name: xmlrpc loads literal negative
+    code: |
+      import xmlrpc
+
+      def example(user_input):
+          return xmlrpc.loads('safe')
+    expect_no_match: true
+  description: "xmlrpc.client.loads — also XXE-capable."
+- id: python.deser.plistlib_loads
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: insecure-deserialization
+  severity: medium
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - plistlib
+      - loads
+  description: "Disabled — plistlib can be exploited via crafted XML; rare."
+- id: python.deser.toml_loads
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: insecure-deserialization
+  severity: low
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - tomllib
+      - loads
+  description: "Disabled — TOML is generally safe."
+- id: python.deser.msgpack_unpack_use_list
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - msgpack
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - msgpack
+      - unpackb
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: msgpack unpackb raw false
+    code: |
+      import msgpack
+      def decode(payload):
+          return msgpack.unpackb(payload, raw=False)
+    expect_match_text:
+    - msgpack.unpackb
+  - name: msgpack unpack use list literal negative
+    code: |
+      import msgpack
+
+      def decode(payload):
+          return msgpack.unpackb('safe', raw=False)
+    expect_no_match: true
+  description: 'msgpack.unpackb(..., raw=False) - untrusted MessagePack frames materialize string/object values; audit callers that then trust decoded object structure. Merged aliases: python.deser.msgpack_unpackb_object_hook.'
+  aliases:
+  - python.deser.msgpack_unpackb_object_hook
+- id: python.deser.bson_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: insecure-deserialization
+  severity: medium
+  packages:
+  - bson
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - bson
+      - decode
+  description: "Disabled — BSON itself is type-bounded."
+- id: python.deser.django_signed_cookie_loads
+  enabled: true
+  language: python
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - django
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - signing
+      - loads
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deser django signed cookie loads
+    code: |
+      import django
+      def example(user_input):
+          return signing.loads(user_input, serializer=PickleSerializer)
+  - name: django signed cookie loads literal negative
+    code: |
+      import django
+
+      def example(user_input):
+          return signing.loads('safe', serializer=PickleSerializer)
+    expect_no_match: true
+  description: django.core.signing.loads with PickleSerializer.
+- id: python.deser.flask_session_pickle
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - flask_session
+  cwe:
+  - CWE-502
+  match:
+    kind: write
+    target:
+      name: SESSION_SERIALIZATION_FORMAT
+  description: "Disabled — config check; flask-session pickle serializer is dangerous."
+- id: python.deser.celery_pickle_serializer
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - celery
+  cwe:
+  - CWE-502
+  match:
+    kind: write
+    target:
+      name: CELERY_TASK_SERIALIZER
+  description: "Disabled — only CELERY_TASK_SERIALIZER='pickle' is the dangerous configuration; write-value equality is not available for this target shape."
+- id: python.deser.multiprocessing_connection_recv
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: python
+  tag: insecure-deserialization
+  severity: medium
+  packages:
+  - multiprocessing
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      regex: ^(multiprocessing\.connection\.)?(Connection|Client)\.recv$
+  description: "multiprocessing.connection Connection.recv()/Client.recv() — recv unpickles received bytes; use only over authenticated/trusted connections."

@@ -1,0 +1,61 @@
+# c race / TOCTOU sinks (T501).
+
+# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# in source order to identify the race window.
+- id: c.toctou.access_check
+  enabled: true
+  language: c
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      name: access
+  match_examples:
+    - name: generated direct match
+      code: |
+        void example(void) {
+          char *arg = "tainted";
+          char *fmt = arg;
+          access(arg);
+        }
+  description: "access(path, mode) — POSIX permission check; window before open() is TOCTOU. CWE-367 / OpenSSL CVE-2008-1872 shape."
+- id: c.toctou.stat_check
+  enabled: true
+  language: c
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      name: stat
+  match_examples:
+    - name: generated direct match
+      code: |
+        void example(void) {
+          char *arg = "tainted";
+          char *fmt = arg;
+          stat(arg);
+        }
+  description: "stat(path, &buf) — check site; symlink swap before subsequent open() is TOCTOU."
+- id: c.toctou.lstat_check
+  enabled: true
+  language: c
+  tag: race
+  severity: medium
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      name: lstat
+  match_examples:
+    - name: generated direct match
+      code: |
+        void example(void) {
+          char *arg = "tainted";
+          char *fmt = arg;
+          lstat(arg);
+        }
+  description: "lstat(path, &buf) — check that doesn't follow symlinks; the symlink-target swap window is between this and open()."

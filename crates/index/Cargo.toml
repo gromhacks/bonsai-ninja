@@ -1,0 +1,17 @@
+[package]
+name = "bonsai_index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Declaration and reference indices."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_lang_api = { workspace = true }
+ahash = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

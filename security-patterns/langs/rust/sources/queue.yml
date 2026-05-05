@@ -1,0 +1,61 @@
+# Rust message-queue / broker sources.
+- id: rust.rdkafka.message_payload
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: rust
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message, binary]
+  frameworks: [rdkafka]
+  packages: [rdkafka]
+  match:
+    kind: call
+    callee:
+      attribute: [BorrowedMessage, payload]
+  description: "Disabled — adapters index local receivers like `msg.payload()`, and bare `payload` is too broad to tail-match safely."
+- id: rust.lapin.delivery_data
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message, binary]
+  frameworks: [lapin]
+  packages: [lapin]
+  match:
+    kind: read
+    target:
+      name: data
+  description: "Disabled — bare `data` overmatches unrelated fields, and typed receiver matching does not work for local delivery variables."
+- id: rust.nats.message_data
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  trust: service
+  tag: queue-input
+  payload_types: [queue-message, binary]
+  frameworks: [nats, async-nats]
+  packages: [nats, async_nats]
+  match:
+    kind: read
+    target:
+      name: payload
+  description: "Disabled — bare `payload` overmatches unrelated fields, and typed receiver matching does not work for local message variables."
+- id: rust.sqs.receive_message
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: rust
+  trust: service
+  tag: queue-input
+  payload_types: [json, text]
+  frameworks: [aws-sdk-sqs]
+  packages: [aws_sdk_sqs]
+  match:
+    kind: call
+    callee:
+      attribute: [Message, body]
+  description: "Disabled — adapters index local receivers like `message.body()`, and bare `body` is too broad to tail-match safely."

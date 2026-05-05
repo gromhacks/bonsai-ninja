@@ -1,0 +1,160 @@
+- id: cpp.tls.openssl_verify_none
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  severity: high
+  packages:
+  - openssl
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      name: SSL_CTX_set_verify
+  match_examples:
+  - name: generated direct match
+    code: "#include <openssl/evp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
+      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  SSL_CTX_set_verify(arg,\
+      \ SSL_VERIFY_NONE);\n}\n"
+  description: "OpenSSL SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL) \u2014 no cert\
+    \ verification."
+- id: cpp.tls.openssl_set_verify_none
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  severity: high
+  packages:
+  - openssl
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      name: SSL_set_verify
+  match_examples:
+  - name: generated direct match
+    code: "#include <openssl/evp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
+      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  SSL_set_verify(arg,\
+      \ SSL_VERIFY_NONE);\n}\n"
+  description: "OpenSSL SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL) \u2014 per-connection\
+    \ no verify."
+- id: cpp.tls.boost_asio_verify_none
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  severity: high
+  packages:
+  - boost.asio
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - context
+      - set_verify_mode
+  match_examples:
+  - name: generated direct match
+    code: "#include <boost/asio.hpp>\n#include <boost/asio.hpp>\n#include <boost/asio.hpp>\n\
+      void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n\
+      \  const char *query = arg;\n  context::set_verify_mode(verify_none);\n}\n"
+  description: "boost::asio::ssl::context::set_verify_mode(verify_none). Arg-shape\
+    \ constraint requires the verify-none enumerator literal \u2014 `set_verify_mode(verify_peer)`\
+    \ does NOT fire."
+  imports:
+  - boost
+  - boost/asio.hpp
+- id: cpp.tls.qt_qssl_setpeerverifymode
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  severity: high
+  packages:
+  - Qt
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      regex: ^QSslConfiguration::setPeerVerifyMode$
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt\
+      \ */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt\
+      \ = arg;\n  const char *query = arg;\n  QSslConfiguration::setPeerVerifyMode(arg);\n\
+      }\n"
+  description: "Qt QSslConfiguration::setPeerVerifyMode(VerifyNone) \u2014 disables\
+    \ cert check."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.tls.qt_qsslsocket_setpeerverifymode
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  severity: high
+  packages:
+  - Qt
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      regex: ^QSslSocket::setPeerVerifyMode$
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt\
+      \ */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt\
+      \ = arg;\n  const char *query = arg;\n  QSslSocket::setPeerVerifyMode(arg);\n\
+      }\n"
+  description: Qt QSslSocket::setPeerVerifyMode(VerifyNone).
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.tls.poco_context_verify_none
+  enabled: true
+  language: cpp
+  tag: weak-tls
+  severity: high
+  packages:
+  - Poco
+  cwe:
+  - CWE-295
+  match:
+    kind: new
+    callee:
+      name: Context
+  match_examples:
+  - name: generated direct match
+    code: "#include <Poco/URI.h>\nvoid example() {\n  const char *arg = \"tainted\"\
+      ;\n  auto *x = new Context(arg);\n}\n"
+  description: "Poco::Net::Context(...) \u2014 flag when constructed with VERIFY_NONE\
+    \ verification mode."
+- id: cpp.tls.cpphttplib_server_verify_off
+  enabled: false
+  language: cpp
+  tag: weak-tls
+  severity: high
+  packages:
+  - cpp-httplib
+  cwe:
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - enable_server_certificate_verification
+  match_examples:
+  - name: generated direct match
+    code: "#include <httplib.h>\n#include <httplib.h>\nvoid example() {\n  const char\
+      \ *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n\
+      \  Client::enable_server_certificate_verification(false);\n}\n"
+  description: "cpp-httplib Client::enable_server_certificate_verification(false)\
+    \ \u2014 disables verification. Arg-equals constraint scopes the rule to the disabling\
+    \ form; the `(true)` call does NOT fire."
+  imports:
+  - httplib.h
+  - httplib
+  disabled_reason:
+    code: over-broad

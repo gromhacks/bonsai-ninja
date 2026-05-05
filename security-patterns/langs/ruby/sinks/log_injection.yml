@@ -1,0 +1,115 @@
+- id: ruby.log_injection.logger_newline
+  enabled: true
+  language: ruby
+  tag: header-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - info
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.log_injection.logger_newline example
+    code: "def example(input, url, id, payload, request, params)\n  Logger.info(input)\nend\n"
+  - name: ruby.log_injection.logger_newline literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Logger.info(\"safe line\")\nend\n"
+    expect_no_match: true
+  description: "Logger.info(\"...#{user}...\\n\") \u2014 newline in interpolated user text forges log entries."
+- id: ruby.log_injection.logger_debug_interp
+  enabled: true
+  language: ruby
+  tag: log-injection
+  severity: low
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - debug
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.log_injection.logger_debug_interp example
+    code: "def example(input, url, id, payload, request, params)\n  logger.debug(input)\nend\n"
+  - name: ruby.log_injection.logger_debug_interp literal negative
+    code: "def example(input, url, id, payload, request, params)\n  logger.debug(\"hello\")\nend\n"
+    expect_no_match: true
+  description: "logger.debug \u2014 log-injection via interpolation."
+- id: ruby.log_injection.logger_warn_interp
+  enabled: true
+  language: ruby
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - warn
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.log_injection.logger_warn_interp example
+    code: "def example(input, url, id, payload, request, params)\n  logger.warn(input)\nend\n"
+  - name: ruby.log_injection.logger_warn_interp literal negative
+    code: "def example(input, url, id, payload, request, params)\n  logger.warn(\"hello\")\nend\n"
+    expect_no_match: true
+  description: "logger.warn \u2014 log-injection via interpolation."
+- id: ruby.log_injection.logger_error_interp
+  enabled: true
+  language: ruby
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - error
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.log_injection.logger_error_interp example
+    code: "def example(input, url, id, payload, request, params)\n  logger.error(input)\nend\n"
+  - name: ruby.log_injection.logger_error_interp literal negative
+    code: "def example(input, url, id, payload, request, params)\n  logger.error(\"hello\")\nend\n"
+    expect_no_match: true
+  description: "logger.error \u2014 log-injection via interpolation."
+- id: ruby.log_injection.logger_fatal_interp
+  enabled: true
+  language: ruby
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - fatal
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.log_injection.logger_fatal_interp example
+    code: "def example(input, url, id, payload, request, params)\n  logger.fatal(input)\nend\n"
+  - name: ruby.log_injection.logger_fatal_interp literal negative
+    code: "def example(input, url, id, payload, request, params)\n  logger.fatal(\"hello\")\nend\n"
+    expect_no_match: true
+  description: "logger.fatal \u2014 log-injection via interpolation."

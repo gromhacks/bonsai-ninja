@@ -1,0 +1,421 @@
+- id: python.llm.openai_chat
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - openai
+  imports:
+  - openai
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.ChatCompletion\.create$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: llm openai chat
+    code: "import openai\ndef example(user_input):\n    return openai.ChatCompletion.create(user_input)\n"
+  - name: llm openai chat literal negative
+    code: "import openai\ndef example(user_input):\n    return openai.ChatCompletion.create({\"messages\": [{\"role\": \"user\", \"content\": \"safe\"}]})\n"
+    expect_no_match: true
+  description: "OpenAI ChatCompletion.create — prompt may include tainted input."
+- id: python.llm.openai_chat_completions_create
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - openai
+  imports:
+  - openai
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chat\.completions\.create$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: llm openai chat completions create
+    code: "import openai\ndef example(user_input):\n    return openai.chat.completions.create(user_input)\n"
+  - name: llm openai chat completions literal negative
+    code: "import openai\ndef example(user_input):\n    return openai.chat.completions.create({\"messages\": [{\"role\": \"user\", \"content\": \"safe\"}]})\n"
+    expect_no_match: true
+  description: "openai.chat.completions.create — tainted prompt content reaches an LLM tool / instruction surface."
+- id: python.llm.openai_responses_create
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - openai
+  imports:
+  - openai
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.responses\.create$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: llm openai responses create
+    code: "import openai\ndef example(user_input):\n    return openai.responses.create(user_input)\n"
+  - name: llm openai responses literal negative
+    code: "import openai\ndef example(user_input):\n    return openai.responses.create({\"input\": \"safe\"})\n"
+    expect_no_match: true
+  description: "openai.responses.create — tainted input can steer model output, tool calls, or data disclosure."
+- id: python.llm.langchain_run
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - langchain
+  match:
+    kind: call
+    callee:
+      attribute:
+      - chain
+      - run
+  description: "Disabled — chain.run is too broad without receiver typing; use app-specific LangChain sink rules for concrete chains/agents."
+- id: python.llm.langchain_invoke
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - langchain
+  - langchain_core
+  match:
+    kind: call
+    callee:
+      attribute:
+      - chain
+      - invoke
+  description: "Disabled — chain.invoke is the modern LCEL entrypoint but `invoke` is too generic; enable with concrete chain typing."
+- id: python.llm.anthropic_messages_create
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - anthropic
+  imports:
+  - anthropic
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - messages
+      - create
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: llm anthropic messages create
+    code: "import anthropic\ndef example(user_input):\n    return client.messages.create(user_input)\n"
+  - name: llm anthropic messages literal negative
+    code: "import anthropic\ndef example(user_input):\n    return client.messages.create({\"messages\": [{\"role\": \"user\", \"content\": \"safe\"}]})\n"
+    expect_no_match: true
+  description: "anthropic client.messages.create — tainted user content can hijack instructions, exfiltrate via tool_use, or inject untrusted output."
+- id: python.llm.cohere_chat
+  enabled: false
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - cohere
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - chat
+  match_examples:
+  - name: llm cohere chat
+    code: "import cohere\ndef example(user_input):\n    return client.chat(user_input)\n"
+  description: "cohere client.chat — tainted user message steers Cohere chat completions. `min_args: 1` rejects unrelated `client.chat()` 0-arg accessors (chat-room/IM helpers that share the verb)."
+  disabled_reason:
+    code: over-broad
+- id: python.llm.boto3_bedrock_invokemodel
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  packages:
+  - boto3
+  - botocore
+  match:
+    kind: call
+    callee:
+      attribute:
+      - bedrock
+      - invoke_model
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: llm boto3 bedrock invokemodel
+    code: "import boto3\ndef example(user_input):\n    return bedrock.invoke_model(user_input)\n"
+  - name: llm boto3 bedrock invokemodel literal negative
+    code: "import boto3\ndef example(user_input):\n    return bedrock.invoke_model(body='{\"prompt\":\"safe\"}')\n"
+    expect_no_match: true
+  description: "boto3 bedrock-runtime invoke_model — tainted body steers underlying foundation model (Claude/Llama/Titan)."
+- id: python.llm.google_genai_generate_content
+  enabled: false
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  packages:
+  - google.generativeai
+  - google.genai
+  match:
+    kind: call
+    callee:
+      attribute:
+      - model
+      - generate_content
+  match_examples:
+  - name: llm google genai generate content
+    code: "import googlegenerativeai\ndef example(user_input):\n    return model.generate_content(user_input)\n"
+  description: "google.generativeai model.generate_content — tainted prompt steers Gemini output and tool calls. `min_args: 1` rejects 0-arg decoys."
+  imports:
+  - googlegenerativeai
+  disabled_reason:
+    code: over-broad
+
+- id: python.llm.langchain_llmchain_invoke
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - langchain
+  - langchain.chains
+  imports:
+  - langchain
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LLMChain
+      - invoke
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: langchain LLMChain invoke tainted
+    code: |
+      import langchain
+      from langchain.chains import LLMChain
+      def example(user_input):
+          return LLMChain.invoke(user_input)
+    expect_match_text: [LLMChain.invoke]
+  - name: langchain LLMChain invoke literal negative
+    code: |
+      import langchain
+      from langchain.chains import LLMChain
+      def example():
+          return LLMChain.invoke({"question": "What is 2+2?"})
+    expect_no_match: true
+  description: "LangChain LLMChain.invoke(tainted) — attacker-controlled chain input drives the LLM, can hijack instructions, exfiltrate tool data, or drive tool calls."
+
+- id: python.llm.langchain_agent_run
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: high
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - langchain
+  imports:
+  - langchain
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.run$
+  constraints:
+  - arg_tainted:
+      index: 0
+  - receiver_name_in: [agent, executor, agent_executor, chain, chain_executor]
+  match_examples:
+  - name: langchain agent.run tainted
+    code: |
+      import langchain
+      def example(agent, user_input):
+          return agent.run(user_input)
+    expect_match_text: [agent.run]
+  - name: langchain agent.run literal negative
+    code: |
+      import langchain
+      def example(agent):
+          return agent.run("What is the capital of France?")
+    expect_no_match: true
+  description: "LangChain agent.run(tainted) / executor.run(tainted) — agent instruction surface; attacker can steer tool calls, leak data, or escape system prompt."
+
+- id: python.llm.langchain_chain_ainvoke
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - langchain
+  - langchain_core
+  imports:
+  - langchain
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.ainvoke$
+  constraints:
+  - arg_tainted:
+      index: 0
+  - receiver_name_in: [chain, llm_chain, agent, executor, runnable]
+  match_examples:
+  - name: langchain chain.ainvoke tainted
+    code: |
+      import langchain
+      async def example(chain, user_input):
+          return await chain.ainvoke(user_input)
+    expect_match_text: [chain.ainvoke]
+  - name: langchain chain.ainvoke literal negative
+    code: |
+      import langchain
+      async def example(chain):
+          return await chain.ainvoke({"question": "What is 2+2?"})
+    expect_no_match: true
+  description: "LangChain chain.ainvoke(tainted) / runnable.ainvoke — async LCEL invocation with attacker-controlled input drives downstream LLM/tool surface."
+
+- id: python.llm.mistralai_chat
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  packages:
+  - mistralai
+  imports:
+  - mistralai
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - chat
+  constraints:
+  - arg_tainted:
+      kw: messages
+  match_examples:
+  - name: mistralai client chat tainted
+    code: |
+      import mistralai
+      def example(user_input):
+          return client.chat(messages=user_input)
+  - name: mistralai client chat literal negative
+    code: |
+      import mistralai
+      def example(user_input):
+          return client.chat(messages=[{"role": "user", "content": "safe"}])
+    expect_no_match: true
+  description: "mistralai client.chat — tainted message content drives Mistral chat completions; prompt-injection / instruction-hijack risk."
+
+- id: python.llm.openai_assistants_runs_create
+  enabled: true
+  language: python
+  tag: web-llm
+  severity: medium
+  cwe:
+  - CWE-74
+  - CWE-1427
+  owasp:
+  - A03-2021
+  packages:
+  - openai
+  imports:
+  - openai
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.beta\.threads\.runs\.create$
+  constraints:
+  - arg_tainted:
+      kw: instructions
+  match_examples:
+  - name: openai assistants thread run tainted instructions
+    code: |
+      import openai
+      def example(user_input):
+          return openai.beta.threads.runs.create(thread_id="t-1", assistant_id="a-1", instructions=user_input)
+    expect_match_text: [openai.beta.threads.runs.create]
+  - name: openai assistants thread run literal negative
+    code: |
+      import openai
+      def example():
+          return openai.beta.threads.runs.create(thread_id="t-1", assistant_id="a-1", instructions="Be concise.")
+    expect_no_match: true
+  description: "openai.beta.threads.runs.create(instructions=tainted) — Assistants API run override; attacker-controlled instructions hijack the agent's system prompt."

@@ -1,0 +1,85 @@
+- id: ruby.info_disclosure.logger_info_secret
+  enabled: true
+  language: ruby
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - info
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: logger info secret
+    code: "def example(secret_token)\n  logger.info(secret_token)\nend\n"
+    expect_match_text:
+    - logger.info
+  - name: literal logger info negative
+    code: "def example(secret_token)\n  logger.info(\"startup ok\")\nend\n"
+    expect_no_match: true
+  description: "logger.info(secret/token/password) \u2014 secret-shaped data written\
+    \ to application logs. Merged aliases: ruby.log_injection.logger_info_interp."
+  aliases:
+  - ruby.log_injection.logger_info_interp
+- id: ruby.info_disclosure.render_exception_message
+  enabled: false
+  language: ruby
+  tag: information-disclosure
+  severity: high
+  packages:
+  - rails
+  - mustache
+  - actionpack
+  - actionview
+  cwe:
+  - CWE-209
+  - CWE-1336
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: render
+  match_examples:
+  - name: render exception message
+    code: "require \"rails\"\ndef show(exception)\n  render plain: exception.message\n\
+      end\n"
+    expect_match_text:
+    - render
+  description: "Rails render(exception.message/backtrace) \u2014 exposes internal\
+    \ exception details in the response. Merged collision aliases: ruby.template.mustache_render,\
+    \ ruby.xss.rails_render_html."
+  aliases:
+  - ruby.template.mustache_render
+  - ruby.xss.rails_render_html
+  disabled_reason:
+    code: over-broad
+- id: ruby.info_disclosure.better_errors_middleware
+  enabled: true
+  language: ruby
+  tag: information-disclosure
+  severity: high
+  packages:
+  - better_errors
+  cwe:
+  - CWE-209
+  match:
+    kind: call
+    callee:
+      attribute:
+      - BetterErrors
+      - Middleware
+      - new
+  match_examples:
+  - name: better errors middleware
+    code: "require \"better_errors\"\ndef configure(app)\n  BetterErrors::Middleware.new(app)\n\
+      end\n"
+    expect_match_text:
+    - BetterErrors::Middleware.new
+  description: "BetterErrors::Middleware.new \u2014 interactive debug error pages\
+    \ can expose stack, environment, and request data if reachable."

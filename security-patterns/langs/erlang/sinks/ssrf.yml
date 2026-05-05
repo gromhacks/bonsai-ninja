@@ -1,0 +1,214 @@
+# Erlang SSRF sinks — HTTP clients. Tainted URL → attacker picks destination host.
+- id: erlang.ssrf.httpc_request_url
+  enabled: true
+  language: erlang
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^httpc:request"
+  constraints:
+  - max_args: 1
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted unary request url
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        httpc:request(Input).
+  - name: literal unary request url negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        httpc:request("https://example.com").
+    expect_no_match: true
+  description: "inets httpc:request/1 — tainted URL reaches internal metadata (169.254.169.254)."
+- id: erlang.ssrf.httpc_request_tuple
+  enabled: true
+  language: erlang
+  tag: ssrf
+  severity: high
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^httpc:request"
+  constraints:
+  - min_args: 2
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted method request tuple
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        httpc:request(get, {Input, []}, [], []).
+  - name: literal method request tuple negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        httpc:request(get, {"https://example.com", []}, [], []).
+    expect_no_match: true
+  description: "inets httpc:request/4 — tainted request URL tuple reaches internal metadata (169.254.169.254)."
+- id: erlang.ssrf.gun_method_path
+  enabled: true
+  language: erlang
+  tag: ssrf
+  severity: high
+  packages: [gun]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^gun:(get|post|put|delete)$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted gun path
+    code: |
+      -include_lib("gun/include/gun.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        gun:get(Conn, Input).
+  - name: literal gun path negative
+    code: |
+      -include_lib("gun/include/gun.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        gun:get(Conn, "/health").
+    expect_no_match: true
+  description: "gun HTTP client — tainted request path reaches arbitrary upstream route."
+- id: erlang.ssrf.gun_request_path
+  enabled: true
+  language: erlang
+  tag: ssrf
+  severity: high
+  packages: [gun]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^gun:request$"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted gun request path
+    code: |
+      -include_lib("gun/include/gun.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        gun:request(Conn, get, Input, []).
+  - name: literal gun request path negative
+    code: |
+      -include_lib("gun/include/gun.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        gun:request(Conn, get, "/health", []).
+    expect_no_match: true
+  description: "gun:request — tainted request path reaches arbitrary upstream route."
+- id: erlang.ssrf.hackney_method_url
+  enabled: true
+  language: erlang
+  tag: ssrf
+  severity: high
+  packages: [hackney]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^hackney:(get|post|put|delete)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted hackney method url
+    code: |
+      -include_lib("hackney/include/hackney.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        hackney:get(Input).
+  - name: literal hackney method url negative
+    code: |
+      -include_lib("hackney/include/hackney.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        hackney:get("https://example.com").
+    expect_no_match: true
+  description: "hackney HTTP method helpers — tainted URL enables SSRF to cloud metadata and localhost."
+- id: erlang.ssrf.hackney_request_url
+  enabled: true
+  language: erlang
+  tag: ssrf
+  severity: high
+  packages: [hackney]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^hackney:request$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted hackney request url
+    code: |
+      -include_lib("hackney/include/hackney.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        hackney:request(get, Input, [], <<>>, []).
+  - name: literal hackney request url negative
+    code: |
+      -include_lib("hackney/include/hackney.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        hackney:request(get, "https://example.com", [], <<>>, []).
+    expect_no_match: true
+  description: "hackney:request(Method, Url, ...) — tainted URL enables SSRF to cloud metadata and localhost."
+- id: erlang.ssrf.ibrowse_send_req
+  enabled: true
+  language: erlang
+  tag: ssrf
+  severity: high
+  packages: [ibrowse]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^ibrowse:send_req"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("ibrowse/include/ibrowse.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        ibrowse:send_req(Input, [], get, []).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("ibrowse/include/ibrowse.hrl").
+      -module(example).
+      -export([test/0]).
+      test() ->
+        ibrowse:send_req("https://example.com", [], get, []).
+    expect_no_match: true
+  description: "ibrowse:send_req — tainted URL reaches attacker-picked host."

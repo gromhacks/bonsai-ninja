@@ -1,0 +1,78 @@
+# JavaScript XPath injection sinks.
+- id: javascript.xpath.select
+  enabled: true
+  language: javascript
+  tag: xpath-injection
+  severity: high
+  packages: [xpath]
+  imports: [xpath]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.select$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xpath select concat expression
+    code: |
+      const xpath = require("xpath");
+      function find(doc, name) {
+        return xpath.select("//user[name='" + name + "']", doc);
+      }
+    expect_match_text: [xpath.select]
+  - name: xpath select variable expression
+    code: |
+      const _u = require("xpath");
+      function find(xpath, doc, expr) {
+        return xpath.select(expr, doc);
+      }
+    expect_match_text: [xpath.select]
+  - name: xpath2 select concat expression
+    code: |
+      const _u = require("xpath");
+      function find(xpath2, doc, name) {
+        return xpath2.select("//user[name='" + name + "']", doc);
+      }
+    expect_match_text: [xpath2.select]
+  - name: literal xpath select negative
+    code: |
+      const xpath = require("xpath");
+      function find(doc) {
+        return xpath.select("//user", doc);
+      }
+    expect_no_match: true
+  description: "xpath/xpath2 select(expr, doc) — attacker-controlled XPath expressions can bypass node selection constraints."
+
+- id: javascript.xpath.select1
+  enabled: true
+  language: javascript
+  tag: xpath-injection
+  severity: high
+  packages: [xpath]
+  imports: [xpath]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      attribute: [xpath, select1]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xpath select1 concat expression
+    code: |
+      const _u = require("xpath");
+      function find(xpath, doc, id) {
+        return xpath.select1("//*[@id='" + id + "']", doc);
+      }
+    expect_match_text: [xpath.select1]
+  - name: literal xpath select1 negative
+    code: |
+      const _u = require("xpath");
+      function find(xpath, doc) {
+        return xpath.select1("//*[@id='root']", doc);
+      }
+    expect_no_match: true
+  description: "xpath.select1(expr, doc) — single-node XPath selection with attacker-controlled expression text."

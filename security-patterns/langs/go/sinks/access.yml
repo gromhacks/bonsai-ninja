@@ -1,0 +1,199 @@
+- id: go.access.aws_s3_get_object
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["github.com/aws/aws-sdk-go/service/s3", "github.com/aws/aws-sdk-go-v2/service/s3"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.GetObject$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/aws/aws-sdk-go/service/s3"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.GetObject(target)
+      }
+  description: "S3 GetObject — tainted bucket/key selector reads arbitrary object data."
+
+- id: go.access.aws_s3_put_object
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["github.com/aws/aws-sdk-go/service/s3", "github.com/aws/aws-sdk-go-v2/service/s3"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.PutObject$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/aws/aws-sdk-go/service/s3"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.PutObject(target)
+      }
+  description: "S3 PutObject — tainted bucket/key selector overwrites attacker-chosen object keys."
+
+- id: go.access.aws_secretsmanager_get_secret_value
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["github.com/aws/aws-sdk-go/service/secretsmanager", "github.com/aws/aws-sdk-go-v2/service/secretsmanager"]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.GetSecretValue$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/aws/aws-sdk-go/service/secretsmanager"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.GetSecretValue(target)
+      }
+  description: "Secrets Manager GetSecretValue — tainted secret id reads arbitrary secret material."
+
+- id: go.access.azure_blob_download_buffer
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.DownloadBuffer$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.DownloadBuffer(target)
+      }
+  description: "Azure blob DownloadBuffer — tainted blob selector reads arbitrary object data."
+
+- id: go.access.azure_blob_upload_buffer
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.UploadBuffer$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.UploadBuffer(target)
+      }
+  description: "Azure blob UploadBuffer — tainted blob selector writes attacker-chosen storage targets."
+
+- id: go.access.gcp_storage_new_reader
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["cloud.google.com/go/storage"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.NewReader$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "cloud.google.com/go/storage"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        ObjectHandle.NewReader(target)
+      }
+  description: "GCS ObjectHandle.NewReader — tainted bucket/object selector reads arbitrary objects."
+
+- id: go.access.gcp_storage_new_writer
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["cloud.google.com/go/storage"]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      regex: "\\.NewWriter$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "cloud.google.com/go/storage"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        ObjectHandle.NewWriter(target)
+      }
+  description: "GCS ObjectHandle.NewWriter — tainted bucket/object selector writes attacker-chosen objects."
+
+- id: go.access.gcp_secretmanager_access_secret_version
+  enabled: true
+  language: go
+  tag: access-control
+  severity: high
+  packages: ["cloud.google.com/go/secretmanager/apiv1"]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.AccessSecretVersion$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "cloud.google.com/go/secretmanager/apiv1"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.AccessSecretVersion(target)
+      }
+  description: "Secret Manager AccessSecretVersion — tainted resource name reads arbitrary secret versions."

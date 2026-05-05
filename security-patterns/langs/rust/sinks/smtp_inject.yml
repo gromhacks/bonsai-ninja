@@ -1,0 +1,43 @@
+# Rust SMTP / mail header injection.
+#
+# `lettre::Message::builder()` accepts header values via fluent
+# methods (`subject`, `from`, `to`, `reply_to`, `header`). Catching
+# tainted headers requires detecting `.subject(input)` /
+# `.header(...)` calls on the builder, which the matcher can express
+# as a single-name callee narrowed by the `lettre` package gate.
+- id: rust.smtpinj.lettre_subject
+  enabled: true
+  language: rust
+  tag: smtp-injection
+  severity: medium
+  packages: ["lettre"]
+  imports: ["lettre"]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      name: subject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lettre subject tainted
+    code: |
+      use lettre::Message;
+      fn handle(input: String) {
+        let builder = Message::builder();
+        let _ = builder.subject(input);
+      }
+    expect_match_text: ['builder.subject']
+  - name: literal subject negative
+    code: |
+      use lettre::Message;
+      fn handle() {
+        let _ = Message::builder()
+          .from("a@x".parse().unwrap())
+          .to("b@x".parse().unwrap())
+          .subject("fixed")
+          .body(String::from("hi"));
+      }
+    expect_no_match: true
+  description: "lettre Message builder `.subject(value)` — CR/LF in subject injects MIME headers."

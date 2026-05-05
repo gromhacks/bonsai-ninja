@@ -1,0 +1,145 @@
+# Elixir LDAP-injection (Erlang :eldap / Exldap / Paddle).
+- id: elixir.ldap.eldap_search
+  enabled: true
+  language: elixir
+  tag: ldap-injection
+  severity: high
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^:eldap\\.search$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted eldap search options
+    code: |
+      alias Eldap
+      defmodule App do
+        def test(input) do
+          :eldap.search(input)
+        end
+      end
+  - name: literal eldap search options negative
+    code: |
+      alias Eldap
+      defmodule App do
+        def test() do
+          :eldap.search([filter: :eldap.equalityMatch("uid", "safe")])
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :eldap.search/2 — tainted filter string allows LDAP filter injection; `*)(|(uid=*` matches every user."
+
+  imports:
+  - Eldap
+- id: elixir.ldap.eldap_equality_match
+  enabled: true
+  language: elixir
+  tag: ldap-injection
+  severity: high
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^:eldap\\.equalityMatch$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted eldap equality value
+    code: |
+      alias Eldap
+      defmodule App do
+        def test(input) do
+          :eldap.equalityMatch("uid", input)
+        end
+      end
+  - name: literal eldap equality value negative
+    code: |
+      alias Eldap
+      defmodule App do
+        def test() do
+          :eldap.equalityMatch("uid", "safe")
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :eldap.equalityMatch/2 — tainted attribute value composed into a filter can break out of the match when unescaped."
+
+  imports:
+  - Eldap
+- id: elixir.ldap.exldap_search
+  enabled: true
+  language: elixir
+  tag: ldap-injection
+  severity: high
+  packages: [exldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Exldap, search_with_filter]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted exldap filter
+    code: |
+      alias Exldap
+      defmodule App do
+        def test(input) do
+          Exldap.search_with_filter("ou=People,dc=example,dc=com", :subtree, input)
+        end
+      end
+  - name: literal exldap filter negative
+    code: |
+      alias Exldap
+      defmodule App do
+        def test() do
+          Exldap.search_with_filter("ou=People,dc=example,dc=com", :subtree, "(cn=safe)")
+        end
+      end
+    expect_no_match: true
+  description: "Exldap.search_with_filter/3 — tainted filter string bypasses LDAP auth or enumerates entries."
+
+  imports:
+  - Exldap
+- id: elixir.ldap.paddle_authenticate
+  enabled: true
+  language: elixir
+  tag: ldap-injection
+  severity: high
+  packages: [paddle]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      attribute: [Paddle, authenticate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted paddle username
+    code: |
+      alias Paddle
+      # uses paddle
+      defmodule App do
+        def test(input) do
+          Paddle.authenticate(input, "password")
+        end
+      end
+  - name: literal paddle username negative
+    code: |
+      alias Paddle
+      defmodule App do
+        def test() do
+          Paddle.authenticate("safe-user", "password")
+        end
+      end
+    expect_no_match: true
+  description: "Paddle.authenticate/2 — DN built from tainted username enables DN injection / auth bypass."
+  imports:
+  - Paddle

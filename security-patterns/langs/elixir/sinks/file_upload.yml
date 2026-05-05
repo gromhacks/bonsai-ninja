@@ -1,0 +1,115 @@
+# Elixir file-upload sinks. `File.cp` / `File.rename` with tainted
+# destination are the canonical move-to-uploads pattern — they're also
+# tagged path-traversal in sinks/path.yml, but kept here under CWE-434
+# semantics because the *danger* (writing arbitrary uploaded bytes into
+# a web-served directory) differs from read/delete path traversal.
+- id: elixir.upload.waffle_store
+  enabled: true
+  language: elixir
+  tag: file-upload
+  severity: high
+  packages: [waffle]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Waffle, Actions, Store, store]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Waffle
+      # uses waffle
+      defmodule App do
+        def test(input) do
+          Waffle.Actions.Store.store(input)
+        end
+      end
+  - name: literal waffle store negative
+    code: |
+      alias Waffle
+      defmodule App do
+        def test(input) do
+          Waffle.Actions.Store.store("priv/static/logo.png")
+        end
+      end
+    expect_no_match: true
+  description: "Waffle Store.store/1 — filename derived from Plug.Upload is persisted directly unless the uploader's `filename/1` sanitises it (default preserves attacker-supplied name)."
+
+  imports:
+  - Waffle
+- id: elixir.upload.arc_store
+  enabled: true
+  language: elixir
+  tag: file-upload
+  severity: high
+  packages: [arc]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Arc, Actions, Store, store]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Arc
+      # uses arc
+      defmodule App do
+        def test(input) do
+          Arc.Actions.Store.store(input)
+        end
+      end
+  - name: literal arc store negative
+    code: |
+      alias Arc
+      defmodule App do
+        def test(input) do
+          Arc.Actions.Store.store("priv/static/logo.png")
+        end
+      end
+    expect_no_match: true
+  description: "Arc.Actions.Store.store/1 — legacy predecessor to Waffle; same filename-from-upload risk."
+
+  imports:
+  - Arc
+- id: elixir.upload.plug_upload_copy
+  enabled: true
+  language: elixir
+  tag: file-upload
+  severity: high
+  packages: [plug]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Upload, chmod]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      # uses plug
+      defmodule App do
+        def test(input) do
+          Plug.Upload.chmod(input)
+        end
+      end
+  - name: literal plug upload chmod negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.Upload.chmod("/tmp/upload-safe")
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Upload.chmod/2 — called on a tainted upload path; file-mode bits derived from user input can make uploads executable."
+  imports:
+  - Plug

@@ -1,0 +1,30 @@
+- id: php.oauth.league_no_state
+  enabled: true
+  language: php
+  tag: oauth
+  severity: high
+  packages:
+  - league/oauth2-client
+  cwe:
+  - CWE-352
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Provider
+      - getAuthorizationUrl
+  match_examples:
+  - name: php.oauth.league_no_state example
+    code: |
+      <?php
+      use league\oauth2client;
+      use league\oauth2client;
+      use league\oauth2-client;
+      function example($input, $url, $id, $payload, $request) {
+        Provider::getAuthorizationUrl($input);
+      }
+  description: league/oauth2-client Provider::getAuthorizationUrl — verify the returned `state` is round-tripped to detect CSRF on the callback.
+  imports:
+  - league
+  - league/oauth2client
+  - league\oauth2client

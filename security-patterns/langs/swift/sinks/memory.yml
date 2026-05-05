@@ -1,0 +1,77 @@
+# Swift memory-safety / lifecycle audit-pair sites.
+# These rules fire on the *use-after-transition* call (value / await)
+# and gate on the adapter-emitted lifecycle state via the
+# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: swift.memory.task_cancel
+  enabled: true
+  language: swift
+  tag: memory-safety
+  severity: medium
+  packages: [Foundation]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      name: result
+  constraints:
+  - requires_state:
+      name: task
+      expected: cancelled
+  match_examples:
+  - name: result after cancel
+    code: |
+      import Foundation
+      func handle(task: Task<Int, Never>) {
+        task.cancel()
+        task.result()
+      }
+    expect_match_text: [task.result]
+  - name: result without preceding cancel
+    code: |
+      import Foundation
+      func handle(task: Task<Int, Never>) {
+        task.result()
+      }
+    expect_no_match: true
+  description: "Use-after-cancel — `Task.result()` / `URLSessionTask.<op>` on a task whose preceding `.cancel()` invalidated the result. The call observes cancellation; depending on the API it throws CancellationError or returns a stale partial (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+- id: swift.memory.lock_unlock
+  enabled: true
+  language: swift
+  tag: memory-safety
+  severity: medium
+  packages: [Foundation]
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.unlock$
+  match_examples:
+  - name: lock unlock site
+    code: |
+      import Foundation
+      func handle(lock: NSLock) {
+        lock.unlock()
+      }
+    expect_match_text: [lock.unlock]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. NSLock/os_unfair_lock unlock — subsequent guarded-region reads/writes without re-locking are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."
+- id: swift.memory.filehandle_close
+  enabled: true
+  language: swift
+  tag: memory-safety
+  severity: medium
+  packages: [Foundation]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.closeFile$
+  match_examples:
+  - name: filehandle close site
+    code: |
+      import Foundation
+      func handle(fh: FileHandle) {
+        fh.closeFile()
+      }
+    expect_match_text: [fh.closeFile]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. FileHandle.closeFile() — later read/write on the same handle traps (use-after-close, CWE-416). The `closeFile` selector isn't recognised by the adapter's lifecycle transition table, so this rule stays a transition-site audit-pair until the adapter wires the dotted `closeFile` form."

@@ -1,0 +1,412 @@
+# C# HTTP / RPC external sources. ASP.NET Core + WebForms + WCF + SignalR + gRPC + Blazor.
+#
+# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# ASP.NET request property reads are now represented as `kind: read`
+# attribute-chain facts, so the Request.Query/Form/Body/Header/etc rules
+# below are enabled. ASP.NET Core MVC parameter binding via attributes
+# ([FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader]) is still kept
+# off until C# parameter-attribute metadata is emitted precisely enough for
+# rule matching. Per docs/pattern-guide.mdx the fix for unsupported shapes is
+# in the C# adapter, not here:
+#
+#   > If a source-visible value flow is missing, fix adapter extraction or
+#   > the semantic graph. Do not encode the missing edge in YAML.
+#
+# Tracking task: surface C# parameter-attribute metadata so the matcher can
+# pivot on attribute name. Once that ships, flip the remaining
+# `enabled: false` attribute rules below to true and re-run the audit.
+#
+# Below this header: callable-shape sources plus enabled ASP.NET
+# attribute-read sources that work today.
+
+- id: csharp.source.httputility_parsequerystring
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [System.Web]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpUtility, ParseQueryString]
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.Web;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; HttpUtility.ParseQueryString(input); } }
+  description: "HttpUtility.ParseQueryString(rawQuery) — parses the request query-string into a NameValueCollection; the input is attacker-controlled."
+
+- id: csharp.source.streamreader_readtoend
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [System.IO]
+  match:
+    kind: call
+    callee:
+      attribute: [StreamReader, ReadToEnd]
+  description: "Disabled — StreamReader.ReadToEnd is generic file/stream IO; enable in audits where Request.Body wrapping is the primary surface."
+
+- id: csharp.source.signalr_hub_method_arg
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: rpc-input
+  packages: [Microsoft.AspNetCore.SignalR]
+  match:
+    kind: param
+    target:
+      name: message
+  description: "Disabled — SignalR Hub method parameters are attacker-controlled, but bare param names overmatch. Enable narrowed."
+
+- id: csharp.source.grpc_request_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: rpc-input
+  packages: [Grpc.Core, Grpc.AspNetCore]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — gRPC service-method `request` parameter is attacker-controlled; bare-name overmatch keeps it off by default."
+
+- id: csharp.source.aspnet_request_query
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [Request, Query]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Query; } }
+  description: "ASP.NET Request.Query property read — query-string collection from the remote request."
+
+- id: csharp.source.aspnet_request_form
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [Request, Form]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Form; } }
+  description: "ASP.NET Request.Form property read — form fields from the remote request."
+
+- id: csharp.source.aspnet_request_body
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [Request, Body]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Body; } }
+  description: "ASP.NET Request.Body property read — request body stream controlled by the client."
+
+- id: csharp.source.aspnet_request_headers
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [Request, Headers]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Headers; } }
+  description: "ASP.NET Request.Headers property read — client-supplied HTTP headers."
+
+- id: csharp.source.aspnet_request_cookies
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [Request, Cookies]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Cookies; } }
+  description: "ASP.NET Request.Cookies property read — client-supplied cookie values."
+
+- id: csharp.source.aspnet_request_routevalues
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [Request, RouteValues]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.RouteValues; } }
+  description: "ASP.NET Request.RouteValues property read — route parameters from the remote request."
+
+- id: csharp.source.aspnet_request_path
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [Request, Path]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Path; } }
+  description: "ASP.NET Request.Path property read — URL path supplied by the client."
+
+- id: csharp.source.aspnet_legacy_querystring
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      attribute: [Request, QueryString]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.QueryString; } }
+  description: "ASP.NET legacy Request.QueryString property read — query-string values from the remote request."
+
+- id: csharp.source.aspnet_legacy_form
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      attribute: [Request, Params]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Params; } }
+  description: "ASP.NET legacy Request.Params property read — combined query/form/cookie/server variables."
+
+- id: csharp.source.aspnet_legacy_unvalidated
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  match:
+    kind: read
+    target:
+      attribute: [Request, Unvalidated]
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var result = Request.Unvalidated; } }
+  description: "ASP.NET Request.Unvalidated property read — unvalidated request values."
+
+- id: csharp.source.controller_bind_parameter
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: param
+    target:
+      name: action
+  description: "Disabled — `target.name: action` does not map to a concrete attribute; [FromBody]/[FromQuery]/[FromForm]/[FromRoute]/[FromHeader] attribute rules cover bound action parameters precisely."
+
+- id: csharp.source.frombody_attr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: param
+    target:
+      name: FromBody
+  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromBody] attributes."
+
+- id: csharp.source.fromquery_attr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: param
+    target:
+      name: FromQuery
+  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromQuery] attributes."
+
+- id: csharp.source.fromform_attr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: param
+    target:
+      name: FromForm
+  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromForm] attributes."
+
+- id: csharp.source.fromroute_attr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: param
+    target:
+      name: FromRoute
+  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromRoute] attributes."
+
+- id: csharp.source.fromheader_attr
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Mvc]
+  match:
+    kind: param
+    target:
+      name: FromHeader
+  description: "Disabled — matcher only sees parameter identifiers, not ASP.NET [FromHeader] attributes."
+
+- id: csharp.source.iformfile_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: http-input
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: param
+    target:
+      name: IFormFile
+  description: "Disabled — `IFormFile` is a type name; `kind: param` only matches parameter identifiers."
+
+- id: csharp.source.signalr_hub_method
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  trust: remote
+  tag: rpc-input
+  packages: [Microsoft.AspNetCore.SignalR]
+  match:
+    kind: param
+    target:
+      name: Hub
+  description: "Disabled — `Hub` is a type name; `kind: param` only matches parameter identifiers."
+
+- id: csharp.source.aspnet_iformfile_filename
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [file]
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [IFormFile, FileName]
+  match_examples:
+  - name: aspnet uploaded filename
+    code: |
+      using Microsoft.AspNetCore.Http;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; var name = IFormFile.FileName; } }
+    expect_match_text: [IFormFile.FileName]
+  description: "ASP.NET Core IFormFile.FileName — client-supplied multipart filename."
+
+- id: csharp.source.aspnet_formfile_filename
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: csharp.source.aspnet_iformfile_filename
+  language: csharp
+  trust: remote
+  tag: http-input
+  payload_types: [file]
+  packages: [Microsoft.AspNetCore.Http]
+  match:
+    kind: read
+    target:
+      attribute: [file, FileName]
+  description: "Disabled — subsumed by csharp.source.aspnet_iformfile_filename whose camelCase verb FileName lax-tail-matches every `*.FileName` read (including `file.FileName`). Re-enable as the dedicated rule only if the IFormFile rule is later tightened."
+
+- id: csharp.source.websocket_receiveasync
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: ws-input
+  payload_types: [binary]
+  packages: [System.Net.WebSockets]
+  match:
+    kind: call
+    callee:
+      attribute: [WebSocket, ReceiveAsync]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: websocket receive async
+    code: |
+      using System.Net.WebSockets;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebSocket.ReceiveAsync(input); } }
+    expect_match_text: [WebSocket.ReceiveAsync]
+  description: "System.Net.WebSockets WebSocket.ReceiveAsync — frame bytes supplied by the websocket peer."

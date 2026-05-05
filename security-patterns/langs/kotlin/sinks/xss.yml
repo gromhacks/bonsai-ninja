@@ -1,0 +1,752 @@
+- id: kotlin.xss.response_writer_write
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: kotlin
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - response
+      - getWriter
+  description: "Disabled — getWriter() only returns the writer; the sink is PrintWriter.write/println/print (covered by kotlin.xss.printwriter_*)."
+- id: kotlin.xss.printwriter_write
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages: [java.io]
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrintWriter
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.io.*
+      // uses java.io
+      class App {
+        fun handle(input: String) {
+          PrintWriter.write(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.io.*
+      // uses java.io
+      class App {
+      fun handle(input: String) {
+        PrintWriter.write("safe")
+      }
+      }
+    expect_no_match: true
+  description: PrintWriter.write.
+- id: kotlin.xss.servletresponse_writer_write
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - writer
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    response.writer.write(\"<b>\" + input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        response.writer.write("safe")
+      }
+      }
+    expect_no_match: true
+  description: "ServletResponse.writer.write(concat) — common Kotlin servlet shape (`resp.writer.write(\"<p>\" + name + \"</p>\")`) where the receiver is a property chain rather than a typed PrintWriter symbol."
+- id: kotlin.xss.printwriter_println
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages: [java.io]
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrintWriter
+      - println
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.io.*
+      // uses java.io
+      class App {
+        fun handle(input: String) {
+          PrintWriter.println(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.io.*
+      // uses java.io
+      class App {
+      fun handle(input: String) {
+        PrintWriter.println("safe")
+      }
+      }
+    expect_no_match: true
+  description: PrintWriter.println.
+- id: kotlin.xss.printwriter_print
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages: [java.io]
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrintWriter
+      - print
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.io.*
+      // uses java.io
+      class App {
+        fun handle(input: String) {
+          PrintWriter.print(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.io.*
+      // uses java.io
+      class App {
+      fun handle(input: String) {
+        PrintWriter.print("safe")
+      }
+      }
+    expect_no_match: true
+  description: PrintWriter.print.
+- id: kotlin.xss.servlet_outputstream_print
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages: [jakarta.servlet, javax.servlet]
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServletOutputStream
+      - print
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jakarta.servlet.*
+      // uses jakarta.servlet
+      class App {
+        fun handle(input: String) {
+          ServletOutputStream.print(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import jakarta.servlet.*
+      // uses jakarta.servlet
+      class App {
+      fun handle(input: String) {
+        ServletOutputStream.print("safe")
+      }
+      }
+    expect_no_match: true
+  description: ServletOutputStream.print(tainted).
+- id: kotlin.xss.jsp_out_println
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - out
+      - println
+  description: "Disabled — `out.println` matches any `out` variable; enable with JSP-scope constraint."
+- id: kotlin.xss.spring_responseentity_body_html_concat
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.web
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - body
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: responseentity raw html body
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(name: String): Any {
+          return ResponseEntity.body("<p>" + name)
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.body
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.*
+      class App {
+      fun handle(name: String): Any {
+        return ResponseEntity.body("safe")
+      }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.body(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  imports:
+  - org.springframework.web
+- id: kotlin.xss.spring_responseentity_ok_html_concat
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.web
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ResponseEntity
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: responseentity ok raw html
+    code: |
+      import org.springframework.web.*
+      class App {
+        fun handle(name: String): Any {
+          return ResponseEntity.ok("<p>" + name)
+        }
+      }
+    expect_match_text:
+    - ResponseEntity.ok
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.*
+      class App {
+      fun handle(name: String): Any {
+        return ResponseEntity.ok("safe")
+      }
+      }
+    expect_no_match: true
+  description: "ResponseEntity.ok(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+  imports:
+  - org.springframework.web
+- id: kotlin.xss.webflux_serverresponse_bodyvalue_html_concat
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - org.springframework.web.reactive
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ServerResponse
+      - bodyValue
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: serverresponse raw html body value
+    code: |
+      import org.springframework.web.reactive.*
+      class App {
+        fun handle(name: String): Any {
+          return ServerResponse.bodyValue("<p>" + name)
+        }
+      }
+    expect_match_text:
+    - ServerResponse.bodyValue
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.reactive.*
+      class App {
+      fun handle(name: String): Any {
+        return ServerResponse.bodyValue("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Spring WebFlux ServerResponse.bodyValue(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: kotlin.xss.jaxrs_response_ok_text_html
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - javax.ws.rs
+  - jakarta.ws.rs
+  - io.quarkus
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Response
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jaxrs html response body
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(name: String): Any {
+          return Response.ok(name, MediaType.TEXT_HTML)
+        }
+      }
+    expect_match_text:
+    - Response.ok
+  - name: arg tainted literal negative
+    code: |
+      import javax.ws.rs.*
+      class App {
+      fun handle(name: String): Any {
+        return Response.ok("safe", MediaType.TEXT_HTML)
+      }
+      }
+    expect_no_match: true
+  description: "JAX-RS Response.ok(body, TEXT_HTML) — raw HTML response body built from attacker-controlled text. Merged aliases: kotlin.xss.jaxrs_response_ok_html_concat."
+  aliases:
+  - kotlin.xss.jaxrs_response_ok_html_concat
+- id: kotlin.xss.micronaut_httpresponse_ok_html_concat
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - io.micronaut.http
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpResponse
+      - ok
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: micronaut raw html response body
+    code: |
+      import io.micronaut.http.*
+      class App {
+        fun handle(name: String): Any {
+          return HttpResponse.ok("<p>" + name)
+        }
+      }
+    expect_match_text:
+    - HttpResponse.ok
+  - name: arg tainted literal negative
+    code: |
+      import io.micronaut.http.*
+      class App {
+      fun handle(name: String): Any {
+        return HttpResponse.ok("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Micronaut HttpResponse.ok(raw HTML concat) — reflected HTML response body built from attacker-controlled text."
+- id: kotlin.xss.vertx_response_end_html_concat
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - io.vertx
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: end
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: vertx response end raw html
+    code: |
+      import io.vertx.*
+      class App {
+        fun handle(response: HttpServerResponse, name: String) {
+          response.end("<p>" + name)
+        }
+      }
+      class HttpServerResponse {
+        fun end(vararg args: Any?) {}
+      }
+    expect_match_text:
+    - response.end
+  - name: arg tainted literal negative
+    code: |
+      import io.vertx.*
+      class App {
+      fun handle(response: HttpServerResponse, name: String) {
+        response.end("safe")
+      }
+      }
+      class HttpServerResponse {
+      fun end(vararg args: Any?) {}
+      }
+    expect_no_match: true
+  description: "Vert.x HttpServerResponse.end(raw HTML concat) — reflected HTML response built from attacker-controlled text."
+- id: kotlin.xss.kotlinx_html_raw
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - kotlinx.html
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - unsafe
+      - raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlinx.html.*
+      class App {
+        fun handle(input: String) {
+          unsafe.raw(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import kotlinx.html.*
+      class App {
+      fun handle(input: String) {
+        unsafe.raw("safe")
+      }
+      }
+    expect_no_match: true
+  description: "kotlinx.html unsafe { raw(tainted) } — bypasses HTML escaping."
+- id: kotlin.xss.spring_modelandview_addobject
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: xss
+  severity: medium
+  packages:
+  - org.springframework.web.servlet
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ModelAndView
+      - addObject
+  description: "Disabled — Spring ModelAndView; flag with template-engine analysis."
+- id: kotlin.xss.thymeleaf_unescaped
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - thymeleaf
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: th:utext
+  description: "Disabled — th:utext (unescaped text) attr write; surface via template scanner."
+- id: kotlin.xss.struts_textparser
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: xss
+  severity: medium
+  packages:
+  - struts2
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - TextParseUtil
+      - translateVariables
+  description: "Disabled — Struts2 TextParseUtil; flag with OGNL scope."
+- id: kotlin.xss.gwt_html_settext
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: xss
+  severity: medium
+  packages:
+  - com.google.gwt
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HTML
+      - setHTML
+  description: "Disabled — GWT HTML.setHTML; flag with constraint."
+- id: kotlin.xss.android_webview_loadurl
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - android.webkit
+  cwe:
+  - CWE-79
+  - CWE-749
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebView
+      - loadUrl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.webkit.*
+      class App {
+        fun handle(input: String) {
+          WebView.loadUrl(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import android.webkit.*
+      class App {
+      fun handle(input: String) {
+        WebView.loadUrl("safe")
+      }
+      }
+    expect_no_match: true
+  description: "WebView.loadUrl(tainted) — `javascript:` URLs and arbitrary http(s) targets execute in the app's WebView origin."
+- id: kotlin.xss.android_webview_loaddata
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - android.webkit
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebView
+      - loadData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.webkit.*
+      class App {
+        fun handle(input: String) {
+          WebView.loadData(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import android.webkit.*
+      class App {
+      fun handle(input: String) {
+        WebView.loadData("safe")
+      }
+      }
+    expect_no_match: true
+  description: "WebView.loadData(tainted html, ...) — renders attacker HTML in the WebView origin."
+- id: kotlin.xss.android_webview_loaddatawithbaseurl
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - android.webkit
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebView
+      - loadDataWithBaseURL
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.webkit.*
+      class App {
+        fun handle(input: String) {
+          WebView.loadDataWithBaseURL(input)
+        }
+      }
+  - name: literal webview base url negative
+    code: |
+      import android.webkit.*
+      class App {
+        fun handle() {
+          WebView.loadDataWithBaseURL("https://example.test")
+        }
+      }
+    expect_no_match: true
+  description: "WebView.loadDataWithBaseURL(tainted) — base URL + HTML controls origin and DOM contents."
+- id: kotlin.xss.android_webview_loaddatawithbaseurl_data
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: high
+  packages:
+  - android.webkit
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebView
+      - loadDataWithBaseURL
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted webview html data
+    code: |
+      import android.webkit.*
+      class App {
+        fun handle(input: String) {
+          WebView.loadDataWithBaseURL("https://example.test", input)
+        }
+      }
+  - name: literal webview html data negative
+    code: |
+      import android.webkit.*
+      class App {
+        fun handle(input: String) {
+          WebView.loadDataWithBaseURL("https://example.test", "<p>safe</p>")
+        }
+      }
+    expect_no_match: true
+  description: "WebView.loadDataWithBaseURL(baseUrl, taintedHtml, ...) — renders attacker HTML in the WebView origin."
+- id: kotlin.xss.android_webview_evaluatejavascript
+  enabled: true
+  language: kotlin
+  tag: xss
+  severity: critical
+  packages:
+  - android.webkit
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebView
+      - evaluateJavascript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import android.webkit.*
+      class App {
+        fun handle(input: String) {
+          WebView.evaluateJavascript(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import android.webkit.*
+      class App {
+      fun handle(input: String) {
+        WebView.evaluateJavascript("safe")
+      }
+      }
+    expect_no_match: true
+  description: "WebView.evaluateJavascript(tainted script, callback) — executes arbitrary JS in the WebView origin."

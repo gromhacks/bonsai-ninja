@@ -1,0 +1,72 @@
+---
+title: "Triage Workflow"
+description: "Read findings, decide true or false positive, suppress, fix, and re-run."
+---
+
+# Triage Workflow
+
+<Steps>
+
+1. Read the source, sink, status, severity, and CWE.
+2. Follow the `F:` flow from source to sink.
+3. Decide whether the tainted value can reach the dangerous argument in the deployed path.
+4. Check sanitizer evidence and context.
+5. Fix, suppress, or tune the rule.
+6. Re-run the same command and compare stable IDs.
+
+</Steps>
+
+## Reading A Finding
+
+Start with the sink rule and `tainted args` line. If the tainted argument is not the dangerous parameter for that API, fix the rule constraint. If the source is too broad, tighten the source rule or run without inferred sources.
+
+```text
+FINDING 1 · command-injection · critical  S:979a7231afe45297
+  status: unsanitized
+  SOURCE python.flask.request_args_get at app.py:29
+  SINK   python.cmdi.os_system at executor.py:29
+  tainted args: [0] cmd
+```
+
+## True Or False Positive
+
+| Question | True-positive signal | False-positive signal |
+|---|---|---|
+| Is the source attacker controlled? | Remote request, queue, CLI, env, database row | Constant, fixture, generated sample |
+| Is the sink dangerous in this context? | Shell, query, template, file, external call | Literal safe arg or non-dangerous overload |
+| Does the flow preserve the value? | Tainted arg labels line up hop by hop | Wrong field, wrong receiver, impossible branch |
+| Is sanitizer context correct? | Sanitizer tag matches sink family | Sanitizer is for a different context |
+
+## Suppression Syntax
+
+Prefer rule fixes over suppressions. When a project needs local policy, disable or replace the rule in `<workspace>/.bonsai/rules/` with the same rule ID.
+
+```yaml
+- id: python.cmdi.os_system
+  enabled: false
+  disabled_reason:
+    code: project-policy
+  language: python
+  tag: command-injection
+  match:
+    kind: call
+    callee:
+      attribute: [os, system]
+  description: "Disabled locally by project policy."
+```
+
+## Finding-ID Semantics
+
+| ID | Meaning | Use |
+|---|---|---|
+| `S:` | Stable finding ID | Cross-run dedupe and triage tracking. |
+| `F:` | Stable flow ID | Re-render a specific path with `inspect --flow`. |
+| `G:` | Stable group ID | Re-render a group of flows sharing a tail. |
+| `T:` | Taint propagation record ID | Debug propagation with `dump-taint`. |
+
+## Re-Run
+
+```bash
+bonsai-ninja security ./src taint-analysis --format json --all > after.json
+bonsai-ninja inspect ./src --query os.system --flow F:0123456789abcdef
+```

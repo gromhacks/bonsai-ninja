@@ -1,0 +1,243 @@
+- id: java.cmdi.runtime_exec
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Runtime
+      - getRuntime
+      - exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.getRuntime.exec(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.getRuntime.exec(\"safe\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Runtime.getRuntime().exec(tainted) — shell-parsed on Unix for String form."
+- id: java.cmdi.runtime_exec_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Runtime
+      - exec
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Runtime.exec(input);\n  }\n}\n"
+  description: "Runtime.exec(String) via a stored Runtime reference — shell-parsed."
+- id: java.cmdi.processbuilder_ctor
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      name: ProcessBuilder
+  constraints:
+  - arg_not_matches_regex:
+      index: 0
+      regex: '^"(/bin/)?(sh|bash)"$'
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    new ProcessBuilder(input);\n  }\n}\nclass ProcessBuilder {\n  ProcessBuilder(Object... args) {}\n}\n"
+  - name: literal processbuilder program negative
+    code: "class App {\n  void handle() throws Exception {\n    new ProcessBuilder(\"true\");\n  }\n}\nclass ProcessBuilder {\n  ProcessBuilder(Object... args) {}\n}\n"
+    expect_no_match: true
+  description: "new ProcessBuilder(tainted) — command elements from untrusted input."
+- id: java.cmdi.processbuilder_shell_wrapper
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      name: ProcessBuilder
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"(/bin/)?(sh|bash)"$'
+  - arg_equals:
+      index: 1
+      value: '"-c"'
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: processbuilder shell flag
+    code: "class App {\n  void handle(String input) throws Exception {\n    new ProcessBuilder(\"sh\", \"-c\", input);\n  }\n}\nclass ProcessBuilder {\n  ProcessBuilder(Object... args) {}\n}\n"
+    expect_match_text:
+    - ProcessBuilder
+  - name: literal shell command negative
+    code: "class App {\n  void handle() throws Exception {\n    new ProcessBuilder(\"sh\", \"-c\", \"whoami\");\n  }\n}\nclass ProcessBuilder {\n  ProcessBuilder(Object... args) {}\n}\n"
+    expect_no_match: true
+  description: "new ProcessBuilder(\"sh\", \"-c\", tainted) — shell command string is interpreted by /bin/sh."
+- id: java.cmdi.processbuilder_start
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ProcessBuilder
+      - start
+  description: "Disabled — ProcessBuilder.start() has no command argument; needs receiver state linking to a tainted constructor or command(...) call."
+- id: java.cmdi.processbuilder_command
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ProcessBuilder
+      - command
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    ProcessBuilder.command(input);\n  }\n}\n"
+  - name: processbuilder command literal negative
+    code: "class App {\n  void handle(String input) throws Exception {\n    ProcessBuilder.command(\"/bin/echo\");\n  }\n}\n"
+    expect_no_match: true
+  description: "ProcessBuilder.command(tainted) — replaces the command list with attacker-controlled executable tokens."
+- id: java.cmdi.commons_exec_commandline_parse
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: critical
+  packages:
+  - org.apache.commons.exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - CommandLine
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.exec.*;
+      class App {
+        void handle(String input) throws Exception {
+          CommandLine.parse(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.exec.*;
+      class App {
+        void handle(String input) throws Exception {
+          CommandLine.parse("safe");
+        }
+      }
+    expect_no_match: true
+  description: "commons-exec CommandLine.parse(tainted) — shell-parsed command string."
+- id: java.cmdi.desktop_browse
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: high
+  cwe:
+  - CWE-78
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Desktop
+      - browse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Desktop.browse(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Desktop.browse("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Desktop.getDesktop().browse(URI) — launches local handler for tainted URI."
+- id: java.cmdi.desktop_open
+  enabled: true
+  language: java
+  tag: command-injection
+  severity: high
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Desktop
+      - open
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Desktop.open(input);\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Desktop.open("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Desktop.getDesktop().open(File) — executes associated handler for tainted file."
+- id: java.cmdi.runtime_exec_array
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: java
+  tag: command-injection
+  severity: low
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: exec
+  description: "Disabled — bare `exec` is too broad; covered by runtime_exec / runtime_exec_string."

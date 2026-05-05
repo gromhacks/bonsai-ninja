@@ -1,0 +1,42 @@
+# Kotlin cloud-function entry points (AWS / GCP / Azure).
+- id: kotlin.source.aws_lambda_handler
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: service
+  tag: cloud-event
+  packages: ["com.amazonaws:aws-lambda-java-core"]
+  match:
+    kind: param
+    target:
+      name: handleRequest
+  description: "Disabled — `handleRequest` is the handler method name; `kind: param` only matches parameter identifiers."
+
+- id: kotlin.source.gcloud_function_handle
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: service
+  tag: cloud-event
+  packages: [com.google.cloud.functions]
+  match:
+    kind: param
+    target:
+      name: service
+  description: "Disabled — `service` is the handler method name; `kind: param` only matches parameter identifiers."
+
+- id: kotlin.source.azure_http_trigger
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  trust: service
+  tag: cloud-event
+  packages: ["com.microsoft.azure.functions"]
+  match:
+    kind: param
+    target:
+      name: HttpTrigger
+  description: "Disabled — matcher only sees parameter identifiers, not Azure @HttpTrigger annotations."

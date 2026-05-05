@@ -1,0 +1,100 @@
+- id: typescript.info_disclosure.console_log_secret
+  enabled: true
+  language: typescript
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      attribute:
+      - console
+      - log
+  match_examples:
+  - name: console log secret
+    code: "function demo(secretToken: string) {\n  console.log(secretToken);\n}\n"
+    expect_match_text:
+    - console.log
+  description: "console.log(secret/token/password) — secret-shaped data written to process logs or captured stdout."
+- id: typescript.info_disclosure.response_send_error_stack
+  enabled: true
+  language: typescript
+  tag: information-disclosure
+  severity: high
+  packages:
+  - express
+  - restify
+  - fastify
+  - '@adonisjs/core'
+  - '@adonisjs/http-server'
+  cwe:
+  - CWE-209
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - send
+  match_examples:
+  - name: response send error stack
+    code: |
+      const _u = require("express");
+      function handler(req: Request, res: Response, err: Error) {
+        return res.send(err.stack);
+      }
+    expect_match_text:
+    - res.send
+  description: "Express res.send(error.stack/message) — exposes internal exception details to the response body. Merged collision aliases: typescript.xss.http_res_send_html, typescript.xss.fastify_reply_send_html, typescript.xss.adonis_response_send_html."
+  aliases:
+  - typescript.xss.http_res_send_html
+  - typescript.xss.fastify_reply_send_html
+  - typescript.xss.adonis_response_send_html
+- id: typescript.info_disclosure.response_render_error_page
+  enabled: true
+  language: typescript
+  tag: information-disclosure
+  severity: medium
+  packages:
+  - express
+  cwe:
+  - CWE-209
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - render
+  match_examples:
+  - name: response render error page
+    code: |
+      const _u = require("express");
+      function handler(req: Request, res: Response, err: Error) {
+        return res.render("error", { error: err, stack: err.stack });
+      }
+    expect_match_text:
+    - res.render
+  description: "Express res.render(error, err/stack) — debug or exception details can be rendered into an error page."
+- id: typescript.info_disclosure.postmessage_wildcard_target
+  enabled: true
+  language: typescript
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  - CWE-346
+  match:
+    kind: call
+    callee:
+      regex: ^(window|parent|opener|targetWindow|frameWindow)\.postMessage$
+  match_examples:
+  - name: window postmessage wildcard
+    code: "function send(secret: string) {\n  return window.postMessage(secret, '*');\n}\n"
+    expect_match_text:
+    - window.postMessage
+  - name: parent postmessage wildcard
+    code: "function send(token: string) {\n  return parent.postMessage(token, '*');\n}\n"
+    expect_match_text:
+    - parent.postMessage
+  description: postMessage with targetOrigin '*' can disclose data to an unexpected origin.

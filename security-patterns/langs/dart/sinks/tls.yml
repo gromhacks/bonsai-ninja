@@ -1,0 +1,61 @@
+# Dart TLS misconfig.
+- id: dart.tls.badcertificatecallback
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: dart
+  tag: weak-tls
+  severity: critical
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: badCertificateCallback
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; badCertificateCallback = input; }
+  description: "Disabled broad duplicate — only callbacks that explicitly accept certificates are weak TLS; covered by dart.tls.disable_verify_bad_cert_callback."
+
+- id: dart.tls.dio_badcertificatecallback
+  enabled: true
+  language: dart
+  tag: weak-tls
+  severity: critical
+  packages: [dio]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: onBadCertificate
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      void test() { var input = "x"; var amount = 1; onBadCertificate = input; }
+  description: "dio HttpClientAdapter onBadCertificate => true."
+
+# Disabled SSL/TLS verification (T404). Tagged weak-tls so
+# `security sinks --tag weak-tls` enumerates these alongside
+# the other transport-security sinks. Per-lang patterns:
+  imports:
+  - dio/dio.dart
+- id: dart.tls.disable_verify_bad_cert_callback
+  enabled: true
+  language: dart
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      attribute: [client, badCertificateCallback]
+  match_examples:
+  - name: declared shape
+    code: |
+      void test() { var input = "x"; var amount = 1; client.badCertificateCallback = true; }
+  description: "HttpClient.badCertificateCallback = (cert, host, port) => true — accepts any certificate."

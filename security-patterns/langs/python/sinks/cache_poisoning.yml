@@ -1,0 +1,13 @@
+- id: python.cache.flask_add_cache_header
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: cache-poisoning
+  severity: medium
+  cwe: [CWE-444]
+  match:
+    kind: call
+    callee:
+      attribute: [response, headers, add]
+  description: "Disabled — flag only on tainted Vary / Cache-Control values."

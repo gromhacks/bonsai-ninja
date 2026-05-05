@@ -1,0 +1,641 @@
+- id: csharp.cmdi.process_start
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Process
+      - Start
+  constraints:
+  - arg_not_matches_regex:
+      index: 0
+      regex: ^"(/bin/)?(sh|bash|cmd(\.exe)?|powershell(\.exe)?|pwsh(\.exe)?)"$
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { Process.Start(input); } }
+
+      '
+  - name: literal process start negative
+    code: 'class App { void Test() { Process.Start("calc.exe"); } }
+
+      '
+    expect_no_match: true
+  description: "System.Diagnostics.Process.Start \u2014 flag if FileName/Arguments\
+    \ tainted."
+- id: csharp.cmdi.process_start_shell_wrapper
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Process
+      - Start
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: ^"(/bin/)?(sh|bash|cmd(\.exe)?|powershell(\.exe)?|pwsh(\.exe)?)"$
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted shell command argument
+    code: 'class App { void Test(string input) { Process.Start("sh", "-c " + input);
+      } }
+
+      '
+    expect_match_text:
+    - Process.Start
+  - name: literal shell command argument negative
+    code: 'class App { void Test() { Process.Start("sh", "-c whoami"); } }
+
+      '
+    expect_no_match: true
+  description: "Process.Start(shell, tainted arguments) \u2014 shell command string\
+    \ is interpreted by the selected shell."
+- id: csharp.cmdi.process_start_info_args
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: write
+    target:
+      name: Arguments
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; Arguments = input; } }
+
+      '
+  description: "ProcessStartInfo.Arguments = tainted \u2014 argv passed verbatim."
+- id: csharp.cmdi.process_start_info_filename
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: write
+    target:
+      name: FileName
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; FileName = input; } }
+
+      '
+  description: ProcessStartInfo.FileName = tainted.
+- id: csharp.cmdi.process_start_use_shell
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: write
+    target:
+      name: UseShellExecute
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; UseShellExecute = input; } }
+
+      '
+  description: "Disabled — UseShellExecute is only dangerous with receiver FileName/Arguments state; enable when receiver-state constraints can join those writes."
+- id: csharp.cmdi.cmd_exe_runtime
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: ExecuteCommand
+  description: "Disabled \u2014 too generic; rely on Process.Start patterns."
+- id: csharp.cmdi.medallion_shell_run
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages:
+  - MedallionShell
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Command
+      - Run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using MedallionShell;
+
+      class App { void Test(string input) { Command.Run(input); } }
+
+      '
+  - name: literal command negative
+    code: 'using MedallionShell;
+
+      class App { void Test() { Command.Run("whoami"); } }
+
+      '
+    expect_no_match: true
+  description: MedallionShell Command.Run.
+- id: csharp.cmdi.cliwrap_with_arguments
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - CliWrap
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: WithArguments
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using CliWrap;
+
+      class App { void Test(string input) { CliWrap.WithArguments(input); } }
+
+      '
+  - name: literal arguments negative
+    code: 'using CliWrap;
+
+      class App { void Test() { CliWrap.WithArguments("--help"); } }
+
+      '
+    expect_no_match: true
+  description: "CliWrap WithArguments(string) \u2014 flag interpolated string form\
+    \ (IList<string> overload is safe)."
+- id: csharp.cmdi.powershell_addscript
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages:
+  - System.Management.Automation
+  cwe:
+  - CWE-78
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PowerShell
+      - AddScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using System.Management.Automation;
+
+      class App { void Test(string input) { PowerShell.AddScript(input); } }
+
+      '
+  - name: literal script negative
+    code: 'using System.Management.Automation;
+
+      class App { void Test() { PowerShell.AddScript("Get-Process"); } }
+
+      '
+    expect_no_match: true
+  description: "PowerShell.AddScript(tainted) \u2014 executes script text in PS runspace."
+- id: csharp.cmdi.powershell_addcommand
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - System.Management.Automation
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PowerShell
+      - AddCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using System.Management.Automation;
+
+      class App { void Test(string input) { PowerShell.AddCommand(input); } }
+
+      '
+  - name: literal command negative
+    code: 'using System.Management.Automation;
+
+      class App { void Test() { PowerShell.AddCommand("Get-Process"); } }
+
+      '
+    expect_no_match: true
+  description: "PowerShell.AddCommand(tainted) \u2014 cmdlet name / path injection."
+- id: csharp.cmdi.runspace_invoke
+  enabled: false
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - System.Management.Automation
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Pipeline
+      - Invoke
+  match_examples:
+  - name: declared shape
+    code: 'using System.Management.Automation;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; Pipeline.Invoke(input); } }
+
+      '
+  description: "Pipeline.Invoke \u2014 PowerShell pipeline executes queued commands."
+  disabled_reason:
+    code: over-broad
+- id: csharp.cmdi.process_start_info_ctor
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      name: ProcessStartInfo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted filename
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic input) { } } class
+      App { void Test(string input) { var result = new ProcessStartInfo(input); }
+      }
+
+      '
+  - name: literal filename negative
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic input) { } } class
+      App { void Test() { var result = new ProcessStartInfo("dotnet"); } }
+
+      '
+    expect_no_match: true
+  description: "new ProcessStartInfo(tainted_fileName, arguments) \u2014 attacker-controlled executable path, typically paired with Process.Start."
+- id: csharp.cmdi.process_start_info_ctor_args
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      name: ProcessStartInfo
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arguments
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic fileName, dynamic arguments) { } } class
+      App { void Test(string input) { var result = new ProcessStartInfo("dotnet", input);
+      } }
+
+      '
+  - name: literal arguments negative
+    code: 'class ProcessStartInfo { public ProcessStartInfo(dynamic fileName, dynamic arguments) { } } class
+      App { void Test() { var result = new ProcessStartInfo("dotnet", "--info"); } }
+
+      '
+    expect_no_match: true
+  description: "new ProcessStartInfo(fileName, tainted_arguments) \u2014 attacker-controlled command arguments, typically paired with Process.Start."
+- id: csharp.cmdi.management_object_invoke
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - System.Management
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ManagementObject
+      - InvokeMethod
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using System.Management;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; ManagementObject.InvokeMethod(input); } }
+
+      '
+  - name: literal wmi method negative
+    code: |
+      using System.Management;
+      class App { void Test() { ManagementObject.InvokeMethod("Create"); } }
+    expect_no_match: true
+  description: "ManagementObject.InvokeMethod (WMI Create) \u2014 used to spawn processes\
+    \ via Win32_Process; tainted command-line argument is RCE."
+- id: csharp.cmdi.management_object_invoke_args
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - System.Management
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ManagementObject
+      - InvokeMethod
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted wmi method arguments
+    code: 'using System.Management;
+
+      class App { void Test(string input) { ManagementObject.InvokeMethod("Create",
+      input); } }
+
+      '
+  - name: literal wmi method arguments negative
+    code: 'using System.Management;
+
+      class App { void Test() { ManagementObject.InvokeMethod("Create", "calc.exe");
+      } }
+
+      '
+    expect_no_match: true
+  description: "ManagementObject.InvokeMethod(\"Create\", tainted_args) — WMI process creation command line is attacker-controlled."
+- id: csharp.cmdi.management_class_invoke
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - System.Management
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ManagementClass
+      - InvokeMethod
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using System.Management;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; ManagementClass.InvokeMethod(input); } }
+
+      '
+  - name: literal wmi class method negative
+    code: |
+      using System.Management;
+      class App { void Test() { ManagementClass.InvokeMethod("Create"); } }
+    expect_no_match: true
+  description: "ManagementClass.InvokeMethod \u2014 WMI process creation surface."
+- id: csharp.cmdi.management_class_invoke_args
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - System.Management
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ManagementClass
+      - InvokeMethod
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted wmi class invoke arguments
+    code: 'using System.Management;
+
+      class App { void Test(string input) { ManagementClass.InvokeMethod("Create",
+      input); } }
+
+      '
+  - name: literal wmi class invoke arguments negative
+    code: 'using System.Management;
+
+      class App { void Test() { ManagementClass.InvokeMethod("Create", "calc.exe");
+      } }
+
+      '
+    expect_no_match: true
+  description: "ManagementClass.InvokeMethod(\"Create\", tainted_args) — WMI process creation command line is attacker-controlled."
+- id: csharp.cmdi.sshnet_runcommand
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages:
+  - SSH.NET
+  - Renci.SshNet
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SshClient
+      - RunCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using SSH.NET;
+
+      class App { void Test(string input) { SshClient.RunCommand(input); } }
+
+      '
+  - name: literal command negative
+    code: 'using SSH.NET;
+
+      class App { void Test() { SshClient.RunCommand("whoami"); } }
+
+      '
+    expect_no_match: true
+  description: "Renci.SshNet SshClient.RunCommand \u2014 executes attacker-supplied\
+    \ shell command on remote host."
+- id: csharp.cmdi.sshnet_createcommand
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages:
+  - SSH.NET
+  - Renci.SshNet
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SshClient
+      - CreateCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using SSH.NET;
+
+      class App { void Test(string input) { SshClient.CreateCommand(input); } }
+
+      '
+  - name: literal command negative
+    code: 'using SSH.NET;
+
+      class App { void Test() { SshClient.CreateCommand("whoami"); } }
+
+      '
+    expect_no_match: true
+  description: "Renci.SshNet SshClient.CreateCommand(string) \u2014 wraps a shell\
+    \ command for later Execute()."
+- id: csharp.cmdi.runspace_invoke_command
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - System.Management.Automation
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RunspaceInvoke
+      - Invoke
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using System.Management.Automation;
+
+      class App { void Test(string input) { RunspaceInvoke.Invoke(input); } }
+
+      '
+  - name: literal script negative
+    code: 'using System.Management.Automation;
+
+      class App { void Test() { RunspaceInvoke.Invoke("Get-Process"); } }
+
+      '
+    expect_no_match: true
+  description: "RunspaceInvoke.Invoke(scriptText) \u2014 executes raw PowerShell text\
+    \ in a runspace."
+- id: csharp.cmdi.cliwrap_targetfile
+  enabled: true
+  language: csharp
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - CliWrap
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: WithTargetFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using CliWrap;
+
+      class App { void Test(string input) { CliWrap.WithTargetFile(input); } }
+
+      '
+  - name: literal target file negative
+    code: 'using CliWrap;
+
+      class App { void Test() { CliWrap.WithTargetFile("dotnet"); } }
+
+      '
+    expect_no_match: true
+  description: "CliWrap Cli.Wrap(...).WithTargetFile(tainted) \u2014 executable path\
+    \ is attacker-controlled."

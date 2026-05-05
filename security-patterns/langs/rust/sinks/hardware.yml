@@ -1,0 +1,169 @@
+# Rust hardware-control / bus-write sinks (GPIO, PWM, I2C/SMBus, SPI).
+- id: rust.hardware.set_high
+  enabled: true
+  language: rust
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [embedded_hal, rppal]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.set_high$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use embedded_hal;
+      use embedded_hal;
+      use embedded_hal::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.set_high(target);
+      }
+  description: "set_high — tainted control flow drives a digital output high."
+
+  imports:
+  - embedded_hal
+- id: rust.hardware.set_low
+  enabled: true
+  language: rust
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [embedded_hal, rppal]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.set_low$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use embedded_hal;
+      use embedded_hal;
+      use embedded_hal::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.set_low(target);
+      }
+  description: "set_low — tainted control flow drives a digital output low."
+
+  imports:
+  - embedded_hal
+- id: rust.hardware.set_duty_cycle
+  enabled: true
+  language: rust
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [rppal]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.set_duty_cycle$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted pwm duty cycle
+    code: |
+      use rppal::dummy;
+      fn example(target: f64) {
+          obj.set_duty_cycle(target);
+      }
+  - name: literal pwm duty cycle negative
+    code: |
+      use rppal::dummy;
+      fn example() {
+          obj.set_duty_cycle(0.5);
+      }
+    expect_no_match: true
+  description: "set_duty_cycle — tainted PWM value actuates attached hardware."
+
+- id: rust.hardware.smbus_write_byte_data
+  enabled: true
+  language: rust
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [i2cdev, linux_embedded_hal]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.smbus_write_byte_data$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use i2cdev::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.smbus_write_byte_data(target);
+      }
+  description: "smbus_write_byte_data — tainted register/value mutates an attached I2C/SMBus device."
+
+- id: rust.hardware.smbus_write_word_data
+  enabled: true
+  language: rust
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [i2cdev, linux_embedded_hal]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.smbus_write_word_data$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      use i2cdev::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          obj.smbus_write_word_data(target);
+      }
+  description: "smbus_write_word_data — tainted 16-bit register write controls peripheral state."
+
+- id: rust.hardware.transfer_in_place
+  enabled: true
+  language: rust
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: [embedded_hal, linux_embedded_hal]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.transfer_in_place$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted spi transfer buffer
+    code: |
+      use embedded_hal;
+      use embedded_hal;
+      use embedded_hal::dummy;
+      fn example(target: &mut [u8]) {
+          obj.transfer_in_place(target);
+      }
+  - name: safe spi transfer buffer negative
+    code: |
+      use embedded_hal;
+      use embedded_hal;
+      use embedded_hal::dummy;
+      fn example() {
+          let safe = [0u8, 1u8];
+          obj.transfer_in_place(safe);
+      }
+    expect_no_match: true
+  description: "transfer_in_place — tainted SPI frame bytes are sent to an attached peripheral."
+  imports:
+  - embedded_hal

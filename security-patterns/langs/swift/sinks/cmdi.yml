@@ -1,0 +1,178 @@
+# Swift command-injection sinks.
+- id: swift.cmdi.process_launch
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: launch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; launch(input) }
+  - name: literal arg 0 negative
+    code: |
+      func test() { launch("safe") }
+    expect_no_match: true
+  description: "Process / NSTask launch (deprecated) — subprocess execution. May FP on AppKit/SwiftUI launch() — rare."
+- id: swift.cmdi.process_run
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [process, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { process.run(input) }
+  - name: literal process run negative
+    code: |
+      func test() { process.run("whoami") }
+    expect_no_match: true
+  description: "Process.run() / task.run() — Foundation subprocess execution. Bare-name `run` retained: canonical Foundation API with no static namespace; narrowed by receiver_name_in to suppress SwiftUI/Combine/Vapor `.run()` decoys."
+- id: swift.cmdi.system_libc
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: system
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { system(input) }
+  - name: literal system negative
+    code: |
+      func test() { system("whoami") }
+    expect_no_match: true
+  description: "libc system() — runs command via /bin/sh; tainted argv executes arbitrary shell commands."
+- id: swift.cmdi.popen
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: popen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { popen(input, "r") }
+  - name: literal popen negative
+    code: |
+      func test() { popen("whoami", "r") }
+    expect_no_match: true
+  description: "popen() — C-bridge shell pipeline."
+- id: swift.cmdi.execl_family
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^execl[pev]*$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; execlp(input) }
+  - name: literal arg 0 negative
+    code: |
+      func test() { execl_family("safe") }
+    expect_no_match: true
+  description: "POSIX execl/execle/execlp/execv/execvp bridged via Darwin."
+- id: swift.cmdi.posix_spawn
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^posix_spawn(p)?$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; posix_spawn(p)(input) }
+  - name: literal arg 1 negative
+    code: |
+      func test() { posix_spawn("safe", "safe") }
+    expect_no_match: true
+  description: "posix_spawn / posix_spawnp bridged via Darwin."
+- id: swift.cmdi.launchpath_write
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: write
+    target:
+      name: launchPath
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; launchPath = input }
+  description: "Process.launchPath = tainted — path to executable."
+- id: swift.cmdi.executableurl_write
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: write
+    target:
+      name: executableURL
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; executableURL = input }
+  description: "Process.executableURL = tainted — Swift-preferred variant."
+- id: swift.cmdi.arguments_write
+  enabled: true
+  language: swift
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: write
+    target:
+      name: arguments
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; arguments = input }
+  description: "Process.arguments = [tainted] — argv injection."

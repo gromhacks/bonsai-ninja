@@ -1,0 +1,84 @@
+//! Progress-bar helpers for long-running CLI commands.
+//!
+//! Bars render to stderr (keeps `--format json` stdout clean) and
+//! become a no-op when any of: stderr isn't a TTY, `--no-progress`
+//! is set, or `NO_PROGRESS` / `NO_COLOR` env vars are present.
+
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::io::IsTerminal;
+use std::sync::OnceLock;
+
+/// Global toggle backing `--no-progress`. Set once at CLI startup
+/// from the flag or the `NO_PROGRESS` / `NO_COLOR` env vars; every
+/// [`progress_bar`] call reads it.
+static NO_PROGRESS: OnceLock<bool> = OnceLock::new();
+
+/// Install the `--no-progress` toggle. Called once from the
+/// top-level CLI dispatch before any command runs.
+pub(crate) fn set_no_progress(disabled: bool) {
+    let _ = NO_PROGRESS.set(disabled);
+}
+
+/// `true` when the CLI has been told (via flag, env, or TTY
+/// detection) that it should not draw progress bars.
+#[must_use]
+pub(crate) fn is_disabled() -> bool {
+    if *NO_PROGRESS.get().unwrap_or(&false) {
+        return true;
+    }
+    if std::env::var("NO_PROGRESS").is_ok() {
+        return true;
+    }
+    // Matches the `--no-color` / `NO_COLOR` convention: if the
+    // user opted out of one chrome knob, they probably want the
+    // other muted too.
+    if std::env::var("NO_COLOR").is_ok() {
+        return true;
+    }
+    !std::io::stderr().is_terminal()
+}
+
+/// Whether the per-command workspace footer (cloc/LLM-style
+/// summary: files, lines, tokens, defs, calls, imports, top
+/// languages) should render. Reuses the progress-bar gating rules:
+/// stderr TTY, no mute env/flag set. Means CI runs, `--format json`
+/// piped consumers, and explicitly-muted shells all stay clean;
+/// interactive terminals get the footer for free.
+#[must_use]
+pub(crate) fn is_footer_enabled() -> bool {
+    !is_disabled()
+}
+
+/// Build a progress bar for a known total. Returns
+/// [`ProgressBar::hidden`] when bars are disabled — safe to call
+/// unconditionally, then invoke `inc(1)` in the hot loop; the
+/// hidden variant is a fast no-op.
+#[must_use]
+pub(crate) fn progress_bar(label: &str, total: u64) -> ProgressBar {
+    if is_disabled() {
+        return ProgressBar::hidden();
+    }
+    let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::stderr());
+    if let Ok(style) = ProgressStyle::with_template("  {msg:<24} [{bar:30.cyan/blue}] {pos}/{len} ({eta})") {
+        bar.set_style(style.progress_chars("━━╸ "));
+    }
+    bar.set_message(label.to_string());
+    bar
+}
+
+/// Build a spinner for operations without a known total count
+/// (e.g. workspace ingestion before the file count is known).
+/// Falls back to [`ProgressBar::hidden`] when bars are disabled.
+#[must_use]
+pub(crate) fn spinner(label: &str) -> ProgressBar {
+    if is_disabled() {
+        return ProgressBar::hidden();
+    }
+    let spin = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    if let Ok(style) = ProgressStyle::with_template("  {spinner:.cyan} {msg}") {
+        spin.set_style(style.tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "));
+    }
+    spin.set_message(label.to_string());
+    spin.enable_steady_tick(std::time::Duration::from_millis(120));
+    spin
+}

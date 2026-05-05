@@ -1,0 +1,54 @@
+# python prototype_pollution sinks.
+
+# Prototype-pollution sinks (round 3 — cross-language).
+- id: python.proto_pollution.dict_update_body
+  enabled: true
+  language: python
+  tag: prototype-pollution
+  severity: low
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [dict, update]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: proto pollution dict update body
+    code: |
+      def example(user_input):
+          return dict.update(user_input, 'requestpayloadbody')
+  - name: dict update body literal negative
+    code: |
+      def example(user_input):
+          return dict.update('safe', 'requestpayloadbody')
+    expect_no_match: true
+  description: 'target.update(request.json) — bulk-merges attacker JSON into a target dict; class-level dunder keys (__class__) can shadow attributes when reflection follows.'
+- id: python.proto_pollution.deepmerge_merge_body
+  enabled: true
+  language: python
+  tag: prototype-pollution
+  severity: medium
+  packages: [deepmerge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [deepmerge, always_merger]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: proto pollution deepmerge merge body
+    code: |
+      import deepmerge
+      def example(user_input):
+          return deepmerge.always_merger(user_input)
+  - name: deepmerge body literal negative
+    code: |
+      import deepmerge
+      def example():
+          return deepmerge.always_merger({"safe": True})
+    expect_no_match: true
+  description: 'deepmerge.always_merger.merge(target, attacker_dict) — recursive deep merge.'

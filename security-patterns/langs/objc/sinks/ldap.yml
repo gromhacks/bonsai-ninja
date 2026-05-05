@@ -1,0 +1,172 @@
+# Objective-C LDAP-injection sinks (OpenLDAP C library via bridge).
+- id: objc.ldap.ldap_search_ext
+  enabled: true
+  language: objc
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldap_search_ext|ldap_search_ext_s)$"
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(LDAP *ld, const char *input) { id target = input; int amount = 1; ldap_search_ext(ld, "dc=example,dc=com", 0, input, NULL, 0, NULL, NULL, NULL, 0, NULL); }
+  - name: literal ldap search filter negative
+    code: |
+      void test(LDAP *ld, const char *input) { ldap_search_ext(ld, input, 0, "(uid=safe)", NULL, 0, NULL, NULL, NULL, 0, NULL); }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search_ext(_s) — tainted filter string permits LDAP filter injection."
+
+- id: objc.ldap.ldap_search_s
+  enabled: true
+  language: objc
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldap_search|ldap_search_s|ldap_search_st)$"
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(LDAP *ld, const char *input) { id target = input; int amount = 1; ldap_search(ld, "dc=example,dc=com", 0, input, NULL, 0); }
+  - name: literal legacy ldap search filter negative
+    code: |
+      void test(LDAP *ld, const char *input) { ldap_search(ld, input, 0, "(uid=safe)", NULL, 0); }
+    expect_no_match: true
+  description: "OpenLDAP ldap_search / ldap_search_s / ldap_search_st — deprecated synchronous search with tainted filter."
+
+- id: objc.ldap.ldap_modify
+  enabled: true
+  language: objc
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldap_modify|ldap_modify_s|ldap_modify_ext|ldap_modify_ext_s)$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; ldap_modify(input); }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        ldap_modify("safe", "safe");
+      }
+    expect_no_match: true
+  description: "OpenLDAP ldap_modify(_s/_ext/_ext_s) — tainted DN/mods permit DIT modification."
+
+- id: objc.ldap.ldap_modify_attrs
+  enabled: true
+  language: objc
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldap_modify|ldap_modify_s|ldap_modify_ext|ldap_modify_ext_s)$"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted arg 2
+    code: |
+      void example(char *input) {
+        ldap_modify("safe", "safe", input);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        ldap_modify("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "ldap_modify(_s/_ext) — tainted modifications can alter unintended directory attributes."
+
+- id: objc.ldap.ldap_delete
+  enabled: true
+  language: objc
+  tag: ldap-injection
+  severity: critical
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldap_delete|ldap_delete_s|ldap_delete_ext|ldap_delete_ext_s)$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(LDAP *ld, const char *input) { id target = input; int amount = 1; ldap_delete(ld, input); }
+  - name: literal ldap delete dn negative
+    code: |
+      void test(LDAP *ld) { ldap_delete(ld, "uid=safe,dc=example,dc=com"); }
+    expect_no_match: true
+  description: "OpenLDAP ldap_delete(_s/_ext/_ext_s) — tainted DN deletes arbitrary directory entries."
+
+- id: objc.ldap.ldap_add
+  enabled: true
+  language: objc
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldap_add|ldap_add_s|ldap_add_ext|ldap_add_ext_s)$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; ldap_add(input); }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        ldap_add("safe", "safe");
+      }
+    expect_no_match: true
+  description: "OpenLDAP ldap_add(_s/_ext/_ext_s) — tainted DN/attributes enables directory injection."
+- id: objc.ldap.ldap_add_attrs
+  enabled: true
+  language: objc
+  tag: ldap-injection
+  severity: high
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^(ldap_add|ldap_add_s|ldap_add_ext|ldap_add_ext_s)$"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted arg 2
+    code: |
+      void example(char *input) {
+        ldap_add("safe", "safe", input);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        ldap_add("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "ldap_add(_s/_ext) — tainted attributes can create rogue directory entries."

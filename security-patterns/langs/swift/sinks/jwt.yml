@@ -1,0 +1,111 @@
+# Swift JWT sinks.
+- id: swift.jwt.swiftjwt_decode
+  enabled: true
+  language: swift
+  tag: jwt
+  severity: high
+  packages: [SwiftJWT, JWTDecode]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JWT, decode]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import SwiftJWT // SwiftJWT
+      func test(input: String) { JWT.decode(input) }
+  - name: literal jwt decode negative
+    code: |
+      import SwiftJWT // SwiftJWT
+      func test() { JWT.decode("eyJhbGciOiJIUzI1NiJ9.safe.sig") }
+    expect_no_match: true
+  description: "JWT.decode — covers SwiftJWT and JWTDecode.swift (same `[JWT, decode]` attribute chain). Flag with non-pinned / missing verifier."
+
+- id: swift.jwt.jwtkit_verifier_unverified
+  enabled: true
+  language: swift
+  tag: jwt
+  severity: critical
+  packages: [JWTKit]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JWTSigners, unverified]
+  match_examples:
+  - name: declared shape
+    code: |
+      import JWTKit
+      func test() { let input = "x"; let amount = 1; JWTSigners.unverified(input) }
+  description: "JWTKit JWTSigners.unverified — explicit no-verify."
+
+- id: swift.jwt.jose_swift_unverified
+  enabled: true
+  language: swift
+  tag: jwt
+  severity: critical
+  packages: [JOSESwift]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: JWS
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import JOSESwift
+      func test(input: String) { JWS(input) }
+  - name: literal jws compact negative
+    code: |
+      import JOSESwift
+      func test() { JWS("eyJhbGciOiJIUzI1NiJ9.safe.sig") }
+    expect_no_match: true
+  description: "JOSESwift JWS(compactSerialization:) — flag if not subsequently verified."
+
+- id: swift.jwt.jwtdecode_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: jwt
+  severity: high
+  packages: [JWTDecode]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JWT, decode]
+  description: "Disabled — merged into swift.jwt.swiftjwt_decode (same `[JWT, decode]` attribute chain)."
+
+- id: swift.jwt.jwtkit_verify_none
+  enabled: true
+  language: swift
+  tag: jwt
+  severity: critical
+  packages: [JWTKit]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: unsafeDecode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import JWTKit
+      func test(input: String) { unsafeDecode(input) }
+  - name: literal unsafe decode negative
+    code: |
+      import JWTKit
+      func test() { unsafeDecode("eyJhbGciOiJub25lIn0.safe.") }
+    expect_no_match: true
+  description: "JWTKit unsafeDecode — skips signature verification."

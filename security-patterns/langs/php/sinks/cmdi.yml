@@ -1,0 +1,352 @@
+- id: php.cmdi.system
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: system
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.system example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  system($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  system(\"safe\");\n}\n"
+    expect_no_match: true
+  description: system() — runs command via shell.
+- id: php.cmdi.exec
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: ^exec$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.exec example
+    code: |
+      <?php
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        exec($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use doctrine\dbal;
+      function example($input, $url, $id, $payload, $request) {
+        exec("safe");
+      }
+    expect_no_match: true
+  description: 'exec() — runs shell command; attacker-controlled argv concatenation lets the attacker execute arbitrary commands as the web-server user. Merged collision aliases: php.sqli.pdo_exec, php.sqli.sqlite_exec, php.sqli.doctrine_dbal_exec.'
+  aliases:
+  - php.sqli.pdo_exec
+  - php.sqli.sqlite_exec
+  - php.sqli.doctrine_dbal_exec
+  packages:
+  - doctrine/dbal
+  imports:
+  - doctrine\dbal
+  - doctrine
+- id: php.cmdi.shell_exec
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: shell_exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.shell_exec example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  shell_exec($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  shell_exec(\"safe\");\n}\n"
+    expect_no_match: true
+  description: shell_exec() — runs argv through /bin/sh; tainted argv executes arbitrary shell commands.
+- id: php.cmdi.passthru
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: passthru
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.passthru example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  passthru($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  passthru(\"safe\");\n}\n"
+    expect_no_match: true
+  description: passthru() — runs argv through /bin/sh and writes output directly to stdout; tainted argv executes arbitrary shell commands.
+- id: php.cmdi.proc_open
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: proc_open
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.proc_open example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  proc_open($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  proc_open(\"safe\");\n}\n"
+    expect_no_match: true
+  description: proc_open() — flag if first arg is a string (uses shell).
+- id: php.cmdi.popen
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: popen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.popen example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  popen($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  popen(\"safe\", \"r\");\n}\n"
+    expect_no_match: true
+  description: popen() — runs command via shell.
+- id: php.cmdi.pcntl_exec
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: pcntl_exec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.pcntl_exec example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  pcntl_exec($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  pcntl_exec(\"/usr/bin/id\");\n}\n"
+    expect_no_match: true
+  description: pcntl_exec() — direct execve, no shell, but path can be tainted.
+- id: php.cmdi.symfony_process_from_shell_commandline
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages:
+  - symfony/process
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Process
+      - fromShellCommandline
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.symfony_process_from_shell_commandline example
+    code: |
+      <?php
+      use symfony\process;
+      use symfony\process;
+      function example($input, $url, $id, $payload, $request) {
+        Process::fromShellCommandline($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use symfony\process;
+      function example($input, $url, $id, $payload, $request) {
+        Process::fromShellCommandline("php bin/console cache:clear");
+      }
+    expect_no_match: true
+  description: Symfony Process::fromShellCommandline — explicitly shell-evaluated.
+  imports:
+  - symfony\process
+  - symfony
+- id: php.cmdi.symfony_process_new
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: command-injection
+  severity: medium
+  category: process-exec
+  packages:
+  - symfony/process
+  cwe:
+  - CWE-78
+  match:
+    kind: new
+    callee:
+      name: Process
+  description: Disabled — Process(array) is safe; flag only when string command.
+- id: php.cmdi.backtick_exec
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      name: shell_exec
+  description: Disabled duplicate — backtick `cmd` desugars to shell_exec; covered above.
+- id: php.cmdi.laravel_artisan_call
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: high
+  category: process-exec
+  packages:
+  - laravel/framework
+  cwe:
+  - CWE-78
+  - CWE-77
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Artisan
+      - call
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.cmdi.laravel_artisan_call example
+    code: |
+      <?php
+      use laravel\framework;
+      use laravel\framework;
+      function example($input, $url, $id, $payload, $request) {
+        Artisan::call($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use laravel\framework;
+      function example($input, $url, $id, $payload, $request) {
+        Artisan::call("cache:clear");
+      }
+    expect_no_match: true
+  description: Laravel Artisan::call — flag tainted command signature.
+  imports:
+  - laravel\framework
+  - laravel
+- id: php.cmdi.mb_send_mail_params
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: high
+  category: process-exec
+  cwe:
+  - CWE-78
+  - CWE-88
+  match:
+    kind: call
+    callee:
+      name: mb_send_mail
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: php.cmdi.mb_send_mail_params example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mb_send_mail('to@example.com', 'subject', 'body', 'From: noreply@example.com', $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mb_send_mail('to@example.com', 'subject', 'body', 'From: noreply@example.com', '-f noreply@example.com');\n}\n"
+    expect_no_match: true
+  description: mb_send_mail — 5th arg (additional_params) goes to sendmail shell; tainted -> RCE.
+- id: php.cmdi.mail_additional_params
+  enabled: true
+  language: php
+  tag: command-injection
+  severity: high
+  category: process-exec
+  cwe:
+  - CWE-78
+  - CWE-88
+  match:
+    kind: call
+    callee:
+      name: mail
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: php.cmdi.mail_additional_params example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mail('to@example.com', 'subject', 'body', 'From: noreply@example.com', $input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  mail('to@example.com', 'subject', 'body', 'From: noreply@example.com', '-f noreply@example.com');\n}\n"
+    expect_no_match: true
+  description: mail() — 5th arg additional_params goes to sendmail shell.
+- id: php.cmdi.symfony_process_run
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: command-injection
+  severity: medium
+  category: process-exec
+  packages:
+  - symfony/process
+  cwe:
+  - CWE-78
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Process
+      - run
+  description: Disabled — Process::run is safe with array cmd; flag when constructed via fromShellCommandline.

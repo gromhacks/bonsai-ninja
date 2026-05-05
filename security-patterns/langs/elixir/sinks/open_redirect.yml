@@ -1,0 +1,86 @@
+- id: elixir.open_redirect.phoenix_redirect
+  enabled: true
+  language: elixir
+  tag: open-redirect
+  severity: high
+  frameworks:
+  - phoenix
+  - phoenix_live_view
+  packages:
+  - phoenix
+  - phoenix_live_view
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      regex: ^Phoenix\.Controller\.redirect$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Phoenix
+      defmodule App do
+        def test(conn, input) do
+          Phoenix.Controller.redirect(conn, to: input)
+        end
+      end
+  - name: literal phoenix redirect negative
+    code: |
+      alias Phoenix
+      defmodule App do
+        def test(conn, input) do
+          Phoenix.Controller.redirect(conn, to: "/dashboard")
+        end
+      end
+    expect_no_match: true
+  description: "Phoenix.Controller.redirect(conn, to: tainted | external: tainted) — Location header set from user input enables phishing redirects; `external:` skips any same-origin check. Merged collision aliases: elixir.open_redirect.phoenix_redirect_imported, elixir.open_redirect.liveview_redirect."
+  aliases:
+  - elixir.open_redirect.phoenix_redirect_imported
+  - elixir.open_redirect.liveview_redirect
+  imports:
+  - Phoenix
+- id: elixir.open_redirect.liveview_push_navigate
+  enabled: true
+  language: elixir
+  tag: open-redirect
+  severity: high
+  frameworks:
+  - phoenix_live_view
+  packages:
+  - phoenix_live_view
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Phoenix
+      - LiveView
+      - push_navigate
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Phoenix_live_view
+      defmodule App do
+        def test(socket, input) do
+          Phoenix.LiveView.push_navigate(socket, to: input)
+        end
+      end
+  - name: literal liveview push navigate negative
+    code: |
+      alias Phoenix_live_view
+      defmodule App do
+        def test(socket, input) do
+          Phoenix.LiveView.push_navigate(socket, to: "/dashboard")
+        end
+      end
+    expect_no_match: true
+  description: "Phoenix.LiveView.push_navigate(socket, to: tainted) — client-side navigation to attacker-chosen path; no same-origin guard."
+  imports:
+  - Phoenix_live_view

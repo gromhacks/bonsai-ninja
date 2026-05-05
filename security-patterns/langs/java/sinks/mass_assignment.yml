@@ -1,0 +1,37 @@
+# java mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: java.mass_assign.databinder_bind_all
+  enabled: true
+  language: java
+  tag: mass-assignment
+  severity: medium
+  packages: [org.springframework.web.bind]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [DataBinder, bind]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.*;
+      class App {
+        void handle(String input) throws Exception {
+          DataBinder.bind(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.web.bind.*;
+      class App {
+        void handle(String input) throws Exception {
+          DataBinder.bind("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Spring DataBinder.bind(request, target) — binds every form field unless setAllowedFields/setDisallowedFields narrows."

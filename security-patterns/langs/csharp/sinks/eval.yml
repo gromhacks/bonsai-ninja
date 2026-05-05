@@ -1,0 +1,357 @@
+# C# eval / dynamic-code sinks. Roslyn + reflection.
+- id: csharp.eval.csharpscript_evaluate
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [Microsoft.CodeAnalysis.CSharp.Scripting]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [CSharpScript, EvaluateAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.CodeAnalysis.CSharp.Scripting;
+      class App { void Test(string input) { CSharpScript.EvaluateAsync(input); } }
+  - name: literal script negative
+    code: |
+      using Microsoft.CodeAnalysis.CSharp.Scripting;
+      class App { void Test() { CSharpScript.EvaluateAsync("1 + 1"); } }
+    expect_no_match: true
+  description: "CSharpScript.EvaluateAsync — Roslyn dynamic compilation."
+
+- id: csharp.eval.csharpscript_runasync
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [Microsoft.CodeAnalysis.CSharp.Scripting]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [CSharpScript, RunAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.CodeAnalysis.CSharp.Scripting;
+      class App { void Test(string input) { CSharpScript.RunAsync(input); } }
+  - name: literal script negative
+    code: |
+      using Microsoft.CodeAnalysis.CSharp.Scripting;
+      class App { void Test() { CSharpScript.RunAsync("1 + 1"); } }
+    expect_no_match: true
+  description: "CSharpScript.RunAsync."
+
+- id: csharp.eval.codedom_compile
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [System.CodeDom.Compiler]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [CSharpCodeProvider, CompileAssemblyFromSource]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.CodeDom.Compiler;
+      class App { void Test(string input) { CSharpCodeProvider.CompileAssemblyFromSource(input); } }
+  - name: literal source negative
+    code: |
+      using System.CodeDom.Compiler;
+      class App { void Test() { CSharpCodeProvider.CompileAssemblyFromSource("class Safe {}"); } }
+    expect_no_match: true
+  description: "CodeDom CompileAssemblyFromSource — runtime compilation."
+
+- id: csharp.eval.activator_create_instance
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Activator, CreateInstance]
+  description: "Disabled — too generic; flag only when type name is tainted."
+
+- id: csharp.eval.assembly_load
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Assembly, Load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(byte[] input) { Assembly.Load(input); } }
+  - name: literal assembly bytes negative
+    code: |
+      class App { void Test() { Assembly.Load(new byte[] {}); } }
+    expect_no_match: true
+  description: "Assembly.Load(byte[]) — RCE if assembly bytes tainted."
+
+- id: csharp.eval.assembly_loadfile
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Assembly, LoadFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Assembly.LoadFile(input); } }
+  - name: literal assembly path negative
+    code: |
+      class App { void Test() { Assembly.LoadFile("plugins/SafePlugin.dll"); } }
+    expect_no_match: true
+  description: "Assembly.LoadFile."
+
+- id: csharp.eval.assembly_loadfrom
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Assembly, LoadFrom]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Assembly.LoadFrom(input); } }
+  - name: literal assembly path negative
+    code: |
+      class App { void Test() { Assembly.LoadFrom("plugins/SafePlugin.dll"); } }
+    expect_no_match: true
+  description: "Assembly.LoadFrom."
+
+- id: csharp.eval.appdomain_executeassembly
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [AppDomain, ExecuteAssembly]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { AppDomain.ExecuteAssembly(input); } }
+  - name: literal assembly path negative
+    code: |
+      class App { void Test() { AppDomain.ExecuteAssembly("tools/Safe.exe"); } }
+    expect_no_match: true
+  description: "AppDomain.ExecuteAssembly."
+
+- id: csharp.eval.type_invokemember
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      name: InvokeMember
+  description: "Disabled — Type.InvokeMember; flag only when method name tainted."
+
+- id: csharp.eval.scriptengine_run
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [IronPython, IronRuby]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ScriptEngine, Execute]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using IronPython;
+      class App { void Test(string input) { ScriptEngine.Execute(input); } }
+  - name: literal script negative
+    code: |
+      using IronPython;
+      class App { void Test() { ScriptEngine.Execute("print(1)"); } }
+    expect_no_match: true
+  description: "IronPython/IronRuby ScriptEngine.Execute."
+
+- id: csharp.eval.vbcodeprovider_compile
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [System.CodeDom.Compiler]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [VBCodeProvider, CompileAssemblyFromSource]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.CodeDom.Compiler;
+      class App { void Test(string input) { VBCodeProvider.CompileAssemblyFromSource(input); } }
+  - name: literal source negative
+    code: |
+      using System.CodeDom.Compiler;
+      class App { void Test() { VBCodeProvider.CompileAssemblyFromSource("Module Safe\nEnd Module"); } }
+    expect_no_match: true
+  description: "VBCodeProvider.CompileAssemblyFromSource — runtime VB compilation."
+
+- id: csharp.eval.codedom_compile_from_file
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [System.CodeDom.Compiler]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: CompileAssemblyFromFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.CodeDom.Compiler;
+      class App { void Test(string input) { CompileAssemblyFromFile(input); } }
+  - name: literal source path negative
+    code: |
+      using System.CodeDom.Compiler;
+      class App { void Test() { CompileAssemblyFromFile("src/Safe.cs"); } }
+    expect_no_match: true
+  description: "CodeDom CompileAssemblyFromFile(tainted path) — compiles attacker-controlled source file."
+
+- id: csharp.eval.csharpsyntaxtree_parsetext
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: code-injection
+  severity: medium
+  packages: [Microsoft.CodeAnalysis.CSharp]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [CSharpSyntaxTree, ParseText]
+  description: "Disabled — ParseText alone is not exec; flag only when followed by Compilation.Emit / EvaluateAsync."
+
+- id: csharp.eval.scriptblock_create
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [System.Management.Automation]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ScriptBlock, Create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.Management.Automation;
+      class App { void Test(string input) { ScriptBlock.Create(input); } }
+  - name: literal script negative
+    code: |
+      using System.Management.Automation;
+      class App { void Test() { ScriptBlock.Create("Get-Process"); } }
+    expect_no_match: true
+  description: "ScriptBlock.Create(tainted) — builds executable PowerShell script block from string."
+
+- id: csharp.eval.dynamicmethod_ctor
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: new
+    callee:
+      name: DynamicMethod
+  description: "Disabled — DynamicMethod is rarely fed user input directly; flag with constraint when name/IL is tainted."
+
+- id: csharp.eval.scripthost_evaluate
+  enabled: true
+  language: csharp
+  tag: code-injection
+  severity: critical
+  packages: [Microsoft.JScript]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Eval, JScriptEvaluate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.JScript;
+      class App { void Test(string input) { Eval.JScriptEvaluate(input); } }
+  - name: literal script negative
+    code: |
+      using Microsoft.JScript;
+      class App { void Test() { Eval.JScriptEvaluate("1 + 1"); } }
+    expect_no_match: true
+  description: "Microsoft.JScript Eval.JScriptEvaluate — legacy JScript runtime eval."

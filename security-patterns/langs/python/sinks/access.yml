@@ -1,0 +1,161 @@
+- id: python.access.boto3_get_object
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [boto3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: get_object
+  match_examples:
+  - name: access boto3 get object
+    code: |
+      import boto3
+      def example(user_input):
+          return get_object(user_input)
+  description: "boto3 S3 get_object(bucket/key) — tainted selector can read arbitrary object data."
+
+- id: python.access.boto3_put_object
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [boto3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: put_object
+  match_examples:
+  - name: access boto3 put object
+    code: |
+      import boto3
+      def example(user_input):
+          return put_object(user_input)
+  description: "boto3 S3 put_object(bucket/key) — tainted selector can overwrite arbitrary object keys."
+
+- id: python.access.boto3_get_secret_value
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [boto3]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      name: get_secret_value
+  match_examples:
+  - name: access boto3 get secret value
+    code: |
+      import boto3
+      def example(user_input):
+          return get_secret_value(user_input)
+  description: "boto3 Secrets Manager get_secret_value — tainted secret id reads arbitrary secret material."
+
+- id: python.access.azure_blob_download_blob
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [azure.storage.blob]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: download_blob
+  match_examples:
+  - name: access azure blob download blob
+    code: |
+      import azure.storage.blob
+      def example(user_input):
+          return download_blob(user_input)
+  description: "Azure BlobClient.download_blob — tainted container/blob selector reads arbitrary object data."
+
+  imports:
+  - azure.storage.blob
+- id: python.access.azure_blob_upload_blob
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [azure.storage.blob]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: upload_blob
+  match_examples:
+  - name: access azure blob upload blob
+    code: |
+      import azure.storage.blob
+      def example(user_input):
+          return upload_blob(user_input)
+  description: "Azure BlobClient.upload_blob — tainted blob name or container target overwrites attacker-chosen storage."
+
+  imports:
+  - azure.storage.blob
+- id: python.access.gcs_download_as_bytes
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [google.cloud.storage]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: download_as_bytes
+  match_examples:
+  - name: access gcs download as bytes
+    code: |
+      import google.cloud.storage
+      def example(user_input):
+          return download_as_bytes(user_input)
+  description: "google-cloud-storage Blob.download_as_bytes — tainted bucket/blob selector reads arbitrary object data."
+
+  imports:
+  - google.cloud.storage
+- id: python.access.gcs_upload_from_file
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [google.cloud.storage]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      name: upload_from_file
+  match_examples:
+  - name: access gcs upload from file
+    code: |
+      import google.cloud.storage
+      def example(user_input):
+          return upload_from_file(user_input)
+  description: "google-cloud-storage Blob.upload_from_file — tainted object key writes to attacker-chosen storage location."
+
+  imports:
+  - google.cloud.storage
+- id: python.access.gcp_secretmanager_access_secret_version
+  enabled: true
+  language: python
+  tag: access-control
+  severity: high
+  packages: [google.cloud.secretmanager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      name: access_secret_version
+  match_examples:
+  - name: access gcp secretmanager access secret version
+    code: |
+      import google.cloud.secretmanager
+      def example(user_input):
+          return access_secret_version(user_input)
+  description: "SecretManagerServiceClient.access_secret_version — tainted resource name reads arbitrary secret versions."
+  imports:
+  - google.cloud.secretmanager

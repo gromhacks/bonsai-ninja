@@ -1,0 +1,48 @@
+[package]
+name = "bonsai_taint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Taint reachability analysis over resolved flow chains."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_diagnostics = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_callgraph = { workspace = true }
+bonsai_cfg = { workspace = true }
+bonsai_index = { workspace = true }
+bonsai_resolve = { workspace = true }
+bonsai_vfs = { workspace = true }
+bonsai_db = { workspace = true }
+ahash = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+bonsai_lang_c = { workspace = true }
+bonsai_lang_cpp = { workspace = true }
+bonsai_lang_csharp = { workspace = true }
+bonsai_lang_go = { workspace = true }
+bonsai_lang_java = { workspace = true }
+bonsai_lang_javascript = { workspace = true }
+bonsai_lang_kotlin = { workspace = true }
+bonsai_lang_php = { workspace = true }
+bonsai_lang_python = { workspace = true }
+bonsai_lang_ruby = { workspace = true }
+bonsai_lang_rust = { workspace = true }
+bonsai_lang_scala = { workspace = true }
+bonsai_lang_swift = { workspace = true }
+bonsai_lang_typescript = { workspace = true }
+bonsai_lang_dart = { workspace = true }
+bonsai_lang_objc = { workspace = true }
+bonsai_lang_lua = { workspace = true }
+bonsai_lang_elixir = { workspace = true }
+bonsai_lang_erlang = { workspace = true }
+bonsai_lang_solidity = { workspace = true }
+bonsai_lang_perl = { workspace = true }
+rayon = { workspace = true }
+
+[lints]
+workspace = true

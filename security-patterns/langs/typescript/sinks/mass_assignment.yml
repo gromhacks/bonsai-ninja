@@ -1,0 +1,23 @@
+# typescript mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: typescript.mass_assign.mongoose_set_body
+  enabled: true
+  language: typescript
+  tag: mass-assignment
+  severity: high
+  packages: [mongoose]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [Document, set]
+  match_examples:
+  - name: mongoose set body
+    code: |
+      const _u = require("mongoose");
+      function demo(input, req, obj) {
+        return Document.set(input, req.body);
+      }
+  description: "Mongoose Document.set(req.body) — TS via @types/mongoose."

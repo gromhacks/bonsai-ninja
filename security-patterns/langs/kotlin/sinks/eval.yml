@@ -1,0 +1,429 @@
+# Java eval / dynamic-code sinks (javax.script + reflection + JEXL/MVEL/Groovy/SpEL).
+- id: kotlin.eval.scriptengine_eval
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [ScriptEngine, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          ScriptEngine.eval(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: "class App {\n  fun handle(input: String) {\n    ScriptEngine.eval(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "javax.script ScriptEngine.eval — Nashorn / Rhino RCE."
+
+- id: kotlin.eval.compiledscript_eval
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [CompiledScript, eval]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          CompiledScript.eval(input)
+        }
+      }
+  description: "Disabled — CompiledScript.eval() executes code compiled earlier; needs receiver state from a tainted compile step, not an eval argument."
+
+- id: kotlin.eval.method_invoke
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Method, invoke]
+  description: "Disabled — reflection.Method.invoke; flag only when method-name tainted."
+
+- id: kotlin.eval.class_forname
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: high
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Class, forName]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          Class.forName(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Class.forName("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Class.forName(tainted) — arbitrary class load."
+
+- id: kotlin.eval.classloader_loadclass
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: high
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [ClassLoader, loadClass]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          ClassLoader.loadClass(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        ClassLoader.loadClass("safe")
+      }
+      }
+    expect_no_match: true
+  description: "ClassLoader.loadClass(tainted)."
+
+- id: kotlin.eval.urlclassloader_new
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: new
+    callee:
+      name: URLClassLoader
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          URLClassLoader(input)
+        }
+      }
+      class URLClassLoader(vararg args: Any?)
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        URLClassLoader("safe")
+      }
+      }
+      class URLClassLoader(vararg args: Any?)
+    expect_no_match: true
+  description: "new URLClassLoader(tainted URLs)."
+
+- id: kotlin.eval.groovyshell_evaluate
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  packages: [groovy]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [GroovyShell, evaluate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import groovy.*
+      // uses groovy
+      class App {
+        fun handle(input: String) {
+          GroovyShell.evaluate(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import groovy.*
+      // uses groovy
+      class App {
+      fun handle(input: String) {
+        GroovyShell.evaluate("safe")
+      }
+      }
+    expect_no_match: true
+  description: "GroovyShell.evaluate(tainted)."
+
+- id: kotlin.eval.groovyshell_parse
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  packages: [groovy]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [GroovyShell, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import groovy.*
+      // uses groovy
+      class App {
+        fun handle(input: String) {
+          GroovyShell.parse(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import groovy.*
+      // uses groovy
+      class App {
+      fun handle(input: String) {
+        GroovyShell.parse("safe")
+      }
+      }
+    expect_no_match: true
+  description: "GroovyShell.parse."
+
+- id: kotlin.eval.spel_parseexpression
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: ssti
+  severity: critical
+  packages: [org.springframework.expression]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [SpelExpressionParser, parseExpression]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.expression.*
+      class App {
+        fun handle(input: String) {
+          SpelExpressionParser.parseExpression(input)
+        }
+      }
+  description: "Disabled duplicate — SpEL template parsing is classified by canonical kotlin.template.spel_parseexpression as SSTI CWE-1336."
+
+  imports:
+  - org.springframework.expression
+- id: kotlin.eval.ognl_getvalue
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  packages: [ognl]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Ognl, getValue]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import ognl.*
+      class App {
+        fun handle(input: String) {
+          Ognl.getValue(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import ognl.*
+      class App {
+      fun handle(input: String) {
+        Ognl.getValue("safe")
+      }
+      }
+    expect_no_match: true
+  description: "OGNL Ognl.getValue — Struts2 RCE family."
+
+- id: kotlin.eval.mvel_eval
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  packages: [mvel2]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [MVEL, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import mvel2.*
+      class App {
+        fun handle(input: String) {
+          MVEL.eval(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import mvel2.*
+      class App {
+      fun handle(input: String) {
+        MVEL.eval("safe")
+      }
+      }
+    expect_no_match: true
+  description: "MVEL MVEL.eval(tainted)."
+
+- id: kotlin.eval.jexl_createexpression
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  packages: [org.apache.commons.jexl3]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [JexlEngine, createExpression]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.jexl3.*
+      class App {
+        fun handle(input: String) {
+          JexlEngine.createExpression(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.jexl3.*
+      class App {
+      fun handle(input: String) {
+        JexlEngine.createExpression("safe")
+      }
+      }
+    expect_no_match: true
+  description: "JEXL JexlEngine.createExpression(tainted)."
+
+  imports:
+  - org.apache.commons.jexl3
+- id: kotlin.eval.groovyshell_run
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  packages: [groovy]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [GroovyShell, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: groovy shell run
+    code: |
+      import groovy.*
+      class App {
+        fun handle(script: String) {
+          GroovyShell.run(script)
+        }
+      }
+    expect_match_text: [GroovyShell.run]
+  - name: arg tainted literal negative
+    code: |
+      import groovy.*
+      class App {
+      fun handle(script: String) {
+        GroovyShell.run("safe")
+      }
+      }
+    expect_no_match: true
+  description: "GroovyShell.run(tainted script) — compiles and executes caller-controlled Groovy code."
+
+- id: kotlin.eval.groovy_eval_me
+  enabled: true
+  language: kotlin
+  tag: code-injection
+  severity: critical
+  packages: [groovy]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Eval, me]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: groovy eval me
+    code: |
+      import groovy.*
+      class App {
+        fun handle(expr: String): Any? {
+          return Eval.me(expr)
+        }
+      }
+    expect_match_text: [Eval.me]
+  - name: arg tainted literal negative
+    code: |
+      import groovy.*
+      class App {
+      fun handle(expr: String): Any? {
+        return Eval.me("safe")
+      }
+      }
+    expect_no_match: true
+  description: "groovy.util.Eval.me(tainted expression) — evaluates caller-controlled Groovy code."

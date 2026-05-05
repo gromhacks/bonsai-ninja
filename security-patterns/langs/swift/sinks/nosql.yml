@@ -1,0 +1,126 @@
+# Swift NoSQL / predicate-injection (Realm, CoreData, MongoDB Swift).
+- id: swift.nosql.nspredicate_format
+  enabled: true
+  language: swift
+  tag: nosql-injection
+  severity: high
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: predicateWithFormat
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { predicateWithFormat(input) }
+  - name: literal predicate format negative
+    code: |
+      func test() { predicateWithFormat("name == 'safe'") }
+    expect_no_match: true
+  description: "NSPredicate.predicateWithFormat — Realm/CoreData filter injection."
+
+- id: swift.nosql.nspredicate_init_format
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: nosql-injection
+  severity: high
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: NSPredicate
+  description: "Disabled — duplicates swift.eval.nspredicate_format (same `NSPredicate(format:)` call site). Kept here for explicit nosql family coverage."
+
+- id: swift.nosql.realm_objects_filter_string
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  tag: nosql-injection
+  severity: high
+  packages: [RealmSwift]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: filter
+  description: "Disabled — bare `.filter` matches every Swift Array/String filter; needs receiver narrowing to Results<>."
+
+- id: swift.nosql.realm_filter_string
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: swift
+  tag: nosql-injection
+  severity: high
+  packages: [RealmSwift]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      name: filter
+  description: "Disabled — duplicate of realm_objects_filter_string; same overbroad `.filter` shape."
+
+- id: swift.nosql.coredata_fetch_predicate
+  enabled: true
+  language: swift
+  tag: nosql-injection
+  severity: high
+  cwe: [CWE-943]
+  match:
+    kind: write
+    target:
+      name: predicate
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; predicate = input }
+  description: "NSFetchRequest.predicate = tainted."
+
+- id: swift.nosql.mongodb_swift_find
+  enabled: true
+  language: swift
+  tag: nosql-injection
+  severity: high
+  packages: [MongoSwift]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [MongoCollection, find]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import mongoswiftdriver
+      func test(input: String) { MongoCollection.find(input) }
+  - name: literal mongo find negative
+    code: |
+      import mongoswiftdriver
+      func test() { MongoCollection.find("{\"name\":\"safe\"}") }
+    expect_no_match: true
+  description: "mongo-swift-driver MongoCollection.find."
+
+  imports:
+  - mongoswiftdriver
+- id: swift.nosql.fmdb_executequery
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: swift
+  tag: sql-injection
+  severity: low
+  packages: [fmdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: executeQuery
+  description: "Disabled — covered by sqli."

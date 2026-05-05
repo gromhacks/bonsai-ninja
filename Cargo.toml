@@ -1,0 +1,189 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/hash",
+    "crates/diagnostics",
+    "crates/vfs",
+    "crates/parser",
+    "crates/lang_api",
+    "crates/index",
+    "crates/resolve",
+    "crates/cfg",
+    "crates/callgraph",
+    "crates/taint",
+    "crates/abstract_interp",
+    "crates/trace",
+    "crates/db",
+    "crates/workspace",
+    "crates/inspect",
+    "crates/browse",
+    "crates/sdk",
+    "crates/testkit",
+    "crates/conformance",
+    "crates/lang_c",
+    "crates/lang_cpp",
+    "crates/lang_csharp",
+    "crates/lang_scala",
+    "crates/lang_rust",
+    "crates/lang_go",
+    "crates/lang_java",
+    "crates/lang_kotlin",
+    "crates/lang_swift",
+    "crates/lang_javascript",
+    "crates/lang_typescript",
+    "crates/lang_php",
+    "crates/lang_python",
+    "crates/lang_perl",
+    "crates/lang_ruby",
+    "crates/lang_dart",
+    "crates/lang_objc",
+    "crates/lang_lua",
+    "crates/lang_elixir",
+    "crates/lang_erlang",
+    "crates/lang_solidity",
+    "crates/adapters",
+    "crates/cli",
+    "crates/security",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/gromhacks/bonsai-ninja"
+description = "Local 21-language code intelligence and security analysis engine"
+
+[workspace.dependencies]
+# External parsing / tree-sitter
+tree-sitter = "0.26"
+tree-sitter-language-pack = { version = "1.6", default-features = false, features = ["dynamic-loading", "download"] }
+
+# Shared infra
+thiserror = "1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ahash = "0.8"
+parking_lot = "0.12"
+smallvec = { version = "1", features = ["union", "serde"] }
+indexmap = "2"
+once_cell = "1"
+bitflags = "2"
+rayon = "1"
+regex = "1"
+bincode = { version = "1", features = [] }
+ignore = "0.4"
+
+# CLI / frontends
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+
+# Testing
+pretty_assertions = "1"
+insta = { version = "1", features = ["yaml", "json"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Workspace crates
+bonsai_common = { path = "crates/common" }
+bonsai_hash = { path = "crates/hash" }
+bonsai_diagnostics = { path = "crates/diagnostics" }
+bonsai_vfs = { path = "crates/vfs" }
+bonsai_parser = { path = "crates/parser" }
+bonsai_lang_api = { path = "crates/lang_api" }
+bonsai_index = { path = "crates/index" }
+bonsai_resolve = { path = "crates/resolve" }
+bonsai_cfg = { path = "crates/cfg" }
+bonsai_callgraph = { path = "crates/callgraph" }
+bonsai_taint = { path = "crates/taint" }
+bonsai_abstract_interp = { path = "crates/abstract_interp" }
+bonsai_trace = { path = "crates/trace" }
+bonsai_db = { path = "crates/db" }
+bonsai_workspace = { path = "crates/workspace" }
+bonsai_inspect = { path = "crates/inspect" }
+bonsai_browse = { path = "crates/browse" }
+bonsai_sdk = { path = "crates/sdk" }
+bonsai_testkit = { path = "crates/testkit" }
+bonsai_conformance = { path = "crates/conformance" }
+bonsai_lang_c = { path = "crates/lang_c" }
+bonsai_lang_cpp = { path = "crates/lang_cpp" }
+bonsai_lang_csharp = { path = "crates/lang_csharp" }
+bonsai_lang_scala = { path = "crates/lang_scala" }
+bonsai_lang_rust = { path = "crates/lang_rust" }
+bonsai_lang_go = { path = "crates/lang_go" }
+bonsai_lang_java = { path = "crates/lang_java" }
+bonsai_lang_kotlin = { path = "crates/lang_kotlin" }
+bonsai_lang_swift = { path = "crates/lang_swift" }
+bonsai_lang_javascript = { path = "crates/lang_javascript" }
+bonsai_lang_typescript = { path = "crates/lang_typescript" }
+bonsai_lang_php = { path = "crates/lang_php" }
+bonsai_lang_python = { path = "crates/lang_python" }
+bonsai_lang_perl = { path = "crates/lang_perl" }
+bonsai_lang_ruby = { path = "crates/lang_ruby" }
+bonsai_lang_dart = { path = "crates/lang_dart" }
+bonsai_lang_objc = { path = "crates/lang_objc" }
+bonsai_lang_lua = { path = "crates/lang_lua" }
+bonsai_lang_elixir = { path = "crates/lang_elixir" }
+bonsai_lang_erlang = { path = "crates/lang_erlang" }
+bonsai_lang_solidity = { path = "crates/lang_solidity" }
+bonsai_adapters = { path = "crates/adapters" }
+bonsai_security = { path = "crates/security" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+similar_names = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+default_trait_access = "allow"
+needless_pass_by_value = "allow"
+doc_markdown = "allow"
+uninlined_format_args = "allow"
+format_in_format_args = "allow"
+explicit_iter_loop = "allow"
+return_self_not_must_use = "allow"
+unnecessary_wraps = "allow"
+option_if_let_else = "allow"
+items_after_statements = "allow"
+single_match_else = "allow"
+if_not_else = "allow"
+redundant_closure_for_method_calls = "allow"
+manual_find = "allow"
+needless_lifetimes = "allow"
+struct_excessive_bools = "allow"
+missing_fields_in_debug = "allow"
+match_same_arms = "allow"
+collapsible_match = "allow"
+format_push_string = "allow"
+redundant_else = "allow"
+derivable_impls = "allow"
+only_used_in_recursion = "allow"
+needless_continue = "allow"
+elidable_lifetime_names = "allow"
+map_unwrap_or = "allow"
+needless_raw_string_hashes = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+debug = true

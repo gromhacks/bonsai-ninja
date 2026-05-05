@@ -1,0 +1,22 @@
+[package]
+name = "bonsai_lang_api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LanguageAdapter trait and capability types for bonsai-ninja."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_diagnostics = { workspace = true }
+bonsai_vfs = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-language-pack = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+ahash = { workspace = true }
+
+[lints]
+workspace = true

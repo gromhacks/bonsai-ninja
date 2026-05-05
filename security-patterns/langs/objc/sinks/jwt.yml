@@ -1,0 +1,79 @@
+# Objective-C JWT sinks.
+- id: objc.jwt.jwtkit_decode
+  enabled: true
+  language: objc
+  tag: jwt
+  severity: high
+  packages: [JWTKit]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(decodeMessage|decodePayload)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <JWTKit/JWTKit.h>
+      void test(id input) { id target = input; int amount = 1; [JWTBuilder decodeMessage:input]; }
+  - name: literal jwtkit token negative
+    code: |
+      #import <JWTKit/JWTKit.h>
+      void test(void) { [JWTBuilder decodeMessage:@"safe.token.value"]; }
+    expect_no_match: true
+  description: "JWTKit -decodeMessage: / -decodePayload: without algorithm whitelist — permits alg:none or HS256/RS256 confusion."
+
+- id: objc.jwt.heimdall_decode
+  enabled: true
+  language: objc
+  tag: jwt
+  severity: high
+  packages: [Heimdall]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: validateJWT
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <Heimdall/Heimdall.h>
+      void test(id input) { id target = input; int amount = 1; [Heimdall validateJWT:input]; }
+  - name: literal heimdall token negative
+    code: |
+      #import <Heimdall/Heimdall.h>
+      void test(void) { [Heimdall validateJWT:@"safe.token.value"]; }
+    expect_no_match: true
+  description: "Heimdall -validateJWT: — flag when no algorithm constraint supplied."
+
+- id: objc.jwt_jose_decode_unverified
+  enabled: true
+  language: objc
+  tag: jwt
+  severity: high
+  packages: [JOSESwift]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: decodeClaimsSet
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: objc jose decode claims unverified
+    code: |
+      #import <JOSESwift/JOSESwift.h>
+      void test(id input) { [JWT decodeClaimsSet:input]; }
+    expect_match_text: [JWT.decodeClaimsSet]
+  - name: literal jose claims token negative
+    code: |
+      #import <JOSESwift/JOSESwift.h>
+      void test(void) { [JWT decodeClaimsSet:@"safe.token.value"]; }
+    expect_no_match: true
+  description: "JOSE / JWT decodeClaimsSet-style helpers — decoding claims before signature verification can trust attacker-controlled JWT payloads."

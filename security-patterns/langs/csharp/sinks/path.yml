@@ -1,0 +1,731 @@
+# C# path-traversal sinks. System.IO + ASP.NET PhysicalFile.
+- id: csharp.path.file_open
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.Open(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.Open("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.Open with tainted path."
+
+- id: csharp.path.file_create
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.Create(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.Create("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.Create with tainted path — attacker-controlled paths can create arbitrary files (overwriting existing content)."
+
+- id: csharp.path.file_readalltext
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, ReadAllText]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.ReadAllText(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.ReadAllText("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.ReadAllText."
+
+- id: csharp.path.file_readallbytes
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, ReadAllBytes]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.ReadAllBytes(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.ReadAllBytes("data/safe.bin"); } }
+    expect_no_match: true
+  description: "File.ReadAllBytes."
+
+- id: csharp.path.file_readalllines
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, ReadAllLines]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.ReadAllLines(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.ReadAllLines("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.ReadAllLines."
+
+- id: csharp.path.file_writealltext
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, WriteAllText]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.WriteAllText(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.WriteAllText("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.WriteAllText."
+
+- id: csharp.path.file_writeallbytes
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, WriteAllBytes]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.WriteAllBytes(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.WriteAllBytes("data/safe.bin"); } }
+    expect_no_match: true
+  description: "File.WriteAllBytes."
+
+- id: csharp.path.file_appendalltext
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, AppendAllText]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.AppendAllText(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.AppendAllText("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.AppendAllText."
+
+- id: csharp.path.file_delete
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: critical
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Delete]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.Delete(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.Delete("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.Delete with tainted path — attacker-controlled paths let the attacker delete arbitrary files on disk."
+
+- id: csharp.path.file_copy
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Copy]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: source path tainted
+    code: |
+      class App { void Test(string input) { File.Copy(input, "safe.txt"); } }
+  - name: literal source path negative
+    code: |
+      class App { void Test() { File.Copy("safe.txt", "copy.txt"); } }
+    expect_no_match: true
+  description: "File.Copy(tainted_source, dest) — attacker-controlled source paths can copy arbitrary files."
+
+- id: csharp.path.file_copy_dest
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Copy]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: destination path tainted
+    code: |
+      class App { void Test(string input) { File.Copy("safe.txt", input); } }
+  - name: literal destination path negative
+    code: |
+      class App { void Test() { File.Copy("safe.txt", "copy.txt"); } }
+    expect_no_match: true
+  description: "File.Copy(source, tainted_dest) — attacker-controlled destination paths can overwrite arbitrary files."
+
+- id: csharp.path.file_move
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Move]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: source path tainted
+    code: |
+      class App { void Test(string input) { File.Move(input, "safe.txt"); } }
+  - name: literal source path negative
+    code: |
+      class App { void Test() { File.Move("safe.txt", "moved.txt"); } }
+    expect_no_match: true
+  description: "File.Move(tainted_source, dest) — attacker-controlled source paths can move arbitrary files."
+
+- id: csharp.path.file_move_dest
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, Move]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: destination path tainted
+    code: |
+      class App { void Test(string input) { File.Move("safe.txt", input); } }
+  - name: literal destination path negative
+    code: |
+      class App { void Test() { File.Move("safe.txt", "moved.txt"); } }
+    expect_no_match: true
+  description: "File.Move(source, tainted_dest) — attacker-controlled destination paths can relocate files outside the intended directory."
+
+- id: csharp.path.directory_delete
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: critical
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, Delete]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Directory.Delete(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { Directory.Delete("data/safe"); } }
+    expect_no_match: true
+  description: "Directory.Delete."
+
+- id: csharp.path.directory_create
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, CreateDirectory]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Directory.CreateDirectory(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { Directory.CreateDirectory("data/safe"); } }
+    expect_no_match: true
+  description: "Directory.CreateDirectory."
+
+- id: csharp.path.streamreader_ctor
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: StreamReader
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class StreamReader { public StreamReader(string input) { } } class App { void Test(string input) { var result = new StreamReader(input); } }
+  - name: literal path negative
+    code: |
+      class StreamReader { public StreamReader(string input) { } } class App { void Test() { var result = new StreamReader("data/safe.txt"); } }
+    expect_no_match: true
+  description: "new StreamReader(tainted path)."
+
+- id: csharp.path.streamwriter_ctor
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: StreamWriter
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class StreamWriter { public StreamWriter(string input) { } } class App { void Test(string input) { var result = new StreamWriter(input); } }
+  - name: literal path negative
+    code: |
+      class StreamWriter { public StreamWriter(string input) { } } class App { void Test() { var result = new StreamWriter("data/safe.txt"); } }
+    expect_no_match: true
+  description: "new StreamWriter(tainted path)."
+
+- id: csharp.path.filestream_ctor
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: FileStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class FileStream { public FileStream(string input) { } } class App { void Test(string input) { var result = new FileStream(input); } }
+  - name: literal path negative
+    code: |
+      class FileStream { public FileStream(string input) { } } class App { void Test() { var result = new FileStream("data/safe.txt"); } }
+    expect_no_match: true
+  description: "new FileStream(tainted path)."
+
+- id: csharp.path.aspnet_physicalfile
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: PhysicalFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test(string input) { PhysicalFile(input); } }
+  - name: literal path negative
+    code: |
+      using Microsoft.AspNetCore.Mvc;
+      class App { void Test() { PhysicalFile("wwwroot/safe.txt"); } }
+    expect_no_match: true
+  description: "ASP.NET Core Controller.PhysicalFile(tainted)."
+
+- id: csharp.path.aspnet_file_returntype
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: path-traversal
+  severity: medium
+  packages: [Microsoft.AspNetCore.Mvc]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: File
+  description: "Disabled — bare File collides with System.IO.File; overload-dependent. Enable only with strict controller-context constraint."
+
+- id: csharp.path.zipfile_extract_to_directory
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [ZipFile, ExtractToDirectory]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: destination directory tainted
+    code: |
+      class App { void Test(string input) { ZipFile.ExtractToDirectory("safe.zip", input); } }
+  - name: literal destination negative
+    code: |
+      class App { void Test() { ZipFile.ExtractToDirectory("safe.zip", "extract"); } }
+    expect_no_match: true
+  description: "ZipFile.ExtractToDirectory(archive, tainted_dest) — attacker-controlled extraction root can write outside the intended directory."
+
+- id: csharp.path.zip_archive_entry_extract
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [ZipFileExtensions, ExtractToFile]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: destination file tainted
+    code: |
+      class App { void Test(string input) { dynamic entry = null; ZipFileExtensions.ExtractToFile(entry, input); } }
+  - name: literal destination negative
+    code: |
+      class App { void Test() { dynamic entry = null; ZipFileExtensions.ExtractToFile(entry, "extract/file.txt"); } }
+    expect_no_match: true
+  description: "ZipArchiveEntry.ExtractToFile(entry, tainted_dest) — attacker-controlled destination file can overwrite arbitrary paths."
+
+- id: csharp.path.file_openread
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, OpenRead]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.OpenRead(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.OpenRead("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.OpenRead with tainted path."
+
+- id: csharp.path.file_openwrite
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, OpenWrite]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.OpenWrite(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.OpenWrite("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.OpenWrite with tainted path."
+
+- id: csharp.path.file_appendalllines
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, AppendAllLines]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.AppendAllLines(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.AppendAllLines("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.AppendAllLines with tainted path."
+
+- id: csharp.path.file_writealllines
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, WriteAllLines]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.WriteAllLines(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.WriteAllLines("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.WriteAllLines with tainted path."
+
+- id: csharp.path.file_create_text
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, CreateText]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { File.CreateText(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { File.CreateText("data/safe.txt"); } }
+    expect_no_match: true
+  description: "File.CreateText with tainted path."
+
+- id: csharp.path.directory_move
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, Move]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: source directory tainted
+    code: |
+      class App { void Test(string input) { Directory.Move(input, "safe-dir"); } }
+  - name: literal source negative
+    code: |
+      class App { void Test() { Directory.Move("safe-dir", "moved-dir"); } }
+    expect_no_match: true
+  description: "Directory.Move(tainted_source, dest) — attacker-controlled source paths can move arbitrary directories."
+
+- id: csharp.path.directory_move_dest
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, Move]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: destination directory tainted
+    code: |
+      class App { void Test(string input) { Directory.Move("safe-dir", input); } }
+  - name: literal destination negative
+    code: |
+      class App { void Test() { Directory.Move("safe-dir", "moved-dir"); } }
+    expect_no_match: true
+  description: "Directory.Move(source, tainted_dest) — attacker-controlled destination paths can relocate directories outside the intended root."
+
+- id: csharp.path.directory_get_files
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, GetFiles]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Directory.GetFiles(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { Directory.GetFiles("data/safe"); } }
+    expect_no_match: true
+  description: "Directory.GetFiles(tainted path) — directory enumeration with attacker-controlled root."
+
+- id: csharp.path.fileinfo_ctor
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: FileInfo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class FileInfo { public FileInfo(string input) { } } class App { void Test(string input) { var result = new FileInfo(input); } }
+  - name: literal path negative
+    code: |
+      class FileInfo { public FileInfo(string input) { } } class App { void Test() { var result = new FileInfo("data/safe.txt"); } }
+    expect_no_match: true
+  description: "new FileInfo(tainted path) — wraps arbitrary file."
+
+- id: csharp.path.directoryinfo_ctor
+  enabled: true
+  language: csharp
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: DirectoryInfo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class DirectoryInfo { public DirectoryInfo(string input) { } } class App { void Test(string input) { var result = new DirectoryInfo(input); } }
+  - name: literal path negative
+    code: |
+      class DirectoryInfo { public DirectoryInfo(string input) { } } class App { void Test() { var result = new DirectoryInfo("data/safe"); } }
+    expect_no_match: true
+  description: "new DirectoryInfo(tainted path)."

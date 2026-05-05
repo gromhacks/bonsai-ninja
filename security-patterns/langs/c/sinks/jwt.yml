@@ -1,0 +1,103 @@
+# C JWT (libjwt + cjose + l8w8jwt).
+- id: c.jwt.libjwt_decode
+  enabled: true
+  language: c
+  tag: jwt
+  severity: high
+  packages: [libjwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: jwt_decode
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libjwt/jwt.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        jwt_decode(arg);
+      }
+  description: "libjwt jwt_decode — flag if jwt_set_alg not pinned."
+
+- id: c.jwt.libjwt_new_with_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: jwt
+  severity: medium
+  packages: [libjwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: jwt_new
+  description: "Disabled — jwt_new creates token; flag with alg=none only."
+
+- id: c.jwt.cjose_jws_verify
+  enabled: true
+  language: c
+  tag: jwt
+  severity: high
+  packages: [cjose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: cjose_jws_verify
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <cjose.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        cjose_jws_verify(arg);
+      }
+  description: "cjose cjose_jws_verify — flag if alg whitelist missing."
+
+- id: c.jwt.l8w8jwt_decode
+  enabled: true
+  language: c
+  tag: jwt
+  severity: high
+  packages: [l8w8jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: l8w8jwt_decode
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <l8w8jwt.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        l8w8jwt_decode(arg);
+      }
+  description: "l8w8jwt_decode."
+
+- id: c.jwt.jose_jws_verify_jwk
+  enabled: true
+  language: c
+  tag: jwt
+  severity: high
+  packages: [libjose]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: jose_jws_ver
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libjose/jose.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        jose_jws_ver(arg);
+      }
+  description: "libjose jose_jws_ver."

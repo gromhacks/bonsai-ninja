@@ -1,0 +1,76 @@
+# TypeScript XPath injection sinks.
+- id: typescript.xpath.select
+  enabled: true
+  language: typescript
+  tag: xpath-injection
+  severity: high
+  packages: [xpath]
+  imports: [xpath]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.select$"
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: xpath select concat expression
+    code: |
+      import * as xpath from "xpath";
+      function find(doc: any, name: string) {
+        return xpath.select("//user[name='" + name + "']", doc);
+      }
+    expect_match_text: [xpath.select]
+  - name: xpath select variable expression
+    code: |
+      const _u = require("xpath");
+      function find(xpath: any, doc: any, expr: string) {
+        return xpath.select(expr, doc);
+      }
+    expect_match_text: [xpath.select]
+  - name: xpath2 select concat expression
+    code: |
+      const _u = require("xpath");
+      function find(xpath2: any, doc: any, name: string) {
+        return xpath2.select("//user[name='" + name + "']", doc);
+      }
+    expect_match_text: [xpath2.select]
+  - name: arg tainted literal negative
+    code: |
+      import * as xpath from "xpath";
+      function find(doc: any, name: string) {
+        return xpath.select("/users/user", doc);
+      }
+    expect_no_match: true
+  description: "xpath/xpath2 select(expr, doc) — attacker-controlled XPath expressions can bypass node selection constraints."
+
+- id: typescript.xpath.select1
+  enabled: true
+  language: typescript
+  tag: xpath-injection
+  severity: high
+  packages: [xpath]
+  imports: [xpath]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      attribute: [xpath, select1]
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: xpath select1 concat expression
+    code: |
+      const _u = require("xpath");
+      function find(xpath: any, doc: any, id: string) {
+        return xpath.select1("//*[@id='" + id + "']", doc);
+      }
+    expect_match_text: [xpath.select1]
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("xpath");
+      function find(xpath: any, doc: any, id: string) {
+        return xpath.select1("/users/user", doc);
+      }
+    expect_no_match: true
+  description: "xpath.select1(expr, doc) — single-node XPath selection with attacker-controlled expression text."

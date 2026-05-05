@@ -1,0 +1,382 @@
+- id: go.ssrf.http_get
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: medium
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^http\.Get$
+  match_examples:
+  - name: net http get
+    code: "package main\nimport \"net/http\"\nfunc fetch(target string) {\n  _, _\
+      \ = http.Get(target)\n}\n"
+    expect_match_text:
+    - http.Get
+  - name: chi query into http get
+    code: "package main\nimport (\n  \"net/http\"\n  \"github.com/go-chi/chi/v5\"\n\
+      )\nfunc handler(r *http.Request) {\n  _ = chi.URLParam(r, \"id\")\n  target\
+      \ := \"https://example.test\"\n  _, _ = http.Get(target)\n}\n"
+    expect_match_text:
+    - http.Get
+  description: "http.Get(tainted URL) \u2014 server-side fetch of attacker-chosen\
+    \ URL."
+- id: go.ssrf.http_client_get
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Get$
+  match_examples:
+  - name: net http client get
+    code: "package main\nimport (\n  \"net/http\"\n)\nfunc fetch(r *http.Request)\
+      \ {\n  url := \"https://example.test\"\n  client := &http.Client{}\n  _, _ =\
+      \ client.Get(url)\n}\n"
+    expect_match_text:
+    - client.Get
+  - name: net http default client get
+    code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
+      \ := \"https://example.test\"\n  _, _ = http.DefaultClient.Get(url)\n}\n"
+    expect_match_text:
+    - http.DefaultClient.Get
+  - name: net http short client get
+    code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request, hc *http.Client)\
+      \ {\n  target := \"https://example.test\"\n  _, _ = hc.Get(target)\n}\n"
+    expect_match_text:
+    - hc.Get
+  description: "(*http.Client).Get(tainted URL), including http.DefaultClient.Get\
+    \ \u2014 method form of net/http SSRF."
+- id: go.ssrf.http_client_post
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Post$
+  match_examples:
+  - name: net http client post
+    code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
+      \ := \"https://example.test\"\n  client := &http.Client{}\n  _, _ = client.Post(url,\
+      \ \"application/json\", nil)\n}\n"
+    expect_match_text:
+    - client.Post
+  description: "(*http.Client).Post(tainted URL, ...) \u2014 server-side POST to attacker-chosen\
+    \ URL."
+- id: go.ssrf.http_client_head
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Head$
+  match_examples:
+  - name: net http client head
+    code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
+      \ := \"https://example.test\"\n  _, _ = http.DefaultClient.Head(url)\n}\n"
+    expect_match_text:
+    - http.DefaultClient.Head
+  description: "(*http.Client).Head(tainted URL) \u2014 server-side HEAD to attacker-chosen\
+    \ URL."
+- id: go.ssrf.http_client_postform
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^(client|httpClient|hc|http\.DefaultClient)\.PostForm$
+  match_examples:
+  - name: net http client post form
+    code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
+      \ := \"https://example.test\"\n  client := &http.Client{}\n  _, _ = client.PostForm(url,\
+      \ nil)\n}\n"
+    expect_match_text:
+    - client.PostForm
+  description: "(*http.Client).PostForm(tainted URL, form) \u2014 server-side form\
+    \ POST to attacker-chosen URL."
+- id: go.ssrf.http_post
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^http\.Post$
+  match_examples:
+  - name: generated direct match
+    code: "import \"net/http\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
+      \n  name := \"user\"\n  value := \"value\"\n  http.Post(target)\n}\n"
+  description: "http.Post(tainted URL, \u2026) \u2014 server-side POST to attacker-chosen\
+    \ URL."
+- id: go.ssrf.http_head
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^http\.Head$
+  match_examples:
+  - name: generated direct match
+    code: "import \"net/http\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
+      \n  name := \"user\"\n  value := \"value\"\n  http.Head(target)\n}\n"
+  description: "http.Head(tainted URL) \u2014 server-side HEAD to attacker-chosen\
+    \ URL."
+- id: go.ssrf.http_postform
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^http\.PostForm$
+  match_examples:
+  - name: generated direct match
+    code: "import \"net/http\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
+      \n  name := \"user\"\n  value := \"value\"\n  http.PostForm(target)\n}\n"
+  description: http.PostForm(tainted URL, form).
+- id: go.ssrf.http_newrequest
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: medium
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - NewRequest
+  match_examples:
+  - name: net http new request
+    code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
+      \ := \"https://example.test\"\n  _, _ = http.NewRequest(\"GET\", url, nil)\n\
+      }\n"
+    expect_match_text:
+    - http.NewRequest
+  description: "http.NewRequest(method, url, body) \u2014 only arg 1 is SSRF-relevant;\
+    \ kept medium until sink-arg-index taint is available."
+- id: go.ssrf.http_newrequestwithcontext
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: medium
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - NewRequestWithContext
+  match_examples:
+  - name: net http new request with context
+    code: "package main\nimport (\n  \"context\"\n  \"net/http\"\n)\nfunc fetch(ctx\
+      \ context.Context, r *http.Request) {\n  url := \"https://example.test\"\n \
+      \ _, _ = http.NewRequestWithContext(ctx, \"GET\", url, nil)\n}\n"
+    expect_match_text:
+    - http.NewRequestWithContext
+  description: http.NewRequestWithContext(ctx, method, tainted URL, body).
+- id: go.ssrf.client_do
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^(client|httpClient|hc|http\.DefaultClient)\.Do$
+  match_examples:
+  - name: client do request
+    code: "package main\nimport \"net/http\"\nfunc fetch(client *http.Client, req\
+      \ *http.Request) {\n  _, _ = client.Do(req)\n}\n"
+    expect_match_text:
+    - client.Do
+  - name: short client do request
+    code: "package main\nimport \"net/http\"\nfunc fetch(hc *http.Client, req *http.Request)\
+      \ {\n  _, _ = hc.Do(req)\n}\n"
+    expect_match_text:
+    - hc.Do
+  description: "*http.Client.Do(req) \u2014 when req.URL came from user input this\
+    \ fetches attacker-chosen URL."
+- id: go.ssrf.net_dial
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - net
+      - Dial
+  match_examples:
+  - name: generated direct match
+    code: "import \"net\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
+      \n  name := \"user\"\n  value := \"value\"\n  net.Dial(target)\n}\n"
+  description: "net.Dial(network, tainted addr) \u2014 raw TCP/UDP to attacker-chosen\
+    \ host."
+- id: go.ssrf.resty_get
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - github.com/go-resty/resty
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: \.R\(\)\.Get$|\.R\.Get$
+  match_examples:
+  - name: generated direct match
+    code: "import \"github.com/go-resty/resty\"\npackage main\n\nfunc example() {\n\
+      \  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  client.R().Get(target)\n\
+      }\n"
+  description: "resty client.R().Get(tainted URL) \u2014 fluent-client SSRF."
+- id: go.ssrf.req_get
+  enabled: false
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - github.com/imroc/req
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - req
+      - Get
+  match_examples:
+  - name: generated direct match
+    code: "import \"github.com/imroc/req\"\npackage main\n\nfunc example() {\n  target\
+      \ := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  req.Get(target)\n\
+      }\n"
+  description: imroc/req.Get(tainted URL).
+  disabled_reason:
+    code: over-broad
+- id: go.ssrf.fasthttp_do
+  enabled: false
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - github.com/valyala/fasthttp
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - fasthttp
+      - Do
+  match_examples:
+  - name: generated direct match
+    code: "import \"github.com/valyala/fasthttp\"\npackage main\n\nfunc example()\
+      \ {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  fasthttp.Do(target)\n\
+      }\n"
+  description: "fasthttp.Do(req, resp) \u2014 tainted URL on req = SSRF."
+  disabled_reason:
+    code: over-broad
+- id: go.ssrf.net_dialtcp
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - net
+      - DialTCP
+  match_examples:
+  - name: generated direct match
+    code: "import \"net\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
+      \n  name := \"user\"\n  value := \"value\"\n  net.DialTCP(target)\n}\n"
+  description: "net.DialTCP(network, laddr, tainted raddr) \u2014 raw TCP to attacker-chosen\
+    \ host:port."
+- id: go.ssrf.httputil_reverseproxy
+  enabled: true
+  language: go
+  tag: ssrf
+  severity: high
+  packages:
+  - net/http/httputil
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httputil
+      - NewSingleHostReverseProxy
+  match_examples:
+  - name: generated direct match
+    code: "import \"net/http/httputil\"\npackage main\n\nfunc example() {\n  target\
+      \ := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  httputil.NewSingleHostReverseProxy(target)\n\
+      }\n"
+  description: "httputil.NewSingleHostReverseProxy(tainted URL) \u2014 reverse-proxies\
+    \ arbitrary upstream; request smuggling / SSRF when the target is user-controlled."

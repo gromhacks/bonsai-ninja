@@ -1,0 +1,615 @@
+- id: cpp.path.fopen
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: fopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  fopen(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        fopen("safe");
+      }
+    expect_no_match: true
+  description: "fopen(path, mode) — tainted path traverses outside base dir."
+- id: cpp.path.open
+  enabled: false
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: open
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  open(arg);\n}\n"
+  description: "POSIX open(path, flags) — tainted path traverses outside base dir. Bare name retained because POSIX open is a true top-level symbol; top_level constraint suppresses ifstream::open / socket::open / QFile::open collisions."
+  disabled_reason:
+    code: over-broad
+- id: cpp.path.openat
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: openat
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  openat(arg);\n}\n"
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        openat("safe", "safe");
+      }
+    expect_no_match: true
+  description: "POSIX openat — tainted path component."
+- id: cpp.path.ifstream
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: ifstream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new ifstream(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new ifstream("safe");
+      }
+    expect_no_match: true
+  description: "std::ifstream ctor — tainted path traverses outside base dir."
+- id: cpp.path.ofstream
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: ofstream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new ofstream(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new ofstream("safe");
+      }
+    expect_no_match: true
+  description: "std::ofstream ctor — write anywhere via tainted path."
+- id: cpp.path.fstream
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: fstream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new fstream(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new fstream("safe");
+      }
+    expect_no_match: true
+  description: "std::fstream ctor — tainted path."
+- id: cpp.path.std_filesystem_remove
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  packages:
+  - std
+  - boost.filesystem
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - remove
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <stdio.h>\n#include <stdio.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::remove(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        filesystem::remove("safe");
+      }
+    expect_no_match: true
+  description: "std::filesystem::remove / boost::filesystem::remove — tainted path = arbitrary file delete (same attribute chain for both)."
+  imports:
+  - stdio
+  - stdio.h
+- id: cpp.path.std_filesystem_remove_all
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: critical
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - remove_all
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::remove_all(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        filesystem::remove_all("safe");
+      }
+    expect_no_match: true
+  description: "std::filesystem::remove_all(tainted) — recursive delete."
+- id: cpp.path.std_filesystem_copy
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted filesystem copy source
+    code: "void example(const char *path) {\n  filesystem::copy(path, \"/srv/files/output.txt\");\n}\n"
+  - name: literal filesystem copy source negative
+    code: "void example() {\n  filesystem::copy(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "std::filesystem::copy — tainted source or destination."
+- id: cpp.path.std_filesystem_copy_dest
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted filesystem copy destination
+    code: "void example(const char *path) {\n  filesystem::copy(\"/srv/files/input.txt\", path);\n}\n"
+  - name: literal filesystem copy destination negative
+    code: "void example() {\n  filesystem::copy(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "std::filesystem::copy(src, dest) — tainted destination can overwrite files outside the intended directory."
+- id: cpp.path.std_filesystem_copy_file
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  packages:
+  - std
+  - boost.filesystem
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - copy_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted filesystem copy_file source
+    code: "#include <stdio.h>\nvoid example(const char *path) {\n  filesystem::copy_file(path, \"/srv/files/output.txt\");\n}\n"
+  - name: literal filesystem copy_file source negative
+    code: "#include <stdio.h>\nvoid example() {\n  filesystem::copy_file(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "std::filesystem::copy_file / boost::filesystem::copy_file — tainted source or destination."
+  imports:
+  - stdio
+  - stdio.h
+- id: cpp.path.std_filesystem_copy_file_dest
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  packages:
+  - std
+  - boost.filesystem
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - copy_file
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted filesystem copy_file destination
+    code: "#include <stdio.h>\nvoid example(const char *path) {\n  filesystem::copy_file(\"/srv/files/input.txt\", path);\n}\n"
+  - name: literal filesystem copy_file destination negative
+    code: "#include <stdio.h>\nvoid example() {\n  filesystem::copy_file(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "std::filesystem::copy_file(src, dest) — tainted destination can overwrite files outside the intended directory."
+  imports:
+  - stdio
+  - stdio.h
+- id: cpp.path.std_filesystem_rename
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  packages:
+  - std
+  - boost.filesystem
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - rename
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted filesystem rename source
+    code: "#include <stdio.h>\nvoid example(const char *path) {\n  filesystem::rename(path, \"/srv/files/output.txt\");\n}\n"
+  - name: literal filesystem rename source negative
+    code: "#include <stdio.h>\nvoid example() {\n  filesystem::rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "std::filesystem::rename / boost::filesystem::rename — tainted source or destination."
+  imports:
+  - stdio
+  - stdio.h
+- id: cpp.path.std_filesystem_rename_dest
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  packages:
+  - std
+  - boost.filesystem
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - rename
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted filesystem rename destination
+    code: "#include <stdio.h>\nvoid example(const char *path) {\n  filesystem::rename(\"/srv/files/input.txt\", path);\n}\n"
+  - name: literal filesystem rename destination negative
+    code: "#include <stdio.h>\nvoid example() {\n  filesystem::rename(\"/srv/files/input.txt\", \"/srv/files/output.txt\");\n}\n"
+    expect_no_match: true
+  description: "std::filesystem::rename(src, dest) — tainted destination can overwrite files outside the intended directory."
+  imports:
+  - stdio
+  - stdio.h
+- id: cpp.path.std_filesystem_create_directory
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - create_directory
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::create_directory(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        filesystem::create_directory("safe");
+      }
+    expect_no_match: true
+  description: "std::filesystem::create_directory(tainted) — create directory anywhere."
+- id: cpp.path.std_filesystem_create_directories
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - create_directories
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::create_directories(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        filesystem::create_directories("safe");
+      }
+    expect_no_match: true
+  description: "std::filesystem::create_directories(tainted) — recursive mkdir."
+- id: cpp.path.qt_qfile_open
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  packages:
+  - Qt
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: QFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  auto *x = new QFile(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new QFile("safe");
+      }
+    expect_no_match: true
+  description: "Qt QFile(path) ctor — tainted path."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.path.qt_qdir_mkpath
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: medium
+  packages:
+  - Qt
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QDir
+      - mkpath
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QDir::mkpath(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        QDir::mkpath("safe");
+      }
+    expect_no_match: true
+  description: "Qt QDir::mkpath(tainted) — create dir tree anywhere."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.path.qt_qfile_remove
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: high
+  packages:
+  - Qt
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - QFile
+      - remove
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QFile::remove(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        QFile::remove("safe");
+      }
+    expect_no_match: true
+  description: "Qt QFile::remove(tainted) — arbitrary file delete."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.path.std_filesystem_exists
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: path-traversal
+  severity: low
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - exists
+  description: "Disabled — std::filesystem::exists(tainted) leaks file presence; off by default (audit only)."
+- id: cpp.path.std_filesystem_read_symlink
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  - CWE-59
+  match:
+    kind: call
+    callee:
+      attribute:
+      - filesystem
+      - read_symlink
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  filesystem::read_symlink(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        filesystem::read_symlink("safe");
+      }
+    expect_no_match: true
+  description: "std::filesystem::read_symlink(tainted) — discloses symlink target outside the trust root."
+- id: cpp.path.std_filesystem_directory_iterator
+  enabled: true
+  language: cpp
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: directory_iterator
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  auto *x = new directory_iterator(arg);\n}\n"
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        auto *x = new directory_iterator("safe");
+      }
+    expect_no_match: true
+  description: "std::filesystem::directory_iterator(tainted) — enumerates an attacker-chosen directory."
+- id: cpp.path.libzip_zip_open
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: zip-slip
+  severity: medium
+  packages:
+  - libzip
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: zip_open
+  description: "Disabled — informational marker for libzip archive open; the Zip Slip site is the use of zip_get_name() output (paired with file open / write below)."
+- id: cpp.path.libzip_zip_get_name
+  enabled: true
+  language: cpp
+  tag: zip-slip
+  severity: high
+  packages:
+  - libzip
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: zip_get_name
+  match_examples:
+  - name: generated direct match
+    code: "#include <libzip.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  zip_get_name(arg);\n}\n"
+  description: "libzip zip_get_name(za, idx, flags) — returns attacker-controlled archive entry name. Joining into a destination path and then opening for write is Zip Slip."
+- id: cpp.path.minizip_unzgetcurrentfileinfo
+  enabled: true
+  language: cpp
+  tag: zip-slip
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: unzGetCurrentFileInfo
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  unzGetCurrentFileInfo(arg);\n}\n"
+  description: "minizip unzGetCurrentFileInfo — fills filename buffer from archive entry; same Zip Slip exposure as libzip zip_get_name."

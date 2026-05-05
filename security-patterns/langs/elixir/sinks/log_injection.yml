@@ -1,0 +1,33 @@
+# elixir log_injection sinks.
+
+# Log-injection sinks (round 2 fill).
+- id: elixir.log_injection.logger_info
+  enabled: true
+  language: elixir
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [Logger, info]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        defmodule App do
+          def test(input) do
+            Logger.info(input)
+          end
+        end
+    - name: literal logger info negative
+      code: |
+        defmodule App do
+          def test(input) do
+            Logger.info("startup complete")
+          end
+        end
+      expect_no_match: true
+  description: 'Logger.info("...#{user}...\n") — log forging.'

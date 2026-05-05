@@ -1,0 +1,70 @@
+# Elixir information-disclosure sinks (logs, debug output, error responses).
+- id: elixir.info_disclosure.logger_error_secret
+  enabled: true
+  language: elixir
+  tag: information-disclosure
+  severity: medium
+  modules: [Logger]
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [Logger, error]
+  match_examples:
+  - name: elixir logger error secret-shaped data
+    code: |
+      alias Logger
+      defmodule App do
+        def test(token) do
+          Logger.error("token=#{token}")
+        end
+      end
+    expect_match_text: [Logger.error]
+  description: "Logger.error with secret-shaped data — credentials or tokens can leak to application logs."
+
+- id: elixir.info_disclosure.plug_send_resp_error
+  enabled: true
+  language: elixir
+  tag: information-disclosure
+  severity: high
+  packages: [plug]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, send_resp]
+  match_examples:
+  - name: elixir plug sends stack response
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, reason, stack) do
+          Plug.Conn.send_resp(conn, 500, Exception.format(:error, reason, stack))
+        end
+      end
+    expect_match_text: [Plug.Conn.send_resp]
+  description: "Plug.Conn.send_resp(conn, 500, exception/stack) — exposes diagnostic internals to HTTP clients."
+
+  imports:
+  - Plug
+- id: elixir.info_disclosure.phoenix_json_error
+  enabled: true
+  language: elixir
+  tag: information-disclosure
+  severity: high
+  frameworks: [phoenix]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [Phoenix, Controller, json]
+  match_examples:
+  - name: elixir phoenix json error details
+    code: |
+      defmodule App do
+        def test(conn, error) do
+          Phoenix.Controller.json(conn, %{error: Exception.message(error)})
+        end
+      end
+    expect_match_text: [Phoenix.Controller.json]
+  description: "Phoenix.Controller.json with raw exception data — returns internal error messages in API responses."

@@ -1,0 +1,163 @@
+- id: scala.open_redirect.play_redirect
+  enabled: true
+  language: scala
+  tag: open-redirect
+  severity: high
+  packages:
+  - play
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: Redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          Redirect(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          Redirect("/home")
+        }
+      }
+    expect_no_match: true
+  description: Play Redirect(tainted url).
+- id: scala.open_redirect.play_movedpermanently
+  enabled: true
+  language: scala
+  tag: open-redirect
+  severity: high
+  packages:
+  - play
+  - http4s
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: MovedPermanently
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          MovedPermanently(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import play._
+      object App {
+        def handle(input: String): Unit = {
+          MovedPermanently("/home")
+        }
+      }
+    expect_no_match: true
+  description: "MovedPermanently(tainted) — covers Play and http4s (same bare `MovedPermanently` name)."
+- id: scala.open_redirect.akka_http_redirect
+  enabled: true
+  language: scala
+  tag: open-redirect
+  severity: high
+  packages:
+  - akka.http.scaladsl
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Directives
+      - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import akka.http.scaladsl._
+      // uses akka.http.scaladsl
+      object App {
+        def handle(input: String): Unit = {
+          Directives.redirect(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import akka.http.scaladsl._
+      // uses akka.http.scaladsl
+      object App {
+        def handle(input: String): Unit = {
+          Directives.redirect("/home")
+        }
+      }
+    expect_no_match: true
+  description: Akka HTTP redirect(tainted Uri).
+  imports:
+  - akka.http.scaladsl
+- id: scala.open_redirect.http4s_temporaryredirect
+  enabled: true
+  language: scala
+  tag: open-redirect
+  severity: high
+  packages:
+  - http4s
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: TemporaryRedirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import http4s._
+      object App {
+        def handle(input: String): Unit = {
+          TemporaryRedirect(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import http4s._
+      object App {
+        def handle(input: String): Unit = {
+          TemporaryRedirect("/home")
+        }
+      }
+    expect_no_match: true
+  description: http4s TemporaryRedirect(tainted Uri).
+- id: scala.open_redirect.http4s_movedpermanently
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: open-redirect
+  severity: high
+  packages:
+  - http4s
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: MovedPermanently
+  description: "Disabled — merged into scala.open_redirect.play_movedpermanently (same bare `MovedPermanently` name)."

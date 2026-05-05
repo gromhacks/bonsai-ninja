@@ -1,0 +1,29 @@
+# Swift cloud-trust sources (AWS Lambda Swift runtime, etc.).
+- id: swift.cloud.aws_lambda_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: service
+  tag: cloud-input
+  payload_types: [json]
+  packages: ["AWSLambdaRuntime"]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "Disabled — `kind: param` cannot currently prove the enclosing function is a Lambda handler, so bare `event` overmatches unrelated Swift callbacks."
+- id: swift.cloud.aws_lambda_context
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: service
+  tag: cloud-input
+  payload_types: [json]
+  packages: ["AWSLambdaRuntime"]
+  match:
+    kind: param
+    target:
+      name: context
+  description: "Disabled — Lambda context is runtime metadata, not untrusted."

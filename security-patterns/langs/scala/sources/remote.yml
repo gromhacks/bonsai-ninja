@@ -1,0 +1,583 @@
+# Scala HTTP-input sources (Play, akka-http, http4s, sttp server, servlet).
+- id: scala.servlet.get_parameter
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [servlet, spring]
+  packages: [jakarta.servlet, javax.servlet]
+  match:
+    kind: call
+    callee:
+      name: getParameter
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jakarta.servlet._
+      object App {
+        def handle(value: String): Unit = {
+          getParameter(value)
+        }
+      }
+  description: "HttpServletRequest.getParameter — Scala servlet / Spring handler parameter."
+- id: scala.play.request_param
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json, query]
+  frameworks: [play, akka-http, http4s]
+  packages: [com.typesafe.play, com.typesafe.akka, http4s]
+  manifests: [build.sbt]
+  match:
+    kind: param
+    target:
+      name: request
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.typesafe.play._
+      object App {
+        def handle(request: String): Unit = {
+        }
+      }
+  description: "Play / akka-http / http4s request parameter (def action(request: Request[...]))."
+
+- id: scala.play.req_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  trust: remote
+  tag: http-input
+  frameworks: [play]
+  match:
+    kind: param
+    target:
+      name: req
+  description: "Disabled duplicate — merged into scala.play.request_param."
+
+- id: scala.play.request_get_query_string
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [play]
+  match:
+    kind: call
+    callee:
+      name: getQueryString
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          getQueryString(value)
+        }
+      }
+  description: "Play request.getQueryString(...)."
+
+- id: scala.play.request_body
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [play]
+  match:
+    kind: call
+    callee:
+      attribute: [request, body]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          request.body()
+        }
+      }
+  description: "Play request.body — narrowed to attribute chain to avoid bare name FPs. Property-style getter (no args); `max_args: 0` rejects unrelated overloads."
+
+- id: scala.play.request_headers
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [play]
+  packages: [play.api.mvc]
+  match:
+    kind: call
+    callee:
+      attribute: [request, headers]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play.api.mvc._
+      object App {
+        def handle(value: String): Unit = {
+          request.headers()
+        }
+      }
+  description: "Play request.headers — narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
+
+- id: scala.play.request_cookies
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [play]
+  packages: [play.api.mvc]
+  match:
+    kind: call
+    callee:
+      attribute: [request, cookies]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play.api.mvc._
+      object App {
+        def handle(value: String): Unit = {
+          request.cookies()
+        }
+      }
+  description: "Play request.cookies — narrowed to attribute chain. Property-style getter (no args). Gated on `play.api.mvc` so the rule only fires on Play handlers."
+
+- id: scala.akka.entity
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [akka-http]
+  match:
+    kind: call
+    callee:
+      name: entity
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          entity(value)
+        }
+      }
+  description: "akka-http entity(as[T]) directive — unmarshals request body."
+
+- id: scala.akka.parameters
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [akka-http]
+  match:
+    kind: call
+    callee:
+      name: parameters
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          parameters(value)
+        }
+      }
+  description: "akka-http parameters(...) directive — query string."
+
+- id: scala.akka.formfields
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  frameworks: [akka-http]
+  match:
+    kind: call
+    callee:
+      name: formFields
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          formFields(value)
+        }
+      }
+  description: "akka-http formFields directive — form body."
+
+- id: scala.akka.path
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [akka-http]
+  match:
+    kind: call
+    callee:
+      name: pathPrefix
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          pathPrefix(value)
+        }
+      }
+  description: "akka-http pathPrefix / path extractor — URL path segment."
+
+- id: scala.play.request_as_json
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [play]
+  match:
+    kind: call
+    callee:
+      name: asJson
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          asJson(value)
+        }
+      }
+  description: "Play request.body.asJson — parsed JSON request body."
+
+- id: scala.play.request_as_form
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [form]
+  frameworks: [play]
+  match:
+    kind: call
+    callee:
+      name: asFormUrlEncoded
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          asFormUrlEncoded(value)
+        }
+      }
+  description: "Play request.body.asFormUrlEncoded — parsed form-encoded body."
+
+- id: scala.akka.header_value_by_name
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [akka-http]
+  match:
+    kind: call
+    callee:
+      name: headerValueByName
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          headerValueByName(value)
+        }
+      }
+  description: "akka-http headerValueByName(name) directive — extracts a request header value."
+
+- id: scala.akka.cookie
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [cookie]
+  frameworks: [akka-http]
+  match:
+    kind: call
+    callee:
+      name: cookie
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          cookie(value)
+        }
+      }
+  description: "akka-http cookie(name) directive — extracts a request cookie."
+
+- id: scala.akka.parameter_singular
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [akka-http]
+  match:
+    kind: call
+    callee:
+      name: parameter
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(value: String): Unit = {
+          parameter(value)
+        }
+      }
+  description: "akka-http parameter(name) directive — singular form of parameters(...)."
+
+- id: scala.http4s.request_body
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [http4s]
+  packages: [http4s]
+  match:
+    kind: call
+    callee:
+      attribute: [Request, body]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import http4s._
+      object App {
+        def handle(value: String): Unit = {
+          Request.body()
+        }
+      }
+  description: "http4s Request.body — raw entity stream from the client. Property-style getter (no args)."
+
+- id: scala.http4s.uri_params
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [http4s]
+  packages: [http4s]
+  match:
+    kind: call
+    callee:
+      attribute: [uri, params]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import http4s._
+      object App {
+        def handle(value: String): Unit = {
+          uri.params(value)
+        }
+      }
+  description: "http4s req.uri.params — parsed query string map."
+
+- id: scala.http4s.request_headers
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [http4s]
+  packages: [http4s]
+  match:
+    kind: call
+    callee:
+      attribute: [Request, headers]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import http4s._
+      object App {
+        def handle(value: String): Unit = {
+          Request.headers()
+        }
+      }
+  description: "http4s Request.headers — request header collection. Property-style getter (no args)."
+
+- id: scala.tapir.input_query
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [tapir]
+  packages: ["sttp.tapir"]
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - top_level: true
+  - min_args: 1
+  - max_args: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import sttp.tapir._
+      object App {
+        def handle(value: String): Unit = {
+          query(value)
+        }
+      }
+  description: "Tapir endpoint .in(query[T](\"name\")) — declares a query-string input bound into the handler. `top_level` rejects `obj.query(...)` ORM/SQL `query` decoys; `min/max_args: 1` matches Tapir's `query[T](name: String)` shape."
+
+- id: scala.tapir.input_json_body
+  enabled: true
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [tapir]
+  packages: ["sttp.tapir"]
+  match:
+    kind: call
+    callee:
+      name: jsonBody
+  match_examples:
+  - name: generated shape example
+    code: |
+      import sttp.tapir._
+      object App {
+        def handle(value: String): Unit = {
+          jsonBody(value)
+        }
+      }
+  description: "Tapir endpoint .in(jsonBody[T]) — declares a JSON request body input."
+
+- id: scala.zio.http_request_body
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [zio-http]
+  packages: ["dev.zio.zio-http"]
+  match:
+    kind: call
+    callee:
+      attribute: [Request, body]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import dev.zio.ziohttp._
+      object App {
+        def handle(value: String): Unit = {
+          Request.body()
+        }
+      }
+  description: "Disabled duplicate — same matcher as canonical scala.http4s.request_body; receiver type is not available in YAML."
+
+  imports:
+  - dev
+  - dev.zio.ziohttp
+- id: scala.lagom.service_call_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  trust: remote
+  tag: http-input
+  payload_types: [json]
+  frameworks: [lagom]
+  packages: ["com.lightbend.lagom"]
+  match:
+    kind: param
+    target:
+      name: request
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.lightbend.lagom._
+      object App {
+        def handle(request: String): Unit = {
+        }
+      }
+  description: "Disabled duplicate — same bare parameter matcher as canonical scala.play.request_param; service framework type is not available in YAML."
+
+  imports:
+  - com
+- id: scala.source.graphql_datafetching_getargument
+  enabled: true
+  language: scala
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  packages: ["graphql"]
+  match:
+    kind: call
+    callee:
+      name: getArgument
+  constraints:
+  - receiver_name_in: [env, environment, dataFetchingEnvironment]
+  - min_args: 1
+  match_examples:
+  - name: graphql data fetching get argument
+    code: |
+      import graphql._
+      object App {
+        def handle(env: DataFetchingEnvironment, name: String): Any = {
+          env.getArgument(name)
+        }
+      }
+      class DataFetchingEnvironment {
+        def getArgument(values: Any*): Any = null
+      }
+    expect_match_text: [env.getArgument]
+  description: "graphql-java DataFetchingEnvironment.getArgument(name) — resolver argument supplied by the GraphQL caller."
+
+  imports:
+  - graphql
+- id: scala.source.graphql_datafetching_getarguments
+  enabled: true
+  language: scala
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  packages: ["graphql"]
+  match:
+    kind: call
+    callee:
+      name: getArguments
+  constraints:
+  - receiver_name_in: [env, environment, dataFetchingEnvironment]
+  - max_args: 0
+  match_examples:
+  - name: graphql data fetching get arguments
+    code: |
+      import graphql._
+      object App {
+        def handle(environment: DataFetchingEnvironment): Any = {
+          environment.getArguments()
+        }
+      }
+      class DataFetchingEnvironment {
+        def getArguments(values: Any*): Any = null
+      }
+    expect_match_text: [environment.getArguments]
+  description: "graphql-java DataFetchingEnvironment.getArguments() — map of caller-controlled resolver arguments."
+  imports:
+  - graphql

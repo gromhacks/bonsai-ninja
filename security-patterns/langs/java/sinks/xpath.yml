@@ -1,0 +1,73 @@
+- id: java.xpath.xpath_evaluate
+  enabled: true
+  language: java
+  tag: xpath-injection
+  severity: high
+  packages: ["javax.xml.xpath"]
+  imports: ["javax.xml.xpath"]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, evaluate]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: typed xpath evaluate receiver
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        Object handle(String name, XPath xpath, Object doc) throws Exception {
+          String expr = "//user[name=\"" + name + "\"]";
+          return xpath.evaluate(expr, doc);
+        }
+      }
+    expect_match_text: [xpath.evaluate]
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        void handle(String input) throws Exception {
+          XPath.evaluate("safe");
+        }
+      }
+    expect_no_match: true
+  description: "XPath.evaluate(expr, doc) — typed receiver form for XPath injection in javax.xml.xpath."
+
+- id: java.xpath.xpath_compile
+  enabled: true
+  language: java
+  tag: xpath-injection
+  severity: high
+  packages: ["javax.xml.xpath"]
+  imports: ["javax.xml.xpath"]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: typed xpath compile receiver
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        XPathExpression handle(String name, XPath xpath) throws Exception {
+          String expr = "//user[name=\"" + name + "\"]";
+          return xpath.compile(expr);
+        }
+      }
+    expect_match_text: [xpath.compile]
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        void handle(String input) throws Exception {
+          XPath.compile("safe");
+        }
+      }
+    expect_no_match: true
+  description: "XPath.compile(expr) — compiled XPath expressions built by concatenating attacker input are injectable before later evaluation."

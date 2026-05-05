@@ -1,0 +1,796 @@
+- id: javascript.cmdi.child_process_exec
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^child_process\\.exec$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process exec
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.exec(input);
+      }
+  - name: literal child process exec negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.exec("whoami");
+      }
+    expect_no_match: true
+  description: child_process.exec runs the command through /bin/sh so any interpolation is a shell-injection.
+
+- id: javascript.cmdi.child_process_exec_sync
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [child_process, execSync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process exec sync
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.execSync(input);
+      }
+  - name: literal child process exec sync negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.execSync("whoami");
+      }
+    expect_no_match: true
+  description: child_process.execSync — same /bin/sh interpolation hazard as exec, synchronous.
+
+- id: javascript.cmdi.child_process_exec_imported
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^exec$"
+  description: "Disabled duplicate — v1 matching normalizes imported `exec(...)` to the same adapter fact as javascript.cmdi.child_process_exec."
+
+- id: javascript.cmdi.child_process_exec_sync_imported
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^execSync$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process exec sync imported
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return execSync(input);
+      }
+  - name: literal child process exec sync imported negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return execSync("whoami");
+      }
+    expect_no_match: true
+  description: "Destructured/aliased execSync from child_process — same shell-interpreting command sink as child_process.execSync."
+
+- id: javascript.cmdi.child_process_spawn_shell
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^child_process\\.spawn$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process spawn shell
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.spawn(input, { shell: true });
+      }
+  - name: literal child process spawn shell negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.spawn("ls", { shell: true });
+      }
+    expect_no_match: true
+  description: "child_process.spawn({shell: true}) reinstates shell interpolation on tainted argv[0]."
+
+- id: javascript.cmdi.child_process_spawn_shell_args
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^child_process\\.spawn$"
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: child process spawn shell args
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.spawn("sh", input, { shell: true });
+      }
+  - name: literal child process spawn shell args negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.spawn("sh", ["-c", "whoami"], { shell: true });
+      }
+    expect_no_match: true
+  description: "child_process.spawn(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
+
+- id: javascript.cmdi.child_process_spawn_sync_shell
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [child_process, spawnSync]
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process spawn sync shell
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.spawnSync(input, { shell: true });
+      }
+  - name: literal child process spawn sync shell negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.spawnSync("ls", { shell: true });
+      }
+    expect_no_match: true
+  description: "child_process.spawnSync({shell: true}) — same shell-injection risk as spawn."
+
+- id: javascript.cmdi.child_process_spawn_sync_shell_args
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [child_process, spawnSync]
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: child process spawn sync shell args
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.spawnSync("sh", input, { shell: true });
+      }
+  - name: literal child process spawn sync shell args negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.spawnSync("sh", ["-c", "whoami"], { shell: true });
+      }
+    expect_no_match: true
+  description: "child_process.spawnSync(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
+
+- id: javascript.cmdi.child_process_spawn_sync_imported_shell
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^spawnSync$"
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process spawn sync imported shell
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return spawnSync(input, { shell: true });
+      }
+  - name: literal child process spawn sync imported shell negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return spawnSync("ls", { shell: true });
+      }
+    expect_no_match: true
+  description: "Destructured/aliased spawnSync(..., {shell: true}) from child_process — shell interpolation reintroduced."
+
+- id: javascript.cmdi.child_process_spawn_sync_imported_shell_args
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^spawnSync$"
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: child process spawn sync imported shell args
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return spawnSync("sh", input, { shell: true });
+      }
+  - name: literal child process spawn sync imported shell args negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return spawnSync("sh", ["-c", "whoami"], { shell: true });
+      }
+    expect_no_match: true
+  description: "Destructured/aliased spawnSync(cmd, taintedArgs, {shell: true}) from child_process — tainted argv is interpreted by the shell."
+
+- id: javascript.cmdi.child_process_execfile_shell
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: command-injection
+  severity: medium
+  packages: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [child_process, execFile]
+  description: "Disabled — execFile is argv-style and safe unless the binary path itself is tainted; flag with source-proximity analysis."
+
+- id: javascript.cmdi.child_process_execfile
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: high
+  packages: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [child_process, execFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process execfile
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.execFile(input);
+      }
+  - name: literal child process execfile negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.execFile("node");
+      }
+    expect_no_match: true
+  description: "child_process.execFile — tainted binary path = arbitrary exec."
+
+- id: javascript.cmdi.child_process_execfile_imported
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: high
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^execFile$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process execfile imported
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return execFile(input);
+      }
+  - name: literal child process execfile imported negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return execFile("node");
+      }
+    expect_no_match: true
+  description: "Destructured/aliased execFile from child_process — tainted binary path = arbitrary exec."
+
+- id: javascript.cmdi.child_process_execfile_sync
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: high
+  packages: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [child_process, execFileSync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process execfile sync
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.execFileSync(input);
+      }
+  - name: literal child process execfile sync negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.execFileSync("node");
+      }
+    expect_no_match: true
+  description: "child_process.execFileSync — tainted binary path = arbitrary exec."
+
+- id: javascript.cmdi.child_process_execfile_sync_imported
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: high
+  packages: [child_process]
+  imports: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^execFileSync$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process execfile sync imported
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return execFileSync(input);
+      }
+  - name: literal child process execfile sync imported negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return execFileSync("node");
+      }
+    expect_no_match: true
+  description: "Destructured/aliased execFileSync from child_process — tainted binary path = arbitrary exec."
+
+- id: javascript.cmdi.fork
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: command-injection
+  severity: medium
+  packages: [child_process]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [child_process, fork]
+  description: "Disabled — fork runs a Node script; tainted module path = RCE but the API is common for legitimate internal workers."
+
+- id: javascript.cmdi.shelljs_exec
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  packages: [shelljs]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [shelljs, exec]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: shelljs exec
+    code: |
+      const _u = require("shelljs");
+      function demo(input, req, obj) {
+        return shelljs.exec(input);
+      }
+  - name: literal shelljs exec negative
+    code: |
+      const _u = require("shelljs");
+      function demo() {
+        return shelljs.exec("whoami");
+      }
+    expect_no_match: true
+  description: shelljs.exec always shells out; tainted input is injection.
+
+- id: javascript.cmdi.execa
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: command-injection
+  severity: high
+  packages: [execa]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execa
+  description: "Disabled — execa(cmd, [args]) is argv-style by default; flag only the {shell: true} form."
+
+- id: javascript.cmdi.execa_shell
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  packages: [execa]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execa
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: execa shell
+    code: |
+      const _u = require("execa");
+      function demo(input, req, obj) {
+        return execa(input, { shell: true });
+      }
+  - name: literal execa shell negative
+    code: |
+      const _u = require("execa");
+      function demo() {
+        return execa("ls", { shell: true });
+      }
+    expect_no_match: true
+  description: "execa(..., {shell: true}) — shell interpolation reinstated."
+
+- id: javascript.cmdi.execa_command
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  packages: [execa]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [execa, command]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: execa command
+    code: |
+      const _u = require("execa");
+      function demo(input, req, obj) {
+        return execa.command(input);
+      }
+  - name: literal execa command negative
+    code: |
+      const _u = require("execa");
+      function demo() {
+        return execa.command("ls -la");
+      }
+    expect_no_match: true
+  description: execa.command parses the single-string command through a shell — tainted input injects.
+
+- id: javascript.cmdi.execa_command_sync
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  packages: [execa]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [execa, commandSync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: execa command sync
+    code: |
+      const _u = require("execa");
+      function demo(input, req, obj) {
+        return execa.commandSync(input);
+      }
+  - name: literal execa command sync negative
+    code: |
+      const _u = require("execa");
+      function demo() {
+        return execa.commandSync("ls -la");
+      }
+    expect_no_match: true
+  description: execa.commandSync — same string-parsing hazard as command.
+
+- id: javascript.cmdi.nodepty_spawn
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  packages: [node-pty]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [pty, spawn]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nodepty spawn
+    code: |
+      const _u = require("node-pty");
+      function demo(input, req, obj) {
+        return pty.spawn(input);
+      }
+  - name: literal nodepty spawn negative
+    code: |
+      const _u = require("node-pty");
+      function demo() {
+        return pty.spawn("bash");
+      }
+    expect_no_match: true
+  description: node-pty spawn runs an interactive shell — tainted command or args can control a live terminal.
+
+- id: javascript.cmdi.cross_spawn
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: command-injection
+  severity: medium
+  packages: [cross-spawn]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^spawn$"
+  description: "Disabled — cross-spawn default is argv-style; flag only with {shell: true} constraint."
+
+- id: javascript.cmdi.cross_spawn_shell
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  packages: [cross-spawn]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^crossSpawn$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: cross spawn shell
+    code: |
+      const _u = require("cross-spawn");
+      function demo(input, req, obj) {
+        return crossSpawn(input, input, { shell: true });
+      }
+  - name: literal cross spawn shell negative
+    code: |
+      const _u = require("cross-spawn");
+      function demo(input) {
+        return crossSpawn("ls", input, { shell: true });
+      }
+    expect_no_match: true
+  description: "cross-spawn alias crossSpawn({shell: true}) — shell-interpreted command execution. The bare `spawn(...)` form collides with child_process.spawn in v1 matching."
+
+- id: javascript.cmdi.cross_spawn_shell_args
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  packages: [cross-spawn]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^crossSpawn$"
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: cross spawn shell args
+    code: |
+      const _u = require("cross-spawn");
+      function demo(input, req, obj) {
+        return crossSpawn("sh", input, { shell: true });
+      }
+  - name: literal cross spawn shell args negative
+    code: |
+      const _u = require("cross-spawn");
+      function demo() {
+        return crossSpawn("sh", ["-c", "whoami"], { shell: true });
+      }
+    expect_no_match: true
+  description: "cross-spawn crossSpawn(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
+
+- id: javascript.cmdi.deno_command
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: new
+    callee:
+      attribute: [Deno, Command]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deno command
+    code: |
+      function demo(input, req, obj) {
+        return new Deno.Command(input);
+      }
+  - name: literal deno command negative
+    code: |
+      function demo() {
+        return new Deno.Command("deno");
+      }
+    expect_no_match: true
+  description: "new Deno.Command(cmd, {args}) — tainted args or cmd launches arbitrary process."
+
+- id: javascript.cmdi.deno_run
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: deno run
+    code: |
+      function demo(input, req, obj) {
+        return Deno.run(input);
+      }
+  - name: literal deno run negative
+    code: |
+      function demo() {
+        return Deno.run({ cmd: ["deno", "--version"] });
+      }
+    expect_no_match: true
+  description: "Deno.run (legacy) — subprocess execution."
+
+- id: javascript.cmdi.bun_spawn
+  enabled: true
+  language: javascript
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Bun, spawn]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bun spawn
+    code: |
+      function demo(input, req, obj) {
+        return Bun.spawn(input);
+      }
+  - name: literal bun spawn negative
+    code: |
+      function demo() {
+        return Bun.spawn(["bun", "--version"]);
+      }
+    expect_no_match: true
+  description: "Bun.spawn — tainted executable path or argv launches arbitrary process. TODO(only_when_packaged): Bun runtime global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Bun', 'spawn']` match only."
+
+- id: javascript.cmdi.zx_dollar
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: command-injection
+  severity: high
+  packages: [zx]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: $
+  description: "Disabled — zx $`...` tagged template; bare `$` name is too ambiguous to enable globally."

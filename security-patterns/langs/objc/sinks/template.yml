@@ -1,0 +1,79 @@
+# Objective-C template-engine SSTI sinks.
+- id: objc.template.grmustache_render
+  enabled: true
+  language: objc
+  tag: ssti
+  severity: high
+  packages: [GRMustache]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(renderObject|renderObjectsFromArray)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <GRMustache/GRMustache.h>
+      void test(id input) { id target = input; int amount = 1; [GRMustacheTemplate renderObject:input]; }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        grmustache_render("safe");
+      }
+    expect_no_match: true
+  description: "GRMustache -renderObject: with tainted template string — Mustache injection. Constrained to GRMustache template receivers."
+
+- id: objc.template.mgtemplateengine_process
+  enabled: true
+  language: objc
+  tag: ssti
+  severity: high
+  packages: [MGTemplateEngine]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(processTemplate|processTemplateInFileAtPath)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <MGTemplateEngine/MGTemplateEngine.h>
+      void test(id input) { id target = input; int amount = 1; [MGTemplateEngine processTemplate:input]; }
+  - name: literal template negative
+    code: |
+      #import <MGTemplateEngine/MGTemplateEngine.h>
+      void test(void) { [MGTemplateEngine processTemplate:@"Hello safe"]; }
+    expect_no_match: true
+  description: "MGTemplateEngine -processTemplate:withVariables: — SSTI when template is tainted."
+
+- id: objc.template.handlebars_compile
+  enabled: true
+  language: objc
+  tag: ssti
+  severity: high
+  packages: [Handlebars-iOS]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(compileTemplate|compileTemplateString)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <Handlebars-iOS/Handlebars-iOS.h>
+      void test(id input) { id target = input; int amount = 1; [HBHandlebars compileTemplate:input]; }
+  - name: literal handlebars template negative
+    code: |
+      #import <Handlebars-iOS/Handlebars-iOS.h>
+      void test(void) { [HBHandlebars compileTemplate:@"Hello safe"]; }
+    expect_no_match: true
+  description: "Handlebars-iOS +compileTemplate: — SSTI when template comes from tainted input."

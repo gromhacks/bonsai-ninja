@@ -1,0 +1,517 @@
+//! Incremental query database (spec §18).
+//!
+//! This is a hand-rolled memoization layer keyed by `(FileId, version)` or
+//! `(FuncId, version)` where appropriate. When a file changes, dependent
+//! queries drop their cached values. Heavyweight enough to be useful for a
+//! single workspace, light enough to avoid pulling in a full query-db
+//! framework like `salsa` (which we can swap in later without changing the
+//! public API of this crate).
+
+use ahash::AHashMap;
+use bonsai_abstract_interp::{run_entry, RawTrace, TraceLimits};
+use bonsai_cfg::{build_cfg_from_flow, Cfg};
+use bonsai_common::{FileId, FuncId, SymbolId};
+use bonsai_diagnostics::DiagnosticSink;
+use bonsai_index::GlobalIndex;
+use bonsai_lang_api::{AdapterContext, DeclIndex, DynAdapter, ImportIndex, ImportSpec, LanguageRegistry};
+use bonsai_parser::{ParseError, ParsedFile, ParserCache, ParserOptions};
+use bonsai_trace::{finalize, TraceResult};
+use bonsai_vfs::Vfs;
+use parking_lot::RwLock;
+use std::sync::Arc;
+
+/// Immutable handle shared across threads. Cheap to clone.
+#[derive(Clone)]
+pub struct AnalyzerDb {
+    inner: Arc<DbInner>,
+}
+
+impl std::fmt::Debug for AnalyzerDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnalyzerDb").finish()
+    }
+}
+
+struct DbInner {
+    pub vfs: Arc<Vfs>,
+    pub registry: Arc<LanguageRegistry>,
+    pub diagnostics: RwLock<DiagnosticSink>,
+    parser: ParserCache,
+    cache: RwLock<Caches>,
+    /// Workspace root path. Set by the workspace at open/index time
+    /// via `set_workspace_root`. Adapters use this through
+    /// `AdapterContext.workspace_root` to derive workspace-relative
+    /// module paths (semantic-identity contract).
+    workspace_root: RwLock<Option<std::path::PathBuf>>,
+}
+
+#[derive(Default)]
+struct Caches {
+    decl_index: AHashMap<(FileId, u64), Arc<DeclIndex>>,
+    import_index: AHashMap<(FileId, u64), Arc<ImportIndex>>,
+    /// CFGs are keyed on `(FuncId, file_version)` so an in-place edit
+    /// to the file owning the function evicts the cached CFG even if
+    /// `invalidate_file` was not explicitly called. The version comes
+    /// from `vfs.snapshot(decl.span.file).version`; if the file is
+    /// missing the CFG is keyed at version 0 (parity with the parser
+    /// cache's missing-snapshot behavior).
+    cfgs: AHashMap<(FuncId, u64), Arc<Cfg>>,
+    /// `func → latest version cached in `cfgs`` so eviction of the
+    /// prior `(func, prev_version)` entry on insert is O(1) instead
+    /// of an O(total cached CFGs) `retain`.
+    cfg_versions: AHashMap<FuncId, u64>,
+    global_index: Option<Arc<GlobalIndex>>,
+}
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct AnalyzerDbOptions {
+    /// Optional per-file tree-sitter parse timeout in milliseconds.
+    /// `None` uses the parser default; `Some(0)` disables it.
+    pub parse_timeout_ms: Option<u64>,
+}
+
+impl AnalyzerDb {
+    /// Build a database wired to `vfs` and `registry` with default options.
+    #[must_use]
+    pub fn new(vfs: Arc<Vfs>, registry: Arc<LanguageRegistry>) -> Self {
+        Self::with_options(vfs, registry, AnalyzerDbOptions::default())
+    }
+
+    /// Build a database with explicit options (parse timeout, etc).
+    #[must_use]
+    pub fn with_options(vfs: Arc<Vfs>, registry: Arc<LanguageRegistry>, options: AnalyzerDbOptions) -> Self {
+        Self::with_parser_options(vfs, registry, parser_options_from_db_options(options))
+    }
+
+    #[must_use]
+    fn with_parser_options(
+        vfs: Arc<Vfs>,
+        registry: Arc<LanguageRegistry>,
+        parser_options: ParserOptions,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DbInner {
+                vfs,
+                registry,
+                diagnostics: RwLock::new(DiagnosticSink::new()),
+                parser: ParserCache::with_options(parser_options),
+                cache: RwLock::new(Caches::default()),
+                workspace_root: RwLock::new(None),
+            }),
+        }
+    }
+
+    /// Set the workspace root path so adapters can compute
+    /// workspace-relative module paths. Called by `Workspace` at
+    /// open/index time. No-op when called twice with the same value.
+    pub fn set_workspace_root(&self, root: std::path::PathBuf) {
+        *self.inner.workspace_root.write() = Some(root);
+    }
+
+    /// Returns the workspace root path if set, or `None` for
+    /// workspaces opened without a root (adapter unit tests).
+    pub fn workspace_root(&self) -> Option<std::path::PathBuf> {
+        self.inner.workspace_root.read().clone()
+    }
+
+    /// Underlying VFS handle. Use this when extracting raw file
+    /// contents; cached query helpers above the VFS belong on `self`.
+    pub fn vfs(&self) -> &Vfs {
+        &self.inner.vfs
+    }
+
+    /// Bundled language registry — adapters are looked up by file
+    /// extension via [`Self::adapter_for`].
+    pub fn registry(&self) -> &LanguageRegistry {
+        &self.inner.registry
+    }
+
+    /// Snapshot of every diagnostic the db has collected so far.
+    pub fn diagnostics(&self) -> Vec<bonsai_diagnostics::Diagnostic> {
+        self.inner.diagnostics.read().snapshot()
+    }
+
+    /// Adapter responsible for `file`, looked up by extension.
+    /// `None` when the file extension isn't registered.
+    pub fn adapter_for(&self, file: FileId) -> Option<DynAdapter> {
+        let path = self.inner.vfs.path(file).ok()?;
+        let ext = path.extension()?.to_str()?;
+        self.inner.registry.adapter_for_extension(ext)
+    }
+
+    /// Build an [`AdapterContext`] without a workspace-root binding.
+    /// Cheap to call but loses the workspace-relative module-path
+    /// resolution; use [`Self::adapter_context_with`] when adapters
+    /// need that path.
+    pub fn adapter_context(&self) -> AdapterContext<'_> {
+        AdapterContext {
+            vfs: &self.inner.vfs,
+            diagnostics: &self.inner.diagnostics,
+            workspace_root: None,
+        }
+    }
+
+    /// Build an AdapterContext that includes the workspace root, if
+    /// known. Adapters that compute workspace-relative module paths
+    /// should consume this via the standard `&AdapterContext` path
+    /// (workspace_root is `Some` whenever set_workspace_root was
+    /// called).
+    pub fn adapter_context_with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&AdapterContext<'_>) -> R,
+    {
+        let root_guard = self.inner.workspace_root.read();
+        let ctx = AdapterContext {
+            vfs: &self.inner.vfs,
+            diagnostics: &self.inner.diagnostics,
+            workspace_root: root_guard.as_deref(),
+        };
+        f(&ctx)
+    }
+
+    /// Parse `file` (cached by `(FileId, version)` inside the parser
+    /// cache). Errors when no adapter handles the extension.
+    pub fn parse(&self, file: FileId) -> Result<Arc<ParsedFile>, ParseError> {
+        let adapter = self.adapter_for(file).ok_or(ParseError::NoAdapter(file))?;
+        self.inner.parser.parse(file, &adapter, &self.inner.vfs)
+    }
+
+    /// Declaration index for `file`, computed once per `(file,
+    /// version)` pair. `None` when no adapter handles the file.
+    pub fn decl_index(&self, file: FileId) -> Option<Arc<DeclIndex>> {
+        let snap = self.inner.vfs.snapshot(file).ok()?;
+        let key = (file, snap.version);
+        if let Some(v) = self.inner.cache.read().decl_index.get(&key).cloned() {
+            return Some(v);
+        }
+        let adapter = self.adapter_for(file)?;
+        let value = Arc::new(self.adapter_context_with(|ctx| adapter.extract_declarations(file, ctx)));
+        let mut cache = self.inner.cache.write();
+        // Re-check inside the write lock — a concurrent caller may
+        // have inserted between our read and the upgrade. Use
+        // `Entry::Vacant` so we only nuke `global_index` when WE
+        // were the inserter; otherwise a racing peer that just
+        // finished building `global_index` over the cached set
+        // would have its result silently discarded.
+        let was_fresh_insert = !cache.decl_index.contains_key(&key);
+        let stored = cache
+            .decl_index
+            .entry(key)
+            .or_insert_with(|| value.clone())
+            .clone();
+        if was_fresh_insert {
+            // Only invalidate the global index when WE actually
+            // installed a new per-file entry. A racing peer that
+            // already cached the same `(file, version)` and
+            // possibly already rebuilt `global_index` should not
+            // have its work silently nuked.
+            cache.global_index = None;
+        }
+        Some(stored)
+    }
+
+    /// Import index for `file`, computed once per `(file, version)`.
+    /// Most callers should use [`Self::imports_for`] instead — that
+    /// helper falls back to the generic syntactic extractor when an
+    /// adapter doesn't provide its own index.
+    pub fn import_index(&self, file: FileId) -> Option<Arc<ImportIndex>> {
+        let snap = self.inner.vfs.snapshot(file).ok()?;
+        let key = (file, snap.version);
+        if let Some(v) = self.inner.cache.read().import_index.get(&key).cloned() {
+            return Some(v);
+        }
+        let adapter = self.adapter_for(file)?;
+        let value = Arc::new(self.adapter_context_with(|ctx| adapter.extract_imports(file, ctx)));
+        let mut cache = self.inner.cache.write();
+        let stored = cache
+            .import_index
+            .entry(key)
+            .or_insert_with(|| value.clone())
+            .clone();
+        Some(stored)
+    }
+
+    /// Single source of truth for "the imports of `file`". Reads the
+    /// adapter's grammar-aware [`ImportIndex`] (cached on
+    /// `(FileId, version)`) when the registered adapter provides one.
+    /// An empty adapter index is authoritative: it means the adapter ran
+    /// and found no imports. The generic
+    /// [`bonsai_lang_api::kit::extract_generic_imports`] fallback only
+    /// runs when no adapter import index can be built at all.
+    ///
+    /// Every consumer that needs a file's imports — alias resolution,
+    /// browse-imports rendering, taint reachability — should call this
+    /// instead of re-implementing the dual-source pattern. Routing
+    /// through one method guarantees that adapter-encoded shape (e.g.
+    /// kotlin's `import x.y.z as Z` → `module="x.y", original_name="z",
+    /// alias="Z"`) is what every downstream pass sees.
+    #[must_use]
+    pub fn imports_for(&self, file: FileId) -> Vec<ImportSpec> {
+        if let Some(idx) = self.import_index(file) {
+            return idx.imports.clone();
+        }
+        let Ok(parsed) = self.parse(file) else {
+            return Vec::new();
+        };
+        let Ok(snapshot) = self.inner.vfs.snapshot(file) else {
+            return Vec::new();
+        };
+        bonsai_lang_api::kit::extract_generic_imports(&parsed.tree, file, snapshot.text.as_bytes())
+    }
+
+    /// Workspace-wide global declaration index. Built lazily on first
+    /// access; invalidated when any per-file decl index is replaced.
+    pub fn global_index(&self) -> Arc<GlobalIndex> {
+        if let Some(v) = self.inner.cache.read().global_index.clone() {
+            return v;
+        }
+        let mut gi = GlobalIndex::new();
+        for file in self.inner.vfs.all_files() {
+            if let Some(idx) = self.decl_index(file) {
+                gi.insert((*idx).clone());
+            }
+        }
+        let arc = Arc::new(gi);
+        let mut cache = self.inner.cache.write();
+        // Re-check under the write lock so a peer thread that beat
+        // us to it doesn't have its `Arc<GlobalIndex>` replaced.
+        if let Some(existing) = cache.global_index.clone() {
+            return existing;
+        }
+        cache.global_index = Some(arc.clone());
+        arc
+    }
+
+    /// Build the CFG of a function from its extracted flow events.
+    ///
+    /// Flow events (`Call` / `Branch` / `Loop` / `Assign` / `Try` / …)
+    /// are the working IR for the current engine; [`bonsai_cfg`] derives
+    /// a structured basic-block CFG from that tree. An empty CFG is
+    /// returned when the function isn't in the global index (e.g. the
+    /// caller passed a stale [`FuncId`]) — this is rare and safe:
+    /// downstream consumers that walk the CFG will see no blocks and
+    /// report unknown precision.
+    pub fn cfg(&self, func: FuncId) -> Arc<Cfg> {
+        let decl = self.decl_for_func(func);
+        let version = decl
+            .as_ref()
+            .and_then(|d| self.inner.vfs.snapshot(d.span.file).ok())
+            .map_or(0, |snap| snap.version);
+        let key = (func, version);
+        if let Some(v) = self.inner.cache.read().cfgs.get(&key).cloned() {
+            return v;
+        }
+        let cfg = decl
+            .map(|d| build_cfg_from_flow(&d.name, &d.flow_events))
+            .unwrap_or_default();
+        let arc = Arc::new(cfg);
+        let mut cache = self.inner.cache.write();
+        // Monotonic eviction: only displace the cached `(func, *)`
+        // when our `version` is strictly newer than the recorded
+        // peer version. A slower thread that re-entered for an
+        // OLDER snapshot must NOT evict a peer's freshly-installed
+        // newer Arc, and must NOT install its own stale Arc on top.
+        let recorded = cache.cfg_versions.get(&func).copied();
+        match recorded {
+            Some(prev) if prev > version => {
+                // Slower thread arrived late. Don't insert; return
+                // the cached newer entry if present, else our own
+                // computed Arc as a fallback (caller sees a
+                // version-correct CFG either way because the cache
+                // is keyed on `(func, version)`).
+                if let Some(existing) = cache.cfgs.get(&(func, prev)).cloned() {
+                    return existing;
+                }
+                return arc;
+            }
+            Some(prev) if prev < version => {
+                cache.cfg_versions.insert(func, version);
+                cache.cfgs.remove(&(func, prev));
+            }
+            Some(_) => {
+                // Same version — don't bump the index, just
+                // reuse / install at this key below.
+            }
+            None => {
+                cache.cfg_versions.insert(func, version);
+            }
+        }
+        let stored = cache.cfgs.entry(key).or_insert_with(|| arc.clone()).clone();
+        stored
+    }
+
+    /// Look up the decl for a function. Returns `None` when the
+    /// [`FuncId`] doesn't resolve to a decl in the current global
+    /// index — typically only happens when callers pass a stale id
+    /// after workspace invalidation.
+    fn decl_for_func(&self, func: FuncId) -> Option<bonsai_lang_api::Decl> {
+        let global = self.global_index();
+        let symbol = SymbolId::new(func.raw());
+        global.decl_of(symbol).cloned()
+    }
+
+    /// Trace a function from its entry using the intraprocedural
+    /// interpreter. The workspace façade exposes a richer cross-module
+    /// tracer on top of this; this method remains available for tests
+    /// and for adapters that just want raw CFG-level traces.
+    pub fn trace_function(&self, func: FuncId, limits: TraceLimits) -> TraceResult {
+        let cfg = self.cfg(func);
+        let raw: RawTrace = run_entry(func, &cfg, limits);
+        let name_of: &dyn Fn(FuncId) -> Option<String> = &|_| None;
+        let module_of: &dyn Fn(FuncId) -> Option<String> = &|_| None;
+        finalize(
+            raw,
+            bonsai_trace::FinalizeCtx {
+                trace_id: String::new(),
+                query: bonsai_trace::TraceQuery {
+                    kind: bonsai_trace::TraceQueryKind::FunctionEntry,
+                    target_symbol: None,
+                    entry_symbol: None,
+                    sink_symbol: None,
+                    file_filter: None,
+                    max_depth: u32::from(limits.max_call_depth),
+                    max_paths: limits.max_branches,
+                    follow_calls: true,
+                },
+                language: "",
+                workspace_root: "",
+                entry_symbol: None,
+                entry_funcs: vec![(func, String::new())],
+                func_name: name_of,
+                func_module: module_of,
+                limits,
+            },
+            &self.inner.vfs,
+        )
+    }
+
+    /// Invalidate everything that depends on a given file. Coarse-grained
+    /// but correct; refine as needed.
+    pub fn invalidate_file(&self, file: FileId) {
+        self.inner.parser.invalidate(file);
+        // Snapshot the GLOBAL FuncIds for `file` from the current
+        // `global_index` BEFORE we wipe it. The per-file
+        // `decl_index` cache holds LOCAL SymbolIds (0, 1, … per
+        // file), and only `GlobalIndex::insert` remaps them to
+        // workspace-flat FuncIds. The CFG cache is keyed on the
+        // GLOBAL FuncIds, so trimming via local ids would miss
+        // entries (or accidentally evict CFGs of a func with the
+        // same local index in a different file).
+        //
+        // Compute the snapshot under the write lock so a peer can't
+        // insert a fresh `decl_index(file)` between snapshot and
+        // trim and leak that peer's CFGs.
+        let mut cache = self.inner.cache.write();
+        let funcs_in_file: ahash::AHashSet<FuncId> = cache
+            .global_index
+            .as_deref()
+            .map(|gi| {
+                gi.decls_in(file)
+                    .iter()
+                    .map(|d| FuncId::new(d.symbol.raw()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        cache.decl_index.retain(|(f, _), _| *f != file);
+        cache.import_index.retain(|(f, _), _| *f != file);
+        cache.global_index = None;
+        // CFGs are keyed on `(FuncId, file_version)` (see `cfg`).
+        // For a file EDIT the version naturally bumps and the next
+        // `cfg(func)` call misses the stale entry — no global wipe.
+        // For a file REMOVAL the version never bumps and the
+        // entries would leak; trim only entries for funcs we know
+        // belonged to `file`.
+        if !funcs_in_file.is_empty() {
+            cache.cfgs.retain(|(func, _), _| !funcs_in_file.contains(func));
+            cache.cfg_versions.retain(|func, _| !funcs_in_file.contains(func));
+        }
+    }
+
+    /// Snapshot of cache occupancy. Useful for the SDK / CLI's
+    /// `diagnostics` and `stats` commands.
+    pub fn stats(&self) -> DbStats {
+        let cache = self.inner.cache.read();
+        DbStats {
+            files: self.inner.vfs.file_count(),
+            cached_decl_indexes: cache.decl_index.len(),
+            cached_cfgs: cache.cfgs.len(),
+        }
+    }
+}
+
+fn parser_options_from_db_options(options: AnalyzerDbOptions) -> ParserOptions {
+    match options.parse_timeout_ms {
+        Some(0) => ParserOptions::with_parse_timeout(None),
+        Some(ms) => ParserOptions::with_parse_timeout(Some(std::time::Duration::from_millis(ms))),
+        None => ParserOptions::default(),
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct DbStats {
+    pub files: usize,
+    pub cached_decl_indexes: usize,
+    pub cached_cfgs: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bonsai_lang_api::{AdapterError, LanguageAdapter, LanguageId};
+    use bonsai_vfs::Vfs;
+
+    struct EmptyImportPythonAdapter;
+
+    impl LanguageAdapter for EmptyImportPythonAdapter {
+        fn language_id(&self) -> LanguageId {
+            LanguageId::new("python")
+        }
+
+        fn display_name(&self) -> &'static str {
+            "Python with empty import index"
+        }
+
+        fn file_extensions(&self) -> &'static [&'static str] {
+            &["py"]
+        }
+
+        fn tree_sitter_language(&self) -> Result<tree_sitter::Language, AdapterError> {
+            bonsai_lang_python::PythonAdapter::new().tree_sitter_language()
+        }
+
+        fn capabilities(&self) -> bonsai_lang_api::LanguageCapabilities {
+            bonsai_lang_api::LanguageCapabilities::unsupported()
+        }
+
+        fn extract_declarations(&self, file: FileId, _ctx: &AdapterContext<'_>) -> DeclIndex {
+            DeclIndex {
+                file,
+                ..Default::default()
+            }
+        }
+
+        fn extract_imports(&self, file: FileId, _ctx: &AdapterContext<'_>) -> ImportIndex {
+            ImportIndex {
+                file,
+                imports: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn imports_for_treats_empty_adapter_index_as_authoritative() {
+        let vfs = Arc::new(Vfs::new());
+        let file = vfs.write(
+            "fixture.py",
+            Arc::<str>::from("import os\n\ndef handler():\n    return os.getcwd()\n"),
+        );
+        let registry = Arc::new(LanguageRegistry::new());
+        registry.register(Arc::new(EmptyImportPythonAdapter));
+        let db = AnalyzerDb::new(vfs, registry);
+
+        assert!(
+            db.imports_for(file).is_empty(),
+            "adapter-returned empty imports must not fall through to generic syntax extraction"
+        );
+    }
+}

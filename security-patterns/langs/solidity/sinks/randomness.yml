@@ -1,0 +1,68 @@
+- id: solidity.randomness.block_timestamp
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: solidity
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: read
+    target:
+      name: timestamp
+  description: "Disabled — duplicate of solidity.block.timestamp source (same `read name: timestamp` shape). The source rule already fires; the analyst will see block.timestamp flowing into entropy-consuming code in the flow report."
+- id: solidity.randomness.now
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: solidity
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: read
+    target:
+      name: now
+  description: "`now` is an alias of block.timestamp (removed in 0.7+)."
+- id: solidity.randomness.blockhash
+  enabled: true
+  language: solidity
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      name: blockhash
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { blockhash(input); } }
+  description: "blockhash(n) as entropy — returns 0 for blocks > 256 old; predictable within recent window."
+- id: solidity.randomness.block_difficulty
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: solidity
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: read
+    target:
+      name: difficulty
+  description: "Disabled — duplicate of solidity.block.difficulty source (same `read name: difficulty` shape). The source rule already fires."
+- id: solidity.randomness.block_number_modulo
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: solidity
+  tag: weak-randomness
+  severity: low
+  cwe: [CWE-330]
+  match:
+    kind: read
+    target:
+      name: number
+  description: "Disabled — `.number` is too ubiquitous a field name; re-enable once block.number-specific read detection (with %-modulus pattern) is available."

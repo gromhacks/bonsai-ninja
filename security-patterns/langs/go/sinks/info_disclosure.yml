@@ -1,0 +1,80 @@
+- id: go.info_disclosure.log_printf_secret
+  enabled: true
+  language: go
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  - CWE-134
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - log
+      - Printf
+  match_examples:
+  - name: log printf secret
+    code: "package main\nfunc example(secretToken string) {\n  log.Printf(\"token value\", secretToken)\n}\n"
+    expect_match_text:
+    - log.Printf
+  description: "log.Printf(secret/token/password) — secret-shaped data written to application logs. Merged aliases: go.log_injection.log_printf_format, go.log_injection.log_printf_constant_format_arg."
+  aliases:
+  - go.log_injection.log_printf_format
+  - go.log_injection.log_printf_constant_format_arg
+- id: go.info_disclosure.http_error_exception
+  enabled: true
+  language: go
+  tag: information-disclosure
+  severity: high
+  packages:
+  - net/http
+  cwe:
+  - CWE-209
+  match:
+    kind: call
+    callee:
+      attribute:
+      - http
+      - Error
+  match_examples:
+  - name: http error exception
+    code: |
+      import "net/http"
+      package main
+      func handler(w http.ResponseWriter, err error) {
+        http.Error(w, err.Error(), 500)
+      }
+    expect_match_text:
+    - http.Error
+  - name: chi http error debug detail
+    code: "package main\nimport (\n  \"net/http\"\n  \"github.com/go-chi/chi/v5\"\n)\nfunc handler(w http.ResponseWriter, r *http.Request, err error) {\n  _ = chi.URLParam(r, \"id\")\n  http.Error(w, \"debug: \"+err.Error(), 500)\n}\n"
+    expect_match_text:
+    - http.Error
+  description: "http.Error(w, err.Error/stack) — returns internal exception details to the client."
+- id: go.info_disclosure.pprof_index
+  enabled: true
+  language: go
+  tag: information-disclosure
+  severity: high
+  packages:
+  - net/http/pprof
+  cwe:
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pprof
+      - Index
+  match_examples:
+  - name: pprof index
+    code: |
+      import "net/http/pprof"
+      package main
+      func handler(w http.ResponseWriter, r *http.Request) {
+        pprof.Index(w, r)
+      }
+    expect_match_text:
+    - pprof.Index
+  description: "pprof.Index exposed as an HTTP handler — debug profiling pages can disclose process internals."

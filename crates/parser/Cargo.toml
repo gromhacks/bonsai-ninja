@@ -1,0 +1,21 @@
+[package]
+name = "bonsai_parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tree-sitter parse cache with incremental reparsing."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_diagnostics = { workspace = true }
+bonsai_vfs = { workspace = true }
+bonsai_lang_api = { workspace = true }
+tree-sitter = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+ahash = { workspace = true }
+
+[lints]
+workspace = true

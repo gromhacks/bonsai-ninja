@@ -1,0 +1,25 @@
+# cpp log_injection sinks.
+
+# Log-injection sinks (round 2 fill).
+- id: cpp.log_injection.spdlog_info_newline
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: medium
+  packages: [spdlog]
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [spdlog, info]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <spdlog/spdlog.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        spdlog::info("user\\n");
+      }
+  description: 'spdlog::info("... {} ...\n", user) — newline log forging.'

@@ -1,0 +1,634 @@
+# Ruby SQL-injection sinks. ActiveRecord, Sequel, raw drivers.
+- id: ruby.sqli.ar_find_by_sql
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: critical
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: find_by_sql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_find_by_sql example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        find_by_sql(input)
+      end
+  - name: ruby.sqli.ar_find_by_sql literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        find_by_sql("SELECT * FROM users")
+      end
+    expect_no_match: true
+  description: "ActiveRecord find_by_sql — raw SQL, no automatic binding."
+
+- id: ruby.sqli.ar_select_all
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: select_all
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_select_all example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        select_all(input)
+      end
+  - name: ruby.sqli.ar_select_all literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        select_all("SELECT * FROM users")
+      end
+    expect_no_match: true
+  description: "ActiveRecord connection.select_all — raw SQL."
+
+- id: ruby.sqli.ar_execute
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: critical
+  packages: [activerecord, sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_execute example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        connection.execute(input)
+      end
+  - name: ruby.sqli.ar_execute literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        connection.execute("SELECT * FROM users WHERE id = 1")
+      end
+    expect_no_match: true
+  description: "connection.execute — raw SQL (ActiveRecord / PG / SQLite3 / arbitrary driver)."
+
+- id: ruby.sqli.ar_exec_query
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: exec_query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_exec_query example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        exec_query(input)
+      end
+  - name: ruby.sqli.ar_exec_query literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        exec_query("SELECT * FROM users")
+      end
+    expect_no_match: true
+  description: "ActiveRecord connection.exec_query."
+
+- id: ruby.sqli.ar_exec_update
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: exec_update
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_exec_update example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        exec_update(input)
+      end
+  - name: ruby.sqli.ar_exec_update literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        exec_update("UPDATE users SET admin = 0")
+      end
+    expect_no_match: true
+  description: "ActiveRecord connection.exec_update."
+
+- id: ruby.sqli.ar_exec_delete
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: exec_delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_exec_delete example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        exec_delete(input)
+      end
+  - name: ruby.sqli.ar_exec_delete literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        exec_delete("DELETE FROM users WHERE id = 1")
+      end
+    expect_no_match: true
+  description: "ActiveRecord connection.exec_delete."
+
+# .where(tainted_string) is dangerous; .where("col = ?", x) is safe.
+# This rule fires on ALL .where calls — rely on downstream taint-flow +
+# arg-shape review to distinguish.
+- id: ruby.sqli.ar_where_string
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: where
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_where_string example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        where(input)
+      end
+  - name: ruby.sqli.ar_where_string literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        where("id = 1")
+      end
+    expect_no_match: true
+  description: "ActiveRecord where(\"col = #{x}\") — tainted string fragment; safe when used with placeholder + bind array."
+
+- id: ruby.sqli.ar_order
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: order
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_order example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        order(input)
+      end
+  - name: ruby.sqli.ar_order literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        order("created_at DESC")
+      end
+    expect_no_match: true
+  description: "ActiveRecord order — string form is unparameterized (columns come from user input in sort UIs)."
+
+- id: ruby.sqli.ar_group
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: medium
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: group
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_group example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        group(input)
+      end
+  - name: ruby.sqli.ar_group literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        group("account_id")
+      end
+    expect_no_match: true
+  description: "ActiveRecord group — string form is unparameterized."
+
+- id: ruby.sqli.ar_having
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: having
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_having example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        having(input)
+      end
+  - name: ruby.sqli.ar_having literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        having("COUNT(*) > 1")
+      end
+    expect_no_match: true
+  description: "ActiveRecord having — string form is unparameterized."
+
+- id: ruby.sqli.ar_joins
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: joins
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_joins example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        joins(input)
+      end
+  - name: ruby.sqli.ar_joins literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        joins("INNER JOIN accounts ON accounts.id = users.account_id")
+      end
+    expect_no_match: true
+  description: "ActiveRecord joins — string form is raw SQL."
+
+- id: ruby.sqli.ar_from
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: from
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.ar_from example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        from(input)
+      end
+  - name: ruby.sqli.ar_from literal negative
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        from("users")
+      end
+    expect_no_match: true
+  description: "ActiveRecord from — string form is raw SQL."
+
+- id: ruby.sqli.ar_pluck
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: sql-injection
+  severity: medium
+  packages: [activerecord]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: pluck
+  description: "Disabled — pluck arg is column name, rarely tainted."
+
+- id: ruby.sqli.sequel_run
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [sequel]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [DB, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.sequel_run example
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        DB.run(input)
+      end
+  - name: ruby.sqli.sequel_run literal negative
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        DB.run("SELECT * FROM users WHERE id = 1")
+      end
+    expect_no_match: true
+  description: "Sequel DB.run — raw SQL."
+
+- id: ruby.sqli.sequel_fetch
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [sequel]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [DB, fetch]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.sequel_fetch example
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        DB.fetch(input)
+      end
+  - name: ruby.sqli.sequel_fetch literal negative
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        DB.fetch("SELECT * FROM users WHERE id = 1")
+      end
+    expect_no_match: true
+  description: "Sequel DB.fetch — raw SQL dataset."
+
+- id: ruby.sqli.sequel_dataset_with_sql
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [sequel]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: with_sql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.sequel_dataset_with_sql example
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        with_sql(input)
+      end
+  - name: ruby.sqli.sequel_dataset_with_sql literal negative
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        with_sql("SELECT * FROM users")
+      end
+    expect_no_match: true
+  description: "Sequel dataset.with_sql(tainted)."
+
+- id: ruby.sqli.sequel_literal
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [sequel]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Sequel, lit]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.sequel_literal example
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        Sequel.lit(input)
+      end
+  - name: ruby.sqli.sequel_literal literal negative
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        Sequel.lit("COUNT(*)")
+      end
+    expect_no_match: true
+  description: "Sequel.lit — bypasses parameterization."
+
+- id: ruby.sqli.sequel_literal_alias
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: high
+  packages: [sequel]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Sequel, literal]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.sequel_literal_alias example
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        Sequel.literal(input)
+      end
+  - name: ruby.sqli.sequel_literal_alias literal negative
+    code: |
+      require "sequel"
+      def example(input, url, id, payload, request, params)
+        Sequel.literal("COUNT(*)")
+      end
+    expect_no_match: true
+  description: "Sequel.literal — bypasses parameterization."
+
+- id: ruby.sqli.mysql2_query
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: critical
+  packages: [mysql2]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: query
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.mysql2_query example
+    code: |
+      require "mysql2"
+      def example(input, url, id, payload, request, params)
+        client.query(input)
+      end
+  - name: ruby.sqli.mysql2_query literal negative
+    code: |
+      require "mysql2"
+      def example(input, url, id, payload, request, params)
+        client.query("SELECT * FROM users")
+      end
+    expect_no_match: true
+  description: "Mysql2::Client#query — raw SQL on common database receiver names."
+
+- id: ruby.sqli.pg_exec
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: ruby
+  tag: sql-injection
+  severity: critical
+  packages: [pg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: exec
+  description: "Disabled — bare `name: exec` collides with ruby.cmdi.kernel_exec (Kernel#exec = cmdi sink). Without receiver-type narrowing (PG::Connection vs Kernel) we cannot distinguish; Kernel#exec is the far more common dangerous call."
+
+- id: ruby.sqli.pg_exec_params
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: sql-injection
+  severity: low
+  packages: [pg]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: exec_params
+  description: "Disabled — exec_params takes a placeholder template + bind array; safe if used correctly."
+
+- id: ruby.sqli.sqlite3_execute
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: ruby.sqli.ar_execute
+  language: ruby
+  tag: sql-injection
+  severity: critical
+  packages: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  description: "Subsumed by ruby.sqli.ar_execute — same shape; canonical rule should add sqlite3 to its packages list."
+
+- id: ruby.sqli.sqlite3_execute_batch
+  enabled: true
+  language: ruby
+  tag: sql-injection
+  severity: critical
+  packages: [sqlite3]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: execute_batch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.sqli.sqlite3_execute_batch example
+    code: |
+      require "sqlite3"
+      def example(input, url, id, payload, request, params)
+        execute_batch(input)
+      end
+  - name: ruby.sqli.sqlite3_execute_batch literal negative
+    code: |
+      require "sqlite3"
+      def example(input, url, id, payload, request, params)
+        execute_batch("SELECT * FROM users")
+      end
+    expect_no_match: true
+  description: "SQLite3::Database#execute_batch."

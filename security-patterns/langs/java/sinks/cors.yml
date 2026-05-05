@@ -1,0 +1,45 @@
+# java CORS misconfiguration sinks (T403).
+- id: java.cors.crossorigin_origins_wildcard
+  enabled: true
+  language: java
+  tag: cors
+  severity: medium
+  packages: [org.springframework.web.bind.annotation]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CrossOrigin, allowedOrigins]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(String input) throws Exception {
+          CrossOrigin.allowedOrigins("*");
+        }
+      }
+  description: |-
+    @CrossOrigin(origins = "*") — Spring controller-level allow-all CORS.
+- id: java.cors.cors_config_addallowedorigin_wildcard
+  enabled: true
+  language: java
+  tag: cors
+  severity: medium
+  packages: [org.springframework.web.cors]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CorsConfiguration, addAllowedOrigin]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.cors.*;
+      class App {
+        void handle(String input) throws Exception {
+          CorsConfiguration.addAllowedOrigin("*");
+        }
+      }
+  description: |-
+    CorsConfiguration.addAllowedOrigin('*') — Spring filter-chain allow-all CORS.

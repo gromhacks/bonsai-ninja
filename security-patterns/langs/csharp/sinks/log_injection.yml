@@ -1,0 +1,95 @@
+# csharp log_injection sinks.
+
+# Log-injection sinks. Newline / control-char / format-string
+# slipping into log calls fed attacker text.
+- id: csharp.log_injection.logger_loginformation_concat
+  enabled: true
+  language: csharp
+  tag: log-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [_logger, LogInformation]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; _logger.LogInformation($"{input}"); } }
+    - name: literal log information negative
+      code: |
+        class App { void Test() { _logger.LogInformation("safe"); } }
+      expect_no_match: true
+  description: '_logger.LogInformation($"...{tainted}...") — CRLF in attacker text forges log entries.'
+
+- id: csharp.log_injection.logger_logdebug_concat
+  enabled: true
+  language: csharp
+  tag: log-injection
+  severity: low
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [_logger, LogDebug]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; _logger.LogDebug($"{input}"); } }
+    - name: literal log debug negative
+      code: |
+        class App { void Test() { _logger.LogDebug("safe"); } }
+      expect_no_match: true
+  description: "_logger.LogDebug — log-injection via concat / interpolation."
+
+- id: csharp.log_injection.logger_logwarning_concat
+  enabled: true
+  language: csharp
+  tag: log-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [_logger, LogWarning]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; _logger.LogWarning($"{input}"); } }
+    - name: literal log warning negative
+      code: |
+        class App { void Test() { _logger.LogWarning("safe"); } }
+      expect_no_match: true
+  description: "_logger.LogWarning — log-injection via concat / interpolation."
+
+- id: csharp.log_injection.logger_logcritical_concat
+  enabled: true
+  language: csharp
+  tag: log-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [_logger, LogCritical]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; _logger.LogCritical($"{input}"); } }
+    - name: literal log critical negative
+      code: |
+        class App { void Test() { _logger.LogCritical("safe"); } }
+      expect_no_match: true
+  description: "_logger.LogCritical — log-injection via concat / interpolation."

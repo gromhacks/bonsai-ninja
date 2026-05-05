@@ -1,0 +1,571 @@
+- id: java.nosql.mongo_find
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb
+  - org.springframework.data.mongodb
+  - org.springframework.ldap
+  cwe:
+  - CWE-943
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MongoCollection
+      - find
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo find tainted filter
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          MongoCollection.find(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          MongoCollection.find("safe");
+        }
+      }
+    expect_no_match: true
+  description: "MongoCollection.find — flag tainted Bson filter. Merged collision aliases: java.nosql.mongo_find_local_document, java.nosql.spring_mongo_template_find, java.ldap.spring_ldap_template_find."
+  aliases:
+  - java.nosql.mongo_find_local_document
+  - java.nosql.spring_mongo_template_find
+  - java.ldap.spring_ldap_template_find
+- id: java.nosql.dbcollection_findone_local_object
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: findOne
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: legacy dbcollection findOne object
+    code: |
+      import org.mongodb.*;
+      class App {
+        Object handle(DBCollection collection, Object callerFilter) {
+          return collection.findOne(callerFilter);
+        }
+      }
+      class DBCollection {
+        Object findOne(Object... args) { return null; }
+      }
+    expect_match_text:
+    - collection.findOne
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          findOne("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Legacy Mongo DBCollection.findOne(callerFilter) — caller-controlled selector values can carry operator objects such as $ne or $where."
+- id: java.nosql.mongo_aggregate
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MongoCollection
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo aggregate tainted pipeline
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          MongoCollection.aggregate(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          MongoCollection.aggregate("safe");
+        }
+      }
+    expect_no_match: true
+  description: MongoCollection.aggregate.
+- id: java.nosql.mongo_runcommand
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MongoDatabase
+      - runCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo run command tainted command
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          MongoDatabase.runCommand(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          MongoDatabase.runCommand("safe");
+        }
+      }
+    expect_no_match: true
+  description: "MongoDatabase.runCommand — arbitrary BSON command."
+- id: java.nosql.mongo_eval
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: critical
+  packages:
+  - org.mongodb
+  cwe:
+  - CWE-943
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DB
+      - eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo eval tainted script
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          DB.eval(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          DB.eval("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Legacy DB.eval — server-side JS."
+- id: java.nosql.bson_document_parse
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Document
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bson document parse tainted json
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          Document.parse(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          Document.parse("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Document.parse(tainted JSON) — feeds Find filter."
+- id: java.nosql.basicdbobject_where_ctor
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb
+  cwe:
+  - CWE-943
+  - CWE-94
+  match:
+    kind: new
+    callee:
+      name: BasicDBObject
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: basic db object where constructor
+    code: |
+      import org.mongodb.*;
+      class App {
+        Object handle(String js) {
+          return new BasicDBObject("$where", js);
+        }
+      }
+      class BasicDBObject {
+        BasicDBObject(Object... args) {}
+      }
+    expect_match_text:
+    - BasicDBObject
+  - name: literal basicdbobject where script negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        Object handle() {
+          return new BasicDBObject("$where", "return true");
+        }
+      }
+      class BasicDBObject {
+        BasicDBObject(Object... args) {}
+      }
+    expect_no_match: true
+  description: "new BasicDBObject(\"$where\", script) — MongoDB server-side JavaScript predicate; attacker-controlled script is NoSQL injection. Merged aliases: java.nosql.basicdbobject_operator_ctor."
+  aliases:
+  - java.nosql.basicdbobject_operator_ctor
+- id: java.nosql.spring_data_mongo_query
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.springframework.data.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: BasicQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.data.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          new BasicQuery(input);
+        }
+      }
+      class BasicQuery {
+        BasicQuery(Object... args) {}
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.data.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          new BasicQuery("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Spring Data new BasicQuery(jsonString) — tainted JSON."
+  imports:
+  - org.springframework.data.mongodb
+- id: java.nosql.spring_mongo_template_criteria_is
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.springframework.data.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Criteria
+      - is
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: spring criteria operator object
+    code: |
+      import org.springframework.data.mongodb.*;
+      class App {
+        Object handle(Criteria criteria, Object operatorObject) {
+          return criteria.is(operatorObject);
+        }
+      }
+      class Criteria {
+        Object is(Object... args) { return null; }
+      }
+    expect_match_text:
+    - criteria.is
+  - name: arg tainted literal negative
+    code: |
+      import org.springframework.data.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          Criteria.is("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Spring Data Mongo Criteria.is(operator object) — caller-controlled criteria value can inject Mongo operators when maps/documents are passed through."
+  imports:
+  - org.springframework.data.mongodb
+- id: java.nosql.bson_document_from_map
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - org.mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: Document
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bson document from caller map
+    code: |
+      import org.mongodb.*;
+      class App {
+        Object handle(java.util.Map<String, Object> callerMap) {
+          return new Document(callerMap);
+        }
+      }
+      class Document {
+        Document(Object... args) {}
+      }
+    expect_match_text:
+    - Document
+  - name: arg tainted literal negative
+    code: |
+      import org.mongodb.*;
+      class App {
+        void handle(String input) throws Exception {
+          new Document("safe");
+        }
+      }
+    expect_no_match: true
+  description: "new Document(callerMap) — MongoDB selector built from a caller-controlled map can carry operators such as $ne or $where."
+- id: java.nosql.cassandra_session_execute
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: cql-injection
+  severity: high
+  packages:
+  - com.datastax.driver.core
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - execute
+  description: "Disabled — [Session, execute] clashes with jOOQ/WebSocket/Hibernate Session; use datastax CqlSession rule below."
+- id: java.nosql.elasticsearch_search
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - elasticsearch
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestHighLevelClient
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: elasticsearch search tainted query
+    code: |
+      import elasticsearch.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestHighLevelClient.search(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import elasticsearch.*;
+      class App {
+        void handle(String input) throws Exception {
+          RestHighLevelClient.search("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Elasticsearch RestHighLevelClient.search — flag tainted DSL JSON."
+- id: java.nosql.neo4j_run
+  enabled: true
+  language: java
+  tag: cypher-injection
+  severity: high
+  packages:
+  - org.neo4j.driver
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: neo4j run tainted cypher
+    code: |
+      import org.neo4j.driver.*;
+      class App {
+        void handle(String input) throws Exception {
+          Session.run(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.neo4j.driver.*;
+      class App {
+        void handle(String input) throws Exception {
+          Session.run("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Neo4j Session.run — flag string-built Cypher."
+  imports:
+  - org.neo4j.driver
+- id: java.nosql.jedis_eval
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - jedis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jedis
+      - eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jedis eval tainted script
+    code: |
+      import jedis.*;
+      class App {
+        void handle(String input) throws Exception {
+          Jedis.eval(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import jedis.*;
+      class App {
+        void handle(String input) throws Exception {
+          Jedis.eval("safe");
+        }
+      }
+    expect_no_match: true
+  description: "Jedis.eval — Lua script injection."
+- id: java.nosql.lettuce_eval
+  enabled: true
+  language: java
+  tag: nosql-injection
+  severity: high
+  packages:
+  - lettuce
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RedisCommands
+      - eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lettuce eval tainted script
+    code: |
+      import lettuce.*;
+      class App {
+        void handle(String input) throws Exception {
+          RedisCommands.eval(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import lettuce.*;
+      class App {
+        void handle(String input) throws Exception {
+          RedisCommands.eval("safe");
+        }
+      }
+    expect_no_match: true
+  description: Lettuce RedisCommands.eval.

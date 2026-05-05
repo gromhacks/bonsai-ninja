@@ -1,0 +1,156 @@
+# Go hardware-control / bus-write sinks (GPIO, PWM, I2C register writes).
+- id: go.hardware.digital_write
+  enabled: true
+  language: go
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: ["gobot.io/x/gobot", "github.com/stianeikeland/go-rpio"]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.DigitalWrite$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.DigitalWrite(target)
+      }
+  description: "DigitalWrite — tainted pin/value toggles a physical output."
+
+- id: go.hardware.analog_write
+  enabled: true
+  language: go
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: ["gobot.io/x/gobot"]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.AnalogWrite$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.AnalogWrite(target)
+      }
+  description: "AnalogWrite — tainted duty/value drives PWM or DAC-backed hardware."
+
+- id: go.hardware.write_byte_data
+  enabled: true
+  language: go
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: ["gobot.io/x/gobot", "periph.io/x/conn/v3/i2c"]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.WriteByteData$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.WriteByteData(target)
+      }
+  description: "WriteByteData — tainted register/value mutates an attached I2C/SMBus device."
+
+- id: go.hardware.write_word_data
+  enabled: true
+  language: go
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: ["gobot.io/x/gobot", "periph.io/x/conn/v3/i2c"]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.WriteWordData$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "gobot.io/x/gobot"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.WriteWordData(target)
+      }
+  description: "WriteWordData — tainted 16-bit register write controls peripheral state."
+
+- id: go.hardware.write_reg_u8
+  enabled: true
+  language: go
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: ["periph.io/x/conn/v3/i2c"]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.WriteRegU8$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "periph.io/x/conn/v3/i2c"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.WriteRegU8(target)
+      }
+  description: "WriteRegU8 — tainted 8-bit device register write drives attached hardware."
+
+- id: go.hardware.write_reg_u16be
+  enabled: true
+  language: go
+  tag: state-manipulation
+  severity: high
+  category: hardware-io
+  packages: ["periph.io/x/conn/v3/i2c"]
+  cwe: [CWE-15, CWE-284]
+  match:
+    kind: call
+    callee:
+      regex: "\\.WriteRegU16BE$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "periph.io/x/conn/v3/i2c"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.WriteRegU16BE(target)
+      }
+  description: "WriteRegU16BE — tainted 16-bit register write mutates peripheral state."

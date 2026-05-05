@@ -1,0 +1,202 @@
+- id: ruby.deser.yaml_load
+  enabled: true
+  language: ruby
+  tag: insecure-deserialization
+  severity: critical
+  cwe:
+  - CWE-502
+  - CWE-22
+  - CWE-94
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      attribute:
+      - YAML
+      - load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.deser.yaml_load example
+    code: |
+      require "oj"
+      def example(input, url, id, payload, request, params)
+        YAML.load(input)
+      end
+  - name: ruby.deser.yaml_load literal negative
+    code: |
+      require "oj"
+      def example(input, url, id, payload, request, params)
+        YAML.load("---\nname: alice\n")
+      end
+    expect_no_match: true
+  description: "YAML.load — accepts arbitrary classes; RCE via crafted document. Merged collision aliases: ruby.deser.psych_load, ruby.deser.marshal_load, ruby.deser.oj_load_default, ruby.deser.json_load, ruby.path.kernel_load, ruby.xxe.ox_load."
+  aliases:
+  - ruby.deser.psych_load
+  - ruby.deser.marshal_load
+  - ruby.deser.oj_load_default
+  - ruby.deser.json_load
+  - ruby.path.kernel_load
+  - ruby.xxe.ox_load
+  packages:
+  - oj
+  - ox
+- id: ruby.deser.yaml_unsafe_load
+  enabled: true
+  language: ruby
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - yaml
+  imports:
+  - yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - YAML
+      - unsafe_load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.deser.yaml_unsafe_load example
+    code: |
+      require "yaml"
+      def example(input, url, id, payload, request, params)
+        YAML.unsafe_load(input)
+      end
+  - name: ruby.deser.yaml_unsafe_load literal negative
+    code: |
+      require "yaml"
+      def example(input, url, id, payload, request, params)
+        YAML.unsafe_load("---\nname: alice\n")
+      end
+    expect_no_match: true
+  description: "YAML.unsafe_load — explicit unsafe variant."
+- id: ruby.deser.yaml_load_file
+  enabled: true
+  language: ruby
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - yaml
+  imports:
+  - yaml
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - YAML
+      - load_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.deser.yaml_load_file example
+    code: |
+      require "yaml"
+      def example(input, url, id, payload, request, params)
+        YAML.load_file(input)
+      end
+  - name: ruby.deser.yaml_load_file literal negative
+    code: |
+      require "yaml"
+      def example(input, url, id, payload, request, params)
+        YAML.load_file("config/settings.yml")
+      end
+    expect_no_match: true
+  description: "YAML.load_file — same risk as YAML.load."
+- id: ruby.deser.marshal_restore
+  enabled: true
+  language: ruby
+  tag: insecure-deserialization
+  severity: critical
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Marshal
+      - restore
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.deser.marshal_restore example
+    code: "def example(input, url, id, payload, request, params)\n  Marshal.restore(input)\nend\n"
+  - name: ruby.deser.marshal_restore literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Marshal.restore(\"\\x04\\bo:\\vObject\\x00\")\nend\n"
+    expect_no_match: true
+  description: "Marshal.restore — alias for load. TODO(only_when_packaged): `marshal_restore` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Marshal', 'restore']` match only."
+- id: ruby.deser.oj_object_load
+  enabled: true
+  language: ruby
+  tag: insecure-deserialization
+  severity: critical
+  packages:
+  - oj
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Oj
+      - object_load
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.deser.oj_object_load example
+    code: |
+      require "oj"
+      def example(input, url, id, payload, request, params)
+        Oj.object_load(input)
+      end
+  - name: ruby.deser.oj_object_load literal negative
+    code: |
+      require "oj"
+      def example(input, url, id, payload, request, params)
+        Oj.object_load("{\"name\":\"alice\"}")
+      end
+    expect_no_match: true
+  description: "Oj.object_load — explicit object deserialization."
+- id: ruby.deser.json_create_id
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: insecure-deserialization
+  severity: medium
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JSON
+      - parse
+  description: "Disabled — JSON.parse is safe unless create_additions: true."
+- id: ruby.deser.cookie_serializer_marshal
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: insecure-deserialization
+  severity: high
+  packages:
+  - rails
+  cwe:
+  - CWE-502
+  match:
+    kind: call
+    callee:
+      name: cookie_serializer
+  description: "Disabled — config check; Rails marshal cookie serializer is dangerous."

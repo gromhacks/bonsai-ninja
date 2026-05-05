@@ -1,0 +1,101 @@
+# C# memory-safety / lifecycle audit-pair sites.
+# C#'s `using (...) { }` is RAII so explicit `.Dispose()` outside the
+# block is the audit-interesting shape. These rules fire on the
+# *use-after-transition* call (Read / IsCancellationRequested / etc.)
+# and gate on the adapter-emitted lifecycle state via the
+# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: csharp.memory.idisposable_dispose
+  enabled: true
+  language: csharp
+  tag: memory-safety
+  severity: medium
+  packages: [System, System.IO]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: Read
+  constraints:
+  - requires_state:
+      name: s
+      expected: freed
+  match_examples:
+  - name: read after dispose
+    code: |
+      using System.IO;
+      class App {
+        void Handle(Stream s) {
+          s.Dispose();
+          s.Read();
+        }
+      }
+    expect_match_text: [s.Read]
+  - name: read without preceding dispose
+    code: |
+      using System.IO;
+      class App {
+        void Handle(Stream s) {
+          s.Read();
+        }
+      }
+    expect_no_match: true
+  description: "Use-after-dispose — `Stream.Read()` / `<IDisposable>.<op>()` on a handle whose preceding `.Dispose()` / `.DisposeAsync()` released the underlying resource. Subsequent calls throw ObjectDisposedException (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `freed` lifecycle state, so explicit-Dispose-then-reuse is flagged while `using` blocks stay silent."
+- id: csharp.memory.cancellation_token_cancel
+  enabled: true
+  language: csharp
+  tag: memory-safety
+  severity: medium
+  packages: [System.Threading]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      name: ThrowIfCancellationRequested
+  constraints:
+  - requires_state:
+      name: cts
+      expected: cancelled
+  match_examples:
+  - name: throw after cancel
+    code: |
+      using System.Threading;
+      class App {
+        void Handle(CancellationTokenSource cts) {
+          cts.Cancel();
+          cts.ThrowIfCancellationRequested();
+        }
+      }
+    expect_match_text: [cts.ThrowIfCancellationRequested]
+  - name: throw without preceding cancel
+    code: |
+      using System.Threading;
+      class App {
+        void Handle(CancellationTokenSource cts) {
+          cts.ThrowIfCancellationRequested();
+        }
+      }
+    expect_no_match: true
+  description: "Use-after-cancel — `CancellationTokenSource.ThrowIfCancellationRequested()` / token-derived ops on a CTS whose preceding `.Cancel()` already tripped the cancellation flag. The call throws OperationCanceledException at runtime (CWE-672). The `requires_state` constraint gates on the binding's actual `cancelled` lifecycle state."
+- id: csharp.memory.mutex_release
+  enabled: true
+  language: csharp
+  tag: memory-safety
+  severity: medium
+  packages: [System.Threading]
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.ReleaseMutex$
+  match_examples:
+  - name: mutex release site
+    code: |
+      using System.Threading;
+      class App {
+        void Handle(Mutex m) {
+          m.ReleaseMutex();
+        }
+      }
+    expect_match_text: [m.ReleaseMutex]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Mutex.ReleaseMutex() — subsequent guarded-region reads/writes without a re-WaitOne are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

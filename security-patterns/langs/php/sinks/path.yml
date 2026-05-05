@@ -1,0 +1,540 @@
+# PHP path-traversal sinks. fopen/file_get_contents + include family.
+#
+# Retained bare-name rule: php.path.copy
+#   `copy` is a real PHP built-in global (filesystem function); there is no
+#   stdlib method `Foo::copy` that would shadow it. `top_level: true` filters
+#   out userland `$collection->copy(...)` decoys. Fragile per pack-audit but
+#   intentional — copy() with a tainted source or destination is a real LFI /
+#   arbitrary-write primitive. Do not scope by package.
+- id: php.path.fopen
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: fopen
+  description: "Disabled — canonical rule is php.ssrf.fopen_url in ssrf.yml. Same call shape; SSRF is strictly worse reach than LFI, so keep the single higher-severity rule."
+
+- id: php.path.file_get_contents
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: file_get_contents
+  description: "Disabled — canonical rule is php.ssrf.file_get_contents_url in ssrf.yml (SSRF strictly supersedes LFI when URL wrappers are in play)."
+
+- id: php.path.file_put_contents
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: file_put_contents
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.file_put_contents example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          file_put_contents($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          file_put_contents("cache/report.txt", "safe");
+        }
+      expect_no_match: true
+  description: "file_put_contents()."
+
+- id: php.path.readfile
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: readfile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.readfile example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          readfile($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          readfile("public/report.txt");
+        }
+      expect_no_match: true
+  description: "readfile() — writes file contents to output; tainted path reads and discloses arbitrary files."
+
+- id: php.path.file
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.file example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          file($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          file("public/report.txt");
+        }
+      expect_no_match: true
+  description: "file() — read into array."
+
+- id: php.path.fread
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: fread
+  description: "Disabled — fread takes a handle; the path was already opened."
+
+- id: php.path.copy
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: copy
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.copy source example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          copy($input, "cache/report.txt");
+        }
+    - name: php.path.copy source literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          copy("public/report.txt", "cache/report.txt");
+        }
+      expect_no_match: true
+  description: "copy(tainted_source, dest) — attacker-controlled source paths can read arbitrary files."
+
+- id: php.path.copy_dest
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: copy
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: php.path.copy destination example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          copy("public/report.txt", $input);
+        }
+    - name: php.path.copy destination literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          copy("public/report.txt", "cache/report.txt");
+        }
+      expect_no_match: true
+  description: "copy(source, tainted_dest) — attacker-controlled destination paths can overwrite configuration or session data."
+
+- id: php.path.rename
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: rename
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.rename source example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          rename($input, "cache/report.txt");
+        }
+    - name: php.path.rename source literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          rename("public/report.txt", "cache/report.txt");
+        }
+      expect_no_match: true
+  description: "rename(tainted_source, dest) — attacker-controlled source paths can move arbitrary files."
+
+- id: php.path.rename_dest
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: rename
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: php.path.rename destination example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          rename("public/report.txt", $input);
+        }
+    - name: php.path.rename destination literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          rename("public/report.txt", "cache/report.txt");
+        }
+      expect_no_match: true
+  description: "rename(source, tainted_dest) — attacker-controlled destination paths can clobber arbitrary filesystem targets."
+
+- id: php.path.unlink
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: critical
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: unlink
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.unlink example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          unlink($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          unlink("cache/report.txt");
+        }
+      expect_no_match: true
+  description: "unlink() with tainted path — attacker-controlled paths let the attacker delete arbitrary files on disk (session stores, config, uploaded content)."
+
+- id: php.path.rmdir
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: critical
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: rmdir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.rmdir example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          rmdir($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          rmdir("cache/tmp");
+        }
+      expect_no_match: true
+  description: "rmdir() with tainted path — attacker-controlled paths can remove arbitrary directories including application data dirs."
+
+- id: php.path.mkdir
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: mkdir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.mkdir example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          mkdir($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          mkdir("cache/tmp");
+        }
+      expect_no_match: true
+  description: "mkdir() with tainted path — attacker-controlled paths can create directories outside the intended root, enabling further path-traversal exploits."
+
+- id: php.path.glob
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: glob
+  description: "Disabled — glob() patterns rarely tainted."
+
+- id: php.path.splfileinfo_new
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: SplFileInfo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.splfileinfo_new example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          new SplFileInfo($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          new SplFileInfo("public/report.txt");
+        }
+      expect_no_match: true
+  description: "new SplFileInfo(tainted) — path accessor; downstream reads propagate traversal."
+
+- id: php.path.splfileobject_new
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: SplFileObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.splfileobject_new example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          new SplFileObject($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          new SplFileObject("public/report.txt");
+        }
+      expect_no_match: true
+  description: "new SplFileObject(tainted) — opens file at tainted path."
+
+- id: php.path.ziparchive_extract_to
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^ZipArchive::extractTo$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.ziparchive_extract_to example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          ZipArchive::extractTo($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          ZipArchive::extractTo("var/extracted");
+        }
+      expect_no_match: true
+  description: "ZipArchive::extractTo — zip-slip when archive entries contain ../ and destination not validated."
+
+- id: php.path.phar_archive_extract_to
+  enabled: true
+  language: php
+  tag: path-traversal
+  severity: high
+  packages: []
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^PharData::extractTo$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: php.path.phar_archive_extract_to example
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          PharData::extractTo($input);
+        }
+    - name: arg tainted literal negative
+      code: |
+        <?php
+        function example($input, $url, $id, $payload, $request) {
+          PharData::extractTo("var/extracted");
+        }
+      expect_no_match: true
+  description: "PharData::extractTo — tar/zip extraction with attacker-controlled archive; zip-slip risk."
+
+- id: php.path.move_uploaded_file
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: path-traversal
+  severity: critical
+  cwe: [CWE-22, CWE-434]
+  match:
+    kind: call
+    callee:
+      name: move_uploaded_file
+  description: "Disabled — canonical rule is php.upload.move_uploaded_file_tainted_dest in file_upload.yml."
+
+- id: php.path.include
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: lfi
+  severity: critical
+  cwe: [CWE-98]
+  match:
+    kind: call
+    callee:
+      name: include
+  description: "Disabled — canonical rule is php.eval.include_tainted in eval.yml. include/require always EXECUTE the included file, so code-injection is strictly stronger than LFI."
+
+- id: php.path.include_once
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: lfi
+  severity: critical
+  cwe: [CWE-98]
+  match:
+    kind: call
+    callee:
+      name: include_once
+  description: "Disabled — canonical rule is php.eval.include_once_tainted in eval.yml (code execution supersedes LFI)."
+
+- id: php.path.require
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: lfi
+  severity: critical
+  cwe: [CWE-98]
+  match:
+    kind: call
+    callee:
+      name: require
+  description: "Disabled — canonical rule is php.eval.require_tainted in eval.yml (code execution supersedes LFI)."
+
+- id: php.path.require_once
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: lfi
+  severity: critical
+  cwe: [CWE-98]
+  match:
+    kind: call
+    callee:
+      name: require_once
+  description: "Disabled — canonical rule is php.eval.require_once_tainted in eval.yml (code execution supersedes LFI)."

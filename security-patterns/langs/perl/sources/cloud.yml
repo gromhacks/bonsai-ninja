@@ -1,0 +1,32 @@
+# Perl cloud / serverless sources.
+# Keep explicit cloud scaffolding in its own file so the trust-boundary split
+# stays meaningful even when the precise runtime shape is too broad for v1.
+- id: perl.source.aws_lambda_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  packages: [AWS::Lambda]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "Disabled — AWS Lambda Perl runtime `event` param is too broad without a runtime-specific handler wrapper."
+
+- id: perl.source.gcf_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  trust: service
+  tag: cloud-event
+  payload_types: [event, json]
+  packages: [Google::Cloud::Functions]
+  match:
+    kind: param
+    target:
+      name: req
+  description: "Disabled — GCF/Functions-style `req` param collides with non-cloud HTTP handlers; enable only in cloud-only audits."

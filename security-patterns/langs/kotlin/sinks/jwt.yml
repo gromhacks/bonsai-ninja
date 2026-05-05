@@ -1,0 +1,204 @@
+- id: kotlin.jwt.jjwt_parser_unsigned
+  enabled: true
+  language: kotlin
+  tag: jwt
+  severity: high
+  packages:
+  - io.jsonwebtoken
+  cwe:
+  - CWE-347
+  - CWE-345
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jwts
+      - parser
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*
+      // uses io.jsonwebtoken
+      class App {
+        fun handle(input: String) {
+          Jwts.parser(input)
+        }
+      }
+  description: "jjwt Jwts.parser() without .setSigningKey() — unsigned decode. Merged aliases: kotlin.jwt.alg_confusion_jjwt."
+  aliases:
+  - kotlin.jwt.alg_confusion_jjwt
+- id: kotlin.jwt.jjwt_parser_builder
+  enabled: true
+  language: kotlin
+  tag: jwt
+  severity: high
+  packages:
+  - io.jsonwebtoken
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jwts
+      - parserBuilder
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*
+      class App {
+        fun handle(input: String) {
+          Jwts.parserBuilder(input)
+        }
+      }
+  description: jjwt Jwts.parserBuilder().
+- id: kotlin.jwt.jjwt_parse_claims_jws
+  enabled: true
+  language: kotlin
+  tag: jwt
+  severity: high
+  packages:
+  - io.jsonwebtoken
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JwtParser
+      - parseClaimsJws
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*
+      class App {
+        fun handle(input: String) {
+          JwtParser.parseClaimsJws(input)
+        }
+      }
+  description: jjwt JwtParser.parseClaimsJws.
+- id: kotlin.jwt.nimbus_signed_jwt_parse
+  enabled: true
+  language: kotlin
+  tag: jwt
+  severity: high
+  packages:
+  - com.nimbusds.jose
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SignedJWT
+      - parse
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.nimbusds.jose.*
+      // uses com.nimbusds.jose
+      class App {
+        fun handle(input: String) {
+          SignedJWT.parse(input)
+        }
+      }
+  description: "Nimbus SignedJWT.parse — flag if no subsequent verify()."
+  imports:
+  - com.nimbusds.jose
+- id: kotlin.jwt.nimbus_plainjwt_parse
+  enabled: true
+  language: kotlin
+  tag: jwt
+  severity: critical
+  packages:
+  - com.nimbusds.jose
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PlainJWT
+      - parse
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.nimbusds.jose.*
+      // uses com.nimbusds.jose
+      class App {
+        fun handle(input: String) {
+          PlainJWT.parse(input)
+        }
+      }
+  description: "Nimbus PlainJWT.parse — explicit unsigned token."
+  imports:
+  - com.nimbusds.jose
+- id: kotlin.jwt.auth0_jwt_decode
+  enabled: true
+  language: kotlin
+  tag: jwt
+  severity: high
+  packages:
+  - com.auth0.jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JWT
+      - decode
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.auth0.jwt.*
+      // uses com.auth0.jwt
+      class App {
+        fun handle(input: String) {
+          JWT.decode(input)
+        }
+      }
+  description: "auth0 JWT.decode — does NOT verify signature."
+- id: kotlin.jwt.auth0_jwt_require_alg_none
+  enabled: true
+  language: kotlin
+  tag: jwt
+  severity: critical
+  packages:
+  - com.auth0.jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Algorithm
+      - none
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.auth0.jwt.*
+      class App {
+        fun handle(input: String) {
+          Algorithm.none(input)
+        }
+      }
+  description: "auth0 Algorithm.none() — accepts unsigned tokens."
+- id: kotlin.jwt.spring_security_jwt_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: jwt
+  severity: medium
+  packages:
+  - org.springframework.security.jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JwtHelper
+      - decode
+  description: "Disabled — JwtHelper.decode is informational only."

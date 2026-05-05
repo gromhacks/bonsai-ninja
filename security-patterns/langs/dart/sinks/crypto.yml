@@ -1,0 +1,115 @@
+# Dart weak-crypto sinks.
+- id: dart.crypto.md5_convert
+  enabled: true
+  language: dart
+  tag: weak-crypto
+  severity: low
+  packages: [crypto]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [md5, convert]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart'; // crypto
+      void test() { var input = "x"; var amount = 1; md5.convert(input); }
+  description: "package:crypto md5.convert — collision-broken hash."
+
+  imports:
+  - crypto/crypto.dart
+- id: dart.crypto.sha1_convert
+  enabled: true
+  language: dart
+  tag: weak-crypto
+  severity: low
+  packages: [crypto]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [sha1, convert]
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart';
+      import 'package:crypto/crypto.dart'; // crypto
+      void test() { var input = "x"; var amount = 1; sha1.convert(input); }
+  description: "package:crypto sha1.convert — collision-weak."
+
+  imports:
+  - crypto/crypto.dart
+- id: dart.crypto.random_default
+  enabled: true
+  language: dart
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: new
+    callee:
+      name: Random
+  match_examples:
+  - name: declared shape
+    code: |
+      class Random { Random([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var input = "x"; var result = Random(input); }
+  description: "Random() default — non-crypto PRNG. Use Random.secure()."
+
+- id: dart.crypto.ecb_cipher
+  enabled: true
+  language: dart
+  tag: weak-crypto
+  severity: high
+  packages: [pointycastle, encrypt, cryptography]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: ECBCipher
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:pointycastle/pointycastle.dart';
+      import 'package:pointycastle/pointycastle.dart';
+      import 'package:pointycastle/pointycastle.dart';
+      import 'package:pointycastle/pointycastle.dart';
+      import 'package:pointycastle/pointycastle.dart'; // pointycastle
+      class ECBCipher { ECBCipher([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var input = "x"; var result = ECBCipher(input); }
+  description: "pointycastle ECBCipher — deterministic/leaks plaintext structure."
+
+  imports:
+  - pointycastle/pointycastle.dart
+- id: dart.crypto.aes_mode_ecb
+  enabled: true
+  language: dart
+  tag: weak-crypto
+  severity: high
+  packages: [encrypt]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      name: AES
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:encrypt/encrypt.dart';
+      import 'package:encrypt/encrypt.dart';
+      import 'package:encrypt/encrypt.dart';
+      import 'package:encrypt/encrypt.dart';
+      import 'package:encrypt/encrypt.dart'; // encrypt
+      class AES { AES([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var input = "x"; var result = AES(input, mode: "AESMode.ecb"); }
+  description: "encrypt package AES(mode: AESMode.ecb)."
+  imports:
+  - encrypt/encrypt.dart

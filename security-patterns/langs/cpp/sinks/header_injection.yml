@@ -1,0 +1,343 @@
+# C++ header / CRLF injection — HTTP response header values from tainted input.
+- id: cpp.header.cpphttplib_set_header
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [cpp-httplib]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, set_header]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <httplib.h>
+      #include <httplib.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        Response::set_header(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        Response::set_header("safe", "safe");
+      }
+    expect_no_match: true
+  description: "cpp-httplib Response::set_header(name, tainted) — CRLF in value splits response."
+
+  imports:
+  - httplib.h
+  - httplib
+- id: cpp.header.cpphttplib_set_header_name
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [cpp-httplib]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, set_header]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      #include <httplib.h>
+      void example(const char *input) {
+        Response::set_header(input);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        Response::set_header("safe");
+      }
+    expect_no_match: true
+  description: "Response::set_header(name, value) — tainted header names can corrupt response headers."
+
+  imports:
+  - httplib.h
+  - httplib
+- id: cpp.header.crowcpp_add_header
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [crow]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)add_header$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <crow.h> /* crow */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        response::add_header(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        crowcpp_add_header("safe", "safe");
+      }
+    expect_no_match: true
+  description: "crow response.add_header(name, tainted) — CRLF injection."
+
+- id: cpp.header.crowcpp_add_header_name
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [crow]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*(\.|::)add_header$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      #include <crow.h> /* crow */
+      void example(const char *input) {
+        response.add_header(input, "safe");
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        response.add_header("safe", "safe");
+      }
+    expect_no_match: true
+  description: "response.add_header(name, value) — tainted header names can corrupt response headers."
+
+- id: cpp.header.drogon_add_header
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [drogon]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpResponse, addHeader]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpResponse::addHeader(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        HttpResponse::addHeader("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpResponse::addHeader(name, tainted) — CRLF injection."
+
+- id: cpp.header.drogon_add_header_name
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [drogon]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpResponse, addHeader]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      #include <drogon/drogon.h>
+      void example(const char *input) {
+        HttpResponse::addHeader(input);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpResponse::addHeader("safe");
+      }
+    expect_no_match: true
+  description: "HttpResponse::addHeader(name, value) — tainted header names can corrupt response headers."
+
+- id: cpp.header.drogon_set_cookie
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [drogon]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpResponse, addCookie]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HttpResponse::addCookie(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HttpResponse::addCookie("safe");
+      }
+    expect_no_match: true
+  description: "Drogon HttpResponse::addCookie — flag tainted cookie value."
+
+- id: cpp.header.poco_response_set
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [Poco]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [HTTPResponse, set]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Poco/URI.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HTTPResponse::set(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        HTTPResponse::set("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Poco::Net::HTTPResponse::set(name, tainted) — CRLF injection."
+
+- id: cpp.header.poco_response_set_name
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [Poco]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [HTTPResponse, set]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      #include <Poco/Net/HTTPResponse.h>
+      void example(const char *input) {
+        HTTPResponse::set(input);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HTTPResponse::set("safe");
+      }
+    expect_no_match: true
+  description: "HTTPResponse::set(name, value) — tainted header names can corrupt response headers."
+
+- id: cpp.header.poco_response_add
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [Poco]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [HTTPResponse, add]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Poco/URI.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        HTTPResponse::add(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example() {
+        HTTPResponse::add("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Poco::Net::HTTPResponse::add(name, tainted) — CRLF injection."
+- id: cpp.header.poco_response_add_name
+  enabled: true
+  language: cpp
+  tag: header-injection
+  severity: high
+  packages: [Poco]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [HTTPResponse, add]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      #include <Poco/Net/HTTPResponse.h>
+      void example(const char *input) {
+        HTTPResponse::add(input);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        HTTPResponse::add("safe");
+      }
+    expect_no_match: true
+  description: "HTTPResponse::add(name, value) — tainted header names can corrupt response headers."

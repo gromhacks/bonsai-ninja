@@ -1,0 +1,65 @@
+---
+title: "Rule Testing"
+description: "Validate rule schema, match examples, collision audits, and integration fixtures."
+---
+
+# Rule Testing
+
+Rule testing has two layers: rulepack validation proves the YAML matches the schema and examples, while integration fixtures prove source-to-sink behavior against real adapter facts.
+
+<Steps>
+
+1. Add or update `match_examples` on every enabled rule.
+2. Run rulepack validation.
+3. Run match-example collision auditing.
+4. Add a fixture when propagation behavior changes.
+5. Run focused security tests before the full workspace suite.
+
+</Steps>
+
+## Match Examples
+
+Positive examples should contain the exact callee or target shape the rule claims. Negative examples should cover the closest safe form, usually a literal argument, disabled option, or wrong receiver.
+
+```yaml
+match_examples:
+  - name: tainted arg 0
+    code: |
+      void example(char *input) {
+        system(input);
+      }
+  - name: literal command negative
+    code: |
+      void example(void) {
+        system("echo safe");
+      }
+    expect_no_match: true
+```
+
+## Pack Validation
+
+```bash
+cargo build --release -p bonsai_cli
+python3 scripts/validate-pattern-pack.py \
+  --binary ./target/release/bonsai-ninja \
+  --json-out /tmp/pattern-pack-validator.json
+```
+
+## Integration Fixtures
+
+Use `examples/<lang>/micro` for small command-surface checks, `mega_flow` for construct coverage, and focused fixtures for sanitizer or lifecycle behavior.
+
+```bash
+./target/release/bonsai-ninja security examples/python/mega_flow taint-analysis \
+  --rules-dir security-patterns \
+  --format json \
+  --all
+```
+
+## Cargo Tests
+
+```bash
+cargo test -q -p bonsai_cli --test security_commands
+cargo test -q -p bonsai_cli --test validate_script
+cargo test --workspace
+```

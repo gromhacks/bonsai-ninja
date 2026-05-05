@@ -1,0 +1,177 @@
+- id: go.log_injection.log_println_concat
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - log
+      - Println
+  match_examples:
+  - name: generated direct match
+    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Println(name + value)\n}\n"
+  description: "log.Println(... + tainted) / log.Println(fmt.Sprintf(...)) — CRLF in attacker text forges log entries."
+- id: go.log_injection.log_print_concat
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: low
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - log
+      - Print
+  match_examples:
+  - name: generated direct match
+    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Print(name + value)\n}\n"
+  description: "log.Print — log-injection via concat / Sprintf."
+- id: go.log_injection.log_fatal_concat
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - log
+      - Fatal
+  match_examples:
+  - name: generated direct match
+    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Fatal(name + value)\n}\n"
+  description: "log.Fatal — log-injection via concat / Sprintf."
+- id: go.log_injection.log_panic_concat
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - log
+      - Panic
+  match_examples:
+  - name: generated direct match
+    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Panic(name + value)\n}\n"
+  description: "log.Panic — log-injection via concat / Sprintf."
+- id: go.log_injection.logger_info_concat
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - Info
+  match_examples:
+  - name: generated direct match
+    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Info(name + value)\n}\n"
+  description: "logger.Info(... + tainted) — log-injection via concat (logrus/zap/slog)."
+- id: go.log_injection.slog_info_concat
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  packages:
+  - log/slog
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - slog
+      - Info
+  match_examples:
+  - name: slog info concat
+    code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Info(\"login user=\" + user)\n}\n"
+    expect_match_text:
+    - slog.Info
+  description: "slog.Info(... + tainted) — concatenated attacker text in structured log messages can forge log entries. Merged aliases: go.log_injection.slog_info_message, go.log_injection.slog_info_constant_message_arg."
+  aliases:
+  - go.log_injection.slog_info_message
+  - go.log_injection.slog_info_constant_message_arg
+- id: go.log_injection.slog_level_message
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  packages:
+  - log/slog
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      regex: ^slog\.(Debug|Warn|Error)$
+  match_examples:
+  - name: slog warn tainted message
+    code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Warn(user)\n}\n"
+    expect_match_text:
+    - slog.Warn
+  - name: slog error tainted message
+    code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Error(user)\n}\n"
+    expect_match_text:
+    - slog.Error
+  description: slog Debug/Warn/Error with attacker-controlled message text can inject line breaks or forged structured-log records.
+- id: go.log_injection.zerolog_msg
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  packages:
+  - github.com/rs/zerolog
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      regex: \.Msg$
+  match_examples:
+  - name: zerolog tainted message
+    code: |
+      import "github.com/rs/zerolog"
+      package main
+      func audit(event Event, user string) {
+        event.Msg(user)
+      }
+      type Event struct{}
+      func (e Event) Msg(msg string) {}
+    expect_match_text:
+    - event.Msg
+  description: "zerolog Event.Msg(taintedMessage) — attacker-controlled log message text can forge log output. Merged aliases: go.log_injection.zerolog_msg_concat."
+  aliases:
+  - go.log_injection.zerolog_msg_concat
+- id: go.log_injection.logger_error_concat
+  enabled: true
+  language: go
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - logger
+      - Error
+  match_examples:
+  - name: generated direct match
+    code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Error(name + value)\n}\n"
+  description: "logger.Error(... + tainted) — log-injection via concat."

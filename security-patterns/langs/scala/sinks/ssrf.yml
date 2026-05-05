@@ -1,0 +1,500 @@
+- id: scala.ssrf.url_openconnection
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - java.net
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - URL
+      - openConnection
+  match_examples:
+  - name: url open connection
+    code: "import java.net._\nobject App {\n  def handle(input: String): Unit = {\n\
+      \    URL.openConnection(input)\n  }\n}\n"
+  description: "Disabled — URL.openConnection() dispatches receiver URL state; URL/URI constructors carry the tainted argument."
+- id: scala.ssrf.apache_httpget_ctor
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - org.apache.httpcomponents
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: HttpGet
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: apache httpget url
+    code: "import org.apache.httpcomponents._\nobject App {\n  def handle(url: String):\
+      \ Any = {\n    new HttpGet(url)\n  }\n}\nclass HttpGet(args: Any*)\n"
+    expect_match_text:
+    - HttpGet
+  - name: arg tainted literal negative
+    code: "import org.apache.httpcomponents._\nobject App {\n  def handle(url: String):\
+      \ Any = {\n    new HttpGet(\"https://example.test/\")\n  }\n}\nclass HttpGet(args:\
+      \ Any*)\n"
+    expect_no_match: true
+  description: "Apache HttpClient HttpGet(url) \u2014 request target controlled by\
+    \ attacker input."
+- id: scala.ssrf.apache_httpclient_execute
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - org.apache.httpcomponents
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - execute
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: apache httpclient execute
+    code: "import org.apache.httpcomponents._\n// uses org.apache.httpcomponents\n\
+      object App {\n  def handle(request: HttpGet): Unit = {\n    HttpClient.execute(request)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.apache.httpcomponents._\n// uses org.apache.httpcomponents\n\
+      object App {\n  def handle(request: HttpGet): Unit = {\n    HttpClient.execute(\"\
+      safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Apache HttpClient.execute(HttpGet) \u2014 dispatches a request whose\
+    \ target may be attacker-controlled."
+- id: scala.ssrf.resttemplate_exchange
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestTemplate
+      - exchange
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: resttemplate exchange
+    code: "import org.springframework.web.client._\n// uses org.springframework.web.client\n\
+      object App {\n  def handle(url: String): Unit = {\n    RestTemplate.exchange(url)\n\
+      \  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.web.client._\n// uses org.springframework.web.client\n\
+      object App {\n  def handle(url: String): Unit = {\n    RestTemplate.exchange(\"\
+      https://example.test/\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Spring RestTemplate.exchange(url, ...) \u2014 server-side request\
+    \ to attacker-controlled URL."
+- id: scala.ssrf.webclient_uri
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - uri
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: webclient uri
+    code: "import org.springframework.web.reactive.function.client._\nobject App {\n\
+      \  def handle(url: String): Unit = {\n    WebClient.uri(url)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import org.springframework.web.reactive.function.client._\nobject App {\n\
+      \  def handle(url: String): Unit = {\n    WebClient.uri(\"https://example.test/\"\
+      )\n  }\n}\n"
+    expect_no_match: true
+  description: "Spring WebClient.uri(url) \u2014 reactive server-side request target\
+    \ controlled by attacker input."
+- id: scala.ssrf.webclient_retrieve
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - org.springframework.web.reactive.function.client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: retrieve
+  match_examples:
+  - name: webclient retrieve request
+    code: "import org.springframework.web.reactive.function.client._\nobject App {\n\
+      \  def handle(requestSpec: RequestSpec): Any = {\n    requestSpec.retrieve()\n\
+      \  }\n}\nclass RequestSpec {\n  def retrieve(args: Any*): Any = null\n}\n"
+    expect_match_text:
+    - requestSpec.retrieve
+  description: "Disabled — WebClient retrieve() dispatches URI held in receiver state; WebClient.uri(tainted) carries the tainted argument."
+- id: scala.ssrf.akka_http_single_request
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  frameworks:
+  - akka-http
+  packages:
+  - com.typesafe.akka
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Http
+      - singleRequest
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import com.typesafe.akka._\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    Http.singleRequest(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import com.typesafe.akka._\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    Http.singleRequest(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: akka-http Http().singleRequest(HttpRequest(uri=tainted)).
+- id: scala.ssrf.akka_http_request_get
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  frameworks:
+  - akka-http
+  packages:
+  - com.typesafe.akka
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpRequest
+      - apply
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import com.typesafe.akka._\n// uses com.typesafe.akka\nobject App {\n \
+      \ def handle(input: String): Unit = {\n    HttpRequest.apply(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import com.typesafe.akka._\n// uses com.typesafe.akka\nobject App {\n \
+      \ def handle(input: String): Unit = {\n    HttpRequest.apply(\"safe\")\n  }\n\
+      }\n"
+    expect_no_match: true
+  description: "HttpRequest(uri = tainted) \u2014 constructs SSRF request; chain to\
+    \ singleRequest."
+- id: scala.ssrf.sttp_send
+  enabled: false
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - sttp
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - basicRequest
+      - send
+  match_examples:
+  - name: generated shape example
+    code: "import sttp._\nobject App {\n  def handle(input: String): Unit = {\n  \
+      \  basicRequest.send(input)\n  }\n}\n"
+  description: "sttp basicRequest.get(uri).send() \u2014 fires HTTP request to attacker\
+    \ URL."
+  disabled_reason:
+    code: over-broad
+- id: scala.ssrf.sttp_quickrequest
+  enabled: false
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - sttp
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - quickRequest
+      - send
+  match_examples:
+  - name: generated shape example
+    code: "import sttp._\nobject App {\n  def handle(input: String): Unit = {\n  \
+      \  quickRequest.send(input)\n  }\n}\n"
+  description: "sttp quickRequest.get(uri).send() \u2014 dispatches GET to tainted\
+    \ URI; SSRF to internal services."
+  disabled_reason:
+    code: over-broad
+- id: scala.ssrf.play_ws_url
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  frameworks:
+  - play
+  packages:
+  - play.api.libs.ws
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WSClient
+      - url
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import play.api.libs.ws._\nobject App {\n  def handle(input: String): Unit = {\n\
+      \    WSClient.url(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import play.api.libs.ws._\nobject App {\n  def handle(input: String): Unit = {\n\
+      \    WSClient.url(\"https://example.test/\")\n  }\n}\n"
+    expect_no_match: true
+  description: "Play WSClient.url(tainted) \u2014 builds WSRequest; downstream .get/.post\
+    \ fire."
+  imports:
+  - play.api.libs.ws
+- id: scala.ssrf.http4s_client_expect
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - http4s
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - expect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import http4s._\n// uses http4s\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    Client.expect(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import http4s._\n// uses http4s\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    Client.expect(\"https://example.test/\")\n  }\n}\n"
+    expect_no_match: true
+  description: "http4s Client.expect[T](uri) \u2014 fires HTTP request to tainted\
+    \ URI; SSRF (CWE-918)."
+- id: scala.ssrf.http4s_client_run
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - http4s
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - run
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import http4s._\nobject App {\n  def handle(input: String): Unit = {\n\
+      \    Client.run(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import http4s._\nobject App {\n  def handle(input: String): Unit = {\n\
+      \    Client.run(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "http4s Client.run(Request(uri)) \u2014 dispatches tainted request\
+    \ URI; classic SSRF vector."
+- id: scala.ssrf.http4s_client_fetch
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - http4s
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - fetch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "import http4s._\n// uses http4s\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    Client.fetch(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "import http4s._\n// uses http4s\nobject App {\n  def handle(input: String):\
+      \ Unit = {\n    Client.fetch(\"safe\")\n  }\n}\n"
+    expect_no_match: true
+  description: "http4s Client.fetch(req)(handler) \u2014 executes tainted request;\
+    \ SSRF if req URI is user-controlled."
+- id: scala.ssrf.source_from_url
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - scala
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Source
+      - fromURL
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: scala source from url
+    code: "// uses: scala-stdlib\nimport scala.io.Source\nobject App {\n  def fetch(url:\
+      \ String): Unit = {\n    Source.fromURL(url)\n  }\n}\n"
+    expect_match_text:
+    - Source.fromURL
+  - name: arg tainted literal negative
+    code: "// uses: scala-stdlib\nimport scala.io.Source\nobject App {\n  def fetch(url:\
+      \ String): Unit = {\n    Source.fromURL(\"https://example.test/\")\n  }\n}\n"
+    expect_no_match: true
+  description: "scala.io.Source.fromURL(tainted) \u2014 server-side fetch of attacker-controlled\
+    \ URL."
+  imports:
+  - scala.io.Source
+  - scala
+- id: scala.ssrf.source_from_uri
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - scala
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Source
+      - fromURI
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: scala source from uri
+    code: "// uses: scala-stdlib\nimport scala.io.Source\nobject App {\n  def fetch(uri:\
+      \ java.net.URI): Unit = {\n    Source.fromURI(uri)\n  }\n}\n"
+    expect_match_text:
+    - Source.fromURI
+  - name: arg tainted literal negative
+    code: "// uses: scala-stdlib\nimport scala.io.Source\nobject App {\n  def fetch(uri:\
+      \ java.net.URI): Unit = {\n    Source.fromURI(\"https://example.test/\")\n \
+      \ }\n}\n"
+    expect_no_match: true
+  description: "scala.io.Source.fromURI(tainted) \u2014 server-side fetch of attacker-controlled\
+    \ URI."
+  imports:
+  - scala.io.Source
+  - scala
+- id: scala.ssrf.scalaj_http
+  enabled: true
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - scalaj.http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: Http
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: scalaj http url
+    code: "// uses: scalaj-http\nimport scalaj.http.Http\nobject App {\n  def fetch(url:\
+      \ String): Unit = {\n    Http(url)\n  }\n}\n"
+    expect_match_text:
+    - Http
+  - name: arg tainted literal negative
+    code: "// uses: scalaj-http\nimport scalaj.http.Http\nobject App {\n  def fetch(url:\
+      \ String): Unit = {\n    Http(\"https://example.test/\")\n  }\n}\n"
+    expect_no_match: true
+  description: "scalaj-http Http(tainted URL) \u2014 constructs an outbound HTTP request\
+    \ target controlled by attacker input."
+  imports:
+  - scalaj
+  - scalaj.http.Http
+- id: scala.ssrf.dispatch_url
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: scala
+  tag: ssrf
+  severity: high
+  packages:
+  - dispatch
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: url
+  description: "Disabled \u2014 dispatch `url(tainted)` too ambiguous (ubiquitous\
+    \ `url` name); rely on HTTP singleRequest/expect."

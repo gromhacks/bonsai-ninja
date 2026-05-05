@@ -1,0 +1,51 @@
+# go CORS misconfiguration sinks (T403).
+- id: go.cors.gin_cors_default
+  enabled: true
+  language: go
+  tag: cors
+  severity: medium
+  packages: [github.com/gin-contrib/cors]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [cors, Default]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/gin-contrib/cors"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        cors.Default(target)
+      }
+  description: |-
+    gin-contrib/cors cors.Default() — allows all origins.
+- id: go.cors.gorilla_handlers_allow_origin_wildcard
+  enabled: true
+  language: go
+  tag: cors
+  severity: medium
+  packages: [github.com/gorilla/handlers]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [handlers, AllowedOrigins]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/gorilla/handlers"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        handlers.AllowedOrigins("*")
+      }
+  description: |-
+    gorilla/handlers.AllowedOrigins([]string{'*'}) — wildcard.

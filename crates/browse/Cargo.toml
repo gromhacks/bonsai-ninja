@@ -1,0 +1,30 @@
+[package]
+name = "bonsai_browse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Browse + dump command data layer — the SDK powering `bonsai-ninja defs/calls/imports/...` and `dump-*`."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_hash = { workspace = true }
+bonsai_callgraph = { workspace = true }
+bonsai_cfg = { workspace = true }
+bonsai_index = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_resolve = { workspace = true }
+bonsai_taint = { workspace = true }
+bonsai_workspace = { workspace = true }
+bonsai_inspect = { workspace = true }
+ahash = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+tree-sitter = { workspace = true }
+rayon = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,125 @@
+# Lua XXE sinks (LuaExpat / LuaXML / xml2lua).
+- id: lua.xxe.lxp_new
+  enabled: true
+  language: lua
+  tag: xxe
+  severity: high
+  packages: [LuaExpat]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [lxp, new]
+  match_examples:
+  - name: lua.xxe.lxp_new example
+    code: |
+      local _luaexpat = require("LuaExpat")
+      function example(input, url, id, payload, request, params, user)
+        lxp.new(input)
+      end
+  description: "LuaExpat lxp.new(callbacks) — parser created with entity-expansion callbacks resolves external entities."
+
+- id: lua.xxe.lxp_parse
+  enabled: true
+  language: lua
+  tag: xxe
+  severity: high
+  packages: [LuaExpat]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [parser, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.xxe.lxp_parse example
+    code: |
+      local _luaexpat = require("LuaExpat")
+      function example(input, url, id, payload, request, params, user)
+        parser.parse(input)
+      end
+  - name: literal xml negative
+    code: |
+      local _luaexpat = require("LuaExpat")
+      function example(input, url, id, payload, request, params, user)
+        parser.parse("<root/>")
+      end
+    expect_no_match: true
+  description: "LuaExpat parser:parse(xml) — parses tainted XML; external entities expanded by default."
+
+- id: lua.xxe.luaxml_eval
+  enabled: true
+  language: lua
+  tag: xxe
+  severity: high
+  packages: [LuaXML]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [xml, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.xxe.luaxml_eval example
+    code: |
+      local _luaxml = require("LuaXML")
+      function example(input, url, id, payload, request, params, user)
+        xml.eval(input)
+      end
+  - name: literal xml negative
+    code: |
+      local _luaxml = require("LuaXML")
+      function example(input, url, id, payload, request, params, user)
+        xml.eval("<root/>")
+      end
+    expect_no_match: true
+  description: "LuaXML xml.eval — parses tainted XML; external_entities default resolves DOCTYPE DTDs."
+
+- id: lua.xxe.xml2lua_parse
+  enabled: true
+  language: lua
+  tag: xxe
+  severity: high
+  packages: [xml2lua]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [xml2lua, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.xxe.xml2lua_parse example
+    code: |
+      local _u = require("xml2lua")
+      function example(input, url, id, payload, request, params, user)
+        xml2lua.parse(input)
+      end
+  - name: literal xml negative
+    code: |
+      local _u = require("xml2lua")
+      function example(input, url, id, payload, request, params, user)
+        xml2lua.parse("<root/>")
+      end
+    expect_no_match: true
+  description: "xml2lua.parse — resolves entities referenced by tainted XML."
+
+- id: lua.xxe.xml2lua_parser
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: xxe
+  severity: high
+  packages: [xml2lua]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [parser, parse]
+  description: "Disabled duplicate — parser:parse is indistinguishable from LuaExpat parser:parse in v1 matching; xml2lua.parse remains enabled."

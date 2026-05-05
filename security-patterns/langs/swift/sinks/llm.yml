@@ -1,0 +1,82 @@
+# Swift LLM sinks (OpenAI / Anthropic / Bedrock client wrappers).
+- id: swift.llm.openai_chats_create
+  enabled: true
+  language: swift
+  tag: web-llm
+  severity: medium
+  packages: [OpenAI]
+  imports: [OpenAI]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chats\.create$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swift openai chats create
+    code: |
+      import OpenAI
+      func test(input: String) { client.chats.create(input) }
+    expect_match_text: [client.chats.create]
+  - name: literal openai chat negative
+    code: |
+      import OpenAI
+      func test() { client.chats.create("Summarize the release notes") }
+    expect_no_match: true
+  description: "OpenAI Swift client.chats.create — tainted prompt content reaches an LLM instruction / tool surface."
+
+- id: swift.llm.anthropic_messages_create
+  enabled: true
+  language: swift
+  tag: web-llm
+  severity: medium
+  packages: [Anthropic]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.messages\.create$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swift anthropic messages create
+    code: |
+      import Anthropic // Anthropic
+      func test(input: String) { anthropic.messages.create(input) }
+    expect_match_text: [anthropic.messages.create]
+  - name: literal anthropic messages negative
+    code: |
+      import Anthropic // Anthropic
+      func test() { anthropic.messages.create("Summarize the release notes") }
+    expect_no_match: true
+  description: "Anthropic Swift wrapper messages.create — tainted prompt content reaches Claude."
+
+- id: swift.llm.bedrock_invoke_model
+  enabled: true
+  language: swift
+  tag: web-llm
+  severity: medium
+  packages: [AWSSDKSwift]
+  cwe: [CWE-20, CWE-94, CWE-200]
+  match:
+    kind: call
+    callee:
+      name: invokeModel
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swift bedrock invoke model
+    code: |
+      import AWSSDKSwift // AWSSDKSwift
+      func test(input: String) { invokeModel(input) }
+    expect_match_text: [invokeModel]
+  - name: literal bedrock invoke model negative
+    code: |
+      import AWSSDKSwift // AWSSDKSwift
+      func test() { invokeModel("Summarize the release notes") }
+    expect_no_match: true
+  description: "AWS Bedrock invokeModel — tainted request body steers the underlying foundation model."

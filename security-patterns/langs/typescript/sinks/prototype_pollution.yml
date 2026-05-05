@@ -1,0 +1,227 @@
+# typescript prototype_pollution sinks.
+
+# Prototype-pollution sinks. Object-merge / set-by-path APIs
+# that honor `__proto__` / `constructor` / `prototype` keys.
+- id: typescript.proto_pollution.object_assign_request_body
+  enabled: true
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [Object, assign]
+  match_examples:
+  - name: object assign request body
+    code: |
+      function apply(req: any, target: any) {
+        return Object.assign(target, req.body);
+      }
+    expect_match_text: [Object.assign]
+  - name: object assign prototype key object
+    code: |
+      function apply(target: any, value: string) {
+        return Object.assign(target, { "__proto__": value });
+      }
+    expect_match_text: [Object.assign]
+  description: "Object.assign(target, source) — shallow merge can still pollute when a tainted source object carries special keys. TODO(only_when_packaged): JS Object global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Object', 'assign']` match only."
+
+- id: typescript.proto_pollution.lodash_merge
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.proto_pollution.lodash_namespace_merge_variants
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [_, merge]
+  description: "Disabled — `_.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$` already includes the `_.merge` shape."
+- id: typescript.proto_pollution.lodash_set
+  enabled: true
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [_, set]
+  match_examples:
+  - name: lodash set
+    code: |
+      const _u = require("lodash");
+      function demo(_: any, input: object, value: unknown) {
+        return _.set(input, "__proto__.polluted", value);
+      }
+    expect_match_text: [_.set]
+  - name: lodash set proto dot path
+    code: |
+      const _u = require("lodash");
+      function apply(_: any, target: object, value: unknown) {
+        return _.set(target, "__proto__.polluted", value);
+      }
+    expect_match_text: [_.set]
+  - name: lodash set constructor prototype dot path
+    code: |
+      const _u = require("lodash");
+      function apply(_: any, target: object, value: unknown) {
+        return _.set(target, "constructor.prototype.admin", value);
+      }
+    expect_match_text: [_.set]
+  description: "_.set(obj, attacker_path, value) — path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
+
+- id: typescript.proto_pollution.lodash_setwith
+  enabled: true
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [_, setWith]
+  match_examples:
+  - name: lodash setwith
+    code: |
+      const _u = require("lodash");
+      function demo(_: any, target: object, path: string, value: unknown) {
+        return _.setWith(target, path, value);
+      }
+    expect_match_text: [_.setWith]
+  description: "_.setWith(obj, attacker_path, value) — customizer variant of lodash path-based prototype pollution."
+
+# Hand-rolled recursive merge `target[key] = source[key]` — the
+# canonical homemade prototype-pollution vector. The engine
+# surfaces the index-write site; constraint requires the rhs to be
+# a same-key index read (`[key]` on both sides). Tainted source
+# object pollutes Object.prototype when the source has __proto__.
+- id: typescript.proto_pollution.recursive_merge
+  enabled: true
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  cwe: [CWE-1321]
+  match:
+    kind: write
+    target:
+      regex: "(\\[|\\.key$)"
+  match_examples:
+  - name: recursive merge
+    code: |
+      function merge(target: any, source: any) {
+        for (const key in source) {
+          target[key] = source[key];
+        }
+      }
+    expect_match_text: [target.key]
+  - name: recursive deep walk merge write
+    code: |
+      function walk(dst: any, src: any) {
+        Object.keys(src).forEach((key) => {
+          if (src[key] && typeof src[key] === "object") walk(dst[key] ||= {}, src[key]);
+          else dst[key] = src[key];
+        });
+      }
+    expect_match_text: [dst.key]
+  description: "Recursive merge `target[key] = source[key]` — homemade deep-merge vector. Without `__proto__` / `constructor` / `prototype` filtering, attacker-controlled source object pollutes Object.prototype."
+
+- id: typescript.proto_pollution.recursive_deep_merge
+  enabled: true
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  packages: [recursive-deep-merge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      name: recursiveDeepMerge
+  match_examples:
+  - name: recursive deep merge exported function
+    code: |
+      import recursiveDeepMerge from "recursive-deep-merge";
+      function applyConfig(input: object) {
+        return recursiveDeepMerge({}, input);
+      }
+    expect_match_text: [recursiveDeepMerge]
+  description: "recursive-deep-merge(target, attacker_obj) — recursive merge APIs can honor __proto__/constructor.prototype keys and pollute Object.prototype."
+
+- id: typescript.proto_pollution.recursive_deep_merge_method
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.proto_pollution.lodash_namespace_merge_variants
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  packages: [recursive-deep-merge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [recursiveDeepMerge, merge]
+  description: "Disabled — `recursiveDeepMerge.merge` is covered by `typescript.proto_pollution.lodash_namespace_merge_variants` whose receiver-agnostic regex matches any `<ident>.merge`."
+
+- id: typescript.proto_pollution.deepmerge_package
+  enabled: true
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  packages: [deepmerge, deep-extend, merge-deep]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      regex: "^(deepmerge|mergeDeep|deepExtend)$"
+  match_examples:
+  - name: deepmerge function
+    code: |
+      import deepmerge from "deepmerge";
+      function applyConfig(input: object) {
+        return deepmerge({}, input);
+      }
+    expect_match_text: [deepmerge]
+  - name: mergeDeep function
+    code: |
+      import mergeDeep from "merge-deep";
+      function applyConfig(input: object) {
+        return mergeDeep({}, input);
+      }
+    expect_match_text: [mergeDeep]
+  description: "Deep recursive merge package calls — audit tainted objects for __proto__/constructor/prototype keys before merging."
+
+- id: typescript.proto_pollution.lodash_namespace_merge_variants
+  enabled: true
+  language: typescript
+  tag: prototype-pollution
+  severity: high
+  packages: [lodash, lodash.merge]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$"
+  match_examples:
+  - name: lodash namespace merge
+    code: |
+      const _u = require("lodash");
+      function applyConfig(lodash: any, input: object) {
+        return lodash.merge({}, input);
+      }
+    expect_match_text: [lodash.merge]
+  - name: lodash.merge package default function
+    code: |
+      import merge from "lodash.merge";
+      function applyConfig(input: object) {
+        return merge({}, input);
+      }
+    expect_match_text: [merge]
+  description: "lodash merge/defaultsDeep variants and lodash.merge package default export — recursive merge prototype-pollution sinks."

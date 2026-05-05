@@ -1,0 +1,386 @@
+# Elixir command injection. Covers Elixir stdlib (System.cmd/shell,
+# Port.open :spawn), Erlang stdlib (:os.cmd, :erlang.open_port) and
+# common process wrappers (MuonTrap, Exexec, Porcelain, Rambo).
+- id: elixir.cmdi.system_cmd
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [System, cmd]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          System.cmd(input)
+        end
+      end
+  - name: literal system cmd negative
+    code: |
+      defmodule App do
+        def test(input) do
+          System.cmd("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "System.cmd(tainted_cmd, args) — attacker-controlled executable paths can spawn unintended programs. Shell-command strings passed through `sh -c` are covered by elixir.cmdi.system_cmd_shell_args."
+
+- id: elixir.cmdi.system_cmd_shell_args
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [System, cmd]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^"(/bin/)?(sh|bash)"$'
+  - arg_matches_regex:
+      index: 1
+      regex: '"-c"'
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted shell command argument
+    code: |
+      defmodule App do
+        def test(input) do
+          System.cmd("sh", ["-c", input])
+        end
+      end
+  - name: literal shell command argument negative
+    code: |
+      defmodule App do
+        def test() do
+          System.cmd("sh", ["-c", "whoami"])
+        end
+      end
+    expect_no_match: true
+  - name: argv command argument negative
+    code: |
+      defmodule App do
+        def test(input) do
+          System.cmd("echo", [input])
+        end
+      end
+    expect_no_match: true
+  description: "System.cmd(\"sh\", [\"-c\", tainted]) — shell-command string is interpreted by /bin/sh."
+
+- id: elixir.cmdi.system_shell
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  modules: [System]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [System, shell]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias System
+      defmodule App do
+        def test(input) do
+          System.shell(input)
+        end
+      end
+  - name: literal system shell negative
+    code: |
+      alias System
+      defmodule App do
+        def test(input) do
+          System.shell("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "System.shell/2 — entire argument is interpreted by /bin/sh -c; no argv splitting, no escaping."
+
+- id: elixir.cmdi.os_cmd
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^:os\\.cmd$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :os.cmd(input)
+        end
+      end
+  - name: literal os cmd negative
+    code: |
+      defmodule App do
+        def test() do
+          :os.cmd("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :os.cmd/1 — runs the binary string through /bin/sh without any escaping; classic shell metacharacter injection."
+
+- id: elixir.cmdi.port_open_spawn
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Port, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Port.open({:spawn, input})
+        end
+      end
+  - name: literal port spawn negative
+    code: |
+      defmodule App do
+        def test(input) do
+          Port.open({:spawn, "whoami"})
+        end
+      end
+    expect_no_match: true
+  description: "Port.open({:spawn, cmd}, _) — :spawn mode runs the command via /bin/sh. Prefer {:spawn_executable, path} with explicit args."
+
+- id: elixir.cmdi.erlang_open_port
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^:erlang\\.open_port$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.open_port({:spawn, input})
+        end
+      end
+  - name: literal erlang open port negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :erlang.open_port({:spawn, "whoami"})
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :erlang.open_port({:spawn, cmd}, _) — same shell-interpreted spawn as Port.open; tainted cmd runs attacker binary."
+
+- id: elixir.cmdi.exexec_run
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  packages: [exexec]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Exexec, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Exexec
+      defmodule App do
+        def test(input) do
+          Exexec.run(input)
+        end
+      end
+  - name: literal exexec run negative
+    code: |
+      alias Exexec
+      defmodule App do
+        def test(input) do
+          Exexec.run("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "Exexec.run/2 — wraps erlexec; tainted cmd string is handed to a shell invocation."
+
+  imports:
+  - Exexec
+- id: elixir.cmdi.muontrap_cmd
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  packages: [muontrap]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [MuonTrap, cmd]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Muontrap
+      defmodule App do
+        def test(input) do
+          MuonTrap.cmd(input)
+        end
+      end
+  - name: literal muontrap cmd negative
+    code: |
+      alias Muontrap
+      defmodule App do
+        def test(input) do
+          MuonTrap.cmd("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "MuonTrap.cmd/3 — runs external process; tainted cmd string executes attacker binary (MuonTrap adds supervision, not argument escaping)."
+
+  imports:
+  - Muontrap
+- id: elixir.cmdi.porcelain_exec
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  packages: [porcelain]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Porcelain, exec]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Porcelain
+      defmodule App do
+        def test(input) do
+          Porcelain.exec(input)
+        end
+      end
+  - name: literal porcelain exec negative
+    code: |
+      alias Porcelain
+      defmodule App do
+        def test(input) do
+          Porcelain.exec("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "Porcelain.exec/3 — tainted cmd executes attacker binary; `shell/2` variant runs via /bin/sh."
+
+  imports:
+  - Porcelain
+- id: elixir.cmdi.porcelain_shell
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  packages: [porcelain]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Porcelain, shell]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Porcelain
+      # uses porcelain
+      defmodule App do
+        def test(input) do
+          Porcelain.shell(input)
+        end
+      end
+  - name: literal porcelain shell negative
+    code: |
+      alias Porcelain
+      defmodule App do
+        def test(input) do
+          Porcelain.shell("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "Porcelain.shell/2 — runs argument through /bin/sh -c; classic shell injection if the string is tainted."
+
+  imports:
+  - Porcelain
+- id: elixir.cmdi.rambo_run
+  enabled: true
+  language: elixir
+  tag: command-injection
+  severity: critical
+  packages: [rambo]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [Rambo, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Rambo
+      defmodule App do
+        def test(input) do
+          Rambo.run(input)
+        end
+      end
+  - name: literal rambo run negative
+    code: |
+      alias Rambo
+      defmodule App do
+        def test(input) do
+          Rambo.run("whoami")
+        end
+      end
+    expect_no_match: true
+  description: "Rambo.run/2 — Elixir external-process wrapper; tainted cmd list element executes attacker binary."
+  imports:
+  - Rambo

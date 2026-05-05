@@ -1,0 +1,70 @@
+# PHP queue/messaging sources. Laravel queue jobs, Beanstalkd, SQS consumers.
+- id: php.source.laravel_job_handle
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: queue-message
+  trust: service
+  packages: [illuminate/queue]
+  match:
+    kind: call
+    callee:
+      name: handle
+  description: "Disabled — too broad (handle is ubiquitous); enable with ShouldQueue class constraint."
+
+- id: php.source.pheanstalk_reserve
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: php
+  tag: queue-message
+  trust: service
+  packages: [pda/pheanstalk]
+  match:
+    kind: call
+    callee:
+      attribute: [Pheanstalk, reserve]
+  description: "Disabled — adapters index local receivers like `$pheanstalk->reserve()`, and bare `reserve` is too broad to tail-match safely."
+
+- id: php.source.pheanstalk_watch
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: queue-message
+  trust: service
+  packages: [pda/pheanstalk]
+  match:
+    kind: call
+    callee:
+      attribute: [Pheanstalk, watch]
+  description: "Disabled — watch selects a tube; reserve is the source."
+
+- id: php.source.amqp_envelope_get_body
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: php
+  tag: queue-message
+  trust: service
+  packages: [php-amqplib/php-amqplib]
+  match:
+    kind: call
+    callee:
+      attribute: [AMQPEnvelope, getBody]
+  description: "Disabled — adapters index local receivers like `$message->getBody()`, and bare `getBody` is too broad to tail-match safely."
+
+- id: php.source.sqs_message_body
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: php
+  tag: queue-message
+  trust: service
+  packages: [aws/aws-sdk-php]
+  match:
+    kind: call
+    callee:
+      attribute: [Message, getBody]
+  description: "Disabled — adapters index local receivers like `$message->getBody()`, and bare `getBody` is too broad to tail-match safely."

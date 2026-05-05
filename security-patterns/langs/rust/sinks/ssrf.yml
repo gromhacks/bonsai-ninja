@@ -1,0 +1,289 @@
+- id: rust.ssrf.reqwest_get
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [reqwest]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [reqwest, get]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted reqwest get url
+    code: |
+      use reqwest::dummy;
+      fn example(target: &str) {
+          reqwest::get(target);
+      }
+  - name: literal reqwest get url negative
+    code: |
+      use reqwest::dummy;
+      fn example() {
+          reqwest::get("https://example.com/status");
+      }
+    expect_no_match: true
+  description: "reqwest::get(url) — top-level fetch; tainted URL reaches internal network or attacker-chosen host."
+- id: rust.ssrf.reqwest_client_get
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [reqwest, hyper]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^Client::get$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted client get url
+    code: |
+      use reqwest::dummy;
+      fn example(target: &str) {
+          Client::get(target);
+      }
+  - name: literal client get url negative
+    code: |
+      use reqwest::dummy;
+      fn example() {
+          Client::get("https://example.com/status");
+      }
+    expect_no_match: true
+  description: "Client::get(url) — covers reqwest and hyper (same `[Client, get]` attribute chain). Tainted URL = SSRF."
+- id: rust.ssrf.reqwest_client_post
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [reqwest]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [Client, post]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted client post url
+    code: |
+      use reqwest::dummy;
+      fn example(target: &str) {
+          Client::post(target);
+      }
+  - name: literal client post url negative
+    code: |
+      use reqwest::dummy;
+      fn example() {
+          Client::post("https://example.com/submit");
+      }
+    expect_no_match: true
+  description: "reqwest::Client::post(url) — tainted URL = SSRF."
+- id: rust.ssrf.reqwest_client_request
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [reqwest, hyper]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [Client, request]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted client request url
+    code: |
+      use reqwest::dummy;
+      fn example(target: &str) {
+          Client::request(Method::GET, target);
+      }
+  - name: literal client request url negative
+    code: |
+      use reqwest::dummy;
+      fn example() {
+          Client::request(Method::GET, "https://example.com/status");
+      }
+    expect_no_match: true
+  description: "Client::request(...) — covers reqwest and hyper (same `[Client, request]` attribute chain). Tainted URL = SSRF."
+- id: rust.ssrf.hyper_client_get
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [hyper]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [Client, get]
+  description: "Disabled — merged into rust.ssrf.reqwest_client_get (same `[Client, get]` attribute chain)."
+- id: rust.ssrf.hyper_client_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [hyper]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [Client, request]
+  description: "Disabled — merged into rust.ssrf.reqwest_client_request (same `[Client, request]` attribute chain)."
+- id: rust.ssrf.ureq_get
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [ureq]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [ureq, get]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted ureq get url
+    code: |
+      use ureq::dummy;
+      fn example(target: &str) {
+          ureq::get(target);
+      }
+  - name: literal ureq get url negative
+    code: |
+      use ureq::dummy;
+      fn example() {
+          ureq::get("https://example.com/status");
+      }
+    expect_no_match: true
+  description: "ureq::get(url) — blocking HTTP client; tainted URL = SSRF (no redirect-to-metadata-service check by default)."
+- id: rust.ssrf.surf_get
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [surf]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [surf, get]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted surf get url
+    code: |
+      use surf::dummy;
+      fn example(target: &str) {
+          surf::get(target);
+      }
+  - name: literal surf get url negative
+    code: |
+      use surf::dummy;
+      fn example() {
+          surf::get("https://example.com/status");
+      }
+    expect_no_match: true
+  description: "surf::get(url) — async HTTP client; tainted URL reaches arbitrary host / internal network."
+- id: rust.ssrf.isahc_get
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [isahc]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [isahc, get]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted isahc get url
+    code: |
+      use isahc::dummy;
+      fn example(target: &str) {
+          isahc::get(target);
+      }
+  - name: literal isahc get url negative
+    code: |
+      use isahc::dummy;
+      fn example() {
+          isahc::get("https://example.com/status");
+      }
+    expect_no_match: true
+  description: "isahc::get(url) — tainted URL reaches arbitrary host."
+- id: rust.ssrf.awc_client_get
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [awc]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      regex: "^awc::Client::get$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted awc client get url
+    code: |
+      use awc::dummy;
+      fn example(target: &str) {
+          awc::Client::get(target);
+      }
+  - name: literal awc client get url negative
+    code: |
+      use awc::dummy;
+      fn example() {
+          awc::Client::get("https://example.com/status");
+      }
+    expect_no_match: true
+  description: "awc (actix-web client) Client::get(url) — tainted URL = SSRF."
+- id: rust.ssrf.curl_easy_url
+  enabled: true
+  language: rust
+  tag: ssrf
+  severity: high
+  packages: [curl]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [Easy, url]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted curl easy url
+    code: |
+      use curl::dummy;
+      fn example(target: &str) {
+          Easy::url(target);
+      }
+  - name: literal curl easy url negative
+    code: |
+      use curl::dummy;
+      fn example() {
+          Easy::url("https://example.com/status");
+      }
+    expect_no_match: true
+  description: "curl::easy::Easy::url(tainted) — sets libcurl request URL."

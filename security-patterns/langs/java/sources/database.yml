@@ -1,0 +1,42 @@
+# Java database-origin sources (JDBC / Hibernate).
+- id: java.jdbc.resultset_getstring
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: database
+  tag: db-input
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [ResultSet, getString]
+  description: "Disabled — adapters index local receivers like `rs.getString`, not receiver types like `ResultSet.getString`."
+
+- id: java.jdbc.resultset_getbytes
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: database
+  tag: db-input
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [ResultSet, getBytes]
+  description: "Disabled — adapters index local receivers like `rs.getBytes`, not receiver types like `ResultSet.getBytes`."
+
+- id: java.hibernate.session_get
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: database
+  tag: db-input
+  packages: ["org.hibernate"]
+  match:
+    kind: call
+    callee:
+      attribute: [Session, get]
+  description: "Disabled — adapters index local receivers like `session.get`, not receiver types like `Session.get`."

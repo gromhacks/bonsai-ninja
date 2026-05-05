@@ -1,0 +1,197 @@
+# Objective-C CLI / local-trust sources (NSProcessInfo, libc, stdin).
+- id: objc.source.stdin_fgets
+  enabled: true
+  language: objc
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: fgets
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; fgets(input); }
+  description: "fgets(buf, size, stdin) — interactive stdin read; buf is tainted."
+
+- id: objc.source.nsprocessinfo_arguments
+  enabled: true
+  language: objc
+  trust: local
+  tag: cli-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: arguments
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].arguments; }
+  description: "NSProcessInfo.processInfo.arguments — CLI argv. Local trust; still attacker-controllable via launch agents."
+
+- id: objc.source.nsprocessinfo_environment
+  enabled: true
+  language: objc
+  trust: local
+  tag: env-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: environment
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; id result = [NSProcessInfo processInfo].environment; }
+  description: "NSProcessInfo.processInfo.environment — env vars. Local trust but crosses boundaries when spawned from untrusted parent."
+
+- id: objc.source.cli_argv
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: objc
+  trust: local
+  tag: cli-input
+  match:
+    kind: param
+    target:
+      name: argv
+  description: "Disabled — `argv` parameter name is also used by unrelated C functions; flag only when main()'s argv crosses a trust boundary."
+
+- id: objc.source.env_getenv
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: local
+  tag: env-input
+  match:
+    kind: call
+    callee:
+      name: getenv
+  description: "Disabled — libc getenv is local; enable when reading security-sensitive env vars in a privileged context."
+
+- id: objc.source.nsfilehandle_standardinput
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      name: fileHandleWithStandardInput
+  description: "Disabled — NSFileHandle standardInput is stdin; rarely used in iOS apps, enable for CLI/macOS tools."
+
+- id: objc.source.readline
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: local
+  tag: cli-input
+  match:
+    kind: call
+    callee:
+      name: readline
+  description: "Disabled — GNU readline; enable for interactive CLI tools bridging libreadline."
+
+- id: objc.source.uitextfield_text
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: text
+  description: "Disabled — bare `.text` read matches every UIKit attribute named text and every NSAttributedString; enable only with receiver narrowing."
+
+- id: objc.source.uitextview_text
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: local
+  tag: ui-input
+  match:
+    kind: read
+    target:
+      name: text
+  description: "Disabled — duplicate of objc.source.uitextfield_text. Bare name 'text' matches every UIKit .text accessor."
+
+- id: objc.source.user_defaults_object
+  enabled: true
+  language: objc
+  trust: config
+  tag: local-input
+  payload_types: [json, text]
+  match:
+    kind: call
+    callee:
+      name: objectForKey
+  constraints:
+    - receiver_name_in: [NSUserDefaults, standardUserDefaults, defaults, userDefaults, sharedDefaults, groupDefaults]
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [NSUserDefaults objectForKey:input]; }
+  description: "NSUserDefaults -objectForKey: — local prefs storage. Untrusted when shared via app group / extension (suiteName:), since any group member can write. Constrained to NSUserDefaults receivers."
+
+- id: objc.source.user_defaults_string
+  enabled: true
+  language: objc
+  trust: config
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(stringForKey|arrayForKey|dictionaryForKey|dataForKey|stringArrayForKey|URLForKey)$"
+  constraints:
+    - receiver_name_in: [NSUserDefaults, standardUserDefaults, defaults, userDefaults, sharedDefaults, groupDefaults]
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [NSUserDefaults stringForKey:input]; }
+  description: "NSUserDefaults -stringForKey: / -dictionaryForKey: / -URLForKey: — typed accessors over the same shared-prefs store; same untrusted-when-shared risk as objectForKey:."
+
+- id: objc.source.uipasteboard_string
+  enabled: true
+  language: objc
+  trust: ipc
+  tag: clipboard-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(stringForType|valueForPasteboardType|dataForPasteboardType)$"
+  constraints:
+    - receiver_name_in: [UIPasteboard, NSPasteboard, pasteboard, generalPasteboard, pb]
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [UIPasteboard stringForType:input]; }
+  description: "UIPasteboard/NSPasteboard typed accessors — clipboard contents originate from any other app or user paste action; treat as untrusted IPC input."
+
+- id: objc.source.nspasteboard_string
+  enabled: true
+  language: objc
+  trust: ipc
+  tag: clipboard-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [NSPasteboard, generalPasteboard]
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [NSPasteboard generalPasteboard:input]; }
+  description: "NSPasteboard +generalPasteboard (AppKit) — macOS clipboard accessor; subsequent -stringForType: returns cross-app input."

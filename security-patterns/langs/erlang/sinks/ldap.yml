@@ -1,0 +1,190 @@
+# Erlang LDAP-injection (eldap). Tainted filter enables ACL bypass / enumeration.
+- id: erlang.ldap.eldap_search
+  enabled: true
+  language: erlang
+  tag: ldap-injection
+  severity: high
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^eldap:search"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        eldap:search(Conn, Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        eldap:search(Conn, [{base, "dc=example,dc=com"}]).
+    expect_no_match: true
+  description: "eldap:search — tainted filter term (e.g. {equalityMatch, ...}) enables LDAP injection/ACL bypass."
+
+- id: erlang.ldap.eldap_modify_dn
+  enabled: true
+  language: erlang
+  tag: ldap-injection
+  severity: high
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^eldap:modify"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted modify dn
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        eldap:modify(Conn, Input, [{add, "mail", ["a@example.com"]}]).
+  - name: literal modify dn negative
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        eldap:modify(Conn, "uid=alice,dc=example,dc=com", [{add, "mail", ["a@example.com"]}]).
+    expect_no_match: true
+  description: "eldap:modify — tainted DN modifies unintended directory entries."
+- id: erlang.ldap.eldap_modify_changes
+  enabled: true
+  language: erlang
+  tag: ldap-injection
+  severity: high
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^eldap:modify"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted modify list
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        eldap:modify(Conn, "uid=alice,dc=example,dc=com", Input).
+  - name: literal modify list negative
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        eldap:modify(Conn, "uid=alice,dc=example,dc=com", [{add, "mail", ["a@example.com"]}]).
+    expect_no_match: true
+  description: "eldap:modify — tainted modification list changes unintended attributes."
+
+- id: erlang.ldap.eldap_add_dn
+  enabled: true
+  language: erlang
+  tag: ldap-injection
+  severity: high
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^eldap:add"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted add dn
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        eldap:add(Conn, Input, [{"cn", ["alice"]}]).
+  - name: literal add dn negative
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        eldap:add(Conn, "uid=alice,dc=example,dc=com", [{"cn", ["alice"]}]).
+    expect_no_match: true
+  description: "eldap:add — tainted DN creates unauthorized directory entries."
+- id: erlang.ldap.eldap_add_attributes
+  enabled: true
+  language: erlang
+  tag: ldap-injection
+  severity: high
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^eldap:add"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted add attributes
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        eldap:add(Conn, "uid=alice,dc=example,dc=com", Input).
+  - name: literal add attributes negative
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        eldap:add(Conn, "uid=alice,dc=example,dc=com", [{"cn", ["alice"]}]).
+    expect_no_match: true
+  description: "eldap:add — tainted attributes create unauthorized directory entries."
+
+- id: erlang.ldap.eldap_delete
+  enabled: true
+  language: erlang
+  tag: ldap-injection
+  severity: critical
+  packages: [eldap]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      regex: "^eldap:delete"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Conn, Input) ->
+        eldap:delete(Conn, Input).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("eldap/include/eldap.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Conn) ->
+        eldap:delete(Conn, "uid=alice,dc=example,dc=com").
+    expect_no_match: true
+  description: "eldap:delete — tainted DN deletes arbitrary directory entries (destructive)."

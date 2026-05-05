@@ -1,0 +1,65 @@
+# Perl information-disclosure sinks (logs, debug output, error responses).
+- id: perl.info_disclosure.warn_secret
+  aliases:
+  - perl.log_injection.warn_newline
+  enabled: true
+  language: perl
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200, CWE-117]
+  match:
+    kind: call
+    callee:
+      name: warn
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl warn secret-shaped data
+    code: |
+      sub example {
+        my ($token) = @_;
+        warn("token=$token");
+      }
+    expect_match_text: [warn]
+  - name: literal warn negative
+    code: |
+      sub example {
+        my ($token) = @_;
+        warn("startup ok");
+      }
+    expect_no_match: true
+  description: "warn with secret-shaped data — credentials or tokens can leak to application logs. Also covers merged aliases: perl.log_injection.warn_newline."
+
+- id: perl.info_disclosure.dancer_send_error
+  enabled: true
+  language: perl
+  tag: information-disclosure
+  severity: high
+  packages: [Dancer2]
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      name: send_error
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl dancer send error details
+    code: |
+      use Dancer2;
+      sub example {
+        my ($err) = @_;
+        send_error("stack trace: $err", 500);
+      }
+    expect_match_text: [send_error]
+  - name: literal dancer send error negative
+    code: |
+      use Dancer2;
+      sub example {
+        my ($err) = @_;
+        send_error("not found", $err);
+      }
+    expect_no_match: true
+  description: "Dancer2 send_error with raw exception / stack details — exposes internal diagnostics in error pages."

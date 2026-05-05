@@ -1,0 +1,325 @@
+# Coverage baseline
+
+Per-language modeling levels for the constructs the security engine
+cares about. **The headline:** every supported language gets the
+common case modeled precisely; rare grammar shapes are flagged with
+reduced precision in the output rather than silently mis-handled.
+
+Most cells in the table below say `Partial` because **`Partial` is
+the engine's healthy default**, not a gap. See [What the levels
+mean](#what-the-levels-mean) below before getting alarmed by a wall
+of `Partial`s.
+
+> **Reading this alongside [`TAINT_COVERAGE_MATRIX.md`](TAINT_COVERAGE_MATRIX.md)?**
+> The taint matrix shows every applicable cell as `pass` — that's the
+> per-scenario behavioural truth (1365 tests run the real engine on
+> each scenario × language and assert the right answer). This doc is
+> the *modeling-level declaration* — `Partial` here means "common
+> case is precise, rare shapes get `Precision::OverApproximate`," not
+> "the test fails." Both views are correct simultaneously.
+>
+> **Should everything here be `Exact`?** No — and that is principled,
+> not a gap. `Exact` requires a closed-form analysis with no
+> over-approximation possible (think: pure functional languages, no
+> reflection, no aliasing). Real-world languages don't admit that for
+> most constructs; static analysis at scale has approximation. The
+> production-correct stance is to model the common case precisely and
+> *flag* the remaining cases with `Precision::OverApproximate` so
+> consumers can filter them — exactly what `Partial` denotes.
+>
+> **Should everything here be supported (no `Unsupported` cells)?**
+> The remaining `Unsupported` cells are deliberate engineering
+> tradeoffs, not omissions:
+>
+> - **Macros** (C, C++, Elixir, Erlang, Objective-C) — modeling
+>   un-expanded macros would invent flow that may not exist after
+>   preprocessing. Rust has limited support (`println!` etc.) because
+>   the kit recognizes the common shapes; C-style preprocessor macros
+>   require a real preprocessor pass we deliberately don't run.
+> - **Reflection** (most langs) — runtime introspection
+>   (`getattr(obj, dyn_str)`, `Class.forName(...)`, etc.) cannot be
+>   resolved statically. Modeling it imprecisely would manufacture
+>   false-precision findings.
+> - **FFI** — foreign function calls cross the language boundary; we
+>   cannot analyze code that isn't in the workspace.
+>
+> Rather than fire imprecise findings on these, the engine rejects
+> rules that anchor on them at rulepack load time. That guarantees a
+> clean signal-to-noise ratio over silent imprecision.
+
+## TL;DR
+
+- The engine runs taint analysis successfully on every language in
+  the table.
+- A `Partial` cell means *"common case is modeled; rare forms emit
+  `Precision::OverApproximate` so users can filter them out"*. It does
+  NOT mean broken or unimplemented.
+- An `Unsupported` cell means *"rules anchored on this construct are
+  rejected at rulepack load time"* — a deliberate choice that prevents
+  rules from firing on shapes the engine wouldn't analyse precisely.
+- An `n/a` cell means the construct **does not exist in that
+  language** (e.g. macros in JavaScript, exceptions in Rust). Rules
+  targeting it would never apply anyway.
+- Real coverage is verified by **per-language matrix tests** in
+  `crates/security/tests/` and `crates/taint/tests/`, not by this
+  capability declaration.
+
+## What the levels mean
+
+| Level | Engine behaviour | Effect on rules | When you'd see it |
+|---|---|---|---|
+| `Exact` | Construct modeled precisely. Findings get `Precision::Exact`. | Rule fires whenever it matches. | Only set when an adapter has a closed-form analysis for this category (rare today; see [backlog](#backlog) below). |
+| `Partial` | Common case modeled precisely; rare forms emit `Precision::OverApproximate`. | Rule fires; users can filter out OverApproximate findings via `--precision exact,narrowed`. | The conservative default. Most cells. Means "the engine works here, with honest precision flagging." |
+| `Unsupported` | Construct ignored. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine wouldn't analyse correctly. |
+| `n/a` | Construct doesn't exist in this language. | No rule could target it anyway. | E.g. macros in JS, exceptions in Rust, generics in Lua. |
+
+So `Partial` everywhere is **good news**: it's the engine telling you
+"I will analyse your code, and where I'm uncertain I'll mark the
+finding so you can decide whether to act on it."
+
+## Capability matrix
+
+Capabilities are grouped by what they affect.
+
+### Tier 1 — Required for taint analysis to run
+
+These are the constructs the resolver and CFG layer use to walk a
+program. Without them, the engine can't even build a call graph.
+Every supported language declares `Partial` here, meaning the engine
+can analyse the language end-to-end with the standard precision-flag
+caveats.
+
+| Language | Modules | Dyn dispatch | Exceptions | Module export aliases |
+|---|---|---|---|---|
+| c | Partial | n/a | n/a | n/a |
+| cpp | Partial | Partial | Partial | n/a |
+| csharp | Partial | Partial | Exact | n/a |
+| dart | Partial | Partial | Partial | n/a |
+| elixir | Partial | Partial | n/a | n/a |
+| erlang | Partial | n/a | n/a | n/a |
+| go | Partial | Partial | n/a | n/a |
+| java | Partial | Partial | Exact | n/a |
+| javascript | Partial | Partial | Partial | exports, module.exports |
+| kotlin | Partial | Partial | Exact | n/a |
+| lua | Partial | Partial | Partial | n/a |
+| objc | Partial | Partial | Partial | n/a |
+| perl | Partial | Partial | Partial | n/a |
+| php | Partial | Partial | Partial | n/a |
+| python | Partial | Partial | Partial | n/a |
+| ruby | Partial | Partial | Partial | n/a |
+| rust | Partial | Partial | n/a | n/a |
+| scala | Partial | Partial | Partial | n/a |
+| solidity | Partial | Partial | Partial | n/a |
+| swift | Partial | Partial | Partial | n/a |
+| typescript | Partial | Partial | Partial | exports, module.exports |
+
+`n/a` = construct doesn't exist in that language (C has no virtual
+dispatch; Rust uses `Result` instead of exceptions; Erlang has no
+class hierarchy).
+
+### Tier 2 — Required only if a rule uses the construct
+
+These categories matter for rules that anchor on async/await,
+coroutines, generics, or pattern matching. A rule that doesn't target
+them is unaffected by these cells.
+
+| Language | Generics | Async / await | Coroutines | Pattern matching |
+|---|---|---|---|---|
+| c | n/a | n/a | n/a | n/a |
+| cpp | Partial | n/a | Partial | n/a |
+| csharp | Partial | Partial | Partial | Partial |
+| dart | Partial | Partial | Partial | Partial |
+| elixir | n/a | n/a | Partial | Partial |
+| erlang | n/a | n/a | Partial | Partial |
+| go | Partial | n/a | Partial | n/a |
+| java | Partial | Partial | n/a | Partial |
+| javascript | n/a | Partial | Partial | n/a |
+| kotlin | Partial | Partial | Partial | Partial |
+| lua | n/a | n/a | Partial | n/a |
+| objc | n/a | n/a | n/a | n/a |
+| perl | n/a | n/a | n/a | n/a |
+| php | n/a | n/a | Partial | n/a |
+| python | n/a | Partial | Partial | Partial |
+| ruby | n/a | n/a | Partial | Partial |
+| rust | Partial | Exact | n/a | Exact |
+| scala | Partial | Partial | Partial | Exact |
+| solidity | n/a | n/a | n/a | n/a |
+| swift | Partial | Partial | Partial | Exact |
+| typescript | Partial | Partial | Partial | n/a |
+
+The Coroutines column was previously marked `Unsupported`; it is
+`Partial` now because the kit recognizes all six yield grammar
+shapes (`yield`, `yield_statement`, `yield_expression`,
+`yield_from_expression`, `co_yield_*`) and emits `FlowEvent::Yield`,
+which the interprocedural engine treats as return-equivalent for
+summary construction. The `Partial` (rather than `Exact`) caveat is
+that cross-process generator-state propagation is intentionally out
+of scope.
+
+### Tier 3 — Adapter conveniences (precision boosters)
+
+These don't gate rule loading; they affect how the resolver narrows
+candidate edges. `Unsupported` here means findings that go through
+this construct degrade to `OverApproximate` precision instead of being
+narrowed; `Partial` means they're handled in the common case.
+
+| Language | Macros | Reflection | FFI |
+|---|---|---|---|
+| c | Partial | n/a | Unsupported |
+| cpp | Partial | Unsupported | Unsupported |
+| csharp | n/a | Unsupported | Unsupported |
+| dart | n/a | n/a | n/a |
+| elixir | Unsupported | n/a | n/a |
+| erlang | Unsupported | n/a | n/a |
+| go | n/a | Unsupported | Unsupported |
+| java | n/a | Partial | Unsupported |
+| javascript | n/a | n/a | n/a |
+| kotlin | n/a | Unsupported | Unsupported |
+| lua | n/a | n/a | Unsupported |
+| objc | Partial | Unsupported | Unsupported |
+| perl | n/a | Unsupported | n/a |
+| php | n/a | Unsupported | n/a |
+| python | n/a | Partial | Unsupported |
+| ruby | n/a | Unsupported | n/a |
+| rust | Partial | n/a | Partial |
+| scala | n/a | Unsupported | n/a |
+| solidity | n/a | n/a | n/a |
+| swift | n/a | Unsupported | n/a |
+| typescript | n/a | n/a | n/a |
+
+## Per-language summary
+
+A plain-English read of where each language stands today:
+
+- **C / C++** — Core analysis works. C++ templates handled as a single
+  decl with type parameters; per-instantiation specialisation degrades
+  to `OverApproximate`. Macro expansion is not performed; rules
+  anchored on macro-defined names won't fire. Smart-pointer move/copy
+  isn't distinguished beyond the standard Assign event.
+- **C#** — Standard async/await flows analysed; reflection (`Type`
+  introspection, dynamic invocation) is opaque. Generic
+  monomorphisation works for the closed set of instantiations seen.
+- **Dart** — Standard analysis. Async/await modeled; FFI is library-
+  level (not a language construct) so declared `n/a`.
+- **Elixir / Erlang** — Module + protocol/behaviour resolution works;
+  process boundaries (`spawn`, `send`, `receive`) are unresolved by
+  design — taint cannot cross process boundaries in static analysis
+  on an actor model. GenServer callbacks are recognised but the
+  message protocol is opaque.
+- **Go** — Standard module + interface dispatch analysis. Generics
+  (1.18+) handled. `panic`/`recover` is not modeled as exceptions;
+  goroutines record the spawn but happens-before is not tracked.
+- **Java / Kotlin** — Standard inheritance + method-resolution
+  analysis. Annotations (`@RequestBody`, etc.) are read by the
+  resolver; reflection (`Class.forName`) is opaque.
+- **JavaScript / TypeScript** — CommonJS + ES module analysis. The
+  engine credits `module.exports = X` and `exports.X = …` to the
+  module's public surface (the only languages that need this). Type
+  annotations populate `Decl.type_aliases`; flow-sensitive narrowing
+  isn't used by the matcher.
+- **Lua** — Module-level resolution via `require` works; the
+  metatable-based "method dispatch" is partially modeled (the common
+  `obj:method()` shape resolves; metatable forwarding chains
+  degrade).
+- **Objective-C** — Standard class + protocol analysis. C-interop
+  (FFI) is via direct C calls; modeled at the standard call-site
+  level.
+- **Perl / PHP / Python / Ruby** — Standard class + module analysis.
+  Decorators (Python) and modifiers (PHP attributes, Ruby method
+  visibility) feed the resolver. Dynamic dispatch (Python `getattr`,
+  Ruby `send`) is opaque when the method name is computed.
+- **Rust** — Trait-based dispatch analysis. `Box<dyn Trait>` calls
+  emit `EdgeKind::Virtual` at `Precision::OverApproximate`. No
+  exception model (Rust uses `Result`); macro expansion is partial
+  (we recognise common shapes like `println!`, but `macro_rules!`
+  and proc-macros aren't expanded).
+- **Scala** — Inheritance + pattern-matching analysis. FFI via Scala-
+  native isn't modeled (not a language-level construct).
+- **Solidity** — Contract inheritance + try/catch external-call
+  analysis. Inline `assembly { … }` (Yul) is parsed but not modeled;
+  rules anchored on inline-assembly shapes need manual annotation.
+- **Swift** — Standard class + protocol analysis. FFI via the
+  Objective-C bridge or `@_cdecl` isn't modeled at the language
+  level.
+
+## The single Rust-customised matrix
+
+For reference, **20 of 21 adapters** return
+[`LanguageCapabilities::partial_baseline()`](../crates/lang_api/src/capabilities.rs)
+verbatim. Only `lang_rust` declares a custom matrix today (macros and
+ffi promoted to `Partial`; exceptions demoted to `Unsupported`
+because Rust has no exception model). `lang_javascript` /
+`lang_typescript` add `module_export_aliases = ["exports",
+"module.exports"]` so the resolver can credit CommonJS-style
+assignments to the module's public surface. Everything else is the
+same conservative `partial_baseline()` — that's by design, not
+neglect.
+
+## Backlog
+
+Promotion candidates — places where an adapter could declare `Exact`
+once the matching test coverage lands:
+
+- **C# / Java / Kotlin:** `Exceptions → Exact` (typed `throws` /
+  checked exceptions / `try-catch` chains are statically analysable
+  in ways Python/Ruby exception hierarchies aren't).
+- **JavaScript / TypeScript:** `Modules → Exact` for ES module graphs
+  that aren't dynamic-import-shaped.
+- **Scala / Swift:** `Pattern matching → Exact` (both have exhaustive-
+  by-default match expressions with compiler-validated totality).
+- **Rust:** `Async / await → Exact` once we model `Future::poll`
+  happens-before relations from `tokio::spawn` / `select!`.
+
+Each promotion lands together with: (a) the adapter override
+declaration, (b) a per-language matrix test exercising the construct
+end-to-end, (c) re-blessing both snapshots.
+
+## How this doc stays honest
+
+The matrix above is generated from runtime data plus a curated
+applicability map (which constructs each language has). Two snapshots
+gate it in CI:
+
+```sh
+# detect drift
+cargo test -p bonsai_conformance --test coverage_baseline
+
+# accept drift after intentional adapter or applicability change
+BLESS_BASELINE=1 cargo test -p bonsai_conformance --test coverage_baseline -- --nocapture
+```
+
+- `.snapshots/COVERAGE_BASELINE.snapshot` — raw runtime levels (no
+  applicability overlay). Pure drift gate against
+  `LanguageCapabilities` returns.
+- `.snapshots/COVERAGE_BASELINE.rendered.snapshot` — the human-readable
+  table above with applicability overlay. Editing the applicability
+  map in [`coverage_baseline.rs`](../crates/conformance/tests/coverage_baseline.rs)
+  invalidates this snapshot and forces a re-bless.
+
+Editing the doc table by hand without re-blessing makes the
+conformance test fail. Editing an adapter's `capabilities()` without
+re-blessing makes the test fail. Either is caught by CI.
+
+## What this doc does NOT measure
+
+Things that aren't visible in this matrix:
+
+- **Per-language rule density.** A language with a thin rulepack and
+  `Partial` capabilities will surface fewer findings than one with a
+  fat rulepack and identical capabilities. That's about rule writing,
+  not engine support.
+- **Real-world precision distribution.** What fraction of findings on
+  a typical workspace land at `Exact` / `Narrowed` /
+  `OverApproximate` / `Unknown`. That's measurable by running the
+  engine on a corpus and tallying `precision` on the findings.
+- **CFG completeness.** Whether each adapter emits Call / Assign /
+  Param / Return for every grammar shape. That's the actual taint-
+  coverage question, and it's tested by the per-language matrix
+  tests (`crates/taint/tests/over_taint_per_language.rs`,
+  `crates/security/tests/per_lang_cli_matrix.rs`,
+  `crates/security/tests/security_pipeline_regressions.rs`), not
+  declared here.
+
+If you want a real "how good is taint coverage" view, the precision
+histogram is the metric — capability levels are a contract for rule
+validation, not a coverage scorecard.

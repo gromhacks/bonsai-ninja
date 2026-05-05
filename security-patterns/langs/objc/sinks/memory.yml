@@ -1,0 +1,38 @@
+# Objective-C memory-safety / lifecycle audit-pair sites.
+# release/autorelease are already covered by the prior session's
+# memory-safety pass. This file adds the NSStream-style explicit close
+# audit-pair shape. The rule fires on the *use-after-close* call (`[stream
+# read:...]`) and gates on the adapter-emitted lifecycle state via the
+# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: objc.memory.nsstream_close
+  enabled: true
+  language: objc
+  tag: memory-safety
+  severity: medium
+  packages: [Foundation]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - requires_state:
+      name: stream
+      expected: closed
+  match_examples:
+  - name: read after close
+    code: |
+      #import <Foundation/Foundation.h>
+      void example(NSInputStream *stream) {
+        [stream close];
+        [stream read:NULL maxLength:0];
+      }
+  - name: read without preceding close
+    code: |
+      #import <Foundation/Foundation.h>
+      void example(NSInputStream *stream) {
+        [stream read:NULL maxLength:0];
+      }
+    expect_no_match: true
+  description: "Use-after-close — `[stream read:...]` on a stream whose preceding `[stream close]` released the underlying NSStream. Subsequent reads return -1 with NSStreamStatusClosed at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."

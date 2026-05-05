@@ -1,0 +1,348 @@
+# C# XSS sinks. ASP.NET MVC / Core / Razor / WebForms.
+- id: csharp.xss.response_write
+  aliases:
+  - csharp.info_disclosure.response_write_exception
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  cwe: [CWE-79, CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, Write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Response.Write(input); } }
+  - name: literal html negative
+    code: |
+      class App { void Test() { Response.Write("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "Response.Write — tainted data escapes HTML encoding. Also covers merged aliases: csharp.info_disclosure.response_write_exception."
+
+- id: csharp.xss.response_writeasync
+  aliases:
+  - csharp.info_disclosure.response_writeasync_exception
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  cwe: [CWE-79, CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, WriteAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Response.WriteAsync(input); } }
+  - name: literal html negative
+    code: |
+      class App { void Test() { Response.WriteAsync("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "ASP.NET Core Response.WriteAsync. Also covers merged aliases: csharp.info_disclosure.response_writeasync_exception."
+
+- id: csharp.xss.html_raw
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [Microsoft.AspNetCore.Mvc.ViewFeatures]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Html, Raw]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc.ViewFeatures;
+      class App { void Test(string input) { Html.Raw(input); } }
+  - name: literal html negative
+    code: |
+      using Microsoft.AspNetCore.Mvc.ViewFeatures;
+      class App { void Test() { Html.Raw("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "Razor @Html.Raw — renders un-escaped HTML."
+
+- id: csharp.xss.htmlstring_ctor
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [Microsoft.AspNetCore.Html]
+  cwe: [CWE-79]
+  match:
+    kind: new
+    callee:
+      name: HtmlString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Html;
+      class HtmlString { public HtmlString(string input) { } } class App { void Test(string input) { var result = new HtmlString(input); } }
+  - name: literal html negative
+    code: |
+      using Microsoft.AspNetCore.Html;
+      class HtmlString { public HtmlString(string input) { } } class App { void Test() { var result = new HtmlString("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "new HtmlString(tainted) — IHtmlContent that bypasses encoding."
+
+- id: csharp.xss.mvchtmlstring_create
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [MvcHtmlString, Create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { MvcHtmlString.Create(input); } }
+  - name: literal html negative
+    code: |
+      class App { void Test() { MvcHtmlString.Create("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "MvcHtmlString.Create."
+
+- id: csharp.xss.literal_text_assign
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: xss
+  severity: medium
+  cwe: [CWE-79]
+  match:
+    kind: write
+    target:
+      name: Text
+  description: "Disabled — Label.Text/Literal.Text writes; too generic without constraint."
+
+- id: csharp.xss.aspnet_innerhtml
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: write
+    target:
+      name: InnerHtml
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; InnerHtml = input; } }
+  description: "Control.InnerHtml = tainted (WebForms / HtmlGenericControl)."
+
+- id: csharp.xss.blazor_markupstring
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [Microsoft.AspNetCore.Components]
+  cwe: [CWE-79]
+  match:
+    kind: new
+    callee:
+      name: MarkupString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Components;
+      class MarkupString { public MarkupString(string input) { } } class App { void Test(string input) { var result = new MarkupString(input); } }
+  - name: literal html negative
+    code: |
+      using Microsoft.AspNetCore.Components;
+      class MarkupString { public MarkupString(string input) { } } class App { void Test() { var result = new MarkupString("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "new MarkupString(tainted) — Blazor renders literal HTML without encoding."
+
+- id: csharp.xss.response_output_write
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Output, Write]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Output.Write(input); } }
+  - name: literal html negative
+    code: |
+      class App { void Test() { Output.Write("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "HttpResponse.Output.Write(tainted) — writes directly to response stream without encoding."
+
+- id: csharp.xss.htmlhelper_raw
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [System.Web.Mvc]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlHelper, Raw]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.Web.Mvc;
+      class App { void Test(string input) { HtmlHelper.Raw(input); } }
+  - name: literal html negative
+    code: |
+      using System.Web.Mvc;
+      class App { void Test() { HtmlHelper.Raw("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "HtmlHelper.Raw — legacy MVC raw output."
+
+- id: csharp.xss.response_writefile
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: medium
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, WriteFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { Response.WriteFile(input); } }
+  - name: literal path negative
+    code: |
+      class App { void Test() { Response.WriteFile("wwwroot/safe.html"); } }
+    expect_no_match: true
+  description: "HttpResponse.WriteFile(tainted) — writes file contents straight to response without encoding."
+
+- id: csharp.xss.htmlcontent_writeto
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [Microsoft.AspNetCore.Html]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlContentBuilder, AppendHtml]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Html;
+      class App { void Test(string input) { HtmlContentBuilder.AppendHtml(input); } }
+  - name: literal html negative
+    code: |
+      using Microsoft.AspNetCore.Html;
+      class App { void Test() { HtmlContentBuilder.AppendHtml("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "HtmlContentBuilder.AppendHtml(tainted) — bypasses HTML encoding when writing to response."
+
+- id: csharp.xss.tag_builder_innerhtml
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [Microsoft.AspNetCore.Mvc.ViewFeatures]
+  cwe: [CWE-79]
+  match:
+    kind: write
+    target:
+      name: InnerHtml
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc.ViewFeatures;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; InnerHtml = input; } }
+  description: "Disabled duplicate — same InnerHtml write matcher as canonical csharp.xss.aspnet_innerhtml."
+
+- id: csharp.xss.html_renderraw
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [Microsoft.AspNetCore.Components]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [RenderTreeBuilder, AddMarkupContent]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Components;
+      class App { void Test(string input) { RenderTreeBuilder.AddMarkupContent(0, input); } }
+  - name: literal html negative
+    code: |
+      using Microsoft.AspNetCore.Components;
+      class App { void Test() { RenderTreeBuilder.AddMarkupContent(0, "<p>safe</p>"); } }
+    expect_no_match: true
+  description: "Blazor RenderTreeBuilder.AddMarkupContent(tainted) — emits raw markup."
+
+- id: csharp.xss.literal_html_string_create
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlString, op_Implicit]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      class App { void Test(string input) { HtmlString.op_Implicit(input); } }
+  - name: literal html negative
+    code: |
+      class App { void Test() { HtmlString.op_Implicit("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "HtmlString implicit conversion path — used to mark tainted content as IHtmlContent without encoding."

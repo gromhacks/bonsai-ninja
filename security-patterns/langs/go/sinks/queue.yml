@@ -1,0 +1,64 @@
+- id: go.queue.send_message
+  enabled: true
+  language: go
+  tag: queue-injection
+  severity: high
+  packages: ["github.com/aws/aws-sdk-go/service/sqs", "github.com/aws/aws-sdk-go-v2/service/sqs", "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "\\.SendMessage$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/aws/aws-sdk-go/service/sqs"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.SendMessage(target)
+      }
+  description: "Cloud queue SendMessage — tainted queue target/body injects arbitrary broker payloads."
+
+- id: go.queue.send_messages
+  enabled: true
+  language: go
+  tag: queue-injection
+  severity: high
+  packages: ["github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "\\.SendMessages$"
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        obj.SendMessages(target)
+      }
+  description: "Service Bus SendMessages — tainted entity path/payload injects arbitrary broker payloads."
+
+- id: go.queue.publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: queue-injection
+  severity: high
+  packages: ["cloud.google.com/go/pubsub", "github.com/aws/aws-sdk-go/service/sns", "github.com/aws/aws-sdk-go-v2/service/sns"]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Publish$"
+  description: "Disabled — cloud pub/sub publish is real queue fanout, but bare `.Publish` is too generic across Go clients and app code."

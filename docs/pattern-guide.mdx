@@ -1,0 +1,390 @@
+---
+title: "Pattern Guide"
+description: "Rulepack schema and authoring contracts for sources, sinks, sanitizers, and constraints."
+---
+
+# Pattern guide
+
+How to author rules for the bonsai-ninja security rulepack. The validator
+enforces these contracts at load time; rules that fail validation are
+rejected.
+
+## File layout
+
+```
+security-patterns/langs/<lang>/{sources,sinks,sanitizers}/<family>.yml
+```
+
+The directory determines the rule kind. `<lang>` matches one of the 21
+supported language IDs. `<family>` is a free-form filename that groups
+related rules — `cmdi.yml`, `sqli.yml`, `xss.yml`, etc.
+
+## Minimum viable rule
+
+```yaml
+- id: python.cmdi.os_system
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: critical
+  packages: [os]
+  imports: [os]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      attribute: [os, system]
+  constraints:
+    - arg_tainted: { index: 0 }
+  match_examples:
+    - name: os.system call
+      code: |
+        import os
+        def example(user):
+            os.system(user)
+      expect_match_text: [os.system]
+  description: "os.system(cmd) — tainted shell command execution."
+```
+
+Required:
+
+- `id` — unique per (language, kind).
+- `language` — required in flat layout, optional in canonical layout.
+- `match.kind` — `call`, `new`, `read`, `write`, `return`, or `param`.
+- `match.callee` (call/new) or `match.target` (read/write/return/param).
+- `description` — at least 15 chars; explains the API shape and the
+  security consequence.
+- `match_examples` — at least one entry with `code` that fires the rule.
+
+Sinks also need `cwe` and `severity`. Sources need `trust`.
+
+## Match shapes
+
+**Attribute path** — preferred for `Type.method` calls:
+
+```yaml
+match:
+  kind: call
+  callee:
+    attribute: [requests, get]
+```
+
+The matcher's alias map handles `from requests import get as r; r(...)`
+automatically.
+
+**Bare name** — use sparingly, pair with `packages:` to narrow:
+
+```yaml
+match:
+  kind: call
+  callee:
+    name: open
+```
+
+**Regex** — for variable receivers with a distinctive verb:
+
+```yaml
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.body$"
+```
+
+Receiver-agnostic regexes **must** declare `packages:` so the
+`OnlyWhenPackaged` lax-tail narrows by file imports.
+
+**Annotation / decorator** — Spring `@RequestParam`, FastAPI binders,
+etc.:
+
+```yaml
+match:
+  kind: param
+  target:
+    annotation: RequestParam
+```
+
+Reads `Decl.param_annotations`.
+
+**Read / write target** — for source-side container reads:
+
+```yaml
+match:
+  kind: read
+  target:
+    attribute: [request, body]
+```
+
+The matcher walks `Assign.source_names` against this shape.
+
+## Constraints
+
+`constraints` is a list of small, composable predicates that run after the
+match shape fires.
+
+### `arg_tainted`
+
+```yaml
+constraints:
+  - arg_tainted: { index: 0 }     # positional
+  - arg_tainted: { kw: data }     # keyword
+```
+
+Defers to the engine's per-call-span taint verdict, but only for syntactic
+call-site arguments. Sink rules anchored on `arg_tainted` only fire when
+the engine can prove the named/positional argument itself flows from a
+source.
+
+### `receiver_tainted`
+
+```yaml
+constraints:
+  - receiver_tainted: true
+```
+
+Use this when the vulnerable operand is the call receiver rather than a
+syntactic argument. Examples include Scala `cmd.!`, Solidity
+`target.delegatecall("")`, and fluent APIs where the dangerous value sits
+to the left of the method call. Do not model these as `arg_tainted`;
+zero-argument receiver calls have no argument slot to prove.
+
+### `any_arg_tainted`
+
+```yaml
+constraints:
+  - any_arg_tainted: true
+```
+
+Use this only when the API treats every syntactic argument as the same
+dangerous payload surface, such as variadic command fragments or generic
+message/body forwarding calls. Prefer `arg_tainted` for APIs where one
+operand has a specific security meaning (`eval(expr, globals)`,
+`memcpy(dst, src, n)`, redirect target, SQL query text, length/count
+arguments, and similar fixed-slot shapes). `any_arg_tainted` still
+requires a real taint verdict on at least one call argument; literal-only
+calls and zero-argument calls do not match.
+
+For bounded-copy rules, constrain the *bound* argument, not just the
+pointers. C/C++ `memcpy(dst, src, n)` uses `index: 2`. A fixed constant
+like `FIXED_LEN` is not evidence of CWE-120 just because `dst` or `src` is
+tainted.
+
+Allocation rules follow the same rule — pin the size/count operand:
+`malloc(n)` index 0, `realloc(ptr, n)` index 1, `aligned_alloc(align,
+size)` index 1, `calloc(nmemb, size)` needs a rule for each.
+
+### `arg_equals` / `keyword_arg_equals`
+
+```yaml
+- arg_equals: { index: 1, value: "shell=True" }
+- keyword_arg_equals: { name: "shell", value: "True" }
+```
+
+### `arg_matches_regex`
+
+```yaml
+- arg_matches_regex: { index: 0, regex: "^/api/" }
+```
+
+### `receiver_name_in`
+
+```yaml
+- receiver_name_in: [client, http]
+```
+
+The receiver text must be one of the listed values.
+
+### `format_arg_index`
+
+```yaml
+- format_arg_index: 0
+```
+
+Treats arg N as a format string — for `printf`-shaped sinks.
+
+### `top_level_only` / `not_in_top_level`
+
+```yaml
+- top_level_only: true
+```
+
+The match must (or must not) be at module top-level.
+
+### `in_class` / `in_method`
+
+```yaml
+match:
+  kind: param
+  target:
+    name: payload
+    in_class: WebSocketHandler
+```
+
+`in_class` consults `Decl.parent` and `Decl.bases`, so subclasses match
+their declared parent.
+
+### `max_args` / `min_args`
+
+```yaml
+- max_args: 3
+```
+
+Argcount bounds. Useful when overload disambiguation matters.
+
+### `arg_lt` / `arg_le` / `arg_gt` / `arg_ge`
+
+```yaml
+- arg_lt: { index: 0, value: 2048 }    # weak crypto strength
+- arg_ge: { index: 1, value: 31536000 } # session timeout > 1y
+```
+
+Integer-literal comparison. Decimal / hex / oct / bin / underscore
+forms are accepted. Non-literal args (variables, expressions) fail
+the constraint conservatively.
+
+### `requires_runtime_type`
+
+```yaml
+- requires_runtime_type: { index: 0, type: TrustedShape }
+```
+
+The arg at `index` must be narrowed to the declared type by a
+preceding type-test guard inside the same decl: `instanceof X`,
+`isinstance(_, X)`, `_ is X`, or `typeof _ === "X"`. The narrowing
+is CFG-aware — only the then-branch of the guard counts; outside
+that range the constraint fails closed.
+
+### `enclosing_decorator_in`
+
+```yaml
+- enclosing_decorator_in: [route, post, get]
+```
+
+The enclosing decl must carry a decorator / annotation whose tail
+matches one of the listed names. Useful for scoping `kind: missing`
+rules to handler decls (`@app.route`) without firing on every
+helper. Splits dotted decorator names so `@app.route` matches
+both `route` and `app`.
+
+### `must_alias`
+
+```yaml
+- must_alias: { source_arg: 0, sink_arg: 1 }
+```
+
+The source and sink args at this call site must share a must-alias
+root within the same decl. Same name on both sides is the trivial
+must-alias; rename chains (`y = x; pair(x, y)`) propagate.
+Compound RHS (`y = f(x)`, `y = x + 1`) is not aliasing.
+
+### `requires_state`
+
+```yaml
+- requires_state: { name: fd, expected: closed }
+```
+
+The named binding must be in `expected` lifecycle state at the
+call site. Adapters emit `FlowEvent::Lifecycle` events on
+recognised free / close / unlock / cancel / move / dispose calls
+(see `kit::inject_lifecycle_events`); the matcher's flow-sensitive
+lattice picks up the most recent transition before the call.
+Canonical states: `freed`, `closed`, `unlocked`, `cancelled`,
+`moved`. Used by audit-pair UAF / use-after-close rules to gate
+findings on actual transition correlation rather than firing on
+the transition site alone.
+
+## `kind: missing` walker
+
+```yaml
+match:
+  kind: missing
+  callee:
+    attribute: [csrf, validate]
+  search_depth: 0   # default: intra-procedural only
+constraints:
+  - enclosing_decorator_in: [route, post, get]
+```
+
+Inverse-match: fires on every function-shaped decl that does
+*not* contain a call to the declared target. `search_depth > 0`
+extends the walker to BFS through resolved callees up to that
+depth (capped at 4 engine-side); use sparingly — cheaper to keep
+the walker intra-procedural and add scoping via
+`enclosing_decorator_in` or package gates.
+
+## Subsumption / disabling
+
+Disabled rules must declare a reason:
+
+```yaml
+- id: python.deprecated.foo
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.canonical.foo
+```
+
+`code` is one of:
+
+- `subsumed` — covered by another (more general) rule. Requires
+  `subsumed_by`.
+- `over-broad` — original pattern was too permissive.
+- `requires-constraint` — needs an extra constraint arm to fire cleanly.
+- `pending-adapter-fact` — needs an adapter capability not yet exposed.
+
+The `subsumed_by` chain must terminate at an enabled rule.
+
+## OnlyWhenPackaged lax-tail
+
+Rules with type-like attribute receivers, lowercase verbs of length ≥ 5,
+and non-empty `packages:` trigger the matcher's `OnlyWhenPackaged`
+lax-tail. The rule may match any `<receiver>.<verb>(...)` call but only
+when the file imports a package signal.
+
+```yaml
+packages: [eta]
+imports: [eta]
+match:
+  kind: call
+  callee:
+    attribute: [Eta, render]
+```
+
+`[Eta, render]` matches `eta.render(...)` but not `pug.render(...)` in a
+file that imports `pug` only.
+
+## Match examples
+
+Every rule must include at least one `match_examples` entry:
+
+```yaml
+match_examples:
+  - name: os.system call
+    code: |
+      import os
+      def example(user):
+          os.system(user)
+    expect_match_text: [os.system]
+```
+
+The `code` is parsed and matched at validation time — if the rule wouldn't
+fire on its own example, validation rejects it. Add multiple examples for
+notable variant shapes; see [Pattern Variants](pattern-variants.mdx) for common
+variants worth covering.
+
+## Severity
+
+Sinks need `severity`: `critical`, `high`, `medium`, `low`, or `info`.
+The CLI ranks findings by severity; SARIF maps it to GitHub's
+high/error/warning levels.
+
+## CWE mapping
+
+`cwe: [CWE-78, CWE-77]` — multiple are fine. The first listed CWE drives
+SARIF tag selection.
+
+## Validation tips
+
+Run `bonsai-ninja security pack --validate path/` to lint a rulepack
+locally. Add `--audit` for the coverage matrix. The validator catches
+missing examples, broken `subsumed_by` chains, severity/CWE typos, and
+match shapes that wouldn't fire on their own examples.

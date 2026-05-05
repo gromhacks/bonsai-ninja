@@ -1,0 +1,129 @@
+- id: dart.template.mustache_template
+  aliases:
+  - dart.template.mustache_html_escape_off
+  - dart.template.liquid_engine_parse
+  enabled: true
+  language: dart
+  tag: ssti
+  severity: high
+  packages:
+  - mustache_template
+  - mustache
+  - jinja
+  - liquid_engine
+  cwe:
+  - CWE-1336
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: Template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted template source
+    code: |
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart'; // mustache_template
+      class Template { Template([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test(String input) { var result = Template(input); }
+  - name: literal template source negative
+    code: |
+      import 'package:mustache_template/mustache_template.dart';
+      class Template { Template([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var result = Template("Hello {{name}}"); }
+    expect_no_match: true
+  description: "new Template(tainted source) — covers mustache_template and jinja (same bare `Template` constructor name). Also covers merged aliases: dart.template.mustache_html_escape_off. Merged collision aliases: dart.template.liquid_engine_parse."
+  imports:
+  - mustache_template/mustache_template.dart
+- id: dart.template.mustache_render_string
+  enabled: true
+  language: dart
+  tag: ssti
+  severity: high
+  packages:
+  - mustache_template
+  - mustache
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - renderString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted render string source
+    code: |
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart';
+      import 'package:mustache_template/mustache_template.dart'; // mustache_template
+      void test(String input) { template.renderString(input); }
+  - name: literal render string source negative
+    code: |
+      import 'package:mustache_template/mustache_template.dart';
+      void test() { template.renderString("Hello {{name}}"); }
+    expect_no_match: true
+  description: "mustache Template.renderString — tainted template-source."
+  imports:
+  - mustache_template/mustache_template.dart
+- id: dart.template.jinja_from_string
+  enabled: true
+  language: dart
+  tag: ssti
+  severity: high
+  packages:
+  - jinja
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - fromString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted jinja source
+    code: |
+      import 'package:jinja/jinja.dart';
+      import 'package:jinja/jinja.dart';
+      import 'package:jinja/jinja.dart';
+      import 'package:jinja/jinja.dart';
+      import 'package:jinja/jinja.dart'; // jinja
+      void test(String input) { Environment.fromString(input); }
+  - name: literal jinja source negative
+    code: |
+      import 'package:jinja/jinja.dart';
+      void test() { Environment.fromString("Hello {{ name }}"); }
+    expect_no_match: true
+  description: jinja Environment.fromString(tainted).
+  imports:
+  - jinja/jinja.dart
+- id: dart.template.jinja_template_new
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: ssti
+  severity: high
+  packages:
+  - jinja
+  cwe:
+  - CWE-1336
+  match:
+    kind: new
+    callee:
+      name: Template
+  description: "Disabled — merged into dart.template.mustache_template (same bare `Template` constructor name)."

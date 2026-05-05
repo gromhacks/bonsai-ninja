@@ -1,0 +1,271 @@
+# Rust eval / dynamic-code sinks (embedded interpreters + dynamic loading).
+- id: rust.eval.deno_core_execute_script
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: critical
+  packages: [deno_core]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [JsRuntime, execute_script]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted deno script source
+    code: |
+      use deno_core::dummy;
+      fn example(target: &str) {
+          JsRuntime::execute_script(target);
+      }
+  - name: literal deno script source negative
+    code: |
+      use deno_core::dummy;
+      fn example() {
+          JsRuntime::execute_script("1 + 1");
+      }
+    expect_no_match: true
+  description: "deno_core JsRuntime::execute_script — tainted source executes inside the embedded V8 runtime (sandbox escapes historical)."
+
+- id: rust.eval.js_context_eval
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: critical
+  packages: [boa_engine, rquickjs]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Context, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted js eval source
+    code: |
+      use boa_engine::dummy;
+      fn example(target: &str) {
+          Context::eval(target);
+      }
+  - name: literal js eval source negative
+    code: |
+      use boa_engine::dummy;
+      fn example() {
+          Context::eval("1 + 1");
+      }
+    expect_no_match: true
+  description: "JS embedded-engine Context::eval — covers boa_engine::Context::eval and rquickjs::Context::eval (same `[Context, eval]` suffix). Tainted script = RCE inside the JS sandbox (and sandbox escapes exist for both). `min_args: 1` rejects 0-arg `Context.eval()` decoys."
+
+- id: rust.eval.mlua_load
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: critical
+  packages: [mlua]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Lua, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mlua source
+    code: |
+      use mlua::dummy;
+      fn example(target: &str) {
+          Lua::load(target);
+      }
+  - name: literal mlua source negative
+    code: |
+      use mlua::dummy;
+      fn example() {
+          Lua::load("return 1");
+      }
+    expect_no_match: true
+  description: "mlua Lua::load(tainted)."
+
+- id: rust.eval.rlua_exec
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: critical
+  packages: [rlua]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Lua, exec]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rlua source
+    code: |
+      use rlua::dummy;
+      fn example(target: &str) {
+          Lua::exec(target);
+      }
+  - name: literal rlua source negative
+    code: |
+      use rlua::dummy;
+      fn example() {
+          Lua::exec("return 1");
+      }
+    expect_no_match: true
+  description: "rlua Lua::exec — executes Lua source from string; tainted input = sandbox-escaping RCE inside the Lua VM."
+
+- id: rust.eval.rhai_engine_eval
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: critical
+  packages: [rhai]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Engine, eval]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rhai source
+    code: |
+      use rhai::dummy;
+      fn example(target: &str) {
+          Engine::eval(target);
+      }
+  - name: literal rhai source negative
+    code: |
+      use rhai::dummy;
+      fn example() {
+          Engine::eval("40 + 2");
+      }
+    expect_no_match: true
+  description: "rhai Engine::eval(tainted)."
+
+- id: rust.eval.starlark_eval
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: critical
+  packages: [starlark]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Evaluator, eval_module]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted starlark module
+    code: |
+      use starlark::dummy;
+      fn example(target: &str) {
+          Evaluator::eval_module(target);
+      }
+  - name: literal starlark module negative
+    code: |
+      use starlark::dummy;
+      fn example() {
+          Evaluator::eval_module("x = 1");
+      }
+    expect_no_match: true
+  description: "starlark Evaluator::eval_module — evaluates Starlark (Bazel-flavoured Python); tainted source runs arbitrary logic in the host."
+
+- id: rust.eval.libloading_library_new
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: high
+  packages: [libloading]
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Library, new]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dynamic library path
+    code: |
+      use libloading::dummy;
+      fn example(target: &str) {
+          Library::new(target);
+      }
+  - name: literal dynamic library path negative
+    code: |
+      use libloading::dummy;
+      fn example() {
+          Library::new("/usr/lib/libsafe.so");
+      }
+    expect_no_match: true
+  description: "libloading::Library::new(tainted) — loads arbitrary .so/.dll."
+
+- id: rust.eval.dlopen_open
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: high
+  packages: [dlopen]
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Container, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dlopen library path
+    code: |
+      use dlopen::dummy;
+      fn example(target: &str) {
+          Container::load(target);
+      }
+  - name: literal dlopen library path negative
+    code: |
+      use dlopen::dummy;
+      fn example() {
+          Container::load("/usr/lib/libsafe.so");
+      }
+    expect_no_match: true
+  description: "dlopen Container::load(tainted)."
+
+# Reflection-based dynamic invocation (T406). Tag
+# code-injection so reviewer enumerates with `security sinks
+# --tag code-injection`. Treats reflection as eval-equivalent
+# when the dispatched name comes from attacker input.
+- id: rust.eval.libloading_get
+  enabled: true
+  language: rust
+  tag: code-injection
+  severity: high
+  cwe: [CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [Library, get]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted library symbol
+    code: |
+      fn example(target: &[u8]) {
+          Library::get(target);
+      }
+  - name: literal library symbol negative
+    code: |
+      fn example() {
+          Library::get(b"safe_symbol");
+      }
+    expect_no_match: true
+  description: "libloading Library.get(attacker_symbol_name) — load arbitrary symbol by name from a dlopen'd library; reflection-equivalent dynamic dispatch."

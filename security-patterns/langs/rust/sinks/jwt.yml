@@ -1,0 +1,143 @@
+# Rust JWT sinks (jsonwebtoken / biscuit / josekit).
+- id: rust.jwt.jsonwebtoken_decode_header
+  enabled: true
+  language: rust
+  tag: jwt
+  severity: high
+  packages: [jsonwebtoken]
+  cwe: [CWE-345, CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jsonwebtoken, decode_header]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted jwt decode_header token
+    code: |
+      use jsonwebtoken::dummy;
+      fn example(target: &str) {
+          jsonwebtoken::decode_header(target);
+      }
+  - name: literal jwt decode_header token negative
+    code: |
+      use jsonwebtoken::dummy;
+      fn example() {
+          jsonwebtoken::decode_header("header.payload.signature");
+      }
+    expect_no_match: true
+  description: "jsonwebtoken::decode_header — returns the JWT header (kid, alg) without signature verification; using the result for routing / key-lookup without later validating the signature = auth bypass."
+
+- id: rust.jwt.jsonwebtoken_dangerous_unsafe
+  enabled: true
+  language: rust
+  tag: jwt
+  severity: critical
+  packages: [jsonwebtoken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jsonwebtoken, dangerous_insecure_decode]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted insecure jwt decode token
+    code: |
+      use jsonwebtoken::dummy;
+      fn example(target: &str) {
+          jsonwebtoken::dangerous_insecure_decode(target);
+      }
+  - name: literal insecure jwt decode token negative
+    code: |
+      use jsonwebtoken::dummy;
+      fn example() {
+          jsonwebtoken::dangerous_insecure_decode("header.payload.signature");
+      }
+    expect_no_match: true
+  description: "jsonwebtoken::dangerous_insecure_decode — documented escape hatch that skips signature verification entirely; tainted JWT = auth bypass / forged claims."
+
+- id: rust.jwt.jsonwebtoken_insecure_disable_signature
+  enabled: true
+  language: rust
+  tag: jwt
+  severity: high
+  packages: [jsonwebtoken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [Validation, insecure_disable_signature_validation]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use jsonwebtoken::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          Validation::insecure_disable_signature_validation(target);
+      }
+  description: "jsonwebtoken Validation::insecure_disable_signature_validation — explicitly turns off signature check."
+
+- id: rust.jwt.jsonwebtoken_decode
+  enabled: true
+  language: rust
+  tag: jwt
+  severity: medium
+  packages: [jsonwebtoken]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [jsonwebtoken, decode]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      use jsonwebtoken::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          jsonwebtoken::decode(target);
+      }
+  - name: literal arg 0 negative
+    code: |
+      fn example() {
+          jsonwebtoken::decode("safe");
+      }
+    expect_no_match: true
+  description: "jsonwebtoken::decode — audit the Validation struct for disabled checks, alg=none, or mixed HMAC/RSA algorithm lists that enable alg-confusion."
+
+- id: rust.jwt.josekit_decode
+  enabled: true
+  language: rust
+  tag: jwt
+  severity: high
+  packages: [josekit]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtPayload, deserialize]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted josekit jwt payload
+    code: |
+      use josekit::dummy;
+      fn example(target: &str) {
+          JwtPayload::deserialize(target);
+      }
+  - name: literal josekit jwt payload negative
+    code: |
+      use josekit::dummy;
+      fn example() {
+          JwtPayload::deserialize("header.payload.signature");
+      }
+    expect_no_match: true
+  description: "josekit JwtPayload::deserialize — parses the JWT claims; flag if no upstream verify (JwsVerifier / JweDecrypter) is invoked on the same token."

@@ -1,0 +1,236 @@
+- id: ruby.xxe.nokogiri_xml
+  enabled: true
+  language: ruby
+  tag: xxe
+  severity: high
+  packages:
+  - nokogiri
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      regex: ^Nokogiri\.XML$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xxe.nokogiri_xml example
+    code: |
+      require "nokogiri"
+      def example(input, url, id, payload, request, params)
+        Nokogiri.XML(input)
+      end
+  - name: ruby.xxe.nokogiri_xml literal negative
+    code: |
+      require "nokogiri"
+      def example(input, url, id, payload, request, params)
+        Nokogiri.XML("<root/>")
+      end
+    expect_no_match: true
+  description: "Nokogiri::XML — flag if NOENT or DTDLOAD set."
+- id: ruby.xxe.nokogiri_xml_document_parse
+  enabled: true
+  language: ruby
+  tag: xxe
+  severity: high
+  packages:
+  - nokogiri
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Nokogiri::XML::Document
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xxe.nokogiri_xml_document_parse example
+    code: |
+      require "nokogiri"
+      def example(input, url, id, payload, request, params)
+        Nokogiri::XML::Document.parse(input)
+      end
+  - name: ruby.xxe.nokogiri_xml_document_parse literal negative
+    code: |
+      require "nokogiri"
+      def example(input, url, id, payload, request, params)
+        Nokogiri::XML::Document.parse("<root/>")
+      end
+    expect_no_match: true
+  description: Nokogiri::XML::Document.parse.
+- id: ruby.xxe.nokogiri_html
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: xxe
+  severity: low
+  packages:
+  - nokogiri
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Nokogiri
+      - HTML
+  description: "Disabled — HTML parser ignores DTDs."
+- id: ruby.xxe.libxml_parser_string
+  enabled: true
+  language: ruby
+  tag: xxe
+  severity: high
+  packages:
+  - libxml-ruby
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LibXML::XML::Parser
+      - string
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xxe.libxml_parser_string example
+    code: |
+      require "libxml-ruby"
+      def example(input, url, id, payload, request, params)
+        LibXML::XML::Parser.string(input)
+      end
+  - name: ruby.xxe.libxml_parser_string literal negative
+    code: |
+      require "libxml-ruby"
+      def example(input, url, id, payload, request, params)
+        LibXML::XML::Parser.string("<root/>")
+      end
+    expect_no_match: true
+  description: "LibXML::XML::Parser.string — DTD load enabled by default."
+- id: ruby.xxe.libxml_parser_file
+  enabled: true
+  language: ruby
+  tag: xxe
+  severity: high
+  packages:
+  - libxml-ruby
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      attribute:
+      - LibXML::XML::Parser
+      - file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xxe.libxml_parser_file example
+    code: |
+      require "libxml-ruby"
+      def example(input, url, id, payload, request, params)
+        LibXML::XML::Parser.file(input)
+      end
+  - name: ruby.xxe.libxml_parser_file literal negative
+    code: |
+      require "libxml-ruby"
+      def example(input, url, id, payload, request, params)
+        LibXML::XML::Parser.file("config/feed.xml")
+      end
+    expect_no_match: true
+  description: LibXML::XML::Parser.file.
+- id: ruby.xxe.rexml_document_new
+  enabled: true
+  language: ruby
+  tag: xxe
+  severity: high
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      attribute:
+      - REXML
+      - Document
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xxe.rexml_document_new example
+    code: "def example(input, url, id, payload, request, params)\n  REXML::Document.new(input)\nend\n"
+  - name: ruby.xxe.rexml_document_new literal negative
+    code: "def example(input, url, id, payload, request, params)\n  REXML::Document.new(\"<root/>\")\nend\n"
+    expect_no_match: true
+  description: "REXML::Document.new — historically vulnerable to billion-laughs / XXE."
+- id: ruby.xxe.hpricot_xml
+  enabled: true
+  language: ruby
+  tag: xxe
+  severity: high
+  packages:
+  - hpricot
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      regex: ^Hpricot\.XML$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xxe.hpricot_xml example
+    code: |
+      require "hpricot"
+      def example(input, url, id, payload, request, params)
+        Hpricot.XML(input)
+      end
+  - name: ruby.xxe.hpricot_xml literal negative
+    code: |
+      require "hpricot"
+      def example(input, url, id, payload, request, params)
+        Hpricot.XML("<root/>")
+      end
+    expect_no_match: true
+  description: "Hpricot.XML(xml) — historic XML parser, XXE-vulnerable."
+- id: ruby.xxe.nori_parse
+  enabled: true
+  language: ruby
+  tag: xxe
+  severity: medium
+  packages:
+  - nori
+  cwe:
+  - CWE-611
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Nori
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.xxe.nori_parse example
+    code: |
+      require "nori"
+      def example(input, url, id, payload, request, params)
+        Nori.parse(input)
+      end
+  - name: ruby.xxe.nori_parse literal negative
+    code: |
+      require "nori"
+      def example(input, url, id, payload, request, params)
+        Nori.parse("<root/>")
+      end
+    expect_no_match: true
+  description: "Nori.parse — underlying parser (Nokogiri/REXML) controls XXE defaults."

@@ -1,0 +1,196 @@
+# Erlang dynamic-code evaluation sinks — tainted code/forms → RCE.
+- id: erlang.eval.erl_eval
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^erl_eval:(exprs|expr|eval_str)"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          erl_eval:exprs(Input).
+    - name: arg tainted literal negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          erl_eval:exprs([]).
+      expect_no_match: true
+  description: "erl_eval — evaluates parsed Erlang AST; tainted forms execute as code (RCE)."
+- id: erlang.eval.erl_scan_string
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: erlang
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^erl_scan:string"
+  description: "Disabled — tokenizing alone is harmless; flag only when paired with erl_eval."
+- id: erlang.eval.compile_forms
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^compile:forms"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          compile:forms(Input).
+    - name: arg tainted literal negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          compile:forms([]).
+      expect_no_match: true
+  description: "compile:forms — compiles AST to BEAM; tainted forms → arbitrary module loaded (RCE)."
+- id: erlang.eval.code_load_binary
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^code:load_binary"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+    - name: declared shape
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          code:load_binary(example, "nofile", Input).
+    - name: arg tainted literal negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          code:load_binary(example, "nofile", <<"safe">>).
+      expect_no_match: true
+  description: "code:load_binary/3 — hot-loads attacker-supplied BEAM bytes into the VM (RCE)."
+- id: erlang.eval.erlang_apply_module
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^(erlang:)?apply$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted module
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          erlang:apply(Input, run, []).
+    - name: literal module negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          erlang:apply(example, run, []).
+      expect_no_match: true
+  description: "erlang:apply/3 (and bare apply/3) — tainted module atom selects attacker-controlled code to invoke."
+- id: erlang.eval.erlang_apply_function
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^(erlang:)?apply$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted function
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          erlang:apply(example, Input, []).
+    - name: literal function negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          erlang:apply(example, run, []).
+      expect_no_match: true
+  description: "erlang:apply/3 (and bare apply/3) — tainted function atom selects attacker-controlled code to invoke."
+- id: erlang.eval.erlang_apply_args
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^(erlang:)?apply$"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+    - name: tainted apply args
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          erlang:apply(example, run, Input).
+    - name: literal apply args negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          erlang:apply(example, run, []).
+      expect_no_match: true
+  description: "erlang:apply/3 (and bare apply/3) — tainted argument list reaches a dynamically selected call target."
+
+- id: erlang.eval.code_ensure_loaded
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: erlang
+  tag: code-injection
+  severity: medium
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^code:(ensure_loaded|load_file)$"
+  description: "Disabled — code:load_file/ensure_loaded loads a module by atom from code path; risky only when atom is attacker-derived. Pair with list_to_existing_atom check before enabling."

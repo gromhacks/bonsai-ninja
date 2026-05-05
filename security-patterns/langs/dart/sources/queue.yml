@@ -1,0 +1,51 @@
+# Dart queue / messaging sources (FCM, PubSub).
+- id: dart.queue.fcm_message_handler
+  enabled: true
+  language: dart
+  trust: service
+  tag: push-message
+  packages: [firebase_messaging]
+  match:
+    kind: param
+    target:
+      name: message
+  match_examples:
+  - name: declared shape
+    code: |
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      import 'package:firebase_messaging/firebase_messaging.dart';
+      import 'package:firebase_messaging/firebase_messaging.dart'; // firebase_messaging
+      void handle(String message) { var seen = message; }
+  description: "FirebaseMessaging.onMessage handler message parameter."
+
+  imports:
+  - firebase_messaging/firebase_messaging.dart
+- id: dart.queue.fcm_remote_message_data
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  trust: service
+  tag: push-message
+  packages: [firebase_messaging]
+  match:
+    kind: read
+    target:
+      name: data
+  description: "Disabled — the current Dart adapter does not index property reads like `message.data`."
+
+- id: dart.queue.fcm_notification_title
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  trust: service
+  tag: push-message
+  packages: [firebase_messaging]
+  match:
+    kind: read
+    target:
+      name: notification
+  description: "Disabled — the current Dart adapter does not index property reads like `message.notification`."

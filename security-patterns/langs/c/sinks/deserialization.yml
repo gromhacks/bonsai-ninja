@@ -1,0 +1,75 @@
+# C deserialization sinks.
+- id: c.deser.libxml2_xmlreadmemory
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: insecure-deserialization
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-502, CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadMemory
+  description: "Disabled — canonical rule is c.xxe.libxml2_xml_read_memory in xxe.yml. libxml2 readers are XXE, not deserialization."
+
+- id: c.deser.libxml2_xmlreadfile
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: insecure-deserialization
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-502, CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadFile
+  description: "Disabled — canonical rule is c.xxe.libxml2_xml_read_file in xxe.yml."
+
+- id: c.deser.libxml2_xmlparsefile
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: insecure-deserialization
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlParseFile
+  description: "Disabled — canonical rule is c.xxe.libxml2_xml_parse_file in xxe.yml."
+
+- id: c.deser.protobuf_c_unpack
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: insecure-deserialization
+  severity: medium
+  packages: [protobuf-c]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: protobuf_c_message_unpack
+  description: "Disabled — protobuf is type-bounded."
+
+- id: c.deser.cjson_parse
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: insecure-deserialization
+  severity: low
+  packages: [cJSON]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: cJSON_Parse
+  description: "Disabled — cJSON_Parse is type-bounded."

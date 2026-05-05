@@ -1,0 +1,204 @@
+# C# JWT sinks. System.IdentityModel + JWT.NET.
+- id: csharp.jwt.tokenhandler_validate
+  aliases:
+  - csharp.jwt.alg_confusion
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: high
+  packages: [System.IdentityModel.Tokens.Jwt]
+  cwe: [CWE-347, CWE-345]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtSecurityTokenHandler, ValidateToken]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.IdentityModel.Tokens.Jwt;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JwtSecurityTokenHandler.ValidateToken(input); } }
+  - name: literal validate token negative
+    code: |
+      using System.IdentityModel.Tokens.Jwt;
+      class App { void Test() { JwtSecurityTokenHandler.ValidateToken("eyJhbGciOiJIUzI1NiJ9.safe.sig"); } }
+    expect_no_match: true
+  description: "JwtSecurityTokenHandler.ValidateToken — verify signing key is set. Also covers merged aliases: csharp.jwt.alg_confusion."
+
+- id: csharp.jwt.tokenhandler_readtoken_unverified
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: high
+  packages: [System.IdentityModel.Tokens.Jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtSecurityTokenHandler, ReadJwtToken]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using System.IdentityModel.Tokens.Jwt;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JwtSecurityTokenHandler.ReadJwtToken(input); } }
+  - name: literal read jwt token negative
+    code: |
+      using System.IdentityModel.Tokens.Jwt;
+      class App { void Test() { JwtSecurityTokenHandler.ReadJwtToken("eyJhbGciOiJIUzI1NiJ9.safe.sig"); } }
+    expect_no_match: true
+  description: "ReadJwtToken — parses but does NOT verify signature."
+
+- id: csharp.jwt.validate_signature_off
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: critical
+  packages: [Microsoft.IdentityModel.Tokens]
+  cwe: [CWE-347]
+  match:
+    kind: write
+    target:
+      name: ValidateIssuerSigningKey
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.IdentityModel.Tokens;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateIssuerSigningKey = input; } }
+  description: "ValidateIssuerSigningKey = false — signature verification disabled."
+
+- id: csharp.jwt.validate_lifetime_off
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: medium
+  packages: [Microsoft.IdentityModel.Tokens]
+  cwe: [CWE-613]
+  match:
+    kind: write
+    target:
+      name: ValidateLifetime
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.IdentityModel.Tokens;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateLifetime = input; } }
+  description: "ValidateLifetime = false — accepts expired tokens."
+
+- id: csharp.jwt.jwt_decode_no_verify
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: critical
+  packages: [JWT]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtBuilder, Decode]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using JWT;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JwtBuilder.Decode(input); } }
+  - name: literal jwtbuilder decode negative
+    code: |
+      using JWT;
+      class App { void Test() { JwtBuilder.Decode("eyJhbGciOiJIUzI1NiJ9.safe.sig"); } }
+    expect_no_match: true
+  description: "jwt-dotnet JwtBuilder.Decode — flag if .MustVerifySignature() not called."
+
+- id: csharp.jwt.jose_decode_no_key
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: critical
+  packages: [jose-jwt]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      attribute: [JWT, Decode]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using josejwt;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; JWT.Decode(input); } }
+  - name: literal jose jwt decode negative
+    code: |
+      using josejwt;
+      class App { void Test() { JWT.Decode("eyJhbGciOiJIUzI1NiJ9.safe.sig"); } }
+    expect_no_match: true
+  description: "jose-jwt Jose.JWT.Decode — flag if called without key / with alg=none."
+
+  imports:
+  - josejwt
+- id: csharp.jwt.validate_issuer_off
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: high
+  packages: [Microsoft.IdentityModel.Tokens]
+  cwe: [CWE-345]
+  match:
+    kind: write
+    target:
+      name: ValidateIssuer
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.IdentityModel.Tokens;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateIssuer = input; } }
+  description: "ValidateIssuer = false — accepts tokens from any issuer."
+
+- id: csharp.jwt.validate_audience_off
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: high
+  packages: [Microsoft.IdentityModel.Tokens]
+  cwe: [CWE-345]
+  match:
+    kind: write
+    target:
+      name: ValidateAudience
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.IdentityModel.Tokens;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ValidateAudience = input; } }
+  description: "ValidateAudience = false — accepts tokens minted for any audience."
+
+- id: csharp.jwt.require_signed_off
+  enabled: true
+  language: csharp
+  tag: jwt
+  severity: critical
+  packages: [Microsoft.IdentityModel.Tokens]
+  cwe: [CWE-347]
+  match:
+    kind: write
+    target:
+      name: RequireSignedTokens
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.IdentityModel.Tokens;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; RequireSignedTokens = input; } }
+  description: "RequireSignedTokens = false — permits unsigned JWTs (alg=none)."
+
+# JWT alg-confusion (T400). HMAC verify with an RSA public
+# key — when both HS* and RS* algorithms are allowed in the
+# verifier's algorithm list, an attacker can sign their own
+# token with the public key as the HMAC secret. Detect by
+# matching the algorithm-list shape at the verify call.

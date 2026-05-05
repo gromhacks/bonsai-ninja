@@ -1,0 +1,1110 @@
+- id: kotlin.path.fileoutputstream
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: FileOutputStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    FileOutputStream(input)\n  }\n}\nclass FileOutputStream(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        FileOutputStream("safe")
+      }
+      }
+      class FileOutputStream(vararg args: Any?)
+    expect_no_match: true
+  description: new FileOutputStream(tainted).
+- id: kotlin.path.file_reader_ctor
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: FileReader
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    FileReader(input)\n  }\n}\nclass FileReader(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        FileReader("safe")
+      }
+      }
+      class FileReader(vararg args: Any?)
+    expect_no_match: true
+  description: new FileReader(tainted).
+- id: kotlin.path.file_writer_ctor
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: FileWriter
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    FileWriter(input)\n  }\n}\nclass FileWriter(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        FileWriter("safe")
+      }
+      }
+      class FileWriter(vararg args: Any?)
+    expect_no_match: true
+  description: new FileWriter(tainted).
+- id: kotlin.path.random_access_file
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: RandomAccessFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    RandomAccessFile(input)\n  }\n}\nclass RandomAccessFile(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        RandomAccessFile("safe")
+      }
+      }
+      class RandomAccessFile(vararg args: Any?)
+    expect_no_match: true
+  description: new RandomAccessFile(tainted).
+- id: kotlin.path.files_write
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages: [java.nio.file]
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.nio.file.*
+      // uses java.nio.file
+      class App {
+        fun handle(input: String) {
+          Files.write(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.nio.file.*
+      // uses java.nio.file
+      class App {
+      fun handle(input: String) {
+        Files.write("safe")
+      }
+      }
+    expect_no_match: true
+  description: java.nio.file.Files.write.
+- id: kotlin.path.files_delete
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages: [java.nio.file]
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.nio.file.*
+      // uses java.nio.file
+      class App {
+        fun handle(input: String) {
+          Files.delete(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.nio.file.*
+      // uses java.nio.file
+      class App {
+      fun handle(input: String) {
+        Files.delete("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Files.delete with tainted Path — attacker-controlled paths let the attacker delete arbitrary files."
+- id: kotlin.path.files_delete_if_exists
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - deleteIfExists
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Files.deleteIfExists(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.deleteIfExists("safe")
+      }
+      }
+    expect_no_match: true
+  description: java.nio.file.Files.deleteIfExists.
+- id: kotlin.path.files_read_all_bytes
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^Files\.readAllBytes$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Files.readAllBytes(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.readAllBytes("safe")
+      }
+      }
+    expect_no_match: true
+  description: java.nio.file.Files.readAllBytes.
+- id: kotlin.path.files_read_string
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - readString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Files.readString(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.readString("safe")
+      }
+      }
+    expect_no_match: true
+  description: java.nio.file.Files.readString (Java 11+).
+- id: kotlin.path.files_new_input_stream
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - newInputStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Files.newInputStream(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.newInputStream("safe")
+      }
+      }
+    expect_no_match: true
+  description: java.nio.file.Files.newInputStream.
+- id: kotlin.path.files_new_output_stream
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - newOutputStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Files.newOutputStream(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.newOutputStream("safe")
+      }
+      }
+    expect_no_match: true
+  description: java.nio.file.Files.newOutputStream.
+- id: kotlin.path.files_copy
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Files.copy(input, \"safe\")\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.copy("safe", "dest")
+      }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Files.copy(tainted_source, dest)."
+- id: kotlin.path.files_copy_dest
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted destination
+    code: |
+      class App {
+        fun handle(input: String) {
+          Files.copy("safe", input)
+        }
+      }
+  - name: literal destination negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.copy("safe", "dest")
+      }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Files.copy(source, tainted_dest)."
+- id: kotlin.path.files_move
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - move
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    Files.move(input, \"safe\")\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.move("safe", "dest")
+      }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Files.move(tainted_source, dest)."
+- id: kotlin.path.files_move_dest
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - move
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted destination
+    code: |
+      class App {
+        fun handle(input: String) {
+          Files.move("safe", input)
+        }
+      }
+  - name: literal destination negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        Files.move("safe", "dest")
+      }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Files.move(source, tainted_dest)."
+- id: kotlin.path.file_input_stream
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: FileInputStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    FileInputStream(input)\n  }\n}\nclass FileInputStream(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        FileInputStream("safe")
+      }
+      }
+      class FileInputStream(vararg args: Any?)
+    expect_no_match: true
+  description: new FileInputStream(tainted).
+- id: kotlin.path.file_ctor
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: File
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    File(input)\n  }\n}\nclass File(vararg args: Any?)\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        File("safe")
+      }
+      }
+      class File(vararg args: Any?)
+    expect_no_match: true
+  description: new java.io.File(tainted).
+- id: kotlin.path.file_ctor_child
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: File
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted child path
+    code: |
+      class App {
+        fun handle(input: String) {
+          File("safe", input)
+        }
+      }
+      class File(vararg args: Any?)
+  - name: literal child path negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        File("safe", "child.txt")
+      }
+      }
+      class File(vararg args: Any?)
+    expect_no_match: true
+  description: "new java.io.File(parent, tainted_child) — tainted child path can escape the intended parent."
+- id: kotlin.path.file_readtext
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - kotlin.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - readText
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: tainted file receiver
+    code: |
+      import kotlin.io.*
+      class App {
+        fun handle(input: String) {
+          val f = File(input)
+          f.readText()
+        }
+      }
+  - name: literal file receiver negative
+    code: |
+      import kotlin.io.*
+      class App {
+        fun handle(input: String) {
+          val f = File("safe")
+          f.readText()
+        }
+      }
+    expect_no_match: true
+  description: "Kotlin File.readText extension — reads path-targeted content."
+- id: kotlin.path.file_writetext
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - kotlin.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - writeText
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.io.*
+      class App {
+        fun handle(input: String) {
+          File.writeText(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import kotlin.io.*
+      class App {
+      fun handle(input: String) {
+        File.writeText("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Kotlin File.writeText extension — writes to path-targeted file."
+- id: kotlin.path.file_copyto
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - kotlin.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - copyTo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.io.*
+      class App {
+        fun handle(input: String) {
+          File.copyTo(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import kotlin.io.*
+      class App {
+      fun handle(input: String) {
+        File.copyTo("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Kotlin File.copyTo — destination path traversal."
+- id: kotlin.path.file_renameto
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - renameTo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    File.renameTo(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        File.renameTo("safe")
+      }
+      }
+    expect_no_match: true
+  description: File.renameTo(tainted).
+- id: kotlin.path.paths_get
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Paths
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.typesafe.play.*
+      class App {
+        fun handle(input: String) {
+          Paths.get(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.typesafe.play.*
+      class App {
+      fun handle(input: String) {
+        Paths.get("safe")
+      }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Paths.get(tainted) — path resolution without normalize/startsWith check. Merged collision aliases: kotlin.ssrf.play_wsrequest_get, kotlin.ssrf.ktor_httpclient_get, kotlin.ssrf.fuel_http_get."
+  aliases:
+  - kotlin.ssrf.play_wsrequest_get
+  - kotlin.ssrf.ktor_httpclient_get
+  - kotlin.ssrf.fuel_http_get
+  packages:
+  - com.typesafe.play
+  - play.libs.ws
+  - io.ktor:ktor-client-core
+  - com.github.kittinunf.fuel
+- id: kotlin.path.filesystem_getpath
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileSystem
+      - getPath
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    FileSystem.getPath(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        FileSystem.getPath("safe")
+      }
+      }
+    expect_no_match: true
+  description: FileSystem.getPath(tainted).
+- id: kotlin.path.commons_fileutils_read_file_to_string
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - org.apache.commons.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - readFileToString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.io.*
+      class App {
+        fun handle(input: String) {
+          FileUtils.readFileToString(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.io.*
+      class App {
+      fun handle(input: String) {
+        FileUtils.readFileToString("safe")
+      }
+      }
+    expect_no_match: true
+  description: Apache Commons IO FileUtils.readFileToString.
+  imports:
+  - org.apache.commons.io
+- id: kotlin.path.commons_fileutils_write
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - org.apache.commons.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.io.*
+      // uses org.apache.commons.io
+      class App {
+        fun handle(input: String) {
+          FileUtils.write(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.io.*
+      // uses org.apache.commons.io
+      class App {
+      fun handle(input: String) {
+        FileUtils.write("safe")
+      }
+      }
+    expect_no_match: true
+  description: Apache Commons IO FileUtils.write.
+  imports:
+  - org.apache.commons.io
+- id: kotlin.path.commons_fileutils_write_string
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - org.apache.commons.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - writeStringToFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.io.*
+      class App {
+        fun handle(input: String) {
+          FileUtils.writeStringToFile(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.io.*
+      class App {
+      fun handle(input: String) {
+        FileUtils.writeStringToFile("safe")
+      }
+      }
+    expect_no_match: true
+  description: Apache Commons IO FileUtils.writeStringToFile.
+  imports:
+  - org.apache.commons.io
+- id: kotlin.path.commons_fileutils_copy
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - org.apache.commons.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - copyFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.io.*
+      class App {
+        fun handle(input: String) {
+          FileUtils.copyFile(input, "safe")
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.io.*
+      class App {
+      fun handle(input: String) {
+        FileUtils.copyFile("safe", "dest")
+      }
+      }
+    expect_no_match: true
+  description: "Apache Commons IO FileUtils.copyFile(tainted_source, dest)."
+  imports:
+  - org.apache.commons.io
+- id: kotlin.path.commons_fileutils_copy_dest
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - org.apache.commons.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - copyFile
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted destination
+    code: |
+      import org.apache.commons.io.*
+      class App {
+        fun handle(input: String) {
+          FileUtils.copyFile("safe", input)
+        }
+      }
+  - name: literal destination negative
+    code: |
+      import org.apache.commons.io.*
+      class App {
+      fun handle(input: String) {
+        FileUtils.copyFile("safe", "dest")
+      }
+      }
+    expect_no_match: true
+  description: "Apache Commons IO FileUtils.copyFile(source, tainted_dest)."
+  imports:
+  - org.apache.commons.io
+- id: kotlin.path.commons_fileutils_delete
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - org.apache.commons.io
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - forceDelete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.io.*
+      class App {
+        fun handle(input: String) {
+          FileUtils.forceDelete(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.commons.io.*
+      class App {
+      fun handle(input: String) {
+        FileUtils.forceDelete("safe")
+      }
+      }
+    expect_no_match: true
+  description: Apache Commons IO FileUtils.forceDelete.
+  imports:
+  - org.apache.commons.io
+- id: kotlin.path.zip_getnextentry
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ZipInputStream
+      - getNextEntry
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  fun handle(input: String) {\n    ZipInputStream.getNextEntry(input)\n  }\n}\n"
+  description: "Disabled — ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
+- id: kotlin.path.file_readbytes
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - kotlin
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: readBytes
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.*
+      class App {
+        fun handle(input: String) {
+          readBytes(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import kotlin.*
+      class App {
+      fun handle(input: String) {
+        readBytes("safe")
+      }
+      }
+    expect_no_match: true
+  description: "File(...).readBytes() — kotlin.io extension reads file at the (potentially tainted) path."
+  imports:
+  - kotlin
+- id: kotlin.path.file_readlines
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - kotlin
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: readLines
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.*
+      class App {
+        fun handle(input: String) {
+          readLines(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import kotlin.*
+      class App {
+      fun handle(input: String) {
+        readLines("safe")
+      }
+      }
+    expect_no_match: true
+  description: "File(...).readLines([charset]) — same exposure as readBytes."
+  imports:
+  - kotlin
+- id: kotlin.path.file_inputstream_method
+  enabled: true
+  language: kotlin
+  tag: path-traversal
+  severity: high
+  packages:
+  - kotlin
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: inputStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import kotlin.*
+      class App {
+        fun handle(input: String) {
+          inputStream(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import kotlin.*
+      class App {
+      fun handle(input: String) {
+        inputStream("safe")
+      }
+      }
+    expect_no_match: true
+  description: "File(...).inputStream() — opens a FileInputStream at the tainted path. Distinct from kotlin.path.file_input_stream which matches `new FileInputStream(...)`."
+  imports:
+  - kotlin

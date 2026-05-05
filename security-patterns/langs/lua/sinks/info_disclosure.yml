@@ -1,0 +1,23 @@
+# Lua information-disclosure sinks (logs, debug output, error responses).
+- id: lua.info_disclosure.ngx_log_secret
+  aliases:
+  - lua.log_injection.ngx_log_newline
+  enabled: true
+  language: lua
+  tag: information-disclosure
+  severity: medium
+  packages: [openresty]
+  cwe: [CWE-200, CWE-117]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, log]
+  match_examples:
+  - name: lua ngx log secret-shaped data
+    code: |
+      local _openresty = require("openresty")
+      function example(input)
+        ngx.log(ngx.ERR, "token=", input)
+      end
+    expect_match_text: [ngx.log]
+  description: "ngx.log with secret-shaped data — credentials or tokens can leak to nginx / OpenResty logs. Also covers merged aliases: lua.log_injection.ngx_log_newline."

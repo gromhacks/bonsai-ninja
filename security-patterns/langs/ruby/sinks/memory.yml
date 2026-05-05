@@ -1,0 +1,81 @@
+# Ruby memory-safety / lifecycle audit-pair sites.
+# These rules fire on the *use-after-transition* call (read / write)
+# and gate on the adapter-emitted lifecycle state via the
+# `requires_state` engine constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: ruby.memory.io_close
+  enabled: true
+  language: ruby
+  tag: memory-safety
+  severity: medium
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - requires_state:
+      name: io
+      expected: closed
+  match_examples:
+  - name: read after close
+    code: |
+      def example(io)
+        io.close
+        io.read
+      end
+    expect_match_text: [io.read]
+  - name: read without preceding close
+    code: |
+      def example(io)
+        io.read
+      end
+    expect_no_match: true
+  description: "Use-after-close — `IO#read` on a handle whose preceding `.close` released the underlying file descriptor. Subsequent reads raise IOError at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
+- id: ruby.memory.file_close
+  enabled: true
+  language: ruby
+  tag: memory-safety
+  severity: medium
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: write
+  constraints:
+  - requires_state:
+      name: f
+      expected: closed
+  match_examples:
+  - name: write after close
+    code: |
+      def example(f)
+        f.close
+        f.write 'payload'
+      end
+    expect_match_text: [f.write]
+  - name: write without preceding close
+    code: |
+      def example(f)
+        f.write 'payload'
+      end
+    expect_no_match: true
+  description: "Use-after-close — `File#write` on a handle whose preceding `.close` released the underlying file. Subsequent writes raise IOError at runtime (CWE-416/CWE-404). The `requires_state` constraint gates on the binding's actual `closed` lifecycle state."
+- id: ruby.memory.mutex_unlock
+  enabled: true
+  language: ruby
+  tag: memory-safety
+  severity: medium
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      attribute: [Mutex, unlock]
+  match_examples:
+  - name: mutex unlock site
+    code: |
+      def example(mutex)
+        Mutex.unlock(mutex)
+      end
+    expect_match_text: [Mutex.unlock]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. Mutex#unlock — subsequent guarded-region reads/writes without a re-lock are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

@@ -1,0 +1,78 @@
+- id: go.llm.openai_create_chat_completion
+  enabled: false
+  language: go
+  tag: web-llm
+  severity: medium
+  packages:
+  - github.com/sashabaranov/go-openai
+  cwe:
+  - CWE-20
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - CreateChatCompletion
+  match_examples:
+  - name: openai create chat completion
+    code: "import \"github.com/sashabaranov/go-openai\"\npackage main\nfunc example(ctx\
+      \ context.Context, client *openai.Client, req openai.ChatCompletionRequest)\
+      \ {\n  client.CreateChatCompletion(ctx, req)\n}\n"
+    expect_match_text:
+    - client.CreateChatCompletion
+  description: "client.CreateChatCompletion(ctx, request) \u2014 tainted prompt/tool\
+    \ content reaches an LLM instruction surface."
+  disabled_reason:
+    code: over-broad
+- id: go.llm.anthropic_messages_new
+  enabled: true
+  language: go
+  tag: web-llm
+  severity: medium
+  packages:
+  - github.com/anthropics/anthropic-sdk-go
+  cwe:
+  - CWE-20
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - Messages
+      - New
+  match_examples:
+  - name: anthropic messages new
+    code: "import \"github.com/anthropics/anthropic-sdk-go\"\npackage main\nfunc example(ctx\
+      \ context.Context, client *anthropic.Client, params anthropic.MessageNewParams)\
+      \ {\n  client.Messages.New(ctx, params)\n}\n"
+    expect_match_text:
+    - client.Messages.New
+  description: "client.Messages.New(ctx, params) \u2014 tainted prompt content can\
+    \ steer model output or tool calls."
+- id: go.llm.bedrock_invoke_model
+  enabled: true
+  language: go
+  tag: web-llm
+  severity: medium
+  packages:
+  - github.com/aws/aws-sdk-go-v2/service/bedrockruntime
+  cwe:
+  - CWE-20
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      attribute:
+      - bedrock
+      - InvokeModel
+  match_examples:
+  - name: bedrock invoke model
+    code: "import \"github.com/aws/aws-sdk-go-v2/service/bedrockruntime\"\npackage\
+      \ main\nfunc example(ctx context.Context, bedrock *bedrockruntime.Client, input\
+      \ *bedrockruntime.InvokeModelInput) {\n  bedrock.InvokeModel(ctx, input)\n}\n"
+    expect_match_text:
+    - bedrock.InvokeModel
+  description: "bedrock.InvokeModel(ctx, input) \u2014 tainted model body reaches\
+    \ a foundation-model execution surface."

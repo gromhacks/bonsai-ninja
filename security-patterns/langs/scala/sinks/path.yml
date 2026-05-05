@@ -1,0 +1,732 @@
+- id: scala.path.source_fromfile
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Source
+      - fromFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Source.fromFile(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Source.fromFile(\"safe.txt\")\n  }\n}\n"
+    expect_no_match: true
+  description: "scala.io.Source.fromFile(path) — reads attacker-controlled file."
+- id: scala.path.files_readstring
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - readString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readString(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readString(\"safe.txt\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.readString(path) — reads tainted path; traversal yields arbitrary-file disclosure."
+- id: scala.path.files_readallbytes
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^Files\.readAllBytes$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllBytes(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllBytes(\"safe.txt\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.readAllBytes(path) — tainted path enables arbitrary-file read."
+- id: scala.path.files_readalllines
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - readAllLines
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllLines(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.readAllLines(\"safe.txt\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.readAllLines(path) — tainted path enables arbitrary-file read."
+- id: scala.path.files_write
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages: [java.nio.file]
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.nio.file._
+      // uses java.nio.file
+      object App {
+        def handle(input: String): Unit = {
+          Files.write(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.nio.file._
+      // uses java.nio.file
+      object App {
+        def handle(input: String): Unit = {
+          Files.write("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Files.write(path, bytes) — tainted path enables arbitrary-file write/overwrite."
+- id: scala.path.files_writestring
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - writeString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.writeString(input)\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.writeString(\"safe.txt\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.writeString(path, content) — tainted path enables arbitrary-file write."
+- id: scala.path.files_copy
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.copy(input, \"safe\")\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.copy(\"safe\", \"dest\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.copy(tainted_source, dest) — source path tainted."
+- id: scala.path.files_copy_dest
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted destination
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.copy(\"safe\", input)\n  }\n}\n"
+  - name: literal destination negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.copy(\"safe\", \"dest\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.copy(source, tainted_dest) — destination path tainted."
+- id: scala.path.files_move
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - move
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.move(input, \"safe\")\n  }\n}\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.move(\"safe\", \"dest\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.move(tainted_source, dest) — source path tainted."
+- id: scala.path.files_move_dest
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - move
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted destination
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.move(\"safe\", input)\n  }\n}\n"
+  - name: literal destination negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    Files.move(\"safe\", \"dest\")\n  }\n}\n"
+    expect_no_match: true
+  description: "java.nio.file.Files.move(source, tainted_dest) — destination path tainted."
+- id: scala.path.files_delete
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages: [java.nio.file]
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Files
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.nio.file._
+      // uses java.nio.file
+      object App {
+        def handle(input: String): Unit = {
+          Files.delete(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import java.nio.file._
+      // uses java.nio.file
+      object App {
+        def handle(input: String): Unit = {
+          Files.delete("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Files.delete(path) — tainted path enables arbitrary-file deletion / DoS."
+- id: scala.path.paths_get
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Paths
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.typesafe.play._
+      object App {
+        def handle(input: String): Unit = {
+          Paths.get(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.typesafe.play._
+      object App {
+        def handle(input: String): Unit = {
+          Paths.get("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Paths.get(tainted) — early indicator of user-controlled path. Merged collision aliases: scala.ssrf.play_wsrequest_get, scala.ssrf.http4s_client_get, scala.ssrf.sttp_basic_request_url."
+  aliases:
+  - scala.ssrf.play_wsrequest_get
+  - scala.ssrf.http4s_client_get
+  - scala.ssrf.sttp_basic_request_url
+  packages:
+  - com.typesafe.play
+  - play.api.libs.ws
+  - http4s
+  - sttp
+- id: scala.path.os_lib_read
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages:
+  - com.lihaoyi.os-lib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - read
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.read(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.read("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.read(path) — tainted path enables arbitrary-file disclosure."
+  imports:
+  - com.lihaoyi.oslib
+  - com
+- id: scala.path.os_lib_write
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages:
+  - com.lihaoyi.os-lib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.write(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.write("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.write(path, content) — tainted path enables arbitrary-file write."
+  imports:
+  - com.lihaoyi.oslib
+  - com
+- id: scala.path.os_lib_remove
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages:
+  - com.lihaoyi.os-lib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - remove
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.remove(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.remove("safe.txt")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.remove(path) — tainted path enables arbitrary-file deletion."
+  imports:
+  - com.lihaoyi.oslib
+  - com
+- id: scala.path.os_lib_copy
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages:
+  - com.lihaoyi.os-lib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.copy(input, "safe")
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.copy("safe", "dest")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.copy(tainted_src, dest) — tainted source enables arbitrary-file read."
+  imports:
+  - com.lihaoyi.oslib
+  - com
+- id: scala.path.os_lib_copy_dest
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages:
+  - com.lihaoyi.os-lib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - copy
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted destination
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.copy("safe", input)
+        }
+      }
+  - name: literal destination negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.copy("safe", "dest")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.copy(src, tainted_dest) — tainted destination enables arbitrary-file overwrite."
+  imports:
+  - com.lihaoyi.oslib
+  - com
+- id: scala.path.os_lib_move
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages:
+  - com.lihaoyi.os-lib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - move
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.move(input, "safe")
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.move("safe", "dest")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.move(tainted_src, dest) — tainted source enables arbitrary-file relocation."
+  imports:
+  - com.lihaoyi.oslib
+  - com
+- id: scala.path.os_lib_move_dest
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  packages:
+  - com.lihaoyi.os-lib
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - os
+      - move
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted destination
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.move("safe", input)
+        }
+      }
+  - name: literal destination negative
+    code: |
+      import com.lihaoyi.oslib._
+      object App {
+        def handle(input: String): Unit = {
+          os.move("safe", "dest")
+        }
+      }
+    expect_no_match: true
+  description: "os-lib os.move(src, tainted_dest) — tainted destination enables arbitrary-file relocation."
+  imports:
+  - com.lihaoyi.oslib
+  - com
+- id: scala.path.file_new
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: File
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    new File(input)\n  }\n}\nclass File(args: Any*)\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    new File(\"safe.txt\")\n  }\n}\nclass File(args: Any*)\n"
+    expect_no_match: true
+  description: "new java.io.File(tainted) — early path construction sink."
+- id: scala.path.file_new_child
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: File
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted child path
+    code: "object App {\n  def handle(input: String): Unit = {\n    new File(\"safe\", input)\n  }\n}\nclass File(args: Any*)\n"
+  - name: literal child negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    new File(\"safe\", \"child.txt\")\n  }\n}\nclass File(args: Any*)\n"
+    expect_no_match: true
+  description: "new java.io.File(parent, tainted_child) — tainted child segment can escape the intended parent."
+- id: scala.path.fileinputstream_new
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: FileInputStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    new FileInputStream(input)\n  }\n}\nclass FileInputStream(args: Any*)\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    new FileInputStream(\"safe.txt\")\n  }\n}\nclass FileInputStream(args: Any*)\n"
+    expect_no_match: true
+  description: "new FileInputStream(tainted) — opens tainted path; traversal enables arbitrary-file read."
+- id: scala.path.fileoutputstream_new
+  enabled: true
+  language: scala
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: new
+    callee:
+      name: FileOutputStream
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    new FileOutputStream(input)\n  }\n}\nclass FileOutputStream(args: Any*)\n"
+  - name: arg tainted literal negative
+    code: "object App {\n  def handle(input: String): Unit = {\n    new FileOutputStream(\"safe.txt\")\n  }\n}\nclass FileOutputStream(args: Any*)\n"
+    expect_no_match: true
+  description: "new FileOutputStream(tainted) — opens tainted path for write; traversal enables arbitrary-file overwrite."
+- id: scala.path.zipinputstream_get_next_entry
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: zip-slip
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^ZipInputStream\.getNextEntry$
+  match_examples:
+  - name: generated shape example
+    code: "object App {\n  def handle(input: String): Unit = {\n    ZipInputStream.getNextEntry(input)\n  }\n}\n"
+  description: "Disabled — ZipInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."
+- id: scala.path.commons_compress_archive_input_get_next_entry
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: scala
+  tag: zip-slip
+  severity: high
+  packages:
+  - org.apache.commons.compress
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      regex: ^ArchiveInputStream\.getNextEntry$
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.compress._
+      object App {
+        def handle(input: String): Unit = {
+          ArchiveInputStream.getNextEntry(input)
+        }
+      }
+  description: "Disabled — ArchiveInputStream.getNextEntry() returns archive-entry state; Zip Slip should be reported at path write/extract sinks until return-state tracking exists."

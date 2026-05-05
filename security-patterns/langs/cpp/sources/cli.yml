@@ -1,0 +1,262 @@
+# C++ local / CLI / stdin sources (trust: local).
+- id: cpp.input.argv_param
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: param
+    target:
+      name: argv
+      in_method: [main]
+  match_examples:
+  - name: main argv
+    code: |
+      int main(int argc, char **argv) {
+        return argc;
+      }
+  - name: helper argv is not process argv
+    code: |
+      void helper(const char *argv) {
+        (void)argv;
+      }
+    expect_no_match: true
+  description: "main(int argc, char** argv) parameter."
+- id: cpp.input.cin_read
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: cin
+  match_examples:
+  - name: generated direct match
+    code: |
+      struct IO { int cin; } io;
+      void example() {
+        auto x = io.cin;
+      }
+  description: "std::cin stream reads."
+- id: cpp.input.getenv
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: getenv
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        getenv(arg);
+      }
+  description: "libc getenv — environment is attacker-influenced in shared hosts."
+- id: cpp.input.secure_getenv
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  match:
+    kind: call
+    callee:
+      name: secure_getenv
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        secure_getenv(arg);
+      }
+  description: "glibc secure_getenv — still attacker-influenced."
+- id: cpp.input.getline
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  match:
+    kind: call
+    callee:
+      name: getline
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        getline(arg);
+      }
+  description: "getline — stdin / file line."
+- id: cpp.input.fgets
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  match:
+    kind: call
+    callee:
+      name: fgets
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        fgets(arg);
+      }
+  description: "fgets — stdin / file line."
+- id: cpp.input.sscanf
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: sscanf
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        sscanf(arg);
+      }
+  description: "sscanf — parses external string into variables."
+- id: cpp.input.qt_qcoreapplication_arguments
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  packages: [Qt]
+  match:
+    kind: call
+    callee:
+      attribute: [QCoreApplication, arguments]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QCoreApplication::arguments(arg);
+      }
+  description: "Qt QCoreApplication::arguments — CLI args."
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.input.boost_program_options_value
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  packages: [boost.program_options]
+  match:
+    kind: call
+    callee:
+      attribute: [variables_map, "operator[]"]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <boost.program_options.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        variables_map::operator[](arg);
+      }
+  description: "Boost.ProgramOptions variables_map access — CLI args."
+
+- id: cpp.input.absl_parse_command_line
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [abseil]
+  match:
+    kind: call
+    callee:
+      attribute: [absl, ParseCommandLine]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <abseil/strings/str_cat.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        absl::ParseCommandLine(arg);
+      }
+  description: "absl::ParseCommandLine(argc, argv) — returns positional args from argv."
+
+- id: cpp.input.absl_get_flag
+  enabled: true
+  language: cpp
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [abseil]
+  match:
+    kind: call
+    callee:
+      attribute: [absl, GetFlag]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <abseil/strings/str_cat.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        absl::GetFlag(arg);
+      }
+  description: "absl::GetFlag(FLAGS_x) — returns CLI-supplied flag value."
+
+- id: cpp.input.qt_serialport_readall
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  payload_types: [binary]
+  packages: [Qt]
+  match:
+    kind: call
+    callee:
+      attribute: [QSerialPort, readAll]
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QSerialPort::readAll(arg);
+      }
+  description: "Qt QSerialPort::readAll — bytes from a connected serial device."
+  imports:
+  - QtCore
+  - QtCore/Qt

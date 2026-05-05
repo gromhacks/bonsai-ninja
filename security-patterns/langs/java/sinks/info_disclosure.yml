@@ -1,0 +1,126 @@
+- id: java.info_disclosure.system_out_secret
+  enabled: true
+  language: java
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      regex: ^System\.out\.println$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    System.out.println(\"password=\" + input);\n \
+      \ }\n}\n"
+    expect_match_text:
+    - System.out.println
+  - name: literal system out negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          System.out.println("password=redacted");
+        }
+      }
+    expect_no_match: true
+  description: System.out.println of secret-shaped values can disclose credentials through stdout logs.
+- id: java.info_disclosure.system_err_secret
+  enabled: true
+  language: java
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  match:
+    kind: call
+    callee:
+      regex: ^System\.err\.println$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    System.err.println(\"api_key=\" + input);\n  }\n\
+      }\n"
+    expect_match_text:
+    - System.err.println
+  - name: literal system err negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          System.err.println("api_key=redacted");
+        }
+      }
+    expect_no_match: true
+  description: System.err.println of secret-shaped values can leak sensitive data into error logs.
+- id: java.info_disclosure.logger_error_secret
+  enabled: true
+  language: java
+  tag: information-disclosure
+  severity: medium
+  cwe:
+  - CWE-200
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Logger
+      - error
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    Logger.error(\"token value\", input);\n  }\n}\n"
+    expect_match_text:
+    - Logger.error
+  - name: literal logger error value negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          Logger.error("token value", "redacted");
+        }
+      }
+    expect_no_match: true
+  description: 'Logger.error with secret-shaped values persists sensitive data in application logs. Merged aliases: java.log_injection.logger_error_concat.'
+  aliases:
+  - java.log_injection.logger_error_concat
+- id: java.info_disclosure.response_writer_exception
+  enabled: true
+  language: java
+  tag: information-disclosure
+  severity: high
+  cwe:
+  - CWE-209
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - getWriter
+      - println
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: "class App {\n  void handle(String input) throws Exception {\n    getWriter.println(\"Exception stack trace: \"\
+      \ + input);\n  }\n}\n"
+    expect_match_text:
+    - getWriter.println
+  - name: literal response writer negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          getWriter.println("Exception stack trace: redacted");
+        }
+      }
+    expect_no_match: true
+  description: 'HttpServletResponse.getWriter().println of exception or stack details exposes internals to clients. Merged
+    aliases: java.xss.response_writer_println.'
+  aliases:
+  - java.xss.response_writer_println

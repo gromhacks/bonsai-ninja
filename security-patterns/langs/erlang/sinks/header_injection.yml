@@ -1,0 +1,95 @@
+# Erlang HTTP header / CRLF injection (cowboy).
+- id: erlang.header.cowboy_set_resp_header
+  enabled: true
+  language: erlang
+  tag: header-injection
+  severity: high
+  packages: [cowboy]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:set_resp_header"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Req, Input) ->
+        cowboy_req:set_resp_header(<<"x-name">>, Input, Req).
+  - name: arg tainted literal negative
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Req) ->
+        cowboy_req:set_resp_header(<<"x-name">>, <<"safe">>, Req).
+    expect_no_match: true
+  description: "cowboy_req:set_resp_header — tainted value with embedded \\r\\n splits response and injects headers/body."
+
+- id: erlang.header.cowboy_set_resp_cookie_name
+  enabled: true
+  language: erlang
+  tag: header-injection
+  severity: medium
+  packages: [cowboy]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:set_resp_cookie"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted cookie name
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Req, Input) ->
+        cowboy_req:set_resp_cookie(Input, <<"ok">>, Req).
+  - name: literal cookie name negative
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Req) ->
+        cowboy_req:set_resp_cookie(<<"sid">>, <<"ok">>, Req).
+    expect_no_match: true
+  description: "cowboy_req:set_resp_cookie — tainted cookie name can inject cookie attributes or CRLF."
+- id: erlang.header.cowboy_set_resp_cookie_value
+  enabled: true
+  language: erlang
+  tag: header-injection
+  severity: medium
+  packages: [cowboy]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:set_resp_cookie"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted cookie value
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/2]).
+      test(Req, Input) ->
+        cowboy_req:set_resp_cookie(<<"sid">>, Input, Req).
+  - name: literal cookie value negative
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Req) ->
+        cowboy_req:set_resp_cookie(<<"sid">>, <<"ok">>, Req).
+    expect_no_match: true
+  description: "cowboy_req:set_resp_cookie — tainted cookie value can inject cookie attributes or CRLF."

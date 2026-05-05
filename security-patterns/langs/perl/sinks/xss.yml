@@ -1,0 +1,115 @@
+# Perl XSS sinks.
+# Mojolicious $c->render overlaps with template.mojolicious_render_inline (same
+# method name, different kwarg); keep one rule here for text/data forms.
+- id: perl.xss.cgi_print
+  aliases:
+  - perl.info_disclosure.cgi_print_error
+  enabled: true
+  language: perl
+  tag: xss
+  severity: medium
+  packages: [CGI]
+  cwe: [CWE-79, CWE-209]
+  match:
+    kind: call
+    callee:
+      name: print
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.xss.cgi_print example
+    code: |
+      use CGI;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        print "hello " . $payload
+      }
+  - name: literal cgi print negative
+    code: |
+      use CGI;
+      sub example {
+        my ($payload) = @_;
+        print "hello world"
+      }
+    expect_no_match: true
+  description: "print(tainted) — CGI body write. Constraint requires scalar interp (`$var`), dot-concat, or method-call shape so plain literal prints are skipped; the taint engine is the second gate. Also covers merged aliases: perl.info_disclosure.cgi_print_error."
+
+- id: perl.xss.mojolicious_render
+  enabled: true
+  language: perl
+  tag: xss
+  severity: high
+  packages: [Mojolicious]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: render
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.xss.mojolicious_render example
+    code: |
+      use Mojolicious;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $c->render(text => $payload)
+      }
+  - name: literal mojolicious render negative
+    code: |
+      use Mojolicious;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $c->render(text => "<p>safe</p>")
+      }
+    expect_no_match: true
+  description: "Mojolicious $c->render(text|data => tainted, format => 'html') — text/data kwargs bypass auto-escape, emitting raw HTML."
+
+- id: perl.xss.dancer2_send_as
+  enabled: true
+  language: perl
+  tag: xss
+  severity: high
+  packages: [Dancer2]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: send_as
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.xss.dancer2_send_as example
+    code: |
+      use Dancer2;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        send_as html => $payload
+      }
+  - name: literal dancer2 send as negative
+    code: |
+      use Dancer2;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        send_as html => "<p>safe</p>"
+      }
+    expect_no_match: true
+  description: "Dancer2 send_as html => tainted — writes raw HTML body bypassing template escaping."
+
+- id: perl.xss.catalyst_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  tag: xss
+  severity: high
+  packages: [Catalyst]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      name: body
+  description: "Disabled — bare `name: body` is FP-prone; matches HTTP::Response, email, HTML body accessors, and request body reads alike. No canonical exists; re-enable when adapter supports receiver-type narrowing for Catalyst::Response->body."

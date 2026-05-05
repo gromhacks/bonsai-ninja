@@ -1,0 +1,303 @@
+- id: typescript.graphql.graphql_execute
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: high
+  packages:
+  - graphql
+  imports:
+  - graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - graphql
+      - graphql
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: graphql execute
+    code: |
+      const _u = require("graphql");
+      function demo(query: string, schema: GraphQLSchema) {
+        return graphql.graphql({ schema, source: query });
+      }
+    expect_match_text:
+    - graphql.graphql
+  - name: graphql execute source variable
+    code: |
+      const _u = require("graphql");
+      function demo(graphql: any, schema: GraphQLSchema, source: string) {
+        return graphql.graphql({ schema: schema, source: source });
+      }
+    expect_match_text:
+    - graphql.graphql
+  - name: graphql execute literal negative
+    code: |
+      const _u = require("graphql");
+      const schema = {};
+      function demo() {
+        return graphql.graphql({ schema, source: "{ viewer { id } }" });
+      }
+    expect_no_match: true
+  description: "graphql.graphql(source: tainted) — dynamic GraphQL documents can drive resolver-side injection or schema probing."
+- id: typescript.graphql.graphql_sync_execute
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: high
+  packages:
+  - graphql
+  imports:
+  - graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - graphql
+      - graphqlSync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: graphql sync execute
+    code: |
+      const _u = require("graphql");
+      function demo(query: string, schema: GraphQLSchema) {
+        return graphql.graphqlSync({ schema, source: query });
+      }
+    expect_match_text:
+    - graphql.graphqlSync
+  - name: graphql sync source variable
+    code: |
+      const _u = require("graphql");
+      function demo(graphql: any, schema: GraphQLSchema, query: string) {
+        const source = query;
+        return graphql.graphqlSync({ schema: schema, source: source });
+      }
+    expect_match_text:
+    - graphql.graphqlSync
+  - name: graphql sync literal negative
+    code: |
+      const _u = require("graphql");
+      const schema = {};
+      function demo() {
+        return graphql.graphqlSync({ schema, source: "{ viewer { id } }" });
+      }
+    expect_no_match: true
+  description: "graphql.graphqlSync(source: tainted) — synchronous dynamic GraphQL execution with attacker-controlled documents."
+- id: typescript.graphql.graphiql_debug_handler
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - express-graphql
+  - graphiql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: graphiqlExpress
+  match_examples:
+  - name: graphiql debug handler
+    code: |
+      const _u = require("express-graphql");
+      function demo(app: any) {
+        return app.use("/graphiql", graphiqlExpress({ endpointURL: "/graphql" }));
+      }
+    expect_match_text:
+    - graphiqlExpress
+  description: "graphiqlExpress debug UI — exposes interactive GraphQL execution and introspection entry points."
+- id: typescript.graphql.express_graphql_dispatch
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - express-graphql
+  imports:
+  - express-graphql
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^(graphqlHTTP|expressGraphQL)$
+  match_examples:
+  - name: express graphql dispatch
+    code: |
+      const _u = require("express-graphql");
+      function mount(app: any, schema: any, resolvers: any) {
+        return app.use("/graphql", graphqlHTTP({ schema, rootValue: resolvers }));
+      }
+    expect_match_text:
+    - graphqlHTTP
+  description: "express-graphql graphqlHTTP({schema/rootValue/context}) — resolver dispatch surface fed by HTTP GraphQL arguments."
+- id: typescript.graphql.apollo_server_resolvers
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - '@apollo/server'
+  - apollo-server
+  - apollo-server-express
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: ApolloServer
+  match_examples:
+  - name: apollo server resolver dispatch
+    code: |
+      const _u = require("@apollo/server");
+      function boot(typeDefs: string, resolvers: any) {
+        return new ApolloServer({ typeDefs, resolvers });
+      }
+    expect_match_text:
+    - ApolloServer
+  description: "ApolloServer({resolvers}) — GraphQL resolver dispatch surface where args/context become attacker-controlled resolver inputs."
+- id: typescript.graphql.yoga_create_dispatch
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: medium
+  packages:
+  - graphql-yoga
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      name: createYoga
+  match_examples:
+  - name: graphql yoga dispatch
+    code: |
+      const _u = require("graphql-yoga");
+      function boot(schema: any) {
+        return createYoga({ schema, graphqlEndpoint: "/graphql" });
+      }
+    expect_match_text:
+    - createYoga
+  description: "graphql-yoga createYoga({schema/context}) — HTTP GraphQL dispatch surface exposing resolver args and context."
+
+- id: typescript.graphql.graphql_request_send
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: medium
+  packages: [graphql-request]
+  imports: [graphql-request]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request$"
+  constraints:
+  - receiver_name_in: [client, gqlClient, graphqlClient]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: graphql-request client request tainted
+    code: |
+      const _u = require("graphql-request");
+      function demo(client: any, input: string) {
+        return client.request(input);
+      }
+    expect_match_text: [client.request]
+  - name: graphql-request client request literal negative
+    code: |
+      const _u = require("graphql-request");
+      function demo(client: any) {
+        return client.request("{ viewer { id } }");
+      }
+    expect_no_match: true
+  - name: graphql-request unrelated receiver negative
+    code: |
+      const _u = require("graphql-request");
+      function demo(httpClient: any, input: string) {
+        return httpClient.request(input);
+      }
+    expect_no_match: true
+  description: "graphql-request GraphQLClient.request(tainted_query) — sends attacker-controlled GraphQL document to a remote endpoint, enabling injection or schema probing."
+
+- id: typescript.graphql.apollo_client_query
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: medium
+  packages: ["@apollo/client", apollo-client]
+  imports: ["@apollo/client"]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query$"
+  constraints:
+  - receiver_name_in: [client, apolloClient, graphqlClient]
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: apollo client query tainted
+    code: |
+      const _u = require("@apollo/client");
+      function demo(client: any, input: any) {
+        return client.query({ query: input });
+      }
+    expect_match_text: [client.query]
+  - name: apollo client query literal negative
+    code: |
+      const _u = require("@apollo/client");
+      const SAFE = "{ viewer { id } }";
+      function demo(client: any) {
+        return client.query({ query: SAFE });
+      }
+    expect_no_match: true
+  - name: apollo client unrelated receiver negative
+    code: |
+      const _u = require("@apollo/client");
+      function demo(sqlClient: any, input: any) {
+        return sqlClient.query({ query: input });
+      }
+    expect_no_match: true
+  description: "Apollo Client.query({query: tainted}) — sends attacker-controlled document to the GraphQL endpoint; resolver-side injection or introspection probing."
+
+- id: typescript.graphql.graphql_parse
+  enabled: true
+  language: typescript
+  tag: graphql-injection
+  severity: medium
+  packages: [graphql]
+  imports: [graphql]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [graphql, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: graphql parse tainted
+    code: |
+      const _u = require("graphql");
+      function demo(input: string) {
+        return graphql.parse(input);
+      }
+    expect_match_text: [graphql.parse]
+  - name: graphql parse literal negative
+    code: |
+      const _u = require("graphql");
+      function demo() {
+        return graphql.parse("{ viewer { id } }");
+      }
+    expect_no_match: true
+  description: "graphql.parse(tainted_source) — attacker-controlled source produces a Document AST that downstream code may execute or persist as a registered operation."

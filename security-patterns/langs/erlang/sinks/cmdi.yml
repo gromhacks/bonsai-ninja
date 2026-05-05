@@ -1,0 +1,170 @@
+# Erlang command-injection sinks. Erlang stdlib + popular libs.
+- id: erlang.cmdi.os_cmd
+  enabled: true
+  language: erlang
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^os:cmd$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        os:cmd(Input).
+  - name: literal os cmd negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        os:cmd("whoami").
+    expect_no_match: true
+  description: "os:cmd/1 — runs argument under /bin/sh -c; any tainted substring → RCE."
+
+- id: erlang.cmdi.os_cmd_2
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: erlang
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^os:cmd/2$"
+  description: "Disabled — adapter emits callee without arity; os_cmd above already matches."
+
+- id: erlang.cmdi.erlang_open_port
+  enabled: true
+  language: erlang
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^erlang:open_port$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlang:open_port({spawn, Input}, []).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -export([test/0]).
+      test() ->
+        erlang:open_port({spawn, "ls"}, []).
+    expect_no_match: true
+  description: "erlang:open_port({spawn, Cmd}, _) — Cmd runs under a shell; {spawn_executable, _} is the safer form."
+
+- id: erlang.cmdi.exec_run
+  enabled: true
+  language: erlang
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  packages: [erlexec]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^exec:run"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("erlexec/include/erlexec.hrl").
+      -export([test/1]).
+      test(Input) ->
+        exec:run(Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -include_lib("erlexec/include/erlexec.hrl").
+      -export([test/0]).
+      test() ->
+        exec:run("whoami").
+    expect_no_match: true
+  description: "erlexec exec:run/2 — executes a shell command; tainted argv → RCE."
+
+- id: erlang.cmdi.exec_shell
+  enabled: true
+  language: erlang
+  tag: command-injection
+  severity: critical
+  packages: [erlexec]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^exec:shell"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("erlexec/include/erlexec.hrl").
+      -export([test/1]).
+      test(Input) ->
+        exec:shell(Input).
+  - name: arg tainted literal negative
+    code: |
+      -module(example).
+      -include_lib("erlexec/include/erlexec.hrl").
+      -export([test/0]).
+      test() ->
+        exec:shell("whoami").
+    expect_no_match: true
+  description: "erlexec exec:shell — spawns /bin/sh with tainted string."
+
+- id: erlang.cmdi.erlang_spawn_mfa
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: erlang
+  tag: command-injection
+  severity: high
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^erlang:spawn$"
+  description: "Disabled — erlang:spawn/3 with tainted MFA atoms ≈ apply/3 RCE; noisy without atom-source tracking."
+
+- id: erlang.cmdi.rebar3_sh
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: erlang
+  tag: command-injection
+  severity: medium
+  packages: [rebar3]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      regex: "^rebar_utils:sh$"
+  description: "Disabled — build-tool only."

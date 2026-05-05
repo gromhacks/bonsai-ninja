@@ -1,0 +1,255 @@
+- id: php.xss.echo
+  enabled: true
+  language: php
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: echo
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.xss.echo example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  echo $payload;\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  echo \"safe\";\n}\n"
+    expect_no_match: true
+  description: echo(tainted) — direct HTML output to response body. Constraint requires interp (`$var`) or concat (`.`) shape so plain literal echos are skipped; the taint engine is the second gate.
+- id: php.xss.print
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: print
+  description: Disabled — print is ubiquitous.
+- id: php.xss.printf
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: printf
+  description: Disabled — flag per-audit.
+- id: php.xss.twig_markup
+  enabled: true
+  language: php
+  tag: xss
+  severity: high
+  packages:
+  - twig/twig
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: Markup
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.xss.twig_markup example
+    code: |
+      <?php
+      use twig\twig;
+      use twig\twig;
+      function example($input, $url, $id, $payload, $request) {
+        new Markup($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use twig\twig;
+      function example($input, $url, $id, $payload, $request) {
+        new Markup("safe");
+      }
+    expect_no_match: true
+  description: new \Twig\Markup(tainted) — bypasses autoescape.
+  imports:
+  - twig\twig
+  - twig
+- id: php.xss.twig_raw_filter
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: php
+  tag: xss
+  severity: high
+  packages:
+  - twig/twig
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Environment
+      - createTemplate
+  description: Disabled duplicate — Twig Environment::createTemplate covered by template.twig_createTemplate (classified as SSTI).
+- id: php.xss.blade_html_string
+  enabled: true
+  language: php
+  tag: xss
+  severity: high
+  packages:
+  - illuminate/support
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: HtmlString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.xss.blade_html_string example
+    code: |
+      <?php
+      use illuminate\support;
+      use illuminate\support;
+      function example($input, $url, $id, $payload, $request) {
+        new HtmlString($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\support;
+      function example($input, $url, $id, $payload, $request) {
+        new HtmlString("safe");
+      }
+    expect_no_match: true
+  description: new HtmlString(tainted) — Blade {!! !!} compiled output.
+  imports:
+  - illuminate\support
+  - illuminate
+- id: php.xss.wordpress_the_content
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: xss
+  severity: high
+  packages:
+  - wordpress
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: the_content
+  match_examples:
+  - name: php.xss.wordpress_the_content example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        the_content($input);
+      }
+  description: "Disabled — the_content() prints global post content; unsafe user content reaches this through WordPress state rather than a taintable argument."
+- id: php.xss.smarty_display
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: xss
+  severity: high
+  packages:
+  - smarty/smarty
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Smarty
+      - display
+  description: Disabled duplicate — Smarty::display is classified as SSTI/template-path selection in php.template.smarty_display; v1 matching cannot distinguish tainted template path from tainted assigned variable.
+- id: php.xss.cakephp_set
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: xss
+  severity: medium
+  packages:
+  - cakephp/cakephp
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: set
+  description: Disabled — generic set(); flag with h() absence.
+- id: php.xss.yii_raw
+  enabled: true
+  language: php
+  tag: xss
+  severity: high
+  packages:
+  - yiisoft/yii2
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Html
+      - raw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.xss.yii_raw example
+    code: |
+      <?php
+      use yiisoft\yii2;
+      use yiisoft\yii2;
+      function example($input, $url, $id, $payload, $request) {
+        Html::raw($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use yiisoft\yii2;
+      function example($input, $url, $id, $payload, $request) {
+        Html::raw("safe");
+      }
+    expect_no_match: true
+  description: Yii \yii\helpers\Html::raw(tainted).
+  imports:
+  - yiisoft\yii2
+  - yiisoft
+- id: php.xss.symfony_raw_filter
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: xss
+  severity: medium
+  packages:
+  - symfony/twig-bundle
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: raw
+  description: Disabled — Twig |raw filter surfaced in template scanner.

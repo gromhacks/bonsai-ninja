@@ -1,0 +1,1835 @@
+# Java sanitizers — calls that neutralise a specific taint tag.
+# SQL ----------------------------------------------------------------
+- id: java.sanitizer.prepared_statement
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, prepareStatement]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(String input) throws Exception {
+          Connection.prepareStatement(input);
+        }
+      }
+    expect_match_text: [Connection.prepareStatement]
+  description: "Connection.prepareStatement(sql) — placeholder SQL is static; bound args via setX neutralise injection. `min_args: 1` rejects 0-arg `prepareStatement()` decoys (the SQL string is mandatory)."
+
+- id: java.sanitizer.prepared_statement_setstring
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setString]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(String input) throws Exception {
+          PreparedStatement.setString(input);
+        }
+      }
+    expect_match_text: [PreparedStatement.setString]
+  description: "PreparedStatement.setString — parameter bind escapes the bound value at the driver."
+
+- id: java.sanitizer.prepared_statement_setint
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setInt]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(String input) throws Exception {
+          PreparedStatement.setInt(input);
+        }
+      }
+    expect_match_text: [PreparedStatement.setInt]
+  description: "PreparedStatement.setInt — integer bind forces numeric type."
+
+- id: java.sanitizer.prepared_statement_setlong
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setLong]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(String input) throws Exception {
+          PreparedStatement.setLong(input);
+        }
+      }
+    expect_match_text: [PreparedStatement.setLong]
+  description: "PreparedStatement.setLong — long bind forces numeric type."
+
+- id: java.sanitizer.esapi_encode_for_sql
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForSQL]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForSQL(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForSQL]
+  description: "OWASP ESAPI Encoder.encodeForSQL — codec-based SQL escaping (prefer PreparedStatement)."
+
+# URL / SSRF ---------------------------------------------------------
+- id: java.sanitizer.uri_create
+  enabled: true
+  language: java
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, create]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          URI.create(input);
+        }
+      }
+    expect_match_text: [URI.create]
+  description: "URI.create — parses and validates URI syntax; rejects malformed inputs."
+
+- id: java.sanitizer.url_encoder
+  enabled: true
+  language: java
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^URLEncoder\\.encode$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          URLEncoder.encode(input);
+        }
+      }
+    expect_match_text: [URLEncoder.encode]
+  description: "URLEncoder.encode — percent-encodes for URL placement."
+
+- id: java.sanitizer.owasp_encoder_uricomponent
+  enabled: true
+  language: java
+  tag: url-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forUriComponent]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forUriComponent(input);
+        }
+      }
+    expect_match_text: [Encode.forUriComponent]
+  description: "OWASP Java Encoder Encode.forUriComponent — URI component encoder."
+
+- id: java.sanitizer.esapi_encode_for_url
+  enabled: true
+  language: java
+  tag: url-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForURL]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForURL(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForURL]
+  description: "OWASP ESAPI Encoder.encodeForURL."
+
+# XSS / HTML ---------------------------------------------------------
+- id: java.sanitizer.html_escape_text
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.apache.commons.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [StringEscapeUtils, escapeHtml4]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.text.*;
+      class App {
+        void handle(String input) throws Exception {
+          StringEscapeUtils.escapeHtml4(input);
+        }
+      }
+    expect_match_text: [StringEscapeUtils.escapeHtml4]
+  description: "Apache Commons Text StringEscapeUtils.escapeHtml4 — encodes HTML entities."
+
+- id: java.sanitizer.html_escape_xml
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.apache.commons.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [StringEscapeUtils, escapeXml10]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.text.*;
+      class App {
+        void handle(String input) throws Exception {
+          StringEscapeUtils.escapeXml10(input);
+        }
+      }
+    expect_match_text: [StringEscapeUtils.escapeXml10]
+  description: "Apache Commons Text StringEscapeUtils.escapeXml10 — XML entity encoding."
+
+- id: java.sanitizer.spring_htmlutils
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.springframework.web.util"]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlUtils, htmlEscape]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.util.*;
+      class App {
+        void handle(String input) throws Exception {
+          HtmlUtils.htmlEscape(input);
+        }
+      }
+    expect_match_text: [HtmlUtils.htmlEscape]
+  description: "Spring HtmlUtils.htmlEscape — HTML-entity encoder for response bodies."
+
+- id: java.sanitizer.owasp_encoder_forhtml
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forHtml]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forHtml(input);
+        }
+      }
+    expect_match_text: [Encode.forHtml]
+  description: "OWASP Java Encoder Encode.forHtml — HTML body context encoder."
+
+- id: java.sanitizer.owasp_encoder_forjs
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.encoder"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encode, forJavaScript]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.encoder.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encode.forJavaScript(input);
+        }
+      }
+    expect_match_text: [Encode.forJavaScript]
+  description: "OWASP Java Encoder Encode.forJavaScript — JS string context encoder."
+
+- id: java.sanitizer.owasp_html_sanitizer_policy
+  enabled: true
+  language: java
+  tag: html-sanitize
+  packages: ["com.googlecode.owasp-java-html-sanitizer"]
+  match:
+    kind: call
+    callee:
+      regex: "^PolicyFactory\\.sanitize$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.googlecode.owaspjavahtmlsanitizer.*;
+      class App {
+        void handle(String input) throws Exception {
+          PolicyFactory.sanitize(input);
+        }
+      }
+    expect_match_text: [PolicyFactory.sanitize]
+  description: "OWASP HTML Sanitizer PolicyFactory.sanitize — policy-driven HTML cleaner."
+
+  imports:
+  - com
+  - com.googlecode.owaspjavahtmlsanitizer
+- id: java.sanitizer.owasp_html_sanitizer_builder
+  enabled: true
+  language: java
+  tag: html-sanitize
+  packages: ["com.googlecode.owasp-java-html-sanitizer"]
+  match:
+    kind: call
+    callee:
+      regex: "^HtmlPolicyBuilder\\.sanitize$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.googlecode.owaspjavahtmlsanitizer.*;
+      class App {
+        void handle(String input) throws Exception {
+          HtmlPolicyBuilder.sanitize(input);
+        }
+      }
+    expect_match_text: [HtmlPolicyBuilder.sanitize]
+  description: "OWASP HTML Sanitizer HtmlPolicyBuilder.sanitize — per-policy HTML scrub."
+
+  imports:
+  - com
+  - com.googlecode.owaspjavahtmlsanitizer
+- id: java.sanitizer.jsoup_clean
+  enabled: true
+  language: java
+  tag: html-sanitize
+  packages: ["org.jsoup"]
+  match:
+    kind: call
+    callee:
+      regex: "^Jsoup\\.clean$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.jsoup.*;
+      class App {
+        void handle(String input) throws Exception {
+          Jsoup.clean(input);
+        }
+      }
+    expect_match_text: [Jsoup.clean]
+  description: "Jsoup.clean(html, whitelist) — whitelist-based HTML sanitizer."
+
+# ESAPI --------------------------------------------------------------
+- id: java.sanitizer.esapi_encode_for_html
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForHTML]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForHTML(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForHTML]
+  description: "OWASP ESAPI Encoder.encodeForHTML."
+
+- id: java.sanitizer.esapi_encode_for_js
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForJavaScript]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForJavaScript(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForJavaScript]
+  description: "OWASP ESAPI Encoder.encodeForJavaScript."
+
+- id: java.sanitizer.esapi_encode_for_ldap
+  enabled: true
+  language: java
+  tag: ldap-escape
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForLDAP]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForLDAP(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForLDAP]
+  description: "OWASP ESAPI Encoder.encodeForLDAP — escapes LDAP filter metacharacters."
+
+- id: java.sanitizer.esapi_encode_for_xml
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      attribute: [Encoder, encodeForXML]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForXML(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForXML]
+  description: "OWASP ESAPI Encoder.encodeForXML — XML text encoder."
+
+# Auth / crypto ------------------------------------------------------
+- id: java.sanitizer.bcrypt_matches
+  enabled: true
+  language: java
+  tag: auth-sanitizer
+  packages: ["org.mindrot.jbcrypt"]
+  match:
+    kind: call
+    callee:
+      attribute: [BCrypt, checkpw]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.mindrot.jbcrypt.*;
+      class App {
+        void handle(String input) throws Exception {
+          BCrypt.checkpw(input);
+        }
+      }
+    expect_match_text: [BCrypt.checkpw]
+  description: "jBCrypt checkpw — bcrypt password verification."
+
+- id: java.sanitizer.spring_security_password_encoder_matches
+  enabled: true
+  language: java
+  tag: auth-sanitizer
+  packages: ["org.springframework.security"]
+  match:
+    kind: call
+    callee:
+      attribute: [PasswordEncoder, matches]
+  constraints:
+  - receiver_name_in: [PasswordEncoder, passwordEncoder, encoder]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.*;
+      class App {
+        void handle(String input) throws Exception {
+          PasswordEncoder.matches(input);
+        }
+      }
+    expect_match_text: [PasswordEncoder.matches]
+  description: "Spring Security PasswordEncoder.matches — algorithm-agnostic verifier."
+
+- id: java.sanitizer.message_digest_isequal
+  enabled: true
+  language: java
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      attribute: [MessageDigest, isEqual]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          MessageDigest.isEqual(input);
+        }
+      }
+    expect_match_text: [MessageDigest.isEqual]
+  description: "MessageDigest.isEqual — constant-time byte[] compare (MAC / hash verification)."
+
+# Path ---------------------------------------------------------------
+- id: java.sanitizer.path_normalize
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, normalize]
+  description: "Disabled — Path.normalize removes .. segments but does not by itself enforce trusted-root containment."
+
+- id: java.sanitizer.path_startswith
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, startsWith]
+  description: "Disabled — startsWith is only a sanitizer when the receiver is a normalized Path and the argument is the trusted root; receiver type is not available in v1 matching."
+
+- id: java.sanitizer.filename_get_name
+  enabled: true
+  language: java
+  tag: path-sanitize
+  packages: [org.apache.commons.io]
+  match:
+    kind: call
+    callee:
+      attribute: [FilenameUtils, getName]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.io.*;
+      class App {
+        void handle(String input) throws Exception {
+          FilenameUtils.getName(input);
+        }
+      }
+    expect_match_text: [FilenameUtils.getName]
+  description: "Apache Commons IO FilenameUtils.getName — strips directory components from a filename."
+
+# Numeric coercion ---------------------------------------------------
+  imports:
+  - org.apache.commons.io
+- id: java.sanitizer.integer_parseint
+  enabled: true
+  language: java
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Integer, parseInt]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Integer.parseInt(input);
+        }
+      }
+    expect_match_text: [Integer.parseInt]
+  description: "Integer.parseInt — forces numeric shape; throws on non-numeric."
+
+- id: java.sanitizer.long_parselong
+  enabled: true
+  language: java
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [Long, parseLong]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Long.parseLong(input);
+        }
+      }
+    expect_match_text: [Long.parseLong]
+  description: "Long.parseLong — forces numeric shape; throws on non-numeric."
+
+- id: java.sanitizer.uuid_fromstring
+  enabled: true
+  language: java
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [UUID, fromString]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          UUID.fromString(input);
+        }
+      }
+    expect_match_text: [UUID.fromString]
+  description: "UUID.fromString — validates UUID shape; throws on malformed input."
+
+# JWT ----------------------------------------------------------------
+- id: java.sanitizer.jjwt_verifywith
+  enabled: true
+  language: java
+  tag: jwt-verify
+  packages: ["io.jsonwebtoken"]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtParserBuilder, verifyWith]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*;
+      class App {
+        void handle(String input) throws Exception {
+          JwtParserBuilder.verifyWith(input);
+        }
+      }
+    expect_match_text: [JwtParserBuilder.verifyWith]
+  description: "jjwt parserBuilder().verifyWith(key) — enforces signature verification."
+
+- id: java.sanitizer.jjwt_setsigningkey
+  enabled: true
+  language: java
+  tag: jwt-verify
+  packages: ["io.jsonwebtoken"]
+  match:
+    kind: call
+    callee:
+      attribute: [JwtParserBuilder, setSigningKey]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken.*;
+      class App {
+        void handle(String input) throws Exception {
+          JwtParserBuilder.setSigningKey(input);
+        }
+      }
+    expect_match_text: [JwtParserBuilder.setSigningKey]
+  description: "jjwt parserBuilder().setSigningKey — enforces signature verification (legacy API)."
+
+- id: java.sanitizer.nimbus_verify
+  enabled: true
+  language: java
+  tag: jwt-verify
+  packages: [com.nimbusds.jwt]
+  match:
+    kind: call
+    callee:
+      regex: "^SignedJWT\\.verify$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.nimbusds.jwt.*;
+      class App {
+        void handle(String input) throws Exception {
+          SignedJWT.verify(input);
+        }
+      }
+    expect_match_text: [SignedJWT.verify]
+  description: "Nimbus SignedJWT.verify — enforces JWT signature verification with the configured verifier."
+
+# Additional encoder / sanitizer coverage --------------------------------
+
+  imports:
+  - com.nimbusds.jwt
+- id: java.sanitizer.commons_text_escape_javascript
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.apache.commons.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [StringEscapeUtils, escapeEcmaScript]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.text.*;
+      class App {
+        void handle(String input) throws Exception {
+          StringEscapeUtils.escapeEcmaScript(input);
+        }
+      }
+    expect_match_text: [StringEscapeUtils.escapeEcmaScript]
+  description: "Apache Commons Text StringEscapeUtils.escapeEcmaScript — escapes JS string literal context."
+
+- id: java.sanitizer.commons_text_escape_java
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.apache.commons.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [StringEscapeUtils, escapeJava]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.text.*;
+      class App {
+        void handle(String input) throws Exception {
+          StringEscapeUtils.escapeJava(input);
+        }
+      }
+    expect_match_text: [StringEscapeUtils.escapeJava]
+  description: "Apache Commons Text StringEscapeUtils.escapeJava — Java string-literal escape."
+
+- id: java.sanitizer.commons_text_escape_xml11
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.apache.commons.text"]
+  match:
+    kind: call
+    callee:
+      attribute: [StringEscapeUtils, escapeXml11]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.text.*;
+      class App {
+        void handle(String input) throws Exception {
+          StringEscapeUtils.escapeXml11(input);
+        }
+      }
+    expect_match_text: [StringEscapeUtils.escapeXml11]
+  description: "Apache Commons Text StringEscapeUtils.escapeXml11 — XML 1.1 entity encoding."
+
+- id: java.sanitizer.bcrypt_password_encoder_matches
+  enabled: true
+  language: java
+  tag: auth-sanitizer
+  packages: ["org.springframework.security.crypto"]
+  match:
+    kind: call
+    callee:
+      attribute: [BCryptPasswordEncoder, matches]
+  constraints:
+  - receiver_name_in: [BCryptPasswordEncoder, bcryptPasswordEncoder]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.crypto.*;
+      class App {
+        void handle(String input) throws Exception {
+          BCryptPasswordEncoder.matches(input);
+        }
+      }
+    expect_match_text: [BCryptPasswordEncoder.matches]
+  description: "Spring Security BCryptPasswordEncoder.matches — bcrypt password verification (constant-time within bcrypt)."
+
+- id: java.sanitizer.argon2_password_encoder_matches
+  enabled: true
+  language: java
+  tag: auth-sanitizer
+  packages: ["org.springframework.security.crypto"]
+  match:
+    kind: call
+    callee:
+      attribute: [Argon2PasswordEncoder, matches]
+  constraints:
+  - receiver_name_in: [Argon2PasswordEncoder, argon2PasswordEncoder]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.security.crypto.*;
+      class App {
+        void handle(String input) throws Exception {
+          Argon2PasswordEncoder.matches(input);
+        }
+      }
+    expect_match_text: [Argon2PasswordEncoder.matches]
+  description: "Spring Security Argon2PasswordEncoder.matches — argon2 password verification."
+
+- id: java.sanitizer.jsoup_parse_clean
+  enabled: true
+  language: java
+  tag: html-sanitize
+  packages: ["org.jsoup"]
+  match:
+    kind: call
+    callee:
+      regex: "^Jsoup\\.parse$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.jsoup.*;
+      class App {
+        void handle(String input) throws Exception {
+          Jsoup.parse(input);
+        }
+      }
+    expect_match_text: [Jsoup.parse]
+  description: "Jsoup.parse(html) — HTML parsing typically chained with .clean(...) / .text(); stripping returns sanitized markup."
+
+- id: java.sanitizer.hibernate_validator_validate
+  enabled: true
+  language: java
+  tag: schema-validate
+  packages: ["jakarta.validation", "javax.validation"]
+  match:
+    kind: call
+    callee:
+      attribute: [Validator, validate]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jakarta.validation.*;
+      class App {
+        void handle(String input) throws Exception {
+          Validator.validate(input);
+        }
+      }
+    expect_match_text: [Validator.validate]
+  description: "Bean Validation (Hibernate Validator) Validator.validate — runs JSR-380 constraints; rejects values that fail schema."
+
+- id: java.sanitizer.pattern_matcher_matches
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      attribute: [Matcher, matches]
+  description: "Disabled — Matcher.matches is a sanitizer only when the pattern is a strict allowlist; pattern intent is not visible to the matcher."
+
+- id: java.sanitizer.path_normalize_resolved
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Paths, get]
+  description: "Disabled - Paths.get is a constructor-style helper, not a sanitizer; only meaningful when followed by normalize + startsWith(allowedRoot)."
+
+# -- Open-redirect mitigations -------------------------------------------------
+- id: java.sanitizer.owasp_url_validator
+  enabled: true
+  language: java
+  tag: open-redirect-sanitize
+  packages: [org.apache.commons.validator]
+  match:
+    kind: call
+    callee:
+      attribute: [UrlValidator, isValid]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.apache.commons.validator.*;
+      class App {
+        void handle(String input) throws Exception {
+          UrlValidator.isValid(input);
+        }
+      }
+    expect_match_text: [UrlValidator.isValid]
+  description: "Apache Commons UrlValidator.isValid - boolean URL validation; pair with allowlist."
+
+- id: java.sanitizer.spring_uri_components_from
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: open-redirect-sanitize
+  packages: [org.springframework.web.util]
+  match:
+    kind: call
+    callee:
+      attribute: [UriComponentsBuilder, fromUriString]
+  description: "Disabled - UriComponentsBuilder parses but does not validate host. Enable with allowlist downstream."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: java.passthrough.urldecoder_decode
+  enabled: true
+  language: java
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [URLDecoder, decode]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          URLDecoder.decode(input);
+        }
+      }
+    expect_match_text: [URLDecoder.decode]
+  description: "java.net.URLDecoder.decode(s, charset) — preserves taint."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: java.csrf.spring_security_csrf
+  enabled: true
+  language: java
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      attribute: [http, csrf]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          http.csrf(input);
+        }
+      }
+    expect_match_text: [http.csrf]
+  description: "Spring Security HttpSecurity#csrf() — enables Spring Security CSRF filter chain."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: java.lock.synchronized_method_or_block
+  enabled: true
+  language: java
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [Lock, lock]
+  constraints:
+  - receiver_name_in: [Lock, lock]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Lock.lock(input);
+        }
+      }
+    expect_match_text: [Lock.lock]
+  description: "java.util.concurrent.locks.Lock.lock() — explicit lock acquire."
+- id: java.lock.reentrant_lock
+  enabled: true
+  language: java
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [ReentrantLock, lock]
+  constraints:
+  - receiver_name_in: [ReentrantLock, reentrantLock]
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          ReentrantLock.lock(input);
+        }
+      }
+    expect_match_text: [ReentrantLock.lock]
+  description: "ReentrantLock.lock() — guard for shared-state access."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: java.cookie.cookie_sethttponly_true
+  enabled: true
+  language: java
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [Cookie, setHttpOnly]
+  constraints:
+  - any_arg_matches_regex: |-
+      true
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Cookie.setHttpOnly(true);
+        }
+      }
+    expect_match_text: [Cookie.setHttpOnly]
+  - name: generated shape example negative constraint boundary
+    code: "class App {\n  void handle(String input) throws Exception {\n    Cookie.setHttpOnly();\n  }\n}\n"
+    expect_no_match: true
+  description: "javax.servlet.http.Cookie.setHttpOnly(true) — explicit HttpOnly flag."
+- id: java.cookie.cookie_setsecure_true
+  enabled: true
+  language: java
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [Cookie, setSecure]
+  constraints:
+  - any_arg_matches_regex: |-
+      true
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          Cookie.setSecure(true);
+        }
+      }
+    expect_match_text: [Cookie.setSecure]
+  - name: generated shape example negative constraint boundary
+    code: "class App {\n  void handle(String input) throws Exception {\n    Cookie.setSecure();\n  }\n}\n"
+    expect_no_match: true
+  description: "Cookie.setSecure(true) — explicit Secure flag."
+
+# Rate-limit middleware presence sanitizers (round 2 fill).
+- id: java.ratelimit.bucket4j_consume
+  enabled: true
+  language: java
+  tag: rate-limit
+  packages: [com.bucket4j]
+  match:
+    kind: call
+    callee:
+      attribute: [Bucket, tryConsume]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.bucket4j.*;
+      class App {
+        void handle(String input) throws Exception {
+          Bucket.tryConsume(input);
+        }
+      }
+    expect_match_text: [Bucket.tryConsume]
+  description: 'Bucket4j Bucket.tryConsume — rate-limit token-bucket consume.'
+
+# False-positive audit fill: validators and parameter binding shapes.
+- id: java.sanitizer.same_origin_path_startswith_slash
+  enabled: true
+  language: java
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"/"'
+  - same_receiver_call_count_at_least: 2
+  match_examples:
+  - name: paired same-origin path guard
+    code: |
+      class App {
+        boolean allow(String next) {
+          return next.startsWith("/") && !next.startsWith("//");
+        }
+      }
+    expect_match_text: [next.startsWith]
+  - name: paired same-origin path guard negative constraint boundary
+    code: "class App {\n  boolean allow(String next) {\n    return next.startsWith() && !next.startsWith(\"//\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Same-origin redirect path guard — the leading slash check is only credited when another startsWith call is present on the same receiver, allowing the paired `!path.startsWith(\"//\")` scheme-relative guard shape."
+
+- id: java.sanitizer.same_origin_path_reject_scheme_relative
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - arg_equals:
+      index: 0
+      value: '"//"'
+  match_examples:
+  - name: reject scheme-relative redirect target
+    code: |
+      class App {
+        boolean allow(String next) {
+          return next.startsWith("/") && !next.startsWith("//");
+        }
+      }
+    expect_match_text: [next.startsWith]
+  - name: reject scheme-relative redirect target negative constraint boundary
+    code: "class App {\n  boolean allow(String next) {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\");\n  }\n}\n"
+    expect_no_match: true
+  description: "Disabled — same-receiver startsWith(\"/\") + startsWith(\"//\") is modeled by java.sanitizer.same_origin_path_startswith_slash."
+
+- id: java.sanitizer.allowlist_contains
+  enabled: true
+  language: java
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: contains
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 1
+  match_examples:
+  - name: set allowlist contains
+    code: |
+      import java.util.Set;
+      class App {
+        boolean allow(String role) {
+          Set<String> allowed = Set.of("user", "admin");
+          return allowed.contains(role);
+        }
+      }
+    expect_match_text: [allowed.contains]
+  description: "Set/List allowlist membership check on explicitly allowlist-named receivers."
+
+- id: java.sanitizer.map_get_or_default_allowlist
+  enabled: true
+  language: java
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: getOrDefault
+  constraints:
+  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
+  - arg_count: 2
+  match_examples:
+  - name: map default allowlist
+    code: |
+      import java.util.Map;
+      class App {
+        String allow(String key) {
+          Map<String, String> allowed = Map.of("home", "/");
+          return allowed.getOrDefault(key, "/");
+        }
+      }
+    expect_match_text: [allowed.getOrDefault]
+  description: "Map.getOrDefault on an allowlist-named mapping bounds attacker input to known values or a safe default."
+
+- id: java.sanitizer.enum_valueof_allowlist
+  enabled: true
+  language: java
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: valueOf
+  constraints:
+  - receiver_name_in: [AllowedRole, SafeRoute, RouteName, SortField, Status]
+  - arg_count: 1
+  match_examples:
+  - name: enum parse allowlist
+    code: |
+      enum AllowedRole { USER, ADMIN }
+      class App {
+        AllowedRole allow(String role) {
+          return AllowedRole.valueOf(role);
+        }
+      }
+    expect_match_text: [AllowedRole.valueOf]
+  description: "Enum.valueOf on narrowly named allowlist enums rejects values outside the enum domain."
+
+- id: java.sanitizer.string_matches_safe_shape
+  enabled: true
+  language: java
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      name: matches
+  constraints:
+  - receiver_name_in: [input, value, slug, id, name, token, path, safeValue]
+  - arg_matches_regex:
+      index: 0
+      regex: '^\^?["'']\^?\[?(\[A-Za-z0-9_|[A-Fa-f0-9_])'
+  match_examples:
+  - name: slug shape validator
+    code: |
+      class App {
+        boolean allow(String slug) {
+          return slug.matches("^[A-Za-z0-9_-]{1,64}$");
+        }
+      }
+    expect_match_text: [slug.matches]
+  - name: slug shape validator negative constraint boundary
+    code: "class App {\n  boolean allow(String slug) {\n    return slug.matches();\n  }\n}\n"
+    expect_no_match: true
+  description: "String.matches with a tight slug/UUID-style allowlist regex validates input shape before redirect, path, SQL, or XPath use."
+
+- id: java.sanitizer.pattern_matches_safe_shape
+  enabled: true
+  language: java
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      attribute: [Pattern, matches]
+  constraints:
+  - receiver_name_in: [Pattern]
+  - arg_matches_regex:
+      index: 0
+      regex: '^["'']\^?(\[A-Za-z0-9_|\[A-Fa-f0-9)'
+  - min_args: 2
+  match_examples:
+  - name: uuid shape validator
+    code: |
+      import java.util.regex.Pattern;
+      class App {
+        boolean allow(String id) {
+          return Pattern.matches("^[A-Fa-f0-9-]{36}$", id);
+        }
+      }
+    expect_match_text: [Pattern.matches]
+  - name: uuid shape validator negative constraint boundary
+    code: "import java.util.regex.Pattern;\nclass App {\n  boolean allow(String id) {\n    return Pattern.matches();\n  }\n}\n"
+    expect_no_match: true
+  description: "Pattern.matches with a bounded UUID/slug-style allowlist regex validates string shape."
+
+- id: java.sanitizer.replaceall_char_allowlist_strip
+  enabled: true
+  language: java
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: replaceAll
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '^["'']\[\^[-A-Za-z0-9_ /]+\]["'']$'
+  - arg_matches_regex:
+      index: 1
+      regex: '^["'']["'']$'
+  match_examples:
+  - name: strip to safe slug chars
+    code: |
+      class App {
+        String clean(String input) {
+          return input.replaceAll("[^A-Za-z0-9_-]", "");
+        }
+      }
+    expect_match_text: [input.replaceAll]
+  - name: strip to safe slug chars negative constraint boundary
+    code: "class App {\n  String clean(String input) {\n    return input.replaceAll();\n  }\n}\n"
+    expect_no_match: true
+  description: "replaceAll with a negated safe character class and empty replacement strips characters outside the allowlist."
+
+- id: java.sanitizer.prepared_statement_setobject
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setObject]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: prepared statement object bind
+    code: |
+      import java.sql.*;
+      class App {
+        void bind(PreparedStatement ps, Object input) throws Exception {
+          ps.setObject(1, input);
+        }
+      }
+    expect_match_text: [ps.setObject]
+  description: "PreparedStatement.setObject binds a value as a JDBC parameter rather than SQL text."
+
+- id: java.sanitizer.prepared_statement_setboolean
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      attribute: [PreparedStatement, setBoolean]
+  constraints:
+  - min_args: 2
+  match_examples:
+  - name: prepared statement boolean bind
+    code: |
+      import java.sql.*;
+      class App {
+        void bind(PreparedStatement ps, boolean input) throws Exception {
+          ps.setBoolean(1, input);
+        }
+      }
+    expect_match_text: [ps.setBoolean]
+  description: "PreparedStatement.setBoolean binds a boolean parameter."
+
+- id: java.sanitizer.jdbctemplate_query_rowmapper_params
+  enabled: true
+  language: java
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, query]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 3
+  match_examples:
+  - name: jdbc template rowmapper varargs
+    code: |
+      import org.springframework.jdbc.core.*;
+      class App {
+        void load(JdbcTemplate jdbcTemplate, String sql, RowMapper mapper, String input) {
+          jdbcTemplate.query(sql, mapper, input);
+        }
+      }
+    expect_match_text: [jdbcTemplate.query]
+  description: "JdbcTemplate.query(sql, RowMapper, params...) binds trailing arguments as JDBC parameters."
+
+- id: java.sanitizer.jdbctemplate_update_params
+  enabled: true
+  language: java
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, update]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 2
+  match_examples:
+  - name: jdbc template update varargs
+    code: |
+      import org.springframework.jdbc.core.*;
+      class App {
+        void update(JdbcTemplate jdbcTemplate, String sql, String input) {
+          jdbcTemplate.update(sql, input);
+        }
+      }
+    expect_match_text: [jdbcTemplate.update]
+  description: "JdbcTemplate.update(sql, params...) binds arguments after the SQL string as JDBC parameters."
+
+- id: java.sanitizer.xpath_variable_resolver
+  enabled: true
+  language: java
+  tag: xpath-parameter
+  packages: ["javax.xml.xpath"]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, setXPathVariableResolver]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: xpath variable resolver
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        void configure(XPath xpath, XPathVariableResolver resolver) {
+          xpath.setXPathVariableResolver(resolver);
+        }
+      }
+    expect_match_text: [xpath.setXPathVariableResolver]
+  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath text."
+
+- id: java.sanitizer.xpath_evaluate_variable_placeholder
+  enabled: true
+  language: java
+  tag: xpath-parameter
+  packages: ["javax.xml.xpath"]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, evaluate]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '\$[A-Za-z_][A-Za-z0-9_]*'
+  - min_args: 2
+  match_examples:
+  - name: xpath evaluate placeholder
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        Object find(XPath xpath, Object doc) throws Exception {
+          return xpath.evaluate("/users/user[@id=$id]", doc);
+        }
+      }
+    expect_match_text: [xpath.evaluate]
+  - name: xpath evaluate placeholder negative constraint boundary
+    code: "import javax.xml.xpath.*;\nclass App {\n  Object find(XPath xpath, Object doc) throws Exception {\n    return xpath.evaluate();\n  }\n}\n"
+    expect_no_match: true
+  description: "XPath.evaluate with `$name` placeholders is the parameterized side of XPath variable binding."
+
+- id: java.sanitizer.jdbctemplate_query_args_rowmapper
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, query]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 3
+  match_examples:
+  - name: jdbc template object array args before mapper
+    code: |
+      import org.springframework.jdbc.core.*;
+      class App {
+        void load(JdbcTemplate jdbcTemplate, String sql, Object[] args, RowMapper mapper) {
+          jdbcTemplate.query(sql, args, mapper);
+        }
+      }
+    expect_match_text: [jdbcTemplate.query]
+  description: "Disabled duplicate — same matcher as canonical java.sanitizer.jdbctemplate_query_rowmapper_params; JdbcTemplate.query parameter binding is represented once until argument-order constraints exist."
+
+  imports:
+  - org
+- id: java.sanitizer.jdbctemplate_queryforobject_params
+  enabled: true
+  language: java
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core"]
+  match:
+    kind: call
+    callee:
+      attribute: [JdbcTemplate, queryForObject]
+  constraints:
+  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
+  - min_args: 3
+  match_examples:
+  - name: jdbc template query for object varargs
+    code: |
+      import org.springframework.jdbc.core.*;
+      class App {
+        Object load(JdbcTemplate jdbcTemplate, String sql, Class type, String input) {
+          return jdbcTemplate.queryForObject(sql, type, input);
+        }
+      }
+    expect_match_text: [jdbcTemplate.queryForObject]
+  description: "JdbcTemplate.queryForObject(sql, requiredType, params...) binds trailing values as JDBC parameters."
+
+- id: java.sanitizer.namedparameterjdbctemplate_params
+  enabled: true
+  language: java
+  tag: db-bind-parameter
+  packages: ["org.springframework.jdbc.core.namedparam"]
+  match:
+    kind: call
+    callee:
+      name: addValue
+  constraints:
+  - receiver_name_in: [params, parameters, sqlParams, paramSource]
+  - min_args: 2
+  match_examples:
+  - name: named parameter source add value
+    code: |
+      import org.springframework.jdbc.core.namedparam.*;
+      class App {
+        void bind(MapSqlParameterSource params, String input) {
+          params.addValue("name", input);
+        }
+      }
+      class MapSqlParameterSource {
+        void addValue(Object... args) {}
+      }
+    expect_match_text: [params.addValue]
+  description: "MapSqlParameterSource.addValue(name, value) binds a named JDBC parameter rather than interpolating the value into SQL."
+
+- id: java.sanitizer.bean_validation_pattern_param
+  enabled: true
+  language: java
+  tag: schema-validate
+  packages: ["jakarta.validation", "javax.validation"]
+  match:
+    kind: param
+    target:
+      annotation: Pattern
+  match_examples:
+  - name: bean validation pattern parameter
+    code: |
+      import jakarta.validation.*;
+      class App {
+        void handle(@Pattern String slug) {
+        }
+      }
+  description: "Bean Validation @Pattern annotated parameter — framework validation constrains the accepted input shape."
+
+- id: java.sanitizer.bean_validation_size_param
+  enabled: true
+  language: java
+  tag: schema-validate
+  packages: ["jakarta.validation", "javax.validation"]
+  match:
+    kind: param
+    target:
+      annotation: Size
+  match_examples:
+  - name: bean validation size parameter
+    code: |
+      import jakarta.validation.*;
+      class App {
+        void handle(@Size String value) {
+        }
+      }
+  description: "Bean Validation @Size annotated parameter — framework validation enforces length bounds."
+
+- id: java.sanitizer.spring_ldap_filter_encode
+  enabled: true
+  language: java
+  tag: ldap-escape
+  packages: ["org.springframework.ldap"]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapEncoder, filterEncode]
+  match_examples:
+  - name: spring ldap filter encode
+    code: |
+      import org.springframework.ldap.*;
+      class App {
+        String filter(String input) {
+          return LdapEncoder.filterEncode(input);
+        }
+      }
+    expect_match_text: [LdapEncoder.filterEncode]
+  description: "Spring LDAP LdapEncoder.filterEncode — escapes LDAP filter metacharacters."
+
+- id: java.sanitizer.spring_ldap_name_encode
+  enabled: true
+  language: java
+  tag: ldap-escape
+  packages: ["org.springframework.ldap"]
+  match:
+    kind: call
+    callee:
+      attribute: [LdapEncoder, nameEncode]
+  match_examples:
+  - name: spring ldap dn encode
+    code: |
+      import org.springframework.ldap.*;
+      class App {
+        String dn(String input) {
+          return LdapEncoder.nameEncode(input);
+        }
+      }
+    expect_match_text: [LdapEncoder.nameEncode]
+  description: "Spring LDAP LdapEncoder.nameEncode — escapes LDAP DN/RDN metacharacters."
+
+- id: java.sanitizer.rdn_escape_value
+  enabled: true
+  language: java
+  tag: ldap-escape
+  packages: ["javax.naming.ldap"]
+  match:
+    kind: call
+    callee:
+      attribute: [Rdn, escapeValue]
+  match_examples:
+  - name: rdn escape value
+    code: |
+      import javax.naming.ldap.*;
+      class App {
+        String dn(String input) {
+          return Rdn.escapeValue(input);
+        }
+      }
+    expect_match_text: [Rdn.escapeValue]
+  description: "javax.naming.ldap.Rdn.escapeValue — escapes attacker input for an LDAP RDN value."
+
+- id: java.sanitizer.path_normalize_startswith_root
+  enabled: true
+  language: java
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      name: startsWith
+  constraints:
+  - receiver_name_in: [normalized, normalizedPath, resolved, resolvedPath, safePath]
+  - arg_matches_regex:
+      index: 0
+      regex: 'root|base|allowed|uploadDir|safeDir'
+  match_examples:
+  - name: normalized path containment
+    code: |
+      class App {
+        boolean allow(Path root, Path input) {
+          Path normalized = root.resolve(input).normalize();
+          return normalized.startsWith(root);
+        }
+      }
+      class Path {
+        Path resolve(Object o) { return this; }
+        Path normalize() { return this; }
+        boolean startsWith(Object o) { return true; }
+      }
+    expect_match_text: [normalized.startsWith]
+  - name: normalized path containment negative constraint boundary
+    code: "class App {\n  boolean allow(Path root, Path input) {\n    Path normalized = root.resolve(input).normalize();\n    return normalized.startsWith();\n  }\n}\nclass Path {\n  Path resolve(Object o) { return this; }\n  Path normalize() { return this; }\n  boolean startsWith(Object o) { return true; }\n}\n"
+    expect_no_match: true
+  description: "Normalized path containment check — a normalized/resolved path is accepted only if it remains under a trusted root."
+
+- id: java.sanitizer.uri_scheme_allowlist
+  enabled: true
+  language: java
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: contains
+  constraints:
+  - receiver_name_in: [allowedSchemes, safeSchemes, permittedSchemes]
+  - arg_matches_regex:
+      index: 0
+      regex: 'getScheme'
+  match_examples:
+  - name: uri scheme allowlist
+    code: |
+      class App {
+        boolean allow(java.net.URI uri, java.util.Set<String> allowedSchemes) {
+          return allowedSchemes.contains(uri.getScheme());
+        }
+      }
+    expect_match_text: [allowedSchemes.contains]
+  - name: uri scheme allowlist negative constraint boundary
+    code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedSchemes) {\n    return allowedSchemes.contains();\n  }\n}\n"
+    expect_no_match: true
+  description: "URI scheme allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
+
+- id: java.sanitizer.uri_host_allowlist
+  enabled: true
+  language: java
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: contains
+  constraints:
+  - receiver_name_in: [allowedHosts, safeHosts, permittedHosts]
+  - arg_matches_regex:
+      index: 0
+      regex: 'getHost'
+  match_examples:
+  - name: uri host allowlist
+    code: |
+      class App {
+        boolean allow(java.net.URI uri, java.util.Set<String> allowedHosts) {
+          return allowedHosts.contains(uri.getHost());
+        }
+      }
+    expect_match_text: [allowedHosts.contains]
+  - name: uri host allowlist negative constraint boundary
+    code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedHosts) {\n    return allowedHosts.contains();\n  }\n}\n"
+    expect_no_match: true
+  description: "URI host allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+
+- id: java.sanitizer.xml_factory_disallow_doctype
+  enabled: true
+  language: java
+  tag: xxe-sanitizer
+  packages: ["javax.xml.parsers", "jakarta.xml.parsers"]
+  match:
+    kind: call
+    callee:
+      name: setFeature
+  constraints:
+  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - arg_matches_regex:
+      index: 0
+      regex: 'external-general-entities|external-parameter-entities|load-external-dtd'
+  - arg_matches_regex:
+      index: 1
+      regex: 'false|FALSE'
+  match_examples:
+  - name: document builder disable external entity feature
+    code: |
+      import javax.xml.parsers.*;
+      class App {
+        void configure(DocumentBuilderFactory factory) throws Exception {
+          factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        }
+      }
+      class DocumentBuilderFactory {
+        void setFeature(Object... args) {}
+      }
+    expect_match_text: [factory.setFeature]
+  - name: document builder disable external entity feature negative constraint boundary
+    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
+    expect_no_match: true
+  description: "XML parser feature hardening — disables external entity or external DTD loading features."
+
+- id: java.sanitizer.xml_factory_disallow_doctype_true
+  enabled: true
+  language: java
+  tag: xxe-sanitizer
+  packages: ["javax.xml.parsers", "jakarta.xml.parsers"]
+  match:
+    kind: call
+    callee:
+      name: setFeature
+  constraints:
+  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - arg_matches_regex:
+      index: 0
+      regex: 'disallow-doctype-decl'
+  - arg_matches_regex:
+      index: 1
+      regex: 'true|TRUE'
+  match_examples:
+  - name: document builder disallow doctype
+    code: |
+      import javax.xml.parsers.*;
+      class App {
+        void configure(DocumentBuilderFactory factory) throws Exception {
+          factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        }
+      }
+      class DocumentBuilderFactory {
+        void setFeature(Object... args) {}
+      }
+    expect_match_text: [factory.setFeature]
+  - name: document builder disallow doctype negative constraint boundary
+    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
+    expect_no_match: true
+  description: "XML parser feature hardening — disallows DOCTYPE declarations to block XXE payloads."
+
+- id: java.sanitizer.xml_factory_secure_processing
+  enabled: true
+  language: java
+  tag: xxe-sanitizer
+  packages: ["javax.xml.parsers", "jakarta.xml.parsers", "javax.xml.XMLConstants"]
+  match:
+    kind: call
+    callee:
+      name: setFeature
+  constraints:
+  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - arg_matches_regex:
+      index: 0
+      regex: 'FEATURE_SECURE_PROCESSING'
+  - arg_matches_regex:
+      index: 1
+      regex: 'true|TRUE'
+  match_examples:
+  - name: document builder secure processing
+    code: |
+      import javax.xml.parsers.*;
+      class App {
+        void configure(DocumentBuilderFactory dbf) throws Exception {
+          dbf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        }
+      }
+      class DocumentBuilderFactory {
+        void setFeature(Object... args) {}
+      }
+      class XMLConstants {
+        static String FEATURE_SECURE_PROCESSING = "";
+      }
+    expect_match_text: [dbf.setFeature]
+  - name: document builder secure processing negative constraint boundary
+    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory dbf) throws Exception {\n    dbf.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\nclass XMLConstants {\n  static String FEATURE_SECURE_PROCESSING = \"\";\n}\n"
+    expect_no_match: true
+  description: "XMLConstants.FEATURE_SECURE_PROCESSING enabled on XML parser factories."
+
+- id: java.sanitizer.xml_factory_restrict_external_access
+  enabled: true
+  language: java
+  tag: xxe-sanitizer
+  packages: ["javax.xml.XMLConstants"]
+  match:
+    kind: call
+    callee:
+      name: setAttribute
+  constraints:
+  - receiver_name_in: [factory, dbf, schemaFactory, transformerFactory]
+  - arg_matches_regex:
+      index: 0
+      regex: 'ACCESS_EXTERNAL_DTD|ACCESS_EXTERNAL_SCHEMA|ACCESS_EXTERNAL_STYLESHEET'
+  - arg_matches_regex:
+      index: 1
+      regex: '^""$'
+  match_examples:
+  - name: restrict external dtd access
+    code: |
+      import javax.xml.XMLConstants.*;
+      class App {
+        void configure(DocumentBuilderFactory factory) throws Exception {
+          factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        }
+      }
+      class DocumentBuilderFactory {
+        void setAttribute(Object... args) {}
+      }
+      class XMLConstants {
+        static String ACCESS_EXTERNAL_DTD = "";
+      }
+    expect_match_text: [factory.setAttribute]
+  - name: restrict external dtd access negative constraint boundary
+    code: "import javax.xml.XMLConstants.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n    factory.setAttribute();\n  }\n}\nclass DocumentBuilderFactory {\n  void setAttribute(Object... args) {}\n}\nclass XMLConstants {\n  static String ACCESS_EXTERNAL_DTD = \"\";\n}\n"
+    expect_no_match: true
+  description: "XMLConstants ACCESS_EXTERNAL_* set to empty string — blocks external DTD/schema/stylesheet resolution."

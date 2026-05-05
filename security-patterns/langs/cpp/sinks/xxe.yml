@@ -1,0 +1,274 @@
+# C++ XXE sinks (libxml2 / Xerces-C / Qt XML / Poco / pugixml / tinyxml2).
+- id: cpp.xxe.libxml2_xmlreadfile
+  enabled: true
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        xmlReadFile(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        xmlReadFile("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlReadFile — flag when options include XML_PARSE_NOENT or XML_PARSE_DTDLOAD."
+
+- id: cpp.xxe.libxml2_xmlreadmemory
+  enabled: true
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlReadMemory
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        xmlReadMemory(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        xmlReadMemory("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlReadMemory — same options concern as xmlReadFile."
+
+- id: cpp.xxe.libxml2_xmlctxtreadfile
+  enabled: true
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlCtxtReadFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        xmlCtxtReadFile(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        xmlCtxtReadFile("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlCtxtReadFile — context-based reader with same entity risk."
+
+- id: cpp.xxe.libxml2_xmlparsefile
+  enabled: true
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [libxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: xmlParseFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libxml2/libxml/parser.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        xmlParseFile(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        xmlParseFile("safe");
+      }
+    expect_no_match: true
+  description: "libxml2 xmlParseFile — legacy API, entities enabled by default."
+
+- id: cpp.xxe.xerces_parser_parse
+  enabled: true
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [xerces-c]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XercesDOMParser, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <xerces-c.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        XercesDOMParser::parse(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        XercesDOMParser::parse("safe");
+      }
+    expect_no_match: true
+  description: "Xerces-C XercesDOMParser::parse — flag without setDisableDefaultEntityResolution / XMLReader features."
+
+- id: cpp.xxe.xerces_sax_parse
+  enabled: true
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [xerces-c, Poco]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [SAXParser, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <xerces-c.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        SAXParser::parse(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        SAXParser::parse("safe");
+      }
+    expect_no_match: true
+  description: "SAXParser::parse — covers Xerces-C and Poco::XML (same attribute chain). Flag without disabling external entities."
+
+- id: cpp.xxe.qt_qxmlsimplereader_parse
+  enabled: true
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [Qt]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [QXmlSimpleReader, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        QXmlSimpleReader::parse(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example() {
+        QXmlSimpleReader::parse("safe");
+      }
+    expect_no_match: true
+  description: "Qt QXmlSimpleReader::parse — deprecated API with entity resolution."
+
+  imports:
+  - QtCore
+  - QtCore/Qt
+- id: cpp.xxe.poco_sax_parser
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: xxe
+  severity: high
+  packages: [Poco]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [SAXParser, parse]
+  description: "Disabled — merged into cpp.xxe.xerces_sax_parse (same `[SAXParser, parse]` attribute chain; packages list now covers Poco)."
+
+- id: cpp.xxe.tinyxml2_loadfile
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: xxe
+  severity: low
+  packages: [tinyxml2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XMLDocument, LoadFile]
+  description: "Disabled — tinyxml2 has limited entity support; no XXE surface."
+
+- id: cpp.xxe.pugixml_load_file
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: xxe
+  severity: low
+  packages: [pugixml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [xml_document, load_file]
+  description: "Disabled — pugixml does not resolve external entities."

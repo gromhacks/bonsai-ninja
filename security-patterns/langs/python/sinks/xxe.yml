@@ -1,0 +1,513 @@
+# Python XXE sinks. lxml + xml stdlib + xmltodict + BeautifulSoup.
+- id: python.xxe.lxml_parse
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  packages: [lxml]
+  imports: [lxml, lxml.etree]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [etree, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe lxml parse
+    code: |
+      from lxml import etree
+      def example(user_input):
+          return etree.parse(user_input)
+  - name: lxml parse literal negative
+    code: |
+      from lxml import etree
+
+      def example(user_input):
+          return etree.parse('safe')
+    expect_no_match: true
+  description: "lxml.etree.parse — enable DEFUSEDXML or set resolve_entities=False."
+
+- id: python.xxe.lxml_fromstring
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  packages: [lxml]
+  imports: [lxml, lxml.etree]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [etree, fromstring]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe lxml fromstring
+    code: |
+      from lxml import etree
+      def example(user_input):
+          return etree.fromstring(user_input)
+  - name: lxml fromstring literal negative
+    code: |
+      from lxml import etree
+
+      def example(user_input):
+          return etree.fromstring('safe')
+    expect_no_match: true
+  description: "lxml.etree.fromstring."
+
+- id: python.xxe.lxml_xmlparser
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  packages: [lxml]
+  imports: [lxml, lxml.etree]
+  cwe: [CWE-611]
+  match:
+    kind: new
+    callee:
+      attribute: [etree, XMLParser]
+  match_examples:
+  - name: xxe lxml xmlparser
+    code: |
+      from lxml import etree
+      class XMLParser:
+          pass
+
+      def example(user_input):
+          return etree.XMLParser(user_input)
+  description: "new etree.XMLParser — flag if resolve_entities/load_dtd default."
+
+- id: python.xxe.etree_fromstring
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^ElementTree\\.fromstring$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe etree fromstring
+    code: |
+      import xml
+      def example(user_input):
+          return ElementTree.fromstring(user_input)
+  - name: etree fromstring literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return ElementTree.fromstring('safe')
+    expect_no_match: true
+  description: "xml.etree.ElementTree.fromstring."
+
+- id: python.xxe.xml_etree_fromstring
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^xml\\.etree\\.ElementTree\\.fromstring$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe xml etree fromstring fully qualified
+    code: |
+      import xml
+      def example(user_input):
+          return xml.etree.ElementTree.fromstring(user_input)
+    expect_match_text: [xml.etree.ElementTree.fromstring]
+  - name: xml etree fromstring literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return xml.etree.ElementTree.fromstring('safe')
+    expect_no_match: true
+  description: "xml.etree.ElementTree.fromstring fully-qualified form."
+
+- id: python.xxe.etree_parse
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [ElementTree, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe etree parse
+    code: |
+      import xml
+      def example(user_input):
+          return ElementTree.parse(user_input)
+  - name: etree parse literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return ElementTree.parse('safe')
+    expect_no_match: true
+  description: "xml.etree.ElementTree.parse."
+
+- id: python.xxe.etree_iterparse
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [ElementTree, iterparse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe etree iterparse
+    code: |
+      import xml
+      def example(user_input):
+          return ElementTree.iterparse(user_input)
+  - name: etree iterparse literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return ElementTree.iterparse('safe')
+    expect_no_match: true
+  description: "xml.etree.ElementTree.iterparse."
+
+- id: python.xxe.et_alias_fromstring
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [ET, fromstring]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe ET fromstring alias
+    code: |
+      import xml
+      def example(user_input):
+          return ET.fromstring(user_input)
+    expect_match_text: [ET.fromstring]
+  - name: et alias fromstring literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return ET.fromstring('safe')
+    expect_no_match: true
+  description: "xml.etree.ElementTree imported as ET; ET.fromstring parses tainted XML with stdlib entity hazards."
+
+- id: python.xxe.et_alias_parse
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [ET, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe ET parse alias
+    code: |
+      import xml
+      def example(user_input):
+          return ET.parse(user_input)
+    expect_match_text: [ET.parse]
+  - name: et alias parse literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return ET.parse('safe')
+    expect_no_match: true
+  description: "xml.etree.ElementTree imported as ET; ET.parse parses an attacker-controlled XML path or file object."
+
+- id: python.xxe.et_alias_iterparse
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [ET, iterparse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe ET iterparse alias
+    code: |
+      import xml
+      def example(user_input):
+          return ET.iterparse(user_input)
+    expect_match_text: [ET.iterparse]
+  - name: et alias iterparse literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return ET.iterparse('safe')
+    expect_no_match: true
+  description: "xml.etree.ElementTree imported as ET; ET.iterparse streams attacker-controlled XML."
+
+- id: python.xxe.etree_xml_constructor
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^(ElementTree|ET)\\.XML$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe ElementTree XML
+    code: |
+      import xml
+      def example(user_input):
+          return ElementTree.XML(user_input)
+    expect_match_text: [ElementTree.XML]
+  - name: xxe ET XML alias
+    code: |
+      import xml
+      def example(user_input):
+          return ET.XML(user_input)
+    expect_match_text: [ET.XML]
+  - name: etree xml constructor literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return ElementTree.XML('safe')
+    expect_no_match: true
+  description: "ElementTree.XML / ET.XML parse XML text directly; prefer defusedxml for untrusted input."
+
+- id: python.xxe.minidom_parse
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [minidom, parse]
+  description: "Disabled — subsumed by python.xxe.etree_parse / python.xxe.et_alias_parse under OnlyWhenPackaged lax-tail policy. When a file imports `xml`, the `[ElementTree, parse]` rule already lax-matches `minidom.parse(...)`."
+
+- id: python.xxe.minidom_parse_string
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [minidom, parseString]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe minidom parse string
+    code: |
+      import xml
+      def example(user_input):
+          return minidom.parseString(user_input)
+  - name: minidom parse string literal negative
+    code: |
+      import xml
+
+      def example(user_input):
+          return minidom.parseString('safe')
+    expect_no_match: true
+  description: "xml.dom.minidom.parseString."
+
+- id: python.xxe.pulldom_parse
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [pulldom, parse]
+  description: "Disabled — subsumed by python.xxe.etree_parse / python.xxe.et_alias_parse under OnlyWhenPackaged lax-tail policy. When a file imports `xml`, the `[ElementTree, parse]` rule already lax-matches `pulldom.parse(...)`."
+
+- id: python.xxe.sax_parse
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [sax, parse]
+  description: "Disabled — subsumed by python.xxe.etree_parse / python.xxe.et_alias_parse under OnlyWhenPackaged lax-tail policy. When a file imports `xml`, the `[ElementTree, parse]` rule already lax-matches `sax.parse(...)`."
+
+- id: python.xxe.expatreader_make
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  imports: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [sax, make_parser]
+  match_examples:
+  - name: xxe expatreader make
+    code: |
+      import xml
+      def example(user_input):
+          return sax.make_parser(user_input)
+  description: "xml.sax.make_parser — uses expat which can fetch entities."
+
+- id: python.xxe.xmltodict_parse
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  packages: [xmltodict]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [xmltodict, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe xmltodict parse
+    code: |
+      import xmltodict
+      def example(user_input):
+          return xmltodict.parse(user_input)
+  - name: xmltodict parse literal negative
+    code: |
+      import xmltodict
+
+      def example(user_input):
+          return xmltodict.parse('safe')
+    expect_no_match: true
+  description: "xmltodict.parse — built on expat; can fetch entities."
+
+- id: python.xxe.bs4_xml
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: xxe
+  severity: medium
+  packages: [bs4]
+  cwe: [CWE-611]
+  match:
+    kind: new
+    callee:
+      name: BeautifulSoup
+  description: "Disabled — BeautifulSoup with 'xml' parser delegates to lxml; lxml rule covers."
+
+- id: python.xxe.suds_client
+  enabled: true
+  language: python
+  tag: xxe
+  severity: high
+  packages: [suds]
+  cwe: [CWE-611]
+  match:
+    kind: new
+    callee:
+      attribute: [client, Client]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe suds client
+    code: |
+      import suds
+      class Client:
+          pass
+
+      def example(user_input):
+          return client.Client(user_input)
+  - name: suds client literal negative
+    code: |
+      import suds
+
+      class Client:
+          pass
+
+      def example(user_input):
+          return client.Client('safe')
+    expect_no_match: true
+  description: "suds Client — SOAP/XML-RPC, vulnerable to XXE. Constructor takes a WSDL URL as first arg; `min_args: 1` rejects unrelated 0-arg `client.Client()` decoys."
+
+- id: python.xxe.zeep_client
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: xxe
+  severity: medium
+  packages: [zeep]
+  cwe: [CWE-611]
+  match:
+    kind: new
+    callee:
+      attribute: [zeep, Client]
+  description: "Disabled — zeep uses defusedxml by default."

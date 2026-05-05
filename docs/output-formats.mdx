@@ -1,0 +1,98 @@
+---
+title: "Output Formats"
+description: "Text, JSON, graph, train, SARIF, and dependency output shapes."
+---
+
+# Output Formats
+
+## Grouped
+
+Grouped view clusters flows that share a tail. Use it when a sink has many source paths but the same final call chain.
+
+```text
+GROUP 1 G:701fc172b976025d  3 flow(s)
+  FLOW 1a F:c48be683d9e53628
+  handle_request -> orchestrate -> persist -> execute
+```
+
+## Compact
+
+Compact text keeps flow headers and step labels while omitting repeated source bodies.
+
+```bash
+bonsai-ninja security ./src taint-analysis --compact
+bonsai-ninja inspect ./src --query execute --compact
+```
+
+```text
+FLOW 2 F:0123456789abcdef python.cmdi.os_system
+handle_request -> run_pipeline -> orchestrate -> execute
+  1 SOURCE app.py:29 request.args.get
+  2 TAINT  app.py:48 run_pipeline arg[0]
+  3 SINK   executor.py:29 os.system arg[0]
+```
+
+## Graph
+
+`export --format networkx`, `graphml`, and `cypher` project the same workspace graph into graph-tooling formats.
+
+```bash
+bonsai-ninja export ./src --format networkx > graph.node_link.json
+bonsai-ninja export ./src --format graphml > graph.graphml
+bonsai-ninja export ./src --format cypher > graph.cypher
+```
+
+## Train
+
+Training or evaluation pipelines usually consume native JSON because it preserves exact rule IDs, locations, tainted args, chains, and stable IDs.
+
+```json
+[
+  {
+    "finding_id": "S:979a7231afe45297",
+    "source": { "rule_id": "python.flask.request_args_get", "line": 29 },
+    "sink": { "rule_id": "python.cmdi.os_system", "line": 29 },
+    "chain_display": ["handle_request", "run_pipeline", "orchestrate", "execute"]
+  }
+]
+```
+
+## SARIF
+
+SARIF 2.1.0 is available from `security taint-analysis` and `security source-analysis`. Results include standard locations, code flows, rules, CWE properties, and bonsai-specific metadata under `properties.bonsai`.
+
+```json
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/cs01/schemas/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [{
+    "tool": { "driver": { "name": "bonsai-ninja", "rules": [] } },
+    "results": [{
+      "ruleId": "python.cmdi.os_system",
+      "level": "error",
+      "message": { "text": "Tainted input reaches os.system" },
+      "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "executor.py" }, "region": { "startLine": 29 } } }]
+    }]
+  }]
+}
+```
+
+## Deps
+
+Dependency output lists imports that match package names mentioned by the loaded rulepack.
+
+```bash
+bonsai-ninja security ./src deps --severity critical --format json
+```
+
+```json
+[
+  {
+    "package": "flask",
+    "language": "python",
+    "file": "app.py",
+    "line": 14,
+    "rules": ["python.flask.request_args_get"]
+  }
+]
+```

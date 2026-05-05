@@ -1,0 +1,158 @@
+- id: dart.xss.innerhtml
+  enabled: true
+  language: dart
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: innerHtml
+  match_examples:
+  - name: declared shape
+    code: 'void test() { var input = "x"; var amount = 1; innerHtml = input; }
+
+      '
+  description: dart:html element.innerHtml = tainted.
+- id: dart.xss.set_innerhtml
+  enabled: true
+  language: dart
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: setInnerHtml
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted set inner html
+    code: 'void test(String input) { setInnerHtml(input); }
+
+      '
+  - name: literal set inner html negative
+    code: 'void test() { setInnerHtml("<p>safe</p>"); }
+
+      '
+    expect_no_match: true
+  description: Element.setInnerHtml with permissive validator.
+- id: dart.xss.document_write
+  enabled: false
+  language: dart
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - document
+      - write
+  match_examples:
+  - name: declared shape
+    code: 'void test() { var input = "x"; var amount = 1; document.write(input); }
+
+      '
+  description: document.write.
+  disabled_reason:
+    code: over-broad
+- id: dart.xss.iframe_srcdoc
+  enabled: true
+  language: dart
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: srcdoc
+  match_examples:
+  - name: declared shape
+    code: 'void test() { var input = "x"; var amount = 1; srcdoc = input; }
+
+      '
+  description: iframe.srcdoc = tainted.
+- id: dart.xss.flutter_html_widget
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: xss
+  severity: medium
+  packages:
+  - flutter_html
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      name: Html
+  description: "Disabled \u2014 flutter_html Html widget; flag with tainted data argument."
+- id: dart.xss.html_parse
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  tag: xss
+  severity: medium
+  packages:
+  - html
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: parse
+  description: "Disabled \u2014 bare `parse` name is FP-prone (matches every parse()\
+    \ across the codebase). Re-enable with import-scoped matching when adapter supports\
+    \ it. The dangerous flow is package:html parse + downstream innerHtml/setInnerHtml\
+    \ sink, which the existing XSS rules already catch."
+- id: dart.xss.html_parse_fragment
+  enabled: true
+  language: dart
+  tag: xss
+  severity: medium
+  packages:
+  - html
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: parseFragment
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted html fragment
+    code: 'import ''package:html/html.dart'';
+
+      import ''package:html/html.dart'';
+
+      import ''package:html/html.dart'';
+
+      import ''package:html/html.dart'';
+
+      import ''package:html/html.dart''; // html
+
+      void test(String input) { parseFragment(input); }
+
+      '
+  - name: literal html fragment negative
+    code: 'import ''package:html/html.dart'';
+
+      void test() { parseFragment("<p>safe</p>"); }
+
+      '
+    expect_no_match: true
+  description: "package:html parseFragment(tainted) \u2014 fragment parser with un-escaped\
+    \ DOM-build risk. `parseFragment` is a sufficiently distinctive name to scope\
+    \ without import context."
+  imports:
+  - html/html.dart

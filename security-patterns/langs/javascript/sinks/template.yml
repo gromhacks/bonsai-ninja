@@ -1,0 +1,763 @@
+- id: javascript.template.ejs_render
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - ejs
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ejs
+      - render
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ejs render
+    code: "const _u = require(\"ejs\");\nfunction demo(input, req, obj) {\n  return\
+      \ ejs.render(input, \"<%= user %>\");\n}\n"
+    expect_match_text:
+    - ejs.render
+  - name: literal ejs render negative
+    code: "const _u = require(\"ejs\");\nfunction demo() {\n  return ejs.render(\"\
+      Hello user\", {});\n}\n"
+    expect_no_match: true
+  description: 'ejs.render(tainted). Merged aliases: javascript.template.ejs_render_template_variable.'
+  aliases:
+  - javascript.template.ejs_render_template_variable
+- id: javascript.template.ejs_compile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - ejs
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ejs
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ejs compile
+    code: "const _u = require(\"ejs\");\nfunction demo(input, req, obj) {\n  return\
+      \ ejs.compile(input, \"<%= user %>\");\n}\n"
+  - name: literal ejs compile negative
+    code: "const _u = require(\"ejs\");\nfunction demo() {\n  return ejs.compile(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: "ejs.compile(tainted) \u2014 full SSTI to RCE in default config. Merged\
+    \ aliases: javascript.template.ejs_compile_template_variable."
+  aliases:
+  - javascript.template.ejs_compile_template_variable
+- id: javascript.template.handlebars_compile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Handlebars
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: handlebars compile
+    code: "const _u = require(\"handlebars\");\nfunction demo(input, req, obj) {\n\
+      \  return Handlebars.compile(input, \"<%= user %>\");\n}\n"
+  - name: literal handlebars compile negative
+    code: "const _u = require(\"handlebars\");\nfunction demo() {\n  return Handlebars.compile(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: 'Handlebars.compile(tainted). Merged aliases: javascript.template.handlebars_compile_template_variable.'
+  aliases:
+  - javascript.template.handlebars_compile_template_variable
+- id: javascript.template.handlebars_lower_compile
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - handlebars
+      - compile
+  description: "Disabled \u2014 subsumed by javascript.template.handlebars_compile\
+    \ under OnlyWhenPackaged lax-tail policy."
+- id: javascript.template.hbs_compile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - hbs
+  - handlebars
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - hbs
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: hbs compile template source
+    code: "const hbs = require(\"hbs\");\nfunction render(input) {\n  return hbs.compile(input,\
+      \ \"{{ user }}\");\n}\n"
+    expect_match_text:
+    - hbs.compile
+  - name: literal hbs compile negative
+    code: "const hbs = require(\"hbs\");\nfunction render() {\n  return hbs.compile(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: "hbs.compile(tainted) \u2014 hbs exposes Handlebars template compilation;\
+    \ attacker-controlled template source is SSTI."
+- id: javascript.template.handlebars_safestring
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - handlebars
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      attribute:
+      - Handlebars
+      - SafeString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: handlebars safestring
+    code: "const _u = require(\"handlebars\");\nfunction demo(input, req, obj) {\n\
+      \  return new Handlebars.SafeString(input, \"<%= user %>\");\n}\n"
+  - name: literal handlebars safestring negative
+    code: "const _u = require(\"handlebars\");\nfunction demo() {\n  return new Handlebars.SafeString(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: "new Handlebars.SafeString(tainted) \u2014 bypasses escape."
+- id: javascript.template.pug_compile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - pug
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pug
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: pug compile
+    code: "const _u = require(\"pug\");\nfunction demo(input, req, obj) {\n  return\
+      \ pug.compile(input, \"<%= user %>\");\n}\n"
+  - name: literal pug compile negative
+    code: "const _u = require(\"pug\");\nfunction demo() {\n  return pug.compile(\"\
+      p Hello user\");\n}\n"
+    expect_no_match: true
+  description: "pug.compile(tainted) \u2014 Jade/Pug SSTI."
+- id: javascript.template.pug_render
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - pug
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pug
+      - render
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: pug render
+    code: "const _u = require(\"pug\");\nfunction demo(input, req, obj) {\n  return\
+      \ pug.render(input, \"<%= user %>\");\n}\n"
+  - name: literal pug render negative
+    code: "const _u = require(\"pug\");\nfunction demo() {\n  return pug.render(\"\
+      p Hello user\");\n}\n"
+    expect_no_match: true
+  description: pug.render(tainted).
+- id: javascript.template.nunjucks_renderstring
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - nunjucks
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - renderString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nunjucks renderstring
+    code: "const _u = require(\"nunjucks\");\nfunction demo(input, req, obj) {\n \
+      \ return nunjucks.renderString(input, \"<%= user %>\");\n}\n"
+  - name: literal nunjucks renderstring negative
+    code: "const _u = require(\"nunjucks\");\nfunction demo() {\n  return nunjucks.renderString(\"\
+      Hello user\", {});\n}\n"
+    expect_no_match: true
+  description: 'nunjucks.renderString(tainted). Merged aliases: javascript.template.nunjucks_renderstring_template_variable.'
+  aliases:
+  - javascript.template.nunjucks_renderstring_template_variable
+- id: javascript.template.nunjucks_compile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - nunjucks
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nunjucks compile
+    code: "const _u = require(\"nunjucks\");\nfunction demo(nunjucks, input) {\n \
+      \ return nunjucks.compile(input, \"{{ user }}\");\n}\n"
+    expect_match_text:
+    - nunjucks.compile
+  - name: literal nunjucks compile negative
+    code: "const _u = require(\"nunjucks\");\nfunction demo(nunjucks) {\n  return\
+      \ nunjucks.compile(\"Hello user\");\n}\n"
+    expect_no_match: true
+  description: "nunjucks.compile(tainted) \u2014 compiles attacker-controlled template\
+    \ source."
+- id: javascript.template.nunjucks_render_template_source
+  enabled: false
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - nunjucks
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - render
+  match_examples:
+  - name: nunjucks render variable template
+    code: "const _u = require(\"nunjucks\");\nfunction render(nunjucks, template)\
+      \ {\n  return nunjucks.render(template, {});\n}\n"
+    expect_match_text:
+    - nunjucks.render
+  - name: nunjucks render concat template
+    code: "const _u = require(\"nunjucks\");\nfunction render(nunjucks, body) {\n\
+      \  return nunjucks.render(\"Hello {{ \" + body + \" }}\", {});\n}\n"
+    expect_match_text:
+    - nunjucks.render
+  description: "nunjucks.render(templateSource, data) with variable or constructed\
+    \ template names/source \u2014 audit for attacker-controlled template selection\
+    \ or SSTI."
+  disabled_reason:
+    code: over-broad
+- id: javascript.template.dot_template
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - dot
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - doT
+      - template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dot template
+    code: "const _u = require(\"dot\");\nfunction demo(input, req, obj) {\n  return\
+      \ doT.template(input, \"<%= user %>\");\n}\n"
+  - name: literal dot template negative
+    code: "const _u = require(\"dot\");\nfunction demo() {\n  return doT.template(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: doT.template(tainted).
+- id: javascript.template.mustache_render
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: ssti
+  severity: medium
+  packages:
+  - mustache
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Mustache
+      - render
+  description: "Disabled \u2014 Mustache is logic-less; not SSTI-to-RCE."
+- id: javascript.template.lodash_template
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - lodash
+  - underscore
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - _
+      - template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lodash template
+    code: "const _u = require(\"lodash\");\nfunction demo(input, req, obj) {\n  return\
+      \ _.template(input, \"<%= user %>\");\n}\n"
+  - name: literal lodash template negative
+    code: "const _u = require(\"lodash\");\nfunction demo(_) {\n  return _.template(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: "_.template(tainted) \u2014 lodash/underscore templates `with`-scope\
+    \ + `<% %>` evaluate arbitrary JS."
+- id: javascript.template.lodash_template_call
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - lodash
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - lodash
+      - template
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lodash template call
+    code: "const _u = require(\"lodash\");\nfunction demo(input, req, obj) {\n  return\
+      \ lodash.template(input, \"<%= user %>\");\n}\n"
+  - name: literal lodash template call negative
+    code: "const _u = require(\"lodash\");\nfunction demo() {\n  return lodash.template(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: "lodash.template(tainted) \u2014 same JS-evaluation hazard as the `_`\
+    \ alias form."
+- id: javascript.template.consolidate_render
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: ssti
+  severity: medium
+  packages:
+  - consolidate
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      name: render
+  description: "Disabled \u2014 generic render; flag with engine-specific constraint."
+- id: javascript.template.swig_render
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - swig
+  - swig-templates
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - swig
+      - render
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swig render
+    code: "const _u = require(\"swig\");\nfunction demo(input, req, obj) {\n  return\
+      \ swig.render(input, \"<%= user %>\");\n}\n"
+  - name: literal swig render negative
+    code: "const _u = require(\"swig\");\nfunction demo() {\n  return swig.render(\"\
+      Hello user\", {});\n}\n"
+    expect_no_match: true
+  description: "swig.render(tainted, \u2026) \u2014 Swig is abandoned; tainted template\
+    \ source executes arbitrary expressions."
+- id: javascript.template.swig_compile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - swig
+  - swig-templates
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - swig
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swig compile
+    code: "const _u = require(\"swig\");\nfunction demo(input, req, obj) {\n  return\
+      \ swig.compile(input, \"<%= user %>\");\n}\n"
+  - name: literal swig compile negative
+    code: "const _u = require(\"swig\");\nfunction demo() {\n  return swig.compile(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: "swig.compile(tainted) \u2014 full SSTI to RCE in default config."
+- id: javascript.template.swig_renderfile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - swig
+  - swig-templates
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - swig
+      - renderFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: swig renderfile
+    code: "const _u = require(\"swig\");\nfunction demo(input, req, obj) {\n  return\
+      \ swig.renderFile(input, \"<%= user %>\");\n}\n"
+  - name: literal swig renderfile negative
+    code: "const _u = require(\"swig\");\nfunction demo() {\n  return swig.renderFile(\"\
+      home.html\", {});\n}\n"
+    expect_no_match: true
+  description: "swig.renderFile(taintedPath, ctx) \u2014 tainted file path lets attacker\
+    \ pick arbitrary template (path-traversal + SSTI compound)."
+- id: javascript.template.dust_compile
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - dustjs-linkedin
+  - dust
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - dust
+      - compile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dust compile
+    code: "const _u = require(\"dustjs-linkedin\");\nfunction demo(input, req, obj)\
+      \ {\n  return dust.compile(input, \"<%= user %>\");\n}\n"
+  - name: literal dust compile negative
+    code: "const _u = require(\"dustjs-linkedin\");\nfunction demo() {\n  return dust.compile(\"\
+      Hello user\");\n}\n"
+    expect_no_match: true
+  description: "dust.compile(tainted) \u2014 Dust template compilation from attacker\
+    \ source."
+- id: javascript.template.liquid_parseandrender
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - liquidjs
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Liquid
+      - parseAndRender
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: liquid parseandrender
+    code: "const _u = require(\"liquidjs\");\nfunction demo(input, req, obj) {\n \
+      \ return Liquid.parseAndRender(input, \"<%= user %>\");\n}\n"
+  - name: literal liquid parseandrender negative
+    code: "const _u = require(\"liquidjs\");\nfunction demo() {\n  return Liquid.parseAndRender(\"\
+      Hello user\", {});\n}\n"
+    expect_no_match: true
+  description: "liquidjs Liquid.parseAndRender(tainted) \u2014 LiquidJS evaluates\
+    \ template tags; tainted source = SSTI."
+- id: javascript.template.eta_render
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - eta
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Eta
+      - render
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: eta render
+    code: "const _u = require(\"eta\");\nfunction demo(input, req, obj) {\n  return\
+      \ Eta.render(input, \"<%= user %>\");\n}\n"
+  - name: literal eta render negative
+    code: "const _u = require(\"eta\");\nfunction demo() {\n  return Eta.render(\"\
+      Hello user\", {});\n}\n"
+    expect_no_match: true
+  description: "Eta.render(tainted, ctx) \u2014 Eta is an EJS-style engine; tainted\
+    \ template source = SSTI to RCE."
+- id: javascript.template.markojs_load
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: ssti
+  severity: medium
+  packages:
+  - marko
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - marko
+      - load
+  description: "Disabled \u2014 Marko load takes a path; only dangerous when path\
+    \ is tainted. Enable with source-proximity."
+- id: javascript.template.swig_setdefaults_autoescape_off
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - swig
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - swig
+      - setDefaults
+  match_examples:
+  - name: swig setdefaults autoescape off
+    code: "const _u = require(\"swig\");\nfunction demo(input, req, obj) {\n  return\
+      \ swig.setDefaults(input, { autoescape: false });\n}\n"
+  description: "swig.setDefaults({autoescape: false}) \u2014 global autoescape off;\
+    \ NodeGoat tutorial XSS."
+- id: javascript.template.handlebars_safe_string
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - handlebars
+  cwe:
+  - CWE-79
+  match:
+    kind: new
+    callee:
+      attribute:
+      - Handlebars
+      - SafeString
+  description: "Disabled duplicate \u2014 same Handlebars.SafeString match shape is\
+    \ covered by javascript.template.handlebars_safestring."
+- id: javascript.template.nunjucks_configure_autoescape_off
+  enabled: true
+  language: javascript
+  tag: xss
+  severity: high
+  packages:
+  - nunjucks
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - nunjucks
+      - configure
+  match_examples:
+  - name: nunjucks configure autoescape off
+    code: "const _u = require(\"nunjucks\");\nfunction demo(input, req, obj) {\n \
+      \ return nunjucks.configure(input, { autoescape: false });\n}\n"
+  description: "nunjucks.configure(path, {autoescape: false}) \u2014 autoescape disabled."
+
+- id: javascript.template.nunjucks_environment_renderstring
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: critical
+  packages:
+  - nunjucks
+  imports:
+  - nunjucks
+  cwe:
+  - CWE-94
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.renderString$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nunjucks environment renderstring tainted
+    code: |
+      const _u = require("nunjucks");
+      function demo(env, input) {
+        return env.renderString(input, {});
+      }
+      demo({ renderString: () => null }, "");
+    expect_match_text: [env.renderString]
+  - name: nunjucks environment renderstring literal negative
+    code: |
+      const _u = require("nunjucks");
+      function demo(env) {
+        return env.renderString("Hello {{ user }}", {});
+      }
+      demo({ renderString: () => null });
+    expect_no_match: true
+  description: "nunjucks Environment instance .renderString(tainted) \u2014 local nunjucks Environment receivers also reach SSTI when rendering attacker-controlled source."
+
+- id: javascript.template.pug_compile_file
+  enabled: true
+  language: javascript
+  tag: ssti
+  severity: high
+  packages:
+  - pug
+  imports:
+  - pug
+  cwe:
+  - CWE-1336
+  match:
+    kind: call
+    callee:
+      attribute:
+      - pug
+      - compileFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: pug compileFile tainted path
+    code: |
+      const _u = require("pug");
+      function demo(input) {
+        return pug.compileFile(input);
+      }
+    expect_match_text: [pug.compileFile]
+  - name: pug compileFile literal negative
+    code: |
+      const _u = require("pug");
+      function demo() {
+        return pug.compileFile("views/profile.pug");
+      }
+    expect_no_match: true
+  description: "pug.compileFile(taintedPath) \u2014 attacker-controlled file path lets the user pick an arbitrary template (path-traversal + SSTI compound)."

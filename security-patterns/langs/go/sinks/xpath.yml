@@ -1,0 +1,66 @@
+- id: go.xpath.xmlquery_query
+  enabled: true
+  language: go
+  tag: xpath-injection
+  severity: high
+  packages:
+  - github.com/antchfx/xmlquery
+  cwe:
+  - CWE-643
+  match:
+    kind: call
+    callee:
+      attribute:
+      - xmlquery
+      - Query
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted xmlquery xpath
+    code: "package main\nimport \"github.com/antchfx/xmlquery\"\nfunc find(expr string) {\n  _, _ = xmlquery.Query(nil, expr)\n}\n"
+    expect_match_text:
+    - xmlquery.Query
+  - name: literal xmlquery xpath negative
+    code: |
+      package main
+      import "github.com/antchfx/xmlquery"
+
+      func find() {
+        _, _ = xmlquery.Query(nil, "//user[@id='alice']")
+      }
+    expect_no_match: true
+  description: "xmlquery.Query(node, tainted XPath) \u2014 concatenated XPath predicates allow XPath injection."
+- id: go.xpath.xmlquery_queryall
+  enabled: true
+  language: go
+  tag: xpath-injection
+  severity: high
+  packages:
+  - github.com/antchfx/xmlquery
+  cwe:
+  - CWE-643
+  match:
+    kind: call
+    callee:
+      attribute:
+      - xmlquery
+      - QueryAll
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted xmlquery queryall xpath
+    code: "package main\nimport \"github.com/antchfx/xmlquery\"\nfunc find(expr string) {\n  _ = xmlquery.QueryAll(nil, expr)\n}\n"
+    expect_match_text:
+    - xmlquery.QueryAll
+  - name: literal xmlquery queryall xpath negative
+    code: |
+      package main
+      import "github.com/antchfx/xmlquery"
+
+      func find() {
+        _ = xmlquery.QueryAll(nil, "//user")
+      }
+    expect_no_match: true
+  description: "xmlquery.QueryAll(node, tainted XPath) \u2014 attacker-controlled XPath expression."

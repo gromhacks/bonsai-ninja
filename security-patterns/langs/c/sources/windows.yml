@@ -1,0 +1,256 @@
+# C Windows API input sources (Win32 environment, registry, command line, sockets).
+# Bare-name matching is unavoidable here: Win32 functions are real exported globals
+# from kernel32/advapi32/ws2_32 and headers do not place them in a namespace or
+# package the loader can scope on. They are uniquely named (no libc collision risk).
+- id: c.input.win_get_environment_variable_a
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32]
+  match:
+    kind: call
+    callee:
+      name: GetEnvironmentVariableA
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        GetEnvironmentVariableA(arg);
+      }
+  description: "Win32 GetEnvironmentVariableA — process environment lookup; same trust profile as getenv()."
+  imports:
+  - windows
+  - windows.h
+- id: c.input.win_get_environment_variable_w
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32]
+  match:
+    kind: call
+    callee:
+      name: GetEnvironmentVariableW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        GetEnvironmentVariableW(arg);
+      }
+  description: "Win32 GetEnvironmentVariableW — UTF-16 environment lookup; attacker-influenced."
+  imports:
+  - windows
+  - windows.h
+- id: c.input.win_get_command_line_a
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32]
+  match:
+    kind: call
+    callee:
+      name: GetCommandLineA
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        GetCommandLineA(arg);
+      }
+  description: "Win32 GetCommandLineA — full process command line as a single string."
+  imports:
+  - windows
+  - windows.h
+- id: c.input.win_get_command_line_w
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32]
+  match:
+    kind: call
+    callee:
+      name: GetCommandLineW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        GetCommandLineW(arg);
+      }
+  description: "Win32 GetCommandLineW — UTF-16 process command line."
+  imports:
+  - windows
+  - windows.h
+- id: c.input.win_reg_query_value_ex_a
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32-advapi32]
+  match:
+    kind: call
+    callee:
+      name: RegQueryValueExA
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <winreg.h>
+      #include <winreg.h>
+      #include <advapi32.h> /* win32-advapi32 */
+      #include <advapi32.h> /* win32-advapi32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        RegQueryValueExA(arg);
+      }
+  description: "Win32 RegQueryValueExA — reads a registry value; HKCU and per-machine writable hives are attacker-influenced."
+  imports:
+  - winreg.h
+  - winreg
+  - advapi32
+  - advapi32.h
+- id: c.input.win_reg_query_value_ex_w
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32-advapi32]
+  match:
+    kind: call
+    callee:
+      name: RegQueryValueExW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <winreg.h>
+      #include <winreg.h>
+      #include <advapi32.h> /* win32-advapi32 */
+      #include <advapi32.h> /* win32-advapi32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        RegQueryValueExW(arg);
+      }
+  description: "Win32 RegQueryValueExW — UTF-16 registry value read."
+  imports:
+  - winreg.h
+  - winreg
+  - advapi32
+  - advapi32.h
+- id: c.input.win_reg_get_value_a
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32-advapi32]
+  match:
+    kind: call
+    callee:
+      name: RegGetValueA
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <winreg.h>
+      #include <winreg.h>
+      #include <advapi32.h> /* win32-advapi32 */
+      #include <advapi32.h> /* win32-advapi32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        RegGetValueA(arg);
+      }
+  description: "Win32 RegGetValueA — typed registry value read; attacker-influenced for writable hives."
+  imports:
+  - winreg.h
+  - winreg
+  - advapi32
+  - advapi32.h
+- id: c.input.win_reg_get_value_w
+  enabled: true
+  language: c
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [win32-advapi32]
+  match:
+    kind: call
+    callee:
+      name: RegGetValueW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <winreg.h>
+      #include <winreg.h>
+      #include <advapi32.h> /* win32-advapi32 */
+      #include <advapi32.h> /* win32-advapi32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        RegGetValueW(arg);
+      }
+  description: "Win32 RegGetValueW — UTF-16 typed registry value read."
+  imports:
+  - winreg.h
+  - winreg
+  - advapi32
+  - advapi32.h
+- id: c.input.win_wsa_recv
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [winsock]
+  match:
+    kind: call
+    callee:
+      name: WSARecv
+  description: "Disabled — WSARecv writes into a caller-supplied WSABUF; needs pointer-out source modeling."
+- id: c.input.win_recv
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: c
+  trust: remote
+  tag: network-input
+  payload_types: [binary]
+  packages: [winsock]
+  match:
+    kind: call
+    callee:
+      name: recv
+  description: "Disabled — Winsock recv writes into the caller buffer; needs pointer-out modeling (same shape as POSIX recv)."

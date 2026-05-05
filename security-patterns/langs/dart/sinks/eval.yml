@@ -1,0 +1,199 @@
+# Dart dynamic-code / eval sinks.
+- id: dart.eval.webview_run_javascript
+  enabled: true
+  language: dart
+  tag: code-injection
+  severity: critical
+  packages: [webview_flutter]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [controller, runJavaScript]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted javascript string
+    code: |
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      void test(String input) { controller.runJavaScript(input); }
+  - name: literal javascript string negative
+    code: |
+      import 'package:webview_flutter/webview_flutter.dart';
+      void test() { controller.runJavaScript("console.log('safe')"); }
+    expect_no_match: true
+  description: "webview_flutter WebViewController.runJavaScript(tainted). Signature is `runJavaScript(String)` — exactly one arg; bounds reject same-name decoys with different overload shapes."
+
+  imports:
+  - webview_flutter/webview_flutter.dart
+- id: dart.eval.webview_run_javascript_returning_result
+  enabled: true
+  language: dart
+  tag: code-injection
+  severity: critical
+  packages: [webview_flutter]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [controller, runJavaScriptReturningResult]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted javascript result string
+    code: |
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      import 'package:webview_flutter/webview_flutter.dart';
+      void test(String input) { controller.runJavaScriptReturningResult(input); }
+  - name: literal javascript result string negative
+    code: |
+      import 'package:webview_flutter/webview_flutter.dart';
+      void test() { controller.runJavaScriptReturningResult("window.location.href"); }
+    expect_no_match: true
+  description: "runJavaScriptReturningResult. Signature is `runJavaScriptReturningResult(String)` — exactly one arg; bounds reject same-name decoys with different overload shapes."
+
+  imports:
+  - webview_flutter/webview_flutter.dart
+- id: dart.eval.isolate_spawn_uri
+  enabled: true
+  language: dart
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Isolate, spawnUri]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(Uri input) { Isolate.spawnUri(input); }
+  - name: literal isolate uri negative
+    code: |
+      void test() { Isolate.spawnUri(Uri.parse("package:safe/main.dart")); }
+    expect_no_match: true
+  description: "Isolate.spawnUri(tainted URI) — loads arbitrary Dart script."
+
+- id: dart.eval.expressions_new
+  enabled: true
+  language: dart
+  tag: code-injection
+  severity: high
+  packages: [expressions]
+  cwe: [CWE-94]
+  match:
+    kind: new
+    callee:
+      name: Expression
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted expression source
+    code: |
+      import 'package:expressions/expressions.dart';
+      import 'package:expressions/expressions.dart';
+      import 'package:expressions/expressions.dart';
+      import 'package:expressions/expressions.dart';
+      import 'package:expressions/expressions.dart';
+      class Expression { Expression([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test(String input) { var result = Expression(input); }
+  - name: literal expression source negative
+    code: |
+      import 'package:expressions/expressions.dart';
+      class Expression { Expression([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var result = Expression("1 + 1"); }
+    expect_no_match: true
+  description: "package:expressions Expression(tainted) — evaluated expression."
+
+  imports:
+  - expressions/expressions.dart
+- id: dart.eval.dart_eval_compile
+  enabled: true
+  language: dart
+  tag: code-injection
+  severity: critical
+  packages: [dart_eval]
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [compiler, compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dart source
+    code: |
+      import 'package:dart_eval/dart_eval.dart';
+      import 'package:dart_eval/dart_eval.dart';
+      import 'package:dart_eval/dart_eval.dart';
+      import 'package:dart_eval/dart_eval.dart';
+      import 'package:dart_eval/dart_eval.dart';
+      void test(String input) { compiler.compile(input); }
+  - name: literal dart source negative
+    code: |
+      import 'package:dart_eval/dart_eval.dart';
+      void test() { compiler.compile("void main() {}"); }
+    expect_no_match: true
+  description: "dart_eval Compiler.compile(tainted source)."
+
+  imports:
+  - dart_eval/dart_eval.dart
+- id: dart.eval.mirror_invoke
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: dart
+  tag: code-injection
+  severity: medium
+  packages: ["dart:mirrors"]
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      attribute: [instanceMirror, invoke]
+  description: "Disabled — dart:mirrors InstanceMirror.invoke; flag only when method Symbol is tainted."
+
+# Receiver-agnostic mirrors invoke. Inline `reflect(obj).invoke(...)`
+# has no `instanceMirror` receiver name so the rule above misses it.
+# Match `.invoke(...)` directly with a min-args=2 narrower (Symbol +
+# args list) to skip same-name decoys (e.g. Function.invoke,
+# arbitrary user methods named `invoke`).
+- id: dart.eval.mirrors_invoke
+  enabled: true
+  language: dart
+  tag: code-injection
+  severity: critical
+  packages: ["dart:mirrors"]
+  cwe: [CWE-94, CWE-470]
+  match:
+    kind: call
+    callee:
+      name: invoke
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mirror symbol
+    code: |
+      import 'dart:mirrors';
+      void test(String input) { invoke(Symbol(input), []); }
+  - name: literal mirror symbol negative
+    code: |
+      import 'dart:mirrors';
+      void test(String input) { invoke(Symbol("run"), [input]); }
+    expect_no_match: true
+  description: "reflect(obj).invoke(Symbol(name), args) — dart:mirrors reflective dispatch with tainted method name = arbitrary method invocation (CWE-470 / CWE-94). Narrowed by `Symbol(...)` arg-0 shape."

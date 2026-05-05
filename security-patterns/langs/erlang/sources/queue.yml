@@ -1,0 +1,73 @@
+# Erlang queue/broker message sources (trust: service).
+- id: erlang.source.amqp_basic_deliver
+  enabled: true
+  language: erlang
+  trust: service
+  tag: queue-message
+  packages: [amqp_client]
+  match:
+    kind: call
+    callee:
+      regex: "^amqp_channel:call$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("amqp_client/include/amqp_client.hrl").
+      -export([test/1]).
+      test(Input) ->
+        amqp_channel:call(Input).
+  description: "RabbitMQ amqp_channel:call — Delivery.payload contents flow from broker."
+
+- id: erlang.source.brod_consume
+  enabled: true
+  language: erlang
+  trust: service
+  tag: queue-message
+  packages: [brod]
+  match:
+    kind: call
+    callee:
+      regex: "^brod:(fetch|subscribe|consume_ack)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -include_lib("brod/include/brod.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        brod:fetch(Input).
+  description: "Kafka brod fetch/subscribe — consumer payload originates off-box."
+
+- id: erlang.source.amqp_basic_get
+  enabled: true
+  language: erlang
+  trust: service
+  tag: queue-message
+  packages: [amqp_client]
+  match:
+    kind: call
+    callee:
+      regex: "^amqp_channel:cast$"
+  match_examples:
+  - name: declared shape
+    code: |
+      -module(example).
+      -include_lib("amqp_client/include/amqp_client.hrl").
+      -export([test/1]).
+      test(Input) ->
+        amqp_channel:cast(Input).
+  description: "RabbitMQ amqp_channel:cast — Basic.Get / publish flow; payload originates off-box."
+
+- id: erlang.source.gen_server_handle_call
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: erlang
+  trust: local
+  tag: ipc-message
+  match:
+    kind: call
+    callee:
+      regex: "^gen_server:call$"
+  description: "Disabled — gen_server:call return value is the *response*, not the inbound message; handle_call/handle_cast payload is param-shaped and not yet field-accessible. Re-enable when adapter exposes the Request param."

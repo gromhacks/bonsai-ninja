@@ -1,0 +1,23 @@
+# kotlin CORS misconfiguration sinks (T403).
+- id: kotlin.cors.crossorigin_origins_wildcard
+  enabled: true
+  language: kotlin
+  tag: cors
+  severity: medium
+  packages: [org.springframework.web.bind.annotation]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      attribute: [CrossOrigin, allowedOrigins]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*
+      class App {
+        fun handle(input: String) {
+          CrossOrigin.allowedOrigins("*")
+        }
+      }
+  description: |-
+    @CrossOrigin(origins = ['*']) — Spring (Kotlin) allow-all CORS.

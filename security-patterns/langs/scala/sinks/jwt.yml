@@ -1,0 +1,223 @@
+- id: scala.jwt.jwt_circe_decode
+  enabled: true
+  language: scala
+  tag: jwt
+  severity: high
+  packages:
+  - com.pauldijou.jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JwtCirce
+      - decode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.pauldijou.jwt._
+      // uses com.pauldijou.jwt
+      object App {
+        def handle(input: String): Unit = {
+          JwtCirce.decode(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.pauldijou.jwt._
+      // uses com.pauldijou.jwt
+      object App {
+        def handle(input: String): Unit = {
+          JwtCirce.decode("safe")
+        }
+      }
+    expect_no_match: true
+  description: "jwt-circe decode — without signature verification, `decode` returns claims even if sig bad."
+- id: scala.jwt.jwt_circe_decodejson
+  enabled: true
+  language: scala
+  tag: jwt
+  severity: high
+  packages:
+  - com.pauldijou.jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JwtCirce
+      - decodeJson
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.pauldijou.jwt._
+      object App {
+        def handle(input: String): Unit = {
+          JwtCirce.decodeJson(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.pauldijou.jwt._
+      object App {
+        def handle(input: String): Unit = {
+          JwtCirce.decodeJson("safe")
+        }
+      }
+    expect_no_match: true
+  description: "jwt-circe decodeJson — returns claims without enforcing signature verification when no key/algorithm supplied; forgeable tokens."
+- id: scala.jwt.jwt_decodejsonall
+  enabled: true
+  language: scala
+  tag: jwt
+  severity: high
+  packages:
+  - com.pauldijou.jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jwt
+      - decodeJsonAll
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.pauldijou.jwt._
+      object App {
+        def handle(input: String): Unit = {
+          Jwt.decodeJsonAll(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.pauldijou.jwt._
+      object App {
+        def handle(input: String): Unit = {
+          Jwt.decodeJsonAll("safe")
+        }
+      }
+    expect_no_match: true
+  description: "pdi-jwt Jwt.decodeJsonAll — accepts token without verifying signature."
+- id: scala.jwt.nimbus_parse
+  enabled: true
+  language: scala
+  tag: jwt
+  severity: medium
+  packages:
+  - com.nimbusds.jose
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SignedJWT
+      - parse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.nimbusds.jose._
+      // uses com.nimbusds.jose
+      object App {
+        def handle(input: String): Unit = {
+          SignedJWT.parse(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.nimbusds.jose._
+      // uses com.nimbusds.jose
+      object App {
+        def handle(input: String): Unit = {
+          SignedJWT.parse("safe")
+        }
+      }
+    expect_no_match: true
+  description: "Nimbus SignedJWT.parse — parse-only; dangerous unless followed by verify()."
+- id: scala.jwt.jjwt_parser_build
+  enabled: true
+  language: scala
+  tag: jwt
+  severity: high
+  packages:
+  - io.jsonwebtoken
+  cwe:
+  - CWE-347
+  - CWE-345
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Jwts
+      - parser
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.jsonwebtoken._
+      // uses io.jsonwebtoken
+      object App {
+        def handle(input: String): Unit = {
+          Jwts.parser(input)
+        }
+      }
+  description: "jjwt Jwts.parser() — legacy builder that may skip signature check. Merged aliases: scala.jwt.alg_confusion_jjwt."
+  aliases:
+  - scala.jwt.alg_confusion_jjwt
+- id: scala.jwt.auth0_decode
+  enabled: true
+  language: scala
+  tag: jwt
+  severity: high
+  packages:
+  - com.auth0.java-jwt
+  cwe:
+  - CWE-347
+  match:
+    kind: call
+    callee:
+      attribute:
+      - JWT
+      - decode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.auth0.javajwt._
+      // uses com.auth0.java-jwt
+      object App {
+        def handle(input: String): Unit = {
+          JWT.decode(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.auth0.javajwt._
+      // uses com.auth0.java-jwt
+      object App {
+        def handle(input: String): Unit = {
+          JWT.decode("safe")
+        }
+      }
+    expect_no_match: true
+  description: "com.auth0 JWT.decode(token) — decode only, no verify."
+  imports:
+  - com.auth0.javajwt
+  - com

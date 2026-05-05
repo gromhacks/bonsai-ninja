@@ -1,0 +1,34 @@
+# TypeScript log-injection sinks.
+
+- id: typescript.log_injection.structured_logger_concat
+  enabled: true
+  language: typescript
+  tag: log-injection
+  severity: medium
+  cwe: [CWE-117]
+  match:
+    kind: call
+    callee:
+      regex: "^(slog|logger|log|app\\.log)\\.(info|warn|error|debug)$"
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+    - name: app log info concat
+      code: |
+        function demo(app: any, body: string) {
+          return app.log.info("login failed: " + body);
+        }
+      expect_match_text: [app.log.info]
+    - name: slog info template
+      code: |
+        function demo(slog: any, body: string) {
+          return slog.info(`user=${body}`);
+        }
+      expect_match_text: [slog.info]
+    - name: arg tainted literal negative
+      code: |
+        function demo(app: any, body: string) {
+          return app.log.info("login failed");
+        }
+      expect_no_match: true
+  description: "app.log.info/logger/slog with concatenated attacker text — control characters or forged prefixes can corrupt audit logs."

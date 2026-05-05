@@ -1,0 +1,32 @@
+- id: swift.xpath.xmlnode_nodes_for_xpath
+  enabled: true
+  language: swift
+  tag: xpath-injection
+  severity: high
+  packages: ["Foundation"]
+  imports: ["Foundation"]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.nodes$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xmlnode nodes for xpath
+    code: |
+      import Foundation
+      func handle(name: String, node: XMLNode) throws -> [XMLNode] {
+        let expr = "//user[name=\"" + name + "\""
+        return try node.nodes(forXPath: expr)
+      }
+    expect_match_text: [node.nodes]
+  - name: literal xpath negative
+    code: |
+      import Foundation
+      func handle(node: XMLNode) throws -> [XMLNode] {
+        return try node.nodes(forXPath: "//safe")
+      }
+    expect_no_match: true
+  description: "XMLNode.nodes(forXPath:) — XPath injection on a Foundation XML node."

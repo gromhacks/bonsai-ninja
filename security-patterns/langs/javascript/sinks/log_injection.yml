@@ -1,0 +1,22 @@
+- id: javascript.log_injection.structured_logger_concat
+  enabled: true
+  language: javascript
+  tag: log-injection
+  severity: medium
+  cwe:
+  - CWE-117
+  match:
+    kind: call
+    callee:
+      regex: ^(slog|logger|log|app\.log)\.(info|warn|error|debug)$
+  match_examples:
+  - name: app log info concat
+    code: "function demo(app, body) {\n  return app.log.info(\"login failed: \" + body);\n}\n"
+    expect_match_text:
+    - app.log.info
+  - name: slog info template
+    code: "function demo(slog, body) {\n  return slog.info(`user=${body}`);\n}\n"
+    expect_match_text:
+    - slog.info
+  description: "app.log.info/logger/slog with concatenated attacker text \u2014 control characters or forged prefixes can\
+    \ corrupt audit logs."

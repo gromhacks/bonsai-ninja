@@ -1,0 +1,523 @@
+- id: php.ssrf.curl_exec
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: curl_exec
+  match_examples:
+  - name: php.ssrf.curl_exec example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  curl_exec($input);\n}\n"
+  description: "Disabled — curl_exec() dispatches URL stored on the curl handle; php.ssrf.curl_setopt_url carries the tainted URL argument."
+- id: php.ssrf.curl_setopt_url
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      name: curl_setopt
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: ^CURLOPT_URL$
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: php.ssrf.curl_setopt_url example
+    code: "<?php\nfunction example($ch, $url, $id, $payload, $request) {\n  curl_setopt($ch, CURLOPT_URL, $url);\n}\n"
+  - name: curl setopt literal url negative
+    code: "<?php\nfunction example($ch, $url) {\n  curl_setopt($ch, CURLOPT_URL, \"https://example.com/\");\n}\n"
+    expect_no_match: true
+  description: 'curl_setopt CURLOPT_URL = tainted. Merged aliases: php.tls.curl_ssl_verifypeer_off, php.tls.curl_ssl_verifyhost_off.'
+  aliases:
+  - php.tls.curl_ssl_verifypeer_off
+  - php.tls.curl_ssl_verifyhost_off
+- id: php.ssrf.fopen_url
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: fopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.fopen_url example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen($url, \"r\");\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fopen(\"https://example.com/report\", \"r\");\n}\n"
+    expect_no_match: true
+  description: fopen with URL — also path-traversal.
+- id: php.ssrf.file_get_contents_url
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: file_get_contents
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.file_get_contents_url example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  file_get_contents(\"https://example.com/report\");\n}\n"
+    expect_no_match: true
+  description: file_get_contents URL — duplicate of path rule but flagged for SSRF too.
+- id: php.ssrf.fsockopen
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: fsockopen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.fsockopen example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fsockopen($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  fsockopen(\"example.com\", 443);\n}\n"
+    expect_no_match: true
+  description: fsockopen() — direct socket to tainted host.
+- id: php.ssrf.stream_socket_client
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: stream_socket_client
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.stream_socket_client example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  stream_socket_client($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  stream_socket_client(\"tcp://example.com:443\");\n}\n"
+    expect_no_match: true
+  description: stream_socket_client().
+- id: php.ssrf.guzzle_request
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.ssrf.guzzle_request example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::request("GET", $url);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::request("GET", "https://example.com/api");
+      }
+    expect_no_match: true
+  description: Guzzle Client::request(method, tainted_url).
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
+- id: php.ssrf.guzzle_get
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.guzzle_get example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::get($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::get("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Guzzle Client::get.
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
+- id: php.ssrf.guzzle_post
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.guzzle_post example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::post($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        Client::post("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Guzzle Client::post.
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
+- id: php.ssrf.symfony_httpclient_request
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - symfony/http-client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: php.ssrf.symfony_httpclient_request example
+    code: |
+      <?php
+      use symfony\httpclient;
+      use symfony\httpclient;
+      use symfony\http-client;
+      function example($input, $url, $id, $payload, $request) {
+        HttpClient::request("GET", $url);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use symfony\httpclient;
+      function example($input, $url, $id, $payload, $request) {
+        HttpClient::request("GET", "https://example.com/api");
+      }
+    expect_no_match: true
+  description: Symfony HttpClient::request.
+  imports:
+  - symfony
+  - symfony/httpclient
+  - symfony\httpclient
+- id: php.ssrf.laravel_http_get
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - illuminate/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Http
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.laravel_http_get example
+    code: |
+      <?php
+      use illuminate\http;
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::get($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::get("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Laravel Http::get.
+  imports:
+  - illuminate\http
+  - illuminate
+- id: php.ssrf.laravel_http_post
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - illuminate/http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Http
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.laravel_http_post example
+    code: |
+      <?php
+      use illuminate\http;
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::post($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\http;
+      function example($input, $url, $id, $payload, $request) {
+        Http::post("https://example.com/api");
+      }
+    expect_no_match: true
+  description: Laravel Http::post.
+  imports:
+  - illuminate\http
+  - illuminate
+- id: php.ssrf.wp_remote_get
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - wordpress
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: wp_remote_get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.wp_remote_get example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        wp_remote_get($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        wp_remote_get("https://example.com/api");
+      }
+    expect_no_match: true
+  description: WordPress wp_remote_get.
+- id: php.ssrf.wp_remote_post
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: high
+  packages:
+  - wordpress
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: wp_remote_post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.wp_remote_post example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        wp_remote_post($input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        wp_remote_post("https://example.com/api");
+      }
+    expect_no_match: true
+  description: WordPress wp_remote_post.
+- id: php.ssrf.simplexml_load_file_url
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: simplexml_load_file
+  description: Disabled — canonical rule is php.xxe.simplexml_load_file in xxe.yml (XXE is the classic bug class for these loaders).
+- id: php.ssrf.dom_load_file_url
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DOMDocument
+      - load
+  description: Disabled — canonical rule is php.xxe.domdocument_load in xxe.yml.
+- id: php.ssrf.get_headers
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: get_headers
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.get_headers example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  get_headers($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  get_headers(\"https://example.com/api\");\n}\n"
+    expect_no_match: true
+  description: get_headers(tainted) — HEAD request to arbitrary URL.
+- id: php.ssrf.gethostbyname
+  enabled: true
+  language: php
+  tag: ssrf
+  severity: low
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: gethostbyname
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.ssrf.gethostbyname example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  gethostbyname($input);\n}\n"
+  - name: arg tainted literal negative
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  gethostbyname(\"example.com\");\n}\n"
+    expect_no_match: true
+  description: gethostbyname(tainted) — DNS lookup on tainted host; SSRF reconnaissance.
+- id: php.ssrf.symfony_httpclient_create
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: ssrf
+  severity: medium
+  packages:
+  - symfony/http-client
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - create
+  description: Disabled — factory; actual fetch is HttpClient::request.

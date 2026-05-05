@@ -1,0 +1,44 @@
+- id: ruby.queue.send_message
+  enabled: true
+  language: ruby
+  tag: queue-injection
+  severity: high
+  packages: [aws-sdk-sqs]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: send_message
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.queue.send_message example
+    code: |
+      require "aws-sdk-sqs"
+      def example(input, url, id, payload, request, params)
+        send_message(input)
+      end
+  - name: ruby.queue.send_message literal negative
+    code: |
+      require "aws-sdk-sqs"
+      def example(input, url, id, payload, request, params)
+        send_message(queue_url: "https://sqs.example/queue", message_body: "ok")
+      end
+    expect_no_match: true
+  description: "aws-sdk-sqs send_message — tainted queue target/body injects arbitrary broker payloads."
+
+- id: ruby.queue.publish
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: queue-injection
+  severity: high
+  packages: [aws-sdk-sns, google-cloud-pubsub]
+  cwe: [CWE-20]
+  match:
+    kind: call
+    callee:
+      name: publish
+  description: "Disabled — cloud publish is real queue fanout, but bare `publish` is too generic across Ruby clients and app code."

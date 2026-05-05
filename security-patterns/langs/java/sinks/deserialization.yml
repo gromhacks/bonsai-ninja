@@ -1,0 +1,548 @@
+- id: java.deser.object_input_stream
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^ObjectInputStream\\.readObject$"
+  description: "Disabled — ObjectInputStream.readObject() has no tainted argument; needs receiver state showing the stream wraps untrusted bytes. Merged aliases: java.deser.object_input_stream_local."
+  aliases:
+  - java.deser.object_input_stream_local
+
+- id: java.deser.object_input_stream_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: readObject
+  match_examples:
+  - name: local object input stream read object
+    code: |
+      class App {
+        Object handle(ObjectInputStream ois) throws Exception {
+          return ois.readObject();
+        }
+      }
+      class ObjectInputStream {
+        Object readObject(Object... args) { return null; }
+      }
+    expect_match_text: [ois.readObject]
+  description: "ObjectInputStream.readObject() on a local stream variable — classic Java deserialization RCE."
+
+- id: java.deser.xstream_fromxml
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["com.thoughtworks.xstream"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^XStream\\.fromXML$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.thoughtworks.xstream.*;
+      class App {
+        void handle(String input) throws Exception {
+          XStream.fromXML(input);
+        }
+      }
+  - name: local xstream from xml
+    code: |
+      import com.thoughtworks.xstream.*;
+      class App {
+        Object handle(XStream xstream, String xml) {
+          return xstream.fromXML(xml);
+        }
+      }
+      class XStream {
+        Object fromXML(Object... args) { return null; }
+      }
+    expect_match_text: [xstream.fromXML]
+  - name: arg tainted literal negative
+    code: |
+      import com.thoughtworks.xstream.*;
+      class App {
+        void handle(String input) throws Exception {
+          XStream.fromXML("safe");
+        }
+      }
+    expect_no_match: true
+  description: XStream.fromXML — CVE-2021-39140 family.
+
+- id: java.deser.xstream_fromxml_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["com.thoughtworks.xstream"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: fromXML
+  match_examples:
+  - name: local xstream from xml
+    code: |
+      import com.thoughtworks.xstream.*;
+      class App {
+        Object handle(XStream xstream, String xml) {
+          return xstream.fromXML(xml);
+        }
+      }
+      class XStream {
+        Object fromXML(Object... args) { return null; }
+      }
+    expect_match_text: [xstream.fromXML]
+  description: "XStream.fromXML(...) on a local XStream instance — unsafe XML deserialization."
+  imports:
+  - com
+- id: java.deser.jackson_enable_default_typing
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["com.fasterxml.jackson.core"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectMapper, enableDefaultTyping]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.fasterxml.jackson.core.*;
+      class App {
+        void handle(String input) throws Exception {
+          ObjectMapper.enableDefaultTyping(input);
+        }
+      }
+  description: Jackson enableDefaultTyping — gadget-chain RCE.
+- id: java.deser.xmldecoder
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^XMLDecoder\\.readObject$"
+  description: "Disabled — XMLDecoder.readObject() executes data supplied to the decoder constructor; needs receiver state tying the decoder to tainted XML."
+- id: java.deser.snake_yaml
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["org.yaml"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^Yaml\\.load$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.yaml.*;
+      class App {
+        void handle(String input) throws Exception {
+          Yaml.load(input);
+        }
+      }
+  - name: local snakeyaml load
+    code: |
+      import org.yaml.*;
+      class App {
+        Object handle(Yaml yaml, String data) {
+          return yaml.load(data);
+        }
+      }
+      class Yaml {
+        Object load(Object... args) { return null; }
+      }
+    expect_match_text: [yaml.load]
+  - name: arg tainted literal negative
+    code: |
+      import org.yaml.*;
+      class App {
+        void handle(String input) throws Exception {
+          Yaml.load("safe");
+        }
+      }
+    expect_no_match: true
+  description: SnakeYAML Yaml.load — constructor chain RCE.
+
+- id: java.deser.snake_yaml_local
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["org.yaml"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: load
+  match_examples:
+  - name: local snakeyaml load
+    code: |
+      import org.yaml.*;
+      class App {
+        Object handle(Yaml yaml, String data) {
+          return yaml.load(data);
+        }
+      }
+      class Yaml {
+        Object load(Object... args) { return null; }
+      }
+    expect_match_text: [yaml.load]
+  description: "SnakeYAML Yaml.load(...) on a local Yaml instance — constructor-chain deserialization risk."
+  imports:
+  - org
+- id: java.deser.kryo_readclassandobject
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: high
+  packages: ["com.esotericsoftware"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Kryo, readClassAndObject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.esotericsoftware.*;
+      class App {
+        void handle(String input) throws Exception {
+          Kryo.readClassAndObject(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.esotericsoftware.*;
+      class App {
+        void handle(String input) throws Exception {
+          Kryo.readClassAndObject("safe");
+        }
+      }
+    expect_no_match: true
+  description: Kryo readClassAndObject — unsafe with untrusted input.
+- id: java.deser.hessian_readobject
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["com.caucho"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^HessianInput\\.readObject$"
+  description: "Disabled — HessianInput.readObject() has no data argument; needs receiver state showing the HessianInput wraps untrusted bytes."
+
+- id: java.deser.jackson_activate_default_typing
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["com.fasterxml.jackson.databind"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectMapper, activateDefaultTyping]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.fasterxml.jackson.databind.*;
+      class App {
+        void handle(String input) throws Exception {
+          ObjectMapper.activateDefaultTyping(input);
+        }
+      }
+  description: Jackson activateDefaultTyping — polymorphic deser gadget-chain RCE.
+
+- id: java.deser.jackson_readvalue
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: high
+  packages: ["com.fasterxml.jackson.databind"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [ObjectMapper, readValue]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jackson object mapper read value
+    code: |
+      import com.fasterxml.jackson.databind.*;
+      class App {
+        Object handle(ObjectMapper mapper, String json) throws Exception {
+          return mapper.readValue(json, Object.class);
+        }
+      }
+      class ObjectMapper {
+        Object readValue(Object... args) { return null; }
+      }
+    expect_match_text: [mapper.readValue]
+  - name: arg tainted literal negative
+    code: |
+      import com.fasterxml.jackson.databind.*;
+      class App {
+        void handle(String input) throws Exception {
+          ObjectMapper.readValue("safe");
+        }
+      }
+    expect_no_match: true
+  description: "ObjectMapper.readValue(...) after default typing or polymorphic type handling — gadget-chain deserialization risk when fed untrusted JSON."
+
+- id: java.deser.apache_poi_xssfworkbook_inputstream
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: java
+  tag: insecure-deserialization
+  severity: high
+  packages: ["org.apache.poi"]
+  cwe: [CWE-502]
+  match:
+    kind: new
+    callee:
+      name: XSSFWorkbook
+  match_examples:
+  - name: apache poi xssf workbook input stream
+    code: |
+      import org.apache.poi.*;
+      class App {
+        Object handle(InputStream stream) throws Exception {
+          return new XSSFWorkbook(stream);
+        }
+      }
+      class InputStream {}
+      class XSSFWorkbook {
+        XSSFWorkbook(Object... args) {}
+      }
+    expect_match_text: [XSSFWorkbook]
+  description: "Disabled — Apache POI XSSFWorkbook is classified as XXE (CWE-611) in xxe.yml, not generic deserialization, to avoid duplicate/wrong-CWE findings."
+
+  imports:
+  - org
+- id: java.deser.jaxb_unmarshaller_unmarshal
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: java
+  tag: insecure-deserialization
+  severity: high
+  packages: ["javax.xml.bind", "jakarta.xml.bind"]
+  cwe: [CWE-502, CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Unmarshaller, unmarshal]
+  match_examples:
+  - name: jaxb unmarshaller unmarshal
+    code: |
+      import javax.xml.bind.*;
+      class App {
+        Object handle(Unmarshaller unmarshaller, Object source) throws Exception {
+          return unmarshaller.unmarshal(source);
+        }
+      }
+      class Unmarshaller {
+        Object unmarshal(Object... args) { return null; }
+      }
+    expect_match_text: [unmarshaller.unmarshal]
+  description: "Disabled — duplicate of java.xxe.unmarshaller_unmarshal under the current matcher."
+
+  imports:
+  - javax
+- id: java.deser.objectmessage_getobject
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["javax.jms", "jakarta.jms"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      regex: "^ObjectMessage\\.getObject$"
+  description: "Disabled — ObjectMessage.getObject() deserializes message body state; needs tainted/untrusted JMS message provenance."
+
+- id: java.deser.snake_yaml_loadall
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: critical
+  packages: ["org.yaml"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Yaml, loadAll]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.yaml.*;
+      class App {
+        void handle(String input) throws Exception {
+          Yaml.loadAll(input);
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import org.yaml.*;
+      class App {
+        void handle(String input) throws Exception {
+          Yaml.loadAll("safe");
+        }
+      }
+    expect_no_match: true
+  description: SnakeYAML Yaml.loadAll — same constructor-chain risk as load.
+
+- id: java.deser.msgpack_messagepack_read
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: high
+  packages: ["org.msgpack"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [MessagePack, read]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: msgpack messagepack read
+    code: |
+      import org.msgpack.*;
+      class App {
+        void handle(String input) throws Exception {
+          MessagePack.read(input);
+        }
+      }
+    expect_match_text: [MessagePack.read]
+  - name: arg tainted literal negative
+    code: |
+      import org.msgpack.*;
+      class App {
+        void handle(String input) throws Exception {
+          MessagePack.read("safe");
+        }
+      }
+    expect_no_match: true
+  description: "msgpack-java MessagePack.read(...) — deserializes untrusted MessagePack bytes into application objects."
+
+- id: java.deser.msgpack_unpacker_read
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: high
+  packages: ["org.msgpack"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Unpacker, read]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: msgpack unpacker read typed object
+    code: |
+      import org.msgpack.*;
+      class App {
+        void handle(String input) throws Exception {
+          Unpacker.read(input);
+        }
+      }
+    expect_match_text: [Unpacker.read]
+  - name: arg tainted literal negative
+    code: |
+      import org.msgpack.*;
+      class App {
+        void handle(String input) throws Exception {
+          Unpacker.read("safe");
+        }
+      }
+    expect_no_match: true
+  description: "msgpack-java Unpacker.read(...) — typed object materialization from attacker-controlled MessagePack bytes."
+
+- id: java.deser.msgpack_messageunpacker_unpackvalue
+  enabled: true
+  language: java
+  tag: insecure-deserialization
+  severity: medium
+  packages: ["org.msgpack"]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [MessageUnpacker, unpackValue]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: msgpack core unpack value
+    code: |
+      import org.msgpack.*;
+      class App {
+        void handle(String input) throws Exception {
+          MessageUnpacker.unpackValue(input);
+        }
+      }
+    expect_match_text: [MessageUnpacker.unpackValue]
+  - name: arg tainted literal negative
+    code: |
+      import org.msgpack.*;
+      class App {
+        void handle(String input) throws Exception {
+          MessageUnpacker.unpackValue("safe");
+        }
+      }
+    expect_no_match: true
+  description: "msgpack-core MessageUnpacker.unpackValue(...) — parses attacker-controlled MessagePack payloads for downstream object mapping."

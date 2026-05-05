@@ -1,0 +1,35 @@
+- id: go.smtpinj.smtp_send_mail
+  enabled: true
+  language: go
+  tag: smtp-injection
+  severity: medium
+  packages: ["net/smtp"]
+  imports: ["net/smtp"]
+  cwe: [CWE-93]
+  match:
+    kind: call
+    callee:
+      attribute: [smtp, SendMail]
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: net/smtp SendMail with tainted body bytes
+    code: |
+      package main
+      import "net/smtp"
+      func handle(input string) error {
+        msg := []byte("To: a@x\r\nSubject: x\r\n\r\n" + input)
+        return smtp.SendMail("localhost:25", nil, "from@x", []string{"to@x"}, msg)
+      }
+    expect_match_text: [smtp.SendMail]
+  - name: literal msg negative
+    code: |
+      package main
+      import "net/smtp"
+      func handle() error {
+        msg := []byte("To: a@x\r\nSubject: x\r\n\r\nbody")
+        return smtp.SendMail("localhost:25", nil, "from@x", []string{"to@x"}, msg)
+      }
+    expect_no_match: true
+  description: "net/smtp SendMail(addr, auth, from, to, msg) — CR/LF in `msg` injects extra headers/recipients."

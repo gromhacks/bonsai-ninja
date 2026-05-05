@@ -1,0 +1,33 @@
+# scala request_smuggling sinks.
+
+# Request-smuggling marker sinks (round 3).
+- id: scala.smuggle.set_dual_cl_te_headers
+  enabled: true
+  language: scala
+  tag: header-injection
+  severity: medium
+  cwe: [CWE-444]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpServletResponse, setHeader]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: generated shape example
+      code: |
+        object App {
+          def handle(input: String): Unit = {
+            HttpServletResponse.setHeader("Transfer-Encoding", input)
+          }
+        }
+    - name: literal header value negative
+      code: |
+        object App {
+          def handle(): Unit = {
+            HttpServletResponse.setHeader("Transfer-Encoding", "chunked")
+          }
+        }
+      expect_no_match: true
+  description: 'HttpServletResponse.setHeader (Scala) — manual framing override.'

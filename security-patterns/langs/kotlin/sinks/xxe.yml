@@ -1,0 +1,441 @@
+# Java XXE sinks (SAX / DOM / StAX / DocumentBuilder / Transformer / XPath / Schema).
+- id: kotlin.xxe.saxparser_parse
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: [javax.xml.parsers]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [SAXParser, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.xml.parsers.*
+      // uses javax.xml.parsers
+      class App {
+        fun handle(input: String) {
+          SAXParser.parse(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.parsers.*
+      // uses javax.xml.parsers
+      class App {
+      fun handle(input: String) {
+        SAXParser.parse("safe")
+      }
+      }
+    expect_no_match: true
+  description: "SAXParser.parse — disable external entities."
+
+- id: kotlin.xxe.saxparserfactory_newinstance
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^SAXParserFactory\\.newInstance$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          SAXParserFactory.newInstance(input)
+        }
+      }
+  description: "SAXParserFactory.newInstance — flag if XMLConstants.FEATURE_SECURE_PROCESSING off."
+
+- id: kotlin.xxe.documentbuilder_parse
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: [javax.xml.parsers]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [DocumentBuilder, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.xml.parsers.*
+      // uses javax.xml.parsers
+      class App {
+        fun handle(input: String) {
+          DocumentBuilder.parse(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.parsers.*
+      // uses javax.xml.parsers
+      class App {
+      fun handle(input: String) {
+        DocumentBuilder.parse("safe")
+      }
+      }
+    expect_no_match: true
+  description: "DocumentBuilder.parse."
+
+- id: kotlin.xxe.documentbuilderfactory_newinstance
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      regex: "^DocumentBuilderFactory\\.newInstance$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          DocumentBuilderFactory.newInstance(input)
+        }
+      }
+  description: "DocumentBuilderFactory.newInstance — flag without disallow-doctype-decl."
+
+- id: kotlin.xxe.xmlinputfactory_createreader
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XMLInputFactory, createXMLStreamReader]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          XMLInputFactory.createXMLStreamReader(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        XMLInputFactory.createXMLStreamReader("safe")
+      }
+      }
+    expect_no_match: true
+  description: "XMLInputFactory.createXMLStreamReader — flag if SUPPORT_DTD on."
+
+- id: kotlin.xxe.xmlinputfactory_createevent
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XMLInputFactory, createXMLEventReader]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          XMLInputFactory.createXMLEventReader(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        XMLInputFactory.createXMLEventReader("safe")
+      }
+      }
+    expect_no_match: true
+  description: "XMLInputFactory.createXMLEventReader."
+
+- id: kotlin.xxe.transformer_transform
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: [javax.xml.transform]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Transformer, transform]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.xml.transform.*
+      // uses javax.xml.transform
+      class App {
+        fun handle(input: String) {
+          Transformer.transform(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.transform.*
+      // uses javax.xml.transform
+      class App {
+      fun handle(input: String) {
+        Transformer.transform("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Transformer.transform — flag without ACCESS_EXTERNAL_DTD/STYLESHEET disabled."
+
+- id: kotlin.xxe.schemafactory_newschema
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [SchemaFactory, newSchema]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        fun handle(input: String) {
+          SchemaFactory.newSchema(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      class App {
+      fun handle(input: String) {
+        SchemaFactory.newSchema("safe")
+      }
+      }
+    expect_no_match: true
+  description: "SchemaFactory.newSchema."
+
+- id: kotlin.xxe.xpath_evaluate
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: kotlin
+  tag: xxe
+  severity: medium
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XPath, evaluate]
+  description: "Disabled — XPath itself doesn't fetch entities; flag with XML source."
+
+- id: kotlin.xxe.unmarshaller_unmarshal
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: [javax.xml.bind, jakarta.xml.bind]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Unmarshaller, unmarshal]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import javax.xml.bind.*
+      // uses javax.xml.bind
+      class App {
+        fun handle(input: String) {
+          Unmarshaller.unmarshal(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import javax.xml.bind.*
+      // uses javax.xml.bind
+      class App {
+      fun handle(input: String) {
+        Unmarshaller.unmarshal("safe")
+      }
+      }
+    expect_no_match: true
+  description: "JAXB Unmarshaller.unmarshal — wraps SAX parser; same XXE rules apply."
+
+# Note: XStream.fromXML is a dual-category sink (deser + XXE). Kept in
+# sinks/deserialization.yml as kotlin.deser.xstream_fromxml only to avoid
+# duplicate matches.
+
+- id: kotlin.xxe.dom4j_saxreader_read
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: [dom4j]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [SAXReader, read]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import dom4j.*
+      class App {
+        fun handle(input: String) {
+          SAXReader.read(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import dom4j.*
+      class App {
+      fun handle(input: String) {
+        SAXReader.read("safe")
+      }
+      }
+    expect_no_match: true
+  description: "dom4j SAXReader.read."
+
+- id: kotlin.xxe.jdom_saxbuilder_build
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: [jdom2]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [SAXBuilder, build]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jdom2.*
+      // uses jdom2
+      class App {
+        fun handle(input: String) {
+          SAXBuilder.build(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import jdom2.*
+      // uses jdom2
+      class App {
+      fun handle(input: String) {
+        SAXBuilder.build("safe")
+      }
+      }
+    expect_no_match: true
+  description: "JDOM2 SAXBuilder.build."
+
+- id: kotlin.xxe.jackson_xmlmapper_readvalue
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: ["com.fasterxml.jackson.dataformat:jackson-dataformat-xml"]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XmlMapper, readValue]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated shape example
+    code: |
+      import com.fasterxml.jackson.dataformat.jacksondataformatxml.*
+      class App {
+        fun handle(input: String) {
+          XmlMapper.readValue(input)
+        }
+      }
+  - name: arg tainted literal negative
+    code: |
+      import com.fasterxml.jackson.dataformat.jacksondataformatxml.*
+      class App {
+      fun handle(input: String) {
+        XmlMapper.readValue("safe")
+      }
+      }
+    expect_no_match: true
+  description: "Jackson XmlMapper.readValue — XXE unless external entities disabled."
+
+  imports:
+  - com
+  - com.fasterxml.jackson.dataformat.jacksondataformatxml
+- id: kotlin.xxe.apache_poi_xssfworkbook_inputstream
+  enabled: true
+  language: kotlin
+  tag: xxe
+  severity: high
+  packages: ["org.apache.poi"]
+  cwe: [CWE-611]
+  match:
+    kind: new
+    callee:
+      name: XSSFWorkbook
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: apache poi xssf workbook input stream
+    code: |
+      import org.apache.poi.*
+      class App {
+        fun handle(stream: InputStream): Any {
+          return XSSFWorkbook(stream)
+        }
+      }
+      class InputStream
+      class XSSFWorkbook(vararg args: Any?)
+    expect_match_text: [XSSFWorkbook]
+  - name: arg tainted literal negative
+    code: |
+      import org.apache.poi.*
+      class App {
+      fun handle(stream: InputStream): Any {
+        return XSSFWorkbook("safe")
+      }
+      }
+      class InputStream
+      class XSSFWorkbook(vararg args: Any?)
+    expect_no_match: true
+  description: "Apache POI XSSFWorkbook(InputStream) — parses attacker-controlled Office XML archives through XML parsers; keep XXE and zip-bomb protections enabled."

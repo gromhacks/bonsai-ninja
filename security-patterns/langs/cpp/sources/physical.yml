@@ -1,0 +1,254 @@
+# C++ hardware / physical-input sources (GPIO, I2C/SMBus, SPI, UART, ADC).
+- id: cpp.phys.gpio_get_value
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [linux-gpio]
+  match:
+    kind: call
+    callee:
+      name: gpio_get_value
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/gpio.h>
+      #include <linux/gpio.h>
+      #include <linux/gpio.h> /* linux-gpio */
+      #include <linux/gpio.h> /* linux-gpio */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        gpio_get_value(arg);
+      }
+  description: "Linux gpio_get_value — GPIO pin read; physical-origin bit."
+
+  imports:
+  - linux
+  - linux/gpio.h
+- id: cpp.phys.gpiod_line_get_value
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [libgpiod]
+  match:
+    kind: call
+    callee:
+      name: gpiod_line_get_value
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libgpiod.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        gpiod_line_get_value(arg);
+      }
+  description: "libgpiod gpiod_line_get_value — GPIO line state from an attached device."
+
+- id: cpp.phys.i2c_smbus_read_byte_data
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [linux-i2c]
+  match:
+    kind: call
+    callee:
+      name: i2c_smbus_read_byte_data
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        i2c_smbus_read_byte_data(arg);
+      }
+  description: "i2c_smbus_read_byte_data — reads a peripheral register over SMBus/I2C."
+
+  imports:
+  - linux
+  - linux/i2c-dev.h
+- id: cpp.phys.i2c_smbus_read_word_data
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [linux-i2c]
+  match:
+    kind: call
+    callee:
+      name: i2c_smbus_read_word_data
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h>
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      #include <linux/i2c-dev.h> /* linux-i2c */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        i2c_smbus_read_word_data(arg);
+      }
+  description: "i2c_smbus_read_word_data — reads a 16-bit device register."
+
+  imports:
+  - linux
+  - linux/i2c-dev.h
+- id: cpp.phys.wiringpi_i2c_read_reg8
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: wiringPiI2CReadReg8
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        wiringPiI2CReadReg8(arg);
+      }
+  description: "wiringPiI2CReadReg8 — 8-bit chip-to-chip register read."
+
+- id: cpp.phys.wiringpi_i2c_read_reg16
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: wiringPiI2CReadReg16
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        wiringPiI2CReadReg16(arg);
+      }
+  description: "wiringPiI2CReadReg16 — 16-bit peripheral register read."
+
+- id: cpp.phys.serial_getchar
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: serialGetchar
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        serialGetchar(arg);
+      }
+  description: "serialGetchar — UART/serial byte received from external hardware."
+
+- id: cpp.phys.serialport_blocking_read
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [libserialport]
+  match:
+    kind: call
+    callee:
+      name: sp_blocking_read
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <libserialport.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        sp_blocking_read(arg);
+      }
+  description: "sp_blocking_read — serial bytes from a connected device."
+
+- id: cpp.phys.wiringpi_spi_data_rw
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [wiringpi]
+  match:
+    kind: call
+    callee:
+      name: wiringPiSPIDataRW
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <wiringpi.h>
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        wiringPiSPIDataRW(arg);
+      }
+  description: "wiringPiSPIDataRW — SPI transfer reads peripheral response bytes."
+
+- id: cpp.phys.analogread
+  enabled: true
+  language: cpp
+  trust: physical
+  tag: hw-input
+  category: hardware-io
+  packages: [arduino]
+  match:
+    kind: call
+    callee:
+      name: analogRead
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <Arduino.h>
+      #include <Arduino.h>
+      #include <Arduino.h> /* arduino */
+      #include <Arduino.h> /* arduino */
+      void example() {
+        const char *arg = "tainted";
+        const char *fmt = arg;
+        const char *query = arg;
+        analogRead(arg);
+      }
+  description: "Arduino analogRead — ADC sample from a physical pin."
+  imports:
+  - Arduino.h
+  - Arduino

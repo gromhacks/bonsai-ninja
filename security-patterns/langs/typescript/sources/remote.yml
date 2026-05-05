@@ -1,0 +1,1572 @@
+# TypeScript remote (HTTP / WS / GraphQL / RPC) input sources.
+- id: typescript.source.express_req_body
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  frameworks: [express, next, nextjs, restify, polka]
+  packages: [express, next, restify, polka]
+  match:
+    kind: read
+    target:
+      attribute: [req, body]
+  match_examples:
+  - name: express req body
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.body;
+      }
+  description: "Express-compatible req.body, including restify/polka handlers."
+
+- id: typescript.source.express_req_query
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [express, restify, hono]
+  packages: [express, restify, hono]
+  match:
+    kind: read
+    target:
+      attribute: [req, query]
+  match_examples:
+  - name: express req query
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.query;
+      }
+  description: "Express/restify/Hono req.query."
+
+- id: typescript.source.express_req_params
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: [express, bun]
+  match:
+    kind: read
+    target:
+      attribute: [req, params]
+  match_examples:
+  - name: express req params
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.params;
+      }
+  description: "Express req.params — path params."
+
+- id: typescript.source.express_req_headers
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [express, hapi]
+  packages: [express, "@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [req, headers]
+  match_examples:
+  - name: express req headers
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.headers;
+      }
+  description: "Express/Hapi req.headers."
+
+- id: typescript.source.express_req_cookies
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: [express, bun]
+  match:
+    kind: read
+    target:
+      attribute: [req, cookies]
+  match_examples:
+  - name: express req cookies
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.cookies;
+      }
+  description: "Express req.cookies."
+
+- id: typescript.source.express_req_file
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [express, multer]
+  match:
+    kind: read
+    target:
+      attribute: [req, file]
+  match_examples:
+  - name: express req file
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.file;
+      }
+  description: "Express req.file (multer single-file upload)."
+
+- id: typescript.source.express_req_files
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [express, multer, express-fileupload]
+  match:
+    kind: read
+    target:
+      attribute: [req, files]
+  match_examples:
+  - name: express req files
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.files;
+      }
+  description: "Express req.files (multi-file upload)."
+
+- id: typescript.source.express_req_url
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: [express]
+  match:
+    kind: read
+    target:
+      attribute: [req, url]
+  match_examples:
+  - name: express req url
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.url;
+      }
+  description: "Express req.url; also covers Bun.serve request URLs when handlers name the Request `req`."
+
+- id: typescript.source.express_req_originalurl
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: [express]
+  match:
+    kind: read
+    target:
+      attribute: [req, originalUrl]
+  match_examples:
+  - name: express req originalurl
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.originalUrl;
+      }
+  description: "Express req.originalUrl."
+
+- id: typescript.source.express_req_hostname
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: [express]
+  match:
+    kind: read
+    target:
+      attribute: [req, hostname]
+  match_examples:
+  - name: express req hostname
+    code: |
+      const _u = require("express");
+      function demo(input, req, obj) {
+        return req.hostname;
+      }
+  description: "Express req.hostname — derived from Host header."
+
+- id: typescript.source.koa_ctx_request_body
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [koa, koa-body, "@koa/bodyparser"]
+  match:
+    kind: read
+    target:
+      regex: "^ctx\\.request\\.body$"
+  match_examples:
+  - name: koa ctx request body
+    code: |
+      const _u = require("koa");
+      function demo(input, req, obj) {
+        return ctx.request.body;
+      }
+  description: "Koa ctx.request.body."
+
+- id: typescript.source.koa_ctx_query
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [koa, "@nestjs/websockets"]
+  match:
+    kind: read
+    target:
+      attribute: [ctx, query]
+  match_examples:
+  - name: koa ctx query
+    code: |
+      const _u = require("koa");
+      function demo(input, req, obj) {
+        return ctx.query;
+      }
+  description: "Koa ctx.query — parsed query-string object from the request URL; attacker-controlled values."
+
+- id: typescript.source.koa_ctx_params
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [koa-router, "@koa/router"]
+  match:
+    kind: read
+    target:
+      attribute: [ctx, params]
+  match_examples:
+  - name: koa ctx params
+    code: |
+      const _u = require("koa-router");
+      function demo(input, req, obj) {
+        return ctx.params;
+      }
+  description: "Koa ctx.params."
+
+- id: typescript.source.koa_ctx_headers
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [koa]
+  match:
+    kind: read
+    target:
+      attribute: [ctx, headers]
+  match_examples:
+  - name: koa ctx headers
+    code: |
+      const _u = require("koa");
+      function demo(input, req, obj) {
+        return ctx.headers;
+      }
+  description: "Koa ctx.headers; also covers NestJS websocket contexts that expose caller headers on ctx.headers."
+
+- id: typescript.source.koa_ctx_headers_referer
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [koa]
+  packages: [koa]
+  match:
+    kind: read
+    target:
+      regex: "^ctx\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
+  description: "Disabled duplicate — typescript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
+
+- id: typescript.source.fastify_request_body
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  frameworks: [fastify, hapi]
+  packages: [fastify, "@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      regex: "^request\\.body$"
+  match_examples:
+  - name: fastify request body
+    code: |
+      const _u = require("fastify");
+      function demo(input, req, obj) {
+        return request.body;
+      }
+  description: "Fastify request.body."
+
+- id: typescript.source.fastify_request_query
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  frameworks: [fastify, hapi]
+  packages: [fastify, "@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [request, query]
+  match_examples:
+  - name: fastify request query
+    code: |
+      const _u = require("fastify");
+      function demo(input, req, obj) {
+        return request.query;
+      }
+  description: "request.query — covers Fastify and Hapi (same `[request, query]` attribute chain)."
+
+- id: typescript.source.fastify_request_params
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  frameworks: [fastify, hapi]
+  packages: [fastify, "@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [request, params]
+  match_examples:
+  - name: fastify request params
+    code: |
+      const _u = require("fastify");
+      function demo(input, req, obj) {
+        return request.params;
+      }
+  description: "request.params — covers Fastify and Hapi (same `[request, params]` attribute chain)."
+
+- id: typescript.source.fastify_request_headers
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  frameworks: [fastify, next, nextjs]
+  packages: [fastify, next]
+  match:
+    kind: read
+    target:
+      attribute: [request, headers]
+  match_examples:
+  - name: fastify request headers
+    code: |
+      const _u = require("fastify");
+      function demo(input, req, obj) {
+        return request.headers;
+      }
+  description: "Fastify/Next request.headers. Same adapter fact is canonicalized here to avoid duplicate framework-specific header sources."
+
+- id: typescript.source.fastify_req_user_agent
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.source.fastify_request_headers
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [fastify]
+  packages: [fastify]
+  match:
+    kind: read
+    target:
+      regex: "^req\\.headers$|^(req|request)\\.headers\\.userAgent$"
+  match_examples:
+  - name: fastify req headers user agent
+    code: |
+      const _u = require("fastify");
+      function demo(req: any) {
+        return req.headers["user-agent"];
+      }
+    expect_match_text: [req.headers]
+  - name: fastify request headers userAgent
+    code: |
+      const _u = require("fastify");
+      function demo(request: any) {
+        return request.headers.userAgent;
+      }
+    expect_match_text: [request.headers.userAgent]
+  description: "Disabled duplicate — bracket User-Agent reads are surfaced as the whole `req.headers` / `request.headers` object and are already covered by the framework header-object rules; dot `request.headers.userAgent` cannot be kept without colliding on the same example family."
+
+- id: typescript.source.nestjs_body_decorator
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["@nestjs/common"]
+  match:
+    kind: param
+    target:
+      annotation: Body
+  match_examples:
+  - name: nestjs body dto parameter
+    code: |
+      import { Body, Post } from "@nestjs/common";
+      class DemoController {
+        @Post()
+        create(@Body() dto: any) {
+          return dto;
+        }
+      }
+    expect_match_text: [dto]
+  - name: nestjs body field parameter
+    code: |
+      import { Body, Post } from "@nestjs/common";
+      class DemoController {
+        @Post()
+        create(@Body("name") name: string) {
+          return name;
+        }
+      }
+    expect_match_text: [name]
+  description: "NestJS @Body() / @Body('field') parameter — request body DTO or selected body field."
+
+- id: typescript.source.nestjs_message_body_decorator
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: ws-input
+  payload_types: [event]
+  packages: ["@nestjs/websockets"]
+  match:
+    kind: param
+    target:
+      annotation: MessageBody
+  match_examples:
+  - name: nestjs websocket message body
+    code: |
+      import { MessageBody, SubscribeMessage } from "@nestjs/websockets";
+      class EventsGateway {
+        @SubscribeMessage("chat")
+        handle(@MessageBody() payload: any) {
+          return payload;
+        }
+      }
+    expect_match_text: [payload]
+  description: "NestJS @SubscribeMessage handler @MessageBody() parameter — websocket caller-controlled message payload."
+
+- id: typescript.source.nestjs_query_decorator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@nestjs/common"]
+  match:
+    kind: param
+    target:
+      name: Query
+  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+
+- id: typescript.source.nestjs_param_decorator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@nestjs/common"]
+  match:
+    kind: param
+    target:
+      name: Param
+  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+
+- id: typescript.source.nestjs_headers_decorator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["@nestjs/common"]
+  match:
+    kind: param
+    target:
+      name: Headers
+  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+
+- id: typescript.source.nestjs_session_decorator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@nestjs/common"]
+  match:
+    kind: param
+    target:
+      name: Session
+  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+
+- id: typescript.source.nestjs_req_decorator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@nestjs/common"]
+  match:
+    kind: param
+    target:
+      name: Req
+  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+
+- id: typescript.source.nestjs_ip_decorator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@nestjs/common"]
+  match:
+    kind: param
+    target:
+      name: Ip
+  description: "Disabled — matcher only sees parameter identifiers, not NestJS decorator names."
+
+- id: typescript.source.eventsource_message_data
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.source.postmessage_event
+  language: typescript
+  trust: remote
+  tag: network-input
+  payload_types: [text, json]
+  frameworks: [eventsource, sse]
+  packages: [eventsource]
+  match:
+    kind: read
+    target:
+      attribute: [event, data]
+  description: "Disabled — SSE MessageEvent.data shares the same `event.data` AST shape as WebSocket / postMessage / Pub-Sub message events; covered by typescript.source.websocket_message_event. Re-enable once an SSE-specific receiver-type fact ships."
+
+- id: typescript.source.nestjs_subscribe_message_body_decorator
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.source.nestjs_message_body_decorator
+  language: typescript
+  trust: remote
+  tag: ws-input
+  payload_types: [text, json]
+  frameworks: ["@nestjs/websockets"]
+  packages: ["@nestjs/websockets"]
+  match:
+    kind: param
+    target:
+      annotation: MessageBody
+  description: "Subsumed by typescript.source.nestjs_message_body_decorator — same `@MessageBody()` decorator shape; the canonical rule already covers `@SubscribeMessage` handlers."
+
+- id: typescript.source.graphql_resolver_args
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [graphql, "@nestjs/graphql", "type-graphql"]
+  match:
+    kind: param
+    target:
+      name: Args
+  description: "Disabled — matcher only sees parameter identifiers, not GraphQL decorator names."
+
+- id: typescript.source.hapi_request_payload
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [request, payload]
+  match_examples:
+  - name: hapi request payload
+    code: |
+      const _u = require("@hapi/hapi");
+      function demo(input, req, obj) {
+        return request.payload;
+      }
+  description: "Hapi request.payload."
+
+- id: typescript.source.hapi_req_payload
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json, form]
+  frameworks: [hapi]
+  packages: ["@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [req, payload]
+  match_examples:
+  - name: hapi req payload
+    code: |
+      const _u = require("@hapi/hapi");
+      function demo(req: any) {
+        return req.payload;
+      }
+    expect_match_text: [req.payload]
+  description: "Hapi req.payload — HTTP request body when the handler parameter is named `req`."
+
+- id: typescript.source.hapi_request_query
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [request, query]
+  description: "Disabled — merged into typescript.source.fastify_request_query (same `[request, query]` attribute chain)."
+
+- id: typescript.source.hapi_request_params
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [request, params]
+  description: "Disabled — merged into typescript.source.fastify_request_params (same `[request, params]` attribute chain)."
+
+- id: typescript.source.trpc_ctx_req
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["@trpc/server"]
+  match:
+    kind: read
+    target:
+      attribute: [ctx, req]
+  match_examples:
+  - name: trpc ctx req
+    code: |
+      const _u = require("@trpc/server");
+      function demo(input, req, obj) {
+        return ctx.req;
+      }
+  description: "tRPC ctx.req — the raw request object (pre-zod)."
+
+- id: typescript.source.websocket_message
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: ws-input
+  packages: [ws, "socket.io"]
+  match:
+    kind: param
+    target:
+      name: message
+  description: "Disabled — WebSocket `on('message', msg => …)` uses callback param; bare `message` name matches every messaging lib. Enable in WS audits."
+
+- id: typescript.source.incoming_message_data
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [http, https]
+  match:
+    kind: read
+    target:
+      attribute: [IncomingMessage, headers]
+  description: "Disabled — `IncomingMessage` is a type, not a runtime identifier; real code reads `req.headers`. Use remote.express_req_headers instead."
+
+- id: typescript.source.deno_serve_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      attribute: [Deno, serve]
+  description: "Disabled — Deno.serve() registers a handler; the tainted value is the handler's (req) parameter, not the call's return. Use a param-shape rule in Deno audits."
+
+- id: typescript.source.window_location_hash
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: browser-input
+  match:
+    kind: read
+    target:
+      regex: "^(window\\.|document\\.)?location\\.hash$"
+  match_examples:
+  - name: window location hash
+    code: |
+      function demo(input, req, obj) {
+        return location.hash;
+      }
+    expect_match_text: [location.hash]
+  - name: explicit window location hash
+    code: |
+      function demo() {
+        return window.location.hash;
+      }
+    expect_match_text: [window.location.hash]
+  description: "window.location.hash / location.hash — DOM-XSS source."
+
+- id: typescript.source.window_location_search
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: browser-input
+  match:
+    kind: read
+    target:
+      regex: "^(window\\.|document\\.)?location\\.search$"
+  match_examples:
+  - name: window location search
+    code: |
+      function demo(input, req, obj) {
+        return location.search;
+      }
+    expect_match_text: [location.search]
+  - name: explicit window location search
+    code: |
+      function demo() {
+        return window.location.search;
+      }
+    expect_match_text: [window.location.search]
+  description: "window.location.search / location.search — browser query string."
+
+- id: typescript.source.document_referrer
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: browser-input
+  match:
+    kind: read
+    target:
+      attribute: [document, referrer]
+  match_examples:
+  - name: document referrer
+    code: |
+      function demo(input, req, obj) {
+        return document.referrer;
+      }
+  description: "document.referrer — attacker can set via Referer header."
+
+- id: typescript.source.postmessage_event
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: ipc-input
+  match:
+    kind: read
+    target:
+      attribute: [event, data]
+  match_examples:
+  - name: postmessage event
+    code: |
+      function demo(input, req, obj) {
+        return event.data;
+      }
+  description: "window.addEventListener('message', …) event.data — cross-origin postMessage."
+
+- id: typescript.source.gcf_http_req
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: cloud-event
+  packages: ["@google-cloud/functions-framework"]
+  match:
+    kind: param
+    target:
+      name: req
+  description: "Google Cloud Functions HTTP handler `req` param. Disabled — bare `req` matches every Express handler; enable in GCF audits."
+
+- id: typescript.source.azure_function_context
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: cloud-event
+  packages: ["@azure/functions"]
+  match:
+    kind: read
+    target:
+      attribute: [context, req]
+  match_examples:
+  - name: azure function context
+    code: |
+      const _u = require("@azure/functions");
+      function demo(input, req, obj) {
+        return context.req;
+      }
+  description: "Azure Functions context.req — HTTP request object (body/query/headers) from the Functions host."
+
+# ── Modern TS frameworks (mirror JS additions) ──────────────────────────────
+- id: typescript.source.hono_ctx_req_query
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: [hono]
+  match:
+    kind: call
+    callee:
+      regex: "^c\\.req\\.query$"
+  description: "Disabled duplicate — current matching also emits `req.query`; typescript.source.express_req_query carries Hono package metadata for this adapter fact."
+
+- id: typescript.source.hono_ctx_req_json
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: [hono]
+  match:
+    kind: call
+    callee:
+      regex: "^c\\.req\\.json$"
+  match_examples:
+  - name: hono ctx req json
+    code: |
+      const _u = require("hono");
+      function demo(input, req, obj) {
+        return c.req.json(input);
+      }
+  description: "Hono c.req.json() — parsed JSON body."
+
+- id: typescript.source.hono_ctx_req_param
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: [hono]
+  match:
+    kind: call
+    callee:
+      regex: "^c\\.req\\.param$"
+  match_examples:
+  - name: hono ctx req param
+    code: |
+      const _u = require("hono");
+      function demo(input, req, obj) {
+        return c.req.param(input);
+      }
+  description: "Hono c.req.param('name') — URL path parameter."
+
+- id: typescript.source.trpc_input
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: rpc-input
+  packages: ["@trpc/server"]
+  match:
+    kind: read
+    target:
+      attribute: [ctx, input]
+  match_examples:
+  - name: trpc input
+    code: |
+      const _u = require("@trpc/server");
+      function demo(input, req, obj) {
+        return ctx.input;
+      }
+  description: "tRPC procedure ctx.input — attacker-supplied procedure argument."
+
+- id: typescript.source.trpc_resolver_input_property
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: rpc-input
+  payload_types: [json]
+  packages: ["@trpc/server"]
+  match:
+    kind: read
+    target:
+      regex: "^(opts|options)\\.input$"
+  match_examples:
+  - name: trpc opts input
+    code: |
+      const _u = require("@trpc/server");
+      function resolver(opts: any) {
+        return opts.input;
+      }
+    expect_match_text: [opts.input]
+  description: "tRPC resolver options input (`opts.input` / `options.input`) — procedure caller-controlled payload."
+
+- id: typescript.source.adonis_request_input
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form, json, query]
+  frameworks: [adonisjs]
+  packages: ["@adonisjs/core", "@adonisjs/http-server"]
+  match:
+    kind: call
+    callee:
+      attribute: [request, input]
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: adonis request input
+    code: |
+      const _u = require("@adonisjs/core");
+      function show({ request }: any) {
+        return request.input("q");
+      }
+    expect_match_text: [request.input]
+  description: "AdonisJS request.input(name) — merged body/query/route input value controlled by the HTTP client."
+
+- id: typescript.source.adonis_request_all
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form, json, query]
+  frameworks: [adonisjs]
+  packages: ["@adonisjs/core", "@adonisjs/http-server"]
+  match:
+    kind: call
+    callee:
+      regex: "^request\\.(all|only|except)$"
+  constraints:
+  - max_args: 1
+  match_examples:
+  - name: adonis request all
+    code: |
+      const _u = require("@adonisjs/core");
+      function store({ request }: any) {
+        return request.all();
+      }
+    expect_match_text: [request.all]
+  - name: adonis request only
+    code: |
+      const _u = require("@adonisjs/core");
+      function store({ request }: any) {
+        return request.only(["name"]);
+      }
+    expect_match_text: [request.only]
+  description: "AdonisJS request.all()/only()/except() — selected or complete client-controlled request input."
+
+- id: typescript.source.h3_get_query
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [h3, nitro]
+  packages: [h3]
+  match:
+    kind: call
+    callee:
+      name: getQuery
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: h3 getQuery
+    code: |
+      const _u = require("h3");
+      export default eventHandler((event: any) => {
+        return getQuery(event);
+      });
+    expect_match_text: [getQuery]
+  description: "h3 getQuery(event) — parsed request query object."
+
+- id: typescript.source.h3_read_body
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json, form, text]
+  frameworks: [h3, nitro]
+  packages: [h3]
+  match:
+    kind: call
+    callee:
+      name: readBody
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: h3 readBody
+    code: |
+      const _u = require("h3");
+      export default eventHandler(async (event: any) => {
+        return readBody(event);
+      });
+    expect_match_text: [readBody]
+  description: "h3 readBody(event) — parsed request body controlled by the HTTP client."
+
+- id: typescript.source.h3_event_req
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [event]
+  frameworks: [h3, nitro]
+  packages: [h3]
+  match:
+    kind: read
+    target:
+      regex: "^event\\.(node\\.)?req$"
+  match_examples:
+  - name: h3 event node req
+    code: |
+      const _u = require("h3");
+      function handler(event: any) {
+        return event.node.req;
+      }
+    expect_match_text: [event.node.req]
+  description: "h3 event.node.req / event.req — raw Node request object carrying HTTP body, headers, and URL."
+
+- id: typescript.source.next_pages_req_body
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.source.express_req_body
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: [next]
+  match:
+    kind: read
+    target:
+      attribute: [req, body]
+  description: "Disabled duplicate — same `req.body` shape is covered by typescript.source.express_req_body with Next.js package metadata merged."
+
+- id: typescript.source.sveltekit_event_url
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url]
+  packages: ["@sveltejs/kit"]
+  match:
+    kind: read
+    target:
+      attribute: [event, url]
+  match_examples:
+  - name: sveltekit event url
+    code: |
+      const _u = require("@sveltejs/kit");
+      function demo(input, req, obj) {
+        return event.url;
+      }
+  description: "SvelteKit event.url — URL object including searchParams."
+
+- id: typescript.cloud.lambda_event
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  trust: remote
+  tag: cloud-event
+  packages: ["aws-lambda"]
+  match:
+    kind: param
+    target:
+      name: event
+  description: "Disabled — bare `event` parameter collides with h3/nitro event handlers; attribute-chain Lambda event body/header/query/path rules remain enabled."
+
+# -- Additional JS/TS framework, browser, GraphQL, WS, and upload sources -----
+- id: typescript.source.express_req_header_getter
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [express, nestjs]
+  packages: [express, "@nestjs/platform-express"]
+  match:
+    kind: call
+    callee:
+      regex: "^req\\.(get|header)$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: express req.get header
+    code: |
+      const _u = require("express");
+      function demo(req: any) {
+        return req.get("x-forwarded-host");
+      }
+    expect_match_text: [req.get]
+  - name: express req.header accessor
+    code: |
+      const _u = require("express");
+      function demo(req: any) {
+        return req.header("referer");
+      }
+    expect_match_text: [req.header]
+  description: "Express/Nest req.get()/req.header() — single request header value, attacker-controlled."
+
+- id: typescript.source.express_signed_cookies
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: [express, cookie-parser]
+  match:
+    kind: read
+    target:
+      attribute: [req, signedCookies]
+  match_examples:
+  - name: express signed cookies
+    code: |
+      const _u = require("express");
+      function demo(req: any) {
+        return req.signedCookies;
+      }
+    expect_match_text: [req.signedCookies]
+  description: "Express req.signedCookies — cookie names and values are client-controlled even when signatures are verified."
+
+- id: typescript.source.koa_cookie_get
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [koa]
+  packages: [koa]
+  match:
+    kind: call
+    callee:
+      regex: "^ctx\\.cookies\\.get$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: koa cookie get
+    code: |
+      const _u = require("koa");
+      function demo(ctx: any) {
+        return ctx.cookies.get("sid");
+      }
+    expect_match_text: [ctx.cookies.get]
+  description: "Koa ctx.cookies.get(name) — single client-controlled cookie value."
+
+- id: typescript.source.hapi_request_headers
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.source.fastify_request_headers
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  frameworks: [hapi]
+  packages: ["@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [request, headers]
+  description: "Disabled duplicate — same `request.headers` shape is covered by typescript.source.fastify_request_headers with Hapi package metadata merged."
+
+- id: typescript.source.hapi_request_state
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  frameworks: [hapi]
+  packages: ["@hapi/hapi"]
+  match:
+    kind: read
+    target:
+      attribute: [request, state]
+  match_examples:
+  - name: hapi request state cookies
+    code: |
+      const _u = require("@hapi/hapi");
+      function demo(request: any) {
+        return request.state;
+      }
+    expect_match_text: [request.state]
+  description: "Hapi request.state — parsed cookies from the request."
+
+- id: typescript.source.window_location_href
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: browser-input
+  payload_types: [url]
+  match:
+    kind: read
+    target:
+      regex: "^(window\\.|document\\.)?location\\.href$"
+  match_examples:
+  - name: window location href
+    code: |
+      function demo() {
+        return location.href;
+      }
+    expect_match_text: [location.href]
+  - name: explicit window location href
+    code: |
+      function demo() {
+        return window.location.href;
+      }
+    expect_match_text: [window.location.href]
+  description: "window.location.href — full browser URL, attacker-controlled via navigation."
+
+- id: typescript.source.document_cookie
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: browser-input
+  payload_types: [cookie]
+  match:
+    kind: read
+    target:
+      attribute: [document, cookie]
+  match_examples:
+  - name: document cookie
+    code: |
+      function demo() {
+        return document.cookie;
+      }
+    expect_match_text: [document.cookie]
+  description: "document.cookie — client-side cookie string that may be attacker-controlled after injection or subdomain compromise."
+
+- id: typescript.source.window_location_origin_path
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: browser-input
+  payload_types: [url]
+  match:
+    kind: read
+    target:
+      regex: "^(window\\.)?location\\.(origin|pathname|host|hostname)$"
+  match_examples:
+  - name: browser location pathname
+    code: |
+      function demo() {
+        return location.pathname;
+      }
+    expect_match_text: [location.pathname]
+  - name: browser window location host
+    code: |
+      function demo() {
+        return window.location.host;
+      }
+    expect_match_text: [window.location.host]
+  description: "Browser location origin/path/host fields — attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
+
+- id: typescript.source.websocket_structured_frame_data
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: ws-input
+  payload_types: [text, binary]
+  frameworks: [ws, socket.io]
+  packages: [ws, socket.io]
+  match:
+    kind: read
+    target:
+      regex: "^(frame|packet)\\.data$"
+  match_examples:
+  - name: websocket frame data
+    code: |
+      const _u = require("ws");
+      function demo(frame: any) {
+        return frame.data;
+      }
+    expect_match_text: [frame.data]
+  description: "Structured WebSocket frame/packet .data fields — untrusted peer-controlled payloads without colliding with Pub/Sub's `message.data` adapter fact."
+
+- id: typescript.source.socketio_handshake
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: ws-input
+  payload_types: [query, header]
+  frameworks: [socket.io]
+  packages: [socket.io]
+  match:
+    kind: read
+    target:
+      regex: "^socket\\.handshake\\.(query|headers|auth)$"
+  match_examples:
+  - name: socket.io handshake query
+    code: |
+      const _u = require("socket.io");
+      function demo(socket: any) {
+        return socket.handshake.query;
+      }
+    expect_match_text: [socket.handshake.query]
+  - name: socket.io handshake auth
+    code: |
+      const _u = require("socket.io");
+      function demo(socket: any) {
+        return socket.handshake.auth;
+      }
+    expect_match_text: [socket.handshake.auth]
+  description: "Socket.IO handshake query/header/auth objects — remote-controlled connection metadata."
+
+- id: typescript.source.graphql_args_field
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  packages: [graphql, "@nestjs/graphql", type-graphql, "@apollo/server"]
+  match:
+    kind: read
+    target:
+      regex: "^args\\.(input|data|where|filter|id|variables|query|search|email|username|password)$"
+  match_examples:
+  - name: graphql args input
+    code: |
+      const _u = require("graphql");
+      function resolver(parent: unknown, args: any) {
+        return args.input;
+      }
+    expect_match_text: [args.input]
+  - name: graphql args where
+    code: |
+      const _u = require("graphql");
+      function resolver(parent: unknown, args: any) {
+        return args.where;
+      }
+    expect_match_text: [args.where]
+  - name: graphql args email
+    code: |
+      const _u = require("graphql");
+      function resolver(parent: unknown, args: any) {
+        return args.email;
+      }
+    expect_match_text: [args.email]
+  description: "GraphQL resolver args.<field> — attacker-controlled resolver arguments, narrowed to common payload fields instead of bare `args`."
+
+- id: typescript.source.graphql_info_context_args
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  packages: [graphql, "@nestjs/graphql", type-graphql, "@apollo/server"]
+  match:
+    kind: read
+    target:
+      regex: "^info\\.context\\.args(\\.(input|data|where|filter|id|variables))?$"
+  match_examples:
+  - name: graphql info context args
+    code: |
+      const _u = require("graphql");
+      function resolver(parent: unknown, args: any, context: any, info: any) {
+        return info.context.args;
+      }
+    expect_match_text: [info.context.args]
+  - name: graphql info context args where
+    code: |
+      const _u = require("graphql");
+      function resolver(parent: unknown, args: any, context: any, info: any) {
+        return info.context.args.where;
+      }
+    expect_match_text: [info.context.args.where]
+  description: "GraphQL info.context.args — framework-propagated resolver args exposed through GraphQL context."
+
+- id: typescript.source.next_request_body_methods
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json, form, text]
+  frameworks: [next, nextjs, bun, fetch]
+  packages: [next, bun]
+  match:
+    kind: call
+    callee:
+      regex: "^request\\.(json|formData|text|arrayBuffer)$"
+  match_examples:
+  - name: next request json
+    code: |
+      const _u = require("next");
+      export async function POST(request: Request) {
+        return request.json();
+      }
+    expect_match_text: [request.json]
+  - name: next request formData
+    code: |
+      const _u = require("next");
+      export async function POST(request: Request) {
+        return request.formData();
+      }
+    expect_match_text: [request.formData]
+  description: "Fetch Request body readers used by Next.js App Router and Bun.serve — attacker-controlled request body payloads."
+
+- id: typescript.source.next_request_url_headers
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [url, header, cookie]
+  frameworks: [next, nextjs, bun, fetch]
+  packages: [next, bun]
+  match:
+    kind: read
+    target:
+      regex: "^request\\.(url|cookies)$"
+  match_examples:
+  - name: next request url
+    code: |
+      const _u = require("next");
+      export function GET(request: Request) {
+        return request.url;
+      }
+    expect_match_text: [request.url]
+  description: "Fetch Request URL/cookies fields used by Next.js App Router and Bun.serve — attacker-controlled HTTP metadata. `request.headers` is the same adapter fact as Fastify `request.headers`; `request.nextUrl.searchParams` is covered by the query-specific rule."
+
+- id: typescript.source.next_searchparams
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  frameworks: [next, nextjs]
+  packages: [next]
+  match:
+    kind: read
+    target:
+      regex: "^(request\\.)?nextUrl\\.searchParams$"
+  match_examples:
+  - name: next request nextUrl searchParams
+    code: |
+      const _u = require("next");
+      export function GET(request: any) {
+        return request.nextUrl.searchParams;
+      }
+    expect_match_text: [request.nextUrl.searchParams]
+  - name: nextUrl searchParams local
+    code: |
+      const _u = require("next");
+      function demo(nextUrl: any) {
+        return nextUrl.searchParams;
+      }
+    expect_match_text: [nextUrl.searchParams]
+  description: "NextRequest.nextUrl.searchParams — parsed query-string values."
+
+- id: typescript.source.multipart_file_originalname
+  enabled: true
+  language: typescript
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [multipart, file]
+  packages: [multer, formidable, busboy, express-fileupload]
+  match:
+    kind: read
+    target:
+      regex: "^file\\.(originalname|originalFilename|name|filename)$|^info\\.filename$|^uploadedFile\\.name$|^req\\.file\\.originalname$"
+  match_examples:
+  - name: multer file originalname
+    code: |
+      const _u = require("multer");
+      function demo(file: any) {
+        return file.originalname;
+      }
+    expect_match_text: [file.originalname]
+  - name: busboy info filename
+    code: |
+      const _u = require("multer");
+      function demo(info: any) {
+        return info.filename;
+      }
+    expect_match_text: [info.filename]
+  description: "Multipart upload filename fields from multer/formidable/busboy/express-fileupload — client-controlled names."

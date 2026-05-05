@@ -1,0 +1,52 @@
+---
+title: "FAQ"
+description: "Common questions and troubleshooting guidance for bonsai-ninja."
+---
+
+# FAQ
+
+<AccordionGroup>
+
+<Accordion title="Why did a sanitizer not remove the finding?">
+
+Sanitizers are evidence, not propagation blockers. The finding remains visible with `status` set from the sanitizer context so reviewers can decide whether the sanitizer is sufficient.
+
+</Accordion>
+
+<Accordion title="Why are there inferred entry-point findings?">
+
+You passed `--inferred-sources`. That mode seeds synthetic sources at entry-point parameters for audit coverage. Omit the flag to use only real source rules.
+
+</Accordion>
+
+<Accordion title="How do I make output smaller?">
+
+Use `--compact`, reduce `--context`, add `--severity`, `--tag`, `--source`, or `--sink`, and page with `--page next`.
+
+</Accordion>
+
+<Accordion title="How do I get machine-readable output?">
+
+Use `--format json --all` for native JSON or `--format sarif --all` for SARIF from security finding commands.
+
+</Accordion>
+
+<Accordion title="Why does rule validation reject my YAML?">
+
+The rule loader denies unknown fields and validates constraints before scanning. Check field names, rule kind directory, match examples, and whether `arg_tainted` uses a positional index for languages without keyword-argument facts.
+
+</Accordion>
+
+<Accordion title="Why is a flow over-approximate?">
+
+The resolver may have multiple call targets, unknown receiver type, dynamic dispatch, or missing adapter facts. Use `--strict-flow` or `--precision narrowed` when you need higher-confidence paths.
+
+</Accordion>
+
+<Accordion title="How do I clear stale cache data?">
+
+Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidecar, or `bonsai-ninja cache clear ./src` to remove the workspace `.bonsai/` cache.
+
+</Accordion>
+
+</AccordionGroup>

@@ -1,0 +1,571 @@
+- id: csharp.ssrf.httpclient_getasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - GetAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { HttpClient.GetAsync(input); } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { HttpClient.GetAsync("https://example.com/status");
+      } }
+
+      '
+    expect_no_match: true
+  description: HttpClient.GetAsync(tainted URL).
+- id: csharp.ssrf.httpclient_getstringasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - GetStringAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { HttpClient.GetStringAsync(input);
+      } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { HttpClient.GetStringAsync("https://example.com/status");
+      } }
+
+      '
+    expect_no_match: true
+  description: HttpClient.GetStringAsync.
+- id: csharp.ssrf.httpclient_getbytearrayasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - GetByteArrayAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { HttpClient.GetByteArrayAsync(input);
+      } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { HttpClient.GetByteArrayAsync("https://example.com/image.png");
+      } }
+
+      '
+    expect_no_match: true
+  description: HttpClient.GetByteArrayAsync.
+- id: csharp.ssrf.httpclient_postasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - PostAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { HttpClient.PostAsync(input); } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { HttpClient.PostAsync("https://example.com/api");
+      } }
+
+      '
+    expect_no_match: true
+  description: HttpClient.PostAsync.
+- id: csharp.ssrf.httpclient_putasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - PutAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { HttpClient.PutAsync(input); } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { HttpClient.PutAsync("https://example.com/api");
+      } }
+
+      '
+    expect_no_match: true
+  description: HttpClient.PutAsync.
+- id: csharp.ssrf.httpclient_sendasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - SendAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; HttpClient.SendAsync(input); } }
+
+      '
+  - name: literal sendasync request negative
+    code: |
+      class App { void Test() { HttpClient.SendAsync("https://example.com/status"); } }
+    expect_no_match: true
+  description: HttpClient.SendAsync.
+- id: csharp.ssrf.webrequest_create
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebRequest
+      - Create
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { WebRequest.Create(input); } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { WebRequest.Create("https://example.com/status");
+      } }
+
+      '
+    expect_no_match: true
+  description: WebRequest.Create(tainted URL).
+- id: csharp.ssrf.httpwebrequest_create
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpWebRequest
+      - Create
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { HttpWebRequest.Create(input); } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { HttpWebRequest.Create("https://example.com/status");
+      } }
+
+      '
+    expect_no_match: true
+  description: HttpWebRequest.Create.
+- id: csharp.ssrf.webclient_downloadstring
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - DownloadString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { WebClient.DownloadString(input);
+      } }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { WebClient.DownloadString("https://example.com/status");
+      } }
+
+      '
+    expect_no_match: true
+  description: WebClient.DownloadString.
+- id: csharp.ssrf.webclient_openread
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - OpenRead
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: webclient openread
+    code: 'class App { void Test(string input) { WebClient.OpenRead(input); } }
+
+      '
+    expect_match_text:
+    - WebClient.OpenRead
+  - name: literal url negative
+    code: 'class App { void Test() { WebClient.OpenRead("https://example.com/status");
+      } }
+
+      '
+    expect_no_match: true
+  description: "WebClient.OpenRead(tainted URL) \u2014 opens an attacker-selected\
+    \ network resource."
+- id: csharp.ssrf.webclient_openreadasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - OpenReadAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: webclient openread async
+    code: 'class App { void Test(string input) { WebClient.OpenReadAsync(input); }
+      }
+
+      '
+    expect_match_text:
+    - WebClient.OpenReadAsync
+  - name: literal url negative
+    code: 'class App { void Test() { WebClient.OpenReadAsync("https://example.com/status");
+      } }
+
+      '
+    expect_no_match: true
+  description: "WebClient.OpenReadAsync(tainted URL) \u2014 async network fetch to\
+    \ an attacker-selected destination."
+- id: csharp.ssrf.webclient_downloaddata
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - DownloadData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { WebClient.DownloadData(input); }
+      }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { WebClient.DownloadData("https://example.com/file.bin");
+      } }
+
+      '
+    expect_no_match: true
+  description: WebClient.DownloadData.
+- id: csharp.ssrf.webclient_downloadfile
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - DownloadFile
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { WebClient.DownloadFile(input); }
+      }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { WebClient.DownloadFile("https://example.com/file.bin");
+      } }
+
+      '
+    expect_no_match: true
+  description: "WebClient.DownloadFile \u2014 also writes to disk."
+- id: csharp.ssrf.webclient_uploadstring
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - WebClient
+      - UploadString
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test(string input) { WebClient.UploadString(input); }
+      }
+
+      '
+  - name: literal url negative
+    code: 'class App { void Test() { WebClient.UploadString("https://example.com/api");
+      } }
+
+      '
+    expect_no_match: true
+  description: WebClient.UploadString.
+- id: csharp.ssrf.restsharp_execute
+  enabled: false
+  language: csharp
+  tag: ssrf
+  severity: high
+  packages:
+  - RestSharp
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestClient
+      - Execute
+  match_examples:
+  - name: declared shape
+    code: 'using RestSharp;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; RestClient.Execute(input); } }
+
+      '
+  description: RestSharp RestClient.Execute.
+  disabled_reason:
+    code: over-broad
+- id: csharp.ssrf.restsharp_restclient_new
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  packages:
+  - RestSharp
+  cwe:
+  - CWE-918
+  match:
+    kind: new
+    callee:
+      name: RestClient
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: restsharp client constructor
+    code: 'using RestSharp;
+
+      class RestClient { public RestClient(string input) { } } class App { void Test(string
+      input) { var result = new RestClient(input); } }
+
+      '
+    expect_match_text:
+    - RestClient
+  - name: literal base url negative
+    code: 'using RestSharp;
+
+      class RestClient { public RestClient(string input) { } } class App { void Test()
+      { var result = new RestClient("https://api.example.com"); } }
+
+      '
+    expect_no_match: true
+  description: "new RestClient(tainted base URL) \u2014 attacker-controlled RestSharp\
+    \ base URL creates an SSRF client."
+- id: csharp.ssrf.restsharp_executeasync
+  enabled: true
+  language: csharp
+  tag: ssrf
+  severity: high
+  packages:
+  - RestSharp
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - RestClient
+      - ExecuteAsync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: 'using RestSharp;
+
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
+      amount = 1; RestClient.ExecuteAsync(input); } }
+
+      '
+  - name: literal restsharp request negative
+    code: |
+      using RestSharp;
+      class App { void Test() { RestClient.ExecuteAsync("https://example.com/status"); } }
+    expect_no_match: true
+  description: RestSharp ExecuteAsync.
+- id: csharp.ssrf.flurl_geturl
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: ssrf
+  severity: high
+  packages:
+  - Flurl.Http
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: GetAsync
+  description: "Disabled \u2014 bare GetAsync collides with HttpClient.GetAsync and\
+    \ many async APIs; HttpClient rules already cover the concrete risk."
+- id: csharp.ssrf.refit_client
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: ssrf
+  severity: medium
+  packages:
+  - Refit
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      name: For
+  description: "Disabled \u2014 Refit interface clients; flag only when base URL is\
+    \ tainted."
+- id: csharp.ssrf.smtpclient_send
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: ssrf
+  severity: medium
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - SmtpClient
+      - Send
+  description: "Disabled \u2014 SmtpClient.Send is mail, not generic SSRF."
+- id: csharp.ssrf.httpclient_getstring
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - HttpClient
+      - GetStringAsync
+  match_examples:
+  - name: declared shape
+    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
+      dynamic amount = 1; HttpClient.GetStringAsync(input); } }
+
+      '
+  description: "Disabled duplicate \u2014 same matcher as canonical csharp.ssrf.httpclient_getstringasync."

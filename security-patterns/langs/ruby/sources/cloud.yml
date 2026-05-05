@@ -1,0 +1,56 @@
+# Ruby cloud serverless sources. Handlers take attacker-controlled event
+# payloads. trust: service — upstream gateway brokered.
+- id: ruby.source.aws_lambda_event
+  enabled: true
+  language: ruby
+  tag: cloud-event
+  trust: service
+  packages: [aws_lambda_ric]
+  match:
+    kind: param
+    target:
+      name: event
+  match_examples:
+  - name: ruby.source.aws_lambda_event example
+    code: |
+      require "aws_lambda_ric"
+      def handler(event)
+        event
+      end
+  description: "AWS Lambda Ruby handler `event:` parameter (aws_lambda_ric)."
+
+- id: ruby.source.gcf_request
+  enabled: true
+  language: ruby
+  tag: cloud-event
+  trust: service
+  packages: [functions_framework]
+  match:
+    kind: param
+    target:
+      name: request
+  match_examples:
+  - name: ruby.source.gcf_request example
+    code: |
+      require "functions_framework"
+      def handler(request)
+        request
+      end
+  description: "Google Cloud Functions functions_framework http(request) handler."
+
+- id: ruby.source.azure_function_req
+  enabled: true
+  language: ruby
+  tag: cloud-event
+  trust: service
+  match:
+    kind: param
+    target:
+      name: req
+  match_examples:
+  - name: ruby.source.azure_function_req example
+    code: |
+      def handler(req)
+        req
+      end
+  description: "Azure Functions HTTP trigger handler req parameter."

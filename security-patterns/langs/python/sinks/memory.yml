@@ -1,0 +1,86 @@
+# Python memory-safety / lifecycle audit-pair sites.
+# Python's `with` statement is RAII so explicit `.close()` outside the
+# block is the audit-interesting shape. These rules fire on the
+# *use-after-transition* call (read / result / etc.) and gate on the
+# adapter-emitted lifecycle state via the `requires_state` engine
+# constraint (P6 — see docs/contributing/analysis-roadmap.mdx).
+
+- id: python.memory.file_close
+  enabled: true
+  language: python
+  tag: memory-safety
+  severity: medium
+  packages: [io]
+  cwe: [CWE-404, CWE-416]
+  match:
+    kind: call
+    callee:
+      name: read
+  constraints:
+  - requires_state:
+      name: f
+      expected: closed
+  match_examples:
+  - name: read after close
+    code: |
+      import io
+      def handle(f):
+        f.close()
+        f.read()
+    expect_match_text: [f.read]
+  - name: read without preceding close
+    code: |
+      import io
+      def handle(f):
+        f.read()
+    expect_no_match: true
+  description: "Use-after-close — `<file>.read()` on a handle whose preceding `.close()` released the underlying file/socket/connection. Subsequent reads/writes raise ValueError at runtime (CWE-416/CWE-404). The `requires_state` constraint gates the rule on the binding's actual `closed` lifecycle state, so explicit-close-then-reuse is flagged while RAII shapes (`with` blocks) stay silent."
+- id: python.memory.task_cancel
+  enabled: true
+  language: python
+  tag: memory-safety
+  severity: medium
+  packages: [asyncio]
+  cwe: [CWE-672]
+  match:
+    kind: call
+    callee:
+      name: result
+  constraints:
+  - requires_state:
+      name: task
+      expected: cancelled
+  match_examples:
+  - name: result after cancel
+    code: |
+      import asyncio
+      async def handle(task):
+        task.cancel()
+        task.result()
+    expect_match_text: [task.result]
+  - name: result without preceding cancel
+    code: |
+      import asyncio
+      async def handle(task):
+        task.result()
+    expect_no_match: true
+  description: "Use-after-cancel — `Task.result()` / `Future.result()` on an awaitable whose preceding `.cancel()` invalidated the result. The call raises CancelledError (CWE-672). The `requires_state` constraint gates the rule on the binding's actual `cancelled` lifecycle state."
+- id: python.memory.lock_release
+  enabled: true
+  language: python
+  tag: memory-safety
+  severity: medium
+  packages: [threading, asyncio]
+  cwe: [CWE-833, CWE-667]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.release$
+  match_examples:
+  - name: lock release site
+    code: |
+      import threading
+      def handle(lock):
+        lock.release()
+    expect_match_text: [lock.release]
+  description: "Audit-pair site — engine surfaces the lifecycle event; correlate with subsequent uses of the same value. threading.Lock.release() / Semaphore.release() — subsequent guarded-region reads/writes without a re-acquire are racy (CWE-833). No canonical 'use' callee shape exists for guarded-region accesses, so this rule remains a transition-site audit-pair."

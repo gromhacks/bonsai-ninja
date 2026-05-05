@@ -1,0 +1,51 @@
+---
+title: "Contributing"
+description: "Development setup, test workflow, and links for adding rules or language adapters."
+---
+
+# Contributing
+
+## Dev Setup
+
+```bash
+cargo build --workspace
+cargo test -q -p bonsai_cli --test security_commands
+cargo test --workspace
+```
+
+Use `./target/release/bonsai-ninja` for CLI validation when the test or script expects the release binary.
+
+## Add A Rule
+
+1. Choose `sources`, `sinks`, or `sanitizers`.
+2. Put the rule in `security-patterns/langs/<lang>/<kind>/<family>.yml`.
+3. Add positive and negative `match_examples`.
+4. Run `python3 scripts/validate-pattern-pack.py --binary ./target/release/bonsai-ninja`.
+5. Add a fixture test if propagation behavior changes.
+
+## Add A Language Adapter
+
+<Steps>
+
+1. Add the tree-sitter grammar and adapter crate.
+2. Implement the adapter contract with decls, refs, imports, flow events, and visibility.
+3. Populate optional `Decl` fields where the language can support them.
+4. Add micro, complex, sanitizer, and mega-flow fixtures.
+5. Register the adapter in the bundled registry.
+6. Run conformance, per-language matrix, and full workspace tests.
+
+</Steps>
+
+## Deeper Docs
+
+- [Specification](specification.mdx)
+- [Architecture](architecture.mdx)
+- [Adapter Contract](adapter-contract.mdx)
+- [Adapter Capabilities](adapter-capabilities.mdx)
+- [Design Patterns](design-patterns.mdx)
+- [Analysis Roadmap](analysis-roadmap.mdx)
+- [Taint Engine Specification](taint-engine-spec.mdx)
+- [SDK](sdk.mdx)
+- [Sanitizer Test Coverage](sanitizer-test-coverage.mdx)
+- [Review Checklist](review-checklist.mdx)
+- [Third-Party Licenses](third-party-licenses.mdx)

@@ -1,0 +1,70 @@
+# Lua queue / broker sources — trust: service.
+- id: lua.source.resty_kafka_consume
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  trust: service
+  tag: queue-input
+  packages: [lua-resty-kafka]
+  match:
+    kind: call
+    callee:
+      attribute: [consumer, receive]
+  description: "Disabled — lua-resty-kafka consumer:receive (depends on variable name)."
+
+- id: lua.source.resty_redis_subscribe
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  trust: service
+  tag: queue-input
+  packages: [lua-resty-redis]
+  match:
+    kind: call
+    callee:
+      attribute: [red, read_reply]
+  description: "Disabled — lua-resty-redis Pub/Sub read_reply (enable alongside subscribe call)."
+
+- id: lua.source.resty_mysql_query_result
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: lua
+  trust: database
+  tag: db-row
+  packages: [lua-resty-mysql]
+  match:
+    kind: call
+    callee:
+      attribute: [db, query]
+  description: "Disabled — lua-resty-mysql db:query result rows as second-order taint source. Overlaps with lua.sqli.luaresty_mysql_query (sink); enable only when modeling stored-XSS / second-order SQLi flows where DB rows feed dangerous sinks."
+
+- id: lua.source.resty_socket_receive
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  trust: remote
+  tag: socket-input
+  packages: [lua-resty-socket]
+  match:
+    kind: call
+    callee:
+      attribute: [sock, receive]
+  description: "Disabled — lua-resty-* tcp/udp sock:receive returns bytes from a remote peer; enable when modeling raw-protocol parsers (depends on `sock` variable name)."
+
+- id: lua.source.love_keyboard_text
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  trust: local
+  tag: ui-input
+  packages: [love2d]
+  match:
+    kind: call
+    callee:
+      attribute: [love, keyboard, getText]
+  description: "Disabled — LOVE2D love.keyboard input for desktop/game contexts; rarely a security boundary, enable only for sandboxed mod loaders."

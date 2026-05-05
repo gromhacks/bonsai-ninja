@@ -1,0 +1,210 @@
+# Rust template-injection / SSTI (Tera, Handlebars, MiniJinja, Liquid).
+- id: rust.template.tera_render_str
+  enabled: true
+  language: rust
+  tag: ssti
+  severity: critical
+  packages: [tera]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Tera, render_str]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted tera render_str template
+    code: |
+      use tera::dummy;
+      fn example(target: &str) {
+          Tera::render_str(target);
+      }
+  - name: literal tera render_str template negative
+    code: |
+      use tera::dummy;
+      fn example() {
+          Tera::render_str("Hello {{ user }}");
+      }
+    expect_no_match: true
+  description: "Tera::render_str(tainted) — compiles an ad-hoc Jinja-style template from a runtime string; tainted source = SSTI with filter-abuse RCE."
+
+- id: rust.template.tera_one_off
+  enabled: true
+  language: rust
+  tag: ssti
+  severity: critical
+  packages: [tera]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Tera, one_off]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted tera one_off template
+    code: |
+      use tera::dummy;
+      fn example(target: &str) {
+          Tera::one_off(target);
+      }
+  - name: literal tera one_off template negative
+    code: |
+      use tera::dummy;
+      fn example() {
+          Tera::one_off("Hello {{ user }}");
+      }
+    expect_no_match: true
+  description: "Tera::one_off(tainted) — same as render_str but without an engine reuse; tainted template string = SSTI."
+
+- id: rust.template.handlebars_register_template_string
+  enabled: true
+  language: rust
+  tag: ssti
+  severity: high
+  packages: [handlebars]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Handlebars, register_template_string]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted handlebars registered template
+    code: |
+      use handlebars::dummy;
+      fn example(target: &str) {
+          Handlebars::register_template_string("profile", target);
+      }
+  - name: literal handlebars registered template negative
+    code: |
+      use handlebars::dummy;
+      fn example() {
+          Handlebars::register_template_string("profile", "Hello {{ user }}");
+      }
+    expect_no_match: true
+  description: "Handlebars::register_template_string(name, tainted) — template source registered at runtime; tainted content enables SSTI / data exfiltration."
+
+- id: rust.template.handlebars_render_template
+  enabled: true
+  language: rust
+  tag: ssti
+  severity: high
+  packages: [handlebars]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Handlebars, render_template]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted handlebars render_template source
+    code: |
+      use handlebars::dummy;
+      fn example(target: &str) {
+          Handlebars::render_template(target);
+      }
+  - name: literal handlebars render_template source negative
+    code: |
+      use handlebars::dummy;
+      fn example() {
+          Handlebars::render_template("Hello {{ user }}");
+      }
+    expect_no_match: true
+  description: "Handlebars::render_template(tainted, data) — compiles and renders from a runtime string; tainted template = SSTI."
+
+- id: rust.template.minijinja_add_template
+  enabled: true
+  language: rust
+  tag: ssti
+  severity: high
+  packages: [minijinja]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Environment, add_template]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted minijinja add_template source
+    code: |
+      use minijinja::dummy;
+      fn example(target: &str) {
+          Environment::add_template("profile", target);
+      }
+  - name: literal minijinja add_template source negative
+    code: |
+      use minijinja::dummy;
+      fn example() {
+          Environment::add_template("profile", "Hello {{ user }}");
+      }
+    expect_no_match: true
+  description: "MiniJinja Environment::add_template(name, tainted) — registers a Jinja template from a runtime source string."
+
+- id: rust.template.liquid_parse
+  enabled: true
+  language: rust
+  tag: ssti
+  severity: high
+  packages: [liquid]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [ParserBuilder, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted liquid template source
+    code: |
+      use liquid::dummy;
+      fn example(target: &str) {
+          ParserBuilder::parse(target);
+      }
+  - name: literal liquid template source negative
+    code: |
+      use liquid::dummy;
+      fn example() {
+          ParserBuilder::parse("Hello {{ user }}");
+      }
+    expect_no_match: true
+  description: "liquid ParserBuilder::parse(tainted) — parses Liquid templates from runtime strings; tainted source enables template-injection."
+
+- id: rust.template.minijinja_render_str
+  enabled: true
+  language: rust
+  tag: ssti
+  severity: critical
+  packages: [minijinja]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Environment, render_str]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted minijinja render_str source
+    code: |
+      use minijinja::dummy;
+      fn example(target: &str) {
+          Environment::render_str(target);
+      }
+  - name: literal minijinja render_str source negative
+    code: |
+      use minijinja::dummy;
+      fn example() {
+          Environment::render_str("Hello {{ user }}");
+      }
+    expect_no_match: true
+  description: "MiniJinja Environment::render_str(tainted) — compiles and renders a template from a runtime string."

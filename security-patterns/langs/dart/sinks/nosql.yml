@@ -1,0 +1,266 @@
+# Dart NoSQL-injection sinks.
+- id: dart.nosql.mongo_dart_find
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [mongo_dart]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.find$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongo selector
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test(dynamic input) { collection.find(input); }
+  - name: literal mongo selector negative
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test() { collection.find({"name": "safe"}); }
+    expect_no_match: true
+  description: "mongo_dart DbCollection.find(selector)."
+
+  imports:
+  - mongo_dart/mongo_dart.dart
+- id: dart.nosql.mongo_dart_find_one
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [mongo_dart]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.findOne$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongo find one selector
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test(dynamic input) { collection.findOne(input); }
+  - name: literal mongo find one selector negative
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test() { collection.findOne({"name": "safe"}); }
+    expect_no_match: true
+  description: "mongo_dart DbCollection.findOne."
+
+  imports:
+  - mongo_dart/mongo_dart.dart
+- id: dart.nosql.mongo_dart_aggregate
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [mongo_dart]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.aggregate$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongo aggregate pipeline
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test(dynamic input) { collection.aggregate(input); }
+  - name: literal mongo aggregate pipeline negative
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test() { collection.aggregate([{"safe": true}]); }
+    expect_no_match: true
+  description: "mongo_dart DbCollection.aggregate."
+
+  imports:
+  - mongo_dart/mongo_dart.dart
+- id: dart.nosql.mongo_dart_update
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [mongo_dart]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.update$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongo update selector
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test(dynamic input) { collection.update(input, {"safe": true}); }
+  - name: literal mongo update selector negative
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test() { collection.update({"id": 1}, {"safe": true}); }
+    expect_no_match: true
+  description: "mongo_dart DbCollection.update(tainted selector, update)."
+
+  imports:
+  - mongo_dart/mongo_dart.dart
+- id: dart.nosql.mongo_dart_update_document
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [mongo_dart]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.update$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted mongo update document
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test(dynamic input) { collection.update({"id": 1}, input); }
+  - name: literal mongo update document negative
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test() { collection.update({"id": 1}, {"safe": true}); }
+    expect_no_match: true
+  description: "mongo_dart DbCollection.update(selector, tainted update) — attacker-controlled update documents can inject operators."
+  imports:
+  - mongo_dart/mongo_dart.dart
+- id: dart.nosql.mongo_dart_remove
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [mongo_dart]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.remove$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted mongo remove selector
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test(dynamic input) { collection.remove(input); }
+  - name: literal mongo remove selector negative
+    code: |
+      import 'package:mongo_dart/mongo_dart.dart';
+      void test() { collection.remove({"name": "safe"}); }
+    expect_no_match: true
+  description: "mongo_dart DbCollection.remove with tainted selector."
+
+  imports:
+  - mongo_dart/mongo_dart.dart
+- id: dart.nosql.redis_eval
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [redis]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.eval$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted redis lua script
+    code: |
+      import 'package:redis/redis.dart';
+      import 'package:redis/redis.dart';
+      import 'package:redis/redis.dart';
+      import 'package:redis/redis.dart';
+      import 'package:redis/redis.dart'; // redis
+      void test(String input) { redis.eval(input); }
+  - name: literal redis lua script negative
+    code: |
+      import 'package:redis/redis.dart';
+      void test() { redis.eval("return 1"); }
+    expect_no_match: true
+  description: "redis package Redis.eval — Lua injection."
+
+  imports:
+  - redis/redis.dart
+- id: dart.nosql.firestore_where_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: nosql-injection
+  severity: medium
+  packages: [cloud_firestore]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [collection, where]
+  description: "Disabled — Firestore where() is type-bounded; flag with tainted field path."
+
+- id: dart.nosql.realm_query_string
+  enabled: true
+  language: dart
+  tag: nosql-injection
+  severity: high
+  packages: [realm]
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.query$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted realm query
+    code: |
+      import 'package:realm/realm.dart';
+      import 'package:realm/realm.dart';
+      import 'package:realm/realm.dart';
+      import 'package:realm/realm.dart';
+      import 'package:realm/realm.dart'; // realm
+      void test(String input) { realm.query(input); }
+  - name: literal realm query negative
+    code: |
+      import 'package:realm/realm.dart';
+      void test() { realm.query("name == $0"); }
+    expect_no_match: true
+  description: "Realm .query(String rqlFilter) — RQL injection when filter is concatenated with user input instead of using $0/$1 placeholders."
+  imports:
+  - realm/realm.dart

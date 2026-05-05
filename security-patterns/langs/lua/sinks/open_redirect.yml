@@ -1,0 +1,75 @@
+# Lua open-redirect sinks (OpenResty / Lapis).
+- id: lua.open_redirect.ngx_redirect
+  enabled: true
+  language: lua
+  tag: open-redirect
+  severity: high
+  packages: [openresty]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      attribute: [ngx, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.open_redirect.ngx_redirect example
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.redirect(url)
+      end
+  - name: literal path negative
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        ngx.redirect("/dashboard")
+      end
+    expect_no_match: true
+  description: "ngx.redirect(tainted_url) — 302 to attacker host; phishing / OAuth code-theft."
+
+- id: lua.open_redirect.lapis_redirect_to
+  enabled: true
+  language: lua
+  tag: open-redirect
+  severity: high
+  packages: [lapis]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: redirect_to
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.open_redirect.lapis_redirect_to example
+    code: |
+      local _lapis = require("lapis")
+      function example(input, url, id, payload, request, params, user)
+        redirect_to(url)
+      end
+  - name: literal path negative
+    code: |
+      local _lapis = require("lapis")
+      function example(input, url, id, payload, request, params, user)
+        redirect_to("/profile")
+      end
+    expect_no_match: true
+  description: "Lapis self:redirect_to(url) — 302 to tainted URL without host allowlist."
+
+- id: lua.open_redirect.lapis_build_url
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: open-redirect
+  severity: medium
+  packages: [lapis]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: build_url
+  description: "Disabled — lapis build_url; only a redirect sink if passed to redirect_to."

@@ -1,0 +1,127 @@
+# Swift CLI/local-trust sources.
+- id: swift.cli.argv
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: arguments
+  description: "Disabled — the current Swift adapter does not index property reads like `CommandLine.arguments`."
+- id: swift.cli.readline
+  enabled: true
+  language: swift
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      name: readLine
+  match_examples:
+    - name: declared shape
+      code: |
+        func test() { let input = "x"; let amount = 1; readLine(input) }
+  description: "readLine() — stdin."
+- id: swift.os.environment
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: environment
+  description: "Disabled — the current Swift adapter does not index property reads like `ProcessInfo.processInfo.environment`."
+- id: swift.argparser_argument
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: local
+  tag: local-input
+  payload_types: [text]
+  packages: [ArgumentParser]
+  match:
+    kind: read
+    target:
+      name: Argument
+  description: "Disabled — swift-argument-parser @Argument/@Option are property wrappers; not directly observable as reads without annotation support."
+
+- id: swift.ui.text_field_text
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: text
+  description: "Disabled — bare `.text` read matches too broadly without receiver narrowing to UITextField."
+
+- id: swift.ui.textview_text
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  match:
+    kind: read
+    target:
+      name: string
+  description: "Disabled — NSTextView.string overlaps with every Swift String."
+
+- id: swift.ui.textfield_text
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [UITextField, text]
+  description: "Disabled — `field.text` is a property read, and the current Swift adapter does not index that shape."
+
+- id: swift.ui.textview_string
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [NSTextView, string]
+  description: "Disabled — `view.string` is a property read, and the current Swift adapter does not index that shape."
+
+- id: swift.swiftui.textfield_binding
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: local
+  tag: ui-input
+  payload_types: [text]
+  frameworks: [swiftui]
+  match:
+    kind: call
+    callee:
+      attribute: [TextField, init]
+  description: "Disabled — SwiftUI TextField(_:text:) binds a local @State string; match fires on the declaration rather than the read, and property-wrapper flow isn't tracked."

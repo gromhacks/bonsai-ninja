@@ -1,0 +1,787 @@
+- id: typescript.nosql.mongo_find
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  imports:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: (?:^|\.)(?:find|findOne|findOneAnd(?:Update|Delete|Replace))$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo find
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.find(input, { \"$where\": input });\n}\n"
+  - name: mongo findOne destructured shorthand
+    code: "const _u = require(\"mongodb\");\nfunction login(collection: any, req: any) {\n  const { username, password } = req.body;\n  return collection.findOne({ username, password });\n}\n"
+    expect_match_text:
+    - collection.findOne
+  - name: mongoose model findOne destructured shorthand
+    code: "const _u = require(\"mongodb\");\nfunction login(UserModel: any, req: any) {\n  const { email, password } = req.body;\n  return UserModel.findOne({ email, password });\n}\n"
+    expect_match_text:
+    - UserModel.findOne
+  - name: couchdb selector find
+    code: "const _u = require(\"mongodb\");\nfunction query(db: any, selector: any) {\n  return db.find(selector);\n}\n"
+    expect_match_text:
+    - db.find
+  - name: mongo find literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.find({ active: true });\n}\n"
+    expect_no_match: true
+  description: 'Mongo-style find/findOne filter APIs - tainted filter documents enable operator injection. Merged collision aliases: typescript.nosql.mongo_findone, typescript.nosql.mongo_credential_object_filter, typescript.nosql.mongo_caller_controlled_filter_value, typescript.nosql.mongoose_model_find, typescript.nosql.couchdb_find.'
+  aliases:
+  - typescript.nosql.mongo_findone
+  - typescript.nosql.mongo_credential_object_filter
+  - typescript.nosql.mongo_caller_controlled_filter_value
+  - typescript.nosql.mongo_findone_body_spread
+  - typescript.nosql.mongo_shorthand_credential_filter
+  - typescript.nosql.mongoose_model_find
+  - typescript.nosql.mongoose_model_findone
+  - typescript.nosql.mongoose_credential_object_filter
+  - typescript.nosql.mongoose_caller_controlled_filter_value
+  - typescript.nosql.mongoose_shorthand_credential_filter
+  - typescript.nosql.mongoose_findoneandupdate
+  - typescript.nosql.mongoose_findoneanddelete
+  - typescript.nosql.mongoose_findoneandreplace
+  - typescript.nosql.mongoose_model_findone_body_spread
+  - typescript.nosql.couchdb_find
+- id: typescript.nosql.mongo_aggregate
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo aggregate
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.aggregate(input, { \"$where\": input });\n}\n"
+  - name: mongo aggregate literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.aggregate([{ $match: { active: true } }]);\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.aggregate — pipeline injection."
+- id: typescript.nosql.mongo_updateone
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - updateOne
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo updateone
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.updateOne(input, { \"$where\": input });\n}\n"
+  - name: mongo updateone literal filter negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.updateOne({ id: 1 }, { $set: { active: true } });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.updateOne(tainted filter, update) — operator injection in the selector."
+- id: typescript.nosql.mongo_updateone_update_doc
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - updateOne
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo updateone tainted update
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.updateOne({ id: 1 }, input);\n}\n"
+  - name: mongo updateone literal update negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.updateOne({ id: 1 }, { $set: { active: true } });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.updateOne(filter, tainted update) — attacker-controlled update documents can inject operators."
+- id: typescript.nosql.mongo_updatemany
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.updateMany$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo updatemany
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.updateMany(input, { \"$where\": input });\n}\n"
+  - name: mongo updatemany literal filter negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.updateMany({ active: false }, { $set: { active: true } });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.updateMany(tainted filter, update). Receiver-agnostic; OnlyWhenPackaged gate on mongodb narrows to that ecosystem."
+- id: typescript.nosql.mongo_updatemany_update_doc
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.updateMany$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo updatemany tainted update
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.updateMany({ active: false }, input);\n}\n"
+  - name: mongo updatemany literal update negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.updateMany({ active: false }, { $set: { active: true } });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.updateMany(filter, tainted update) — attacker-controlled update documents can inject operators."
+- id: typescript.nosql.mongo_deletemany
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - deleteMany
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo deletemany
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.deleteMany(input, { \"$where\": input });\n}\n"
+  - name: mongo deletemany literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.deleteMany({ inactive: true });\n}\n"
+    expect_no_match: true
+  description: mongodb collection.deleteMany.
+- id: typescript.nosql.mongo_deleteone
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - deleteOne
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo deleteone
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.deleteOne(input, { \"$where\": input });\n}\n"
+  - name: mongo deleteone literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.deleteOne({ id: 1 });\n}\n"
+    expect_no_match: true
+  description: mongodb collection.deleteOne.
+- id: typescript.nosql.mongo_command
+  enabled: false
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - command
+  match_examples:
+  - name: mongo command
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return db.command(input, { \"$where\": input });\n}\n"
+  description: "mongodb db.command — arbitrary command document."
+  disabled_reason:
+    code: over-broad
+- id: typescript.nosql.mongoose_model_find
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^Model\.find(?:One)?$
+  match_examples:
+  - name: mongoose model find
+    code: "const _u = require(\"mongoose\");\nfunction demo(input, req, obj) {\n  return Model.find(input, { \"$where\": input });\n}\n"
+  - name: mongoose findOne destructured shorthand
+    code: "const _u = require(\"mongoose\");\nfunction login(Model: any, req: any) {\n  const { username, password } = req.body;\n  return Model.findOne({ username, password });\n}\n"
+    expect_match_text:
+    - Model.findOne
+  description: Disabled duplicate - covered by canonical typescript.nosql.mongo_find generic Mongo-style find/findOne sink.
+  aliases:
+  - typescript.nosql.mongoose_model_findone
+  - typescript.nosql.mongoose_credential_object_filter
+  - typescript.nosql.mongoose_caller_controlled_filter_value
+  - typescript.nosql.mongoose_shorthand_credential_filter
+  - typescript.nosql.mongoose_findoneandupdate
+  - typescript.nosql.mongoose_findoneanddelete
+  - typescript.nosql.mongoose_findoneandreplace
+  - typescript.nosql.mongoose_model_findone_body_spread
+- id: typescript.nosql.mongoose_where
+  enabled: false
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  imports:
+  - mongoose
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Model
+      - where
+  match_examples:
+  - name: mongoose where
+    code: "const _u = require(\"mongoose\");\nfunction demo(input, req, obj) {\n  return Model.where(input, { \"$where\": input });\n}\n"
+  description: "Mongoose Model.where — $where operator allows JS execution."
+  disabled_reason:
+    code: over-broad
+- id: typescript.nosql.mongoose_updatemany
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: typescript.nosql.mongo_updatemany
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^Model\.updateMany$
+  description: "Subsumed by typescript.nosql.mongo_updatemany — the receiver-agnostic regex covers both `collection.updateMany` and `Model.updateMany` (mongoose) shapes."
+- id: typescript.nosql.redis_eval
+  enabled: false
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - redis
+  - ioredis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - eval
+  match_examples:
+  - name: redis eval
+    code: "const _u = require(\"redis\");\nfunction demo(input, req, obj) {\n  return client.eval(input, { \"$where\": input });\n}\n"
+  description: "redis/ioredis client.eval — tainted Lua script."
+  disabled_reason:
+    code: over-broad
+- id: typescript.nosql.redis_evalsha
+  enabled: false
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - redis
+  - ioredis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - evalsha
+  match_examples:
+  - name: redis evalsha
+    code: "const _u = require(\"redis\");\nfunction demo(input, req, obj) {\n  return client.evalsha(input, { \"$where\": input });\n}\n"
+  description: redis/ioredis client.evalsha.
+  disabled_reason:
+    code: over-broad
+- id: typescript.nosql.ioredis_eval
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - ioredis
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - redis
+      - eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ioredis eval
+    code: "const _u = require(\"ioredis\");\nfunction demo(input, req, obj) {\n  return redis.eval(input, { \"$where\": input });\n}\n"
+  - name: ioredis eval literal negative
+    code: "const _u = require(\"ioredis\");\nfunction demo(redis: any) {\n  return redis.eval(\"return 1\", 0);\n}\n"
+    expect_no_match: true
+  description: "ioredis redis.eval — tainted Lua script."
+- id: typescript.nosql.elasticsearch_search
+  enabled: false
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - '@elastic/elasticsearch'
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - search
+  match_examples:
+  - name: elasticsearch search
+    code: "const _u = require(\"@elastic/elasticsearch\");\nfunction demo(input, req, obj) {\n  return Client.search(input, { \"$where\": input });\n}\n"
+  description: elasticsearch Client.search(body=tainted DSL).
+  disabled_reason:
+    code: over-broad
+- id: typescript.nosql.couchdb_find
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - nano
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - find
+  match_examples:
+  - name: couchdb find
+    code: "const _u = require(\"nano\");\nfunction demo(input, req, obj) {\n  return db.find(input, { \"$where\": input });\n}\n"
+  description: Disabled duplicate - covered by canonical typescript.nosql.mongo_find generic Mongo-style find/findOne sink.
+- id: typescript.nosql.dynamodb_scan
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - '@aws-sdk/client-dynamodb'
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - client
+      - send
+  description: "Disabled — DynamoDB scan via .send(new ScanCommand); flag only with string-built FilterExpression."
+- id: typescript.nosql.dynamodb_scan_command
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - '@aws-sdk/client-dynamodb'
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: ScanCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dynamodb scan command
+    code: "const _u = require(\"@aws-sdk/client-dynamodb\");\nfunction demo(input, req, obj) {\n  return new ScanCommand(input);\n}\n"
+  - name: dynamodb scan command literal negative
+    code: "const _u = require(\"@aws-sdk/client-dynamodb\");\nfunction demo() {\n  return new ScanCommand({ TableName: \"users\", FilterExpression: \"active = :active\" });\n}\n"
+    expect_no_match: true
+  description: "new ScanCommand({FilterExpression, ProjectionExpression, ...}) — tainted expressions build a DynamoDB query shape."
+- id: typescript.nosql.dynamodb_query_command
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - '@aws-sdk/client-dynamodb'
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: QueryCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dynamodb query command
+    code: "const _u = require(\"@aws-sdk/client-dynamodb\");\nfunction demo(input, req, obj) {\n  return new QueryCommand(input);\n}\n"
+  - name: dynamodb query command literal negative
+    code: "const _u = require(\"@aws-sdk/client-dynamodb\");\nfunction demo() {\n  return new QueryCommand({ TableName: \"users\", KeyConditionExpression: \"pk = :pk\" });\n}\n"
+    expect_no_match: true
+  description: "new QueryCommand({KeyConditionExpression, FilterExpression, ...}) — tainted expressions drive DynamoDB query logic."
+- id: typescript.nosql.mongo_findandmodify
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - findAndModify
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo findandmodify
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.findAndModify(input, { \"$where\": input });\n}\n"
+  - name: mongo findandmodify literal query negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.findAndModify({ id: 1 }, [], { $set: { active: true } });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.findAndModify(tainted query, sort, update) — operator injection in filter."
+- id: typescript.nosql.mongo_findandmodify_update_doc
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - findAndModify
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: mongo findandmodify tainted update
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.findAndModify({ id: 1 }, [], input);\n}\n"
+  - name: mongo findandmodify literal update negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.findAndModify({ id: 1 }, [], { $set: { active: true } });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.findAndModify(query, sort, tainted update) — attacker-controlled update documents can inject operators."
+- id: typescript.nosql.mongo_replaceone
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - replaceOne
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo replaceone
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.replaceOne(input, { \"$where\": input });\n}\n"
+  - name: mongo replaceone literal filter negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.replaceOne({ id: 1 }, { name: \"safe\" });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.replaceOne(tainted filter, replacement) — operator injection in filter."
+- id: typescript.nosql.mongo_replaceone_replacement
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - replaceOne
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo replaceone tainted replacement
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.replaceOne({ id: 1 }, input);\n}\n"
+  - name: mongo replaceone literal replacement negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.replaceOne({ id: 1 }, { name: \"safe\" });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.replaceOne(filter, tainted replacement) — attacker-controlled replacement documents can clobber unintended fields."
+- id: typescript.nosql.mongo_bulkwrite
+  enabled: true
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.bulkWrite$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo bulkwrite
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.bulkWrite(input, { \"$where\": input });\n}\n"
+  - name: mongo bulkwrite literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.bulkWrite([{ updateOne: { filter: { id: 1 }, update: { $set: { active: true } } } }]);\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.bulkWrite — array of operations; per-op operator injection."
+- id: typescript.nosql.mongo_mapreduce
+  enabled: true
+  language: typescript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - mapReduce
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo mapreduce
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.mapReduce(input, function reduce() {});\n}\n"
+  - name: mongo mapreduce literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection) {\n  return collection.mapReduce(function map() {}, function reduce() {});\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.mapReduce(map, reduce, options) — tainted map JavaScript is evaluated server-side."
+- id: typescript.nosql.mongo_mapreduce_reduce
+  enabled: true
+  language: typescript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - mapReduce
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo mapreduce reduce
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.mapReduce(function map() {}, input);\n}\n"
+  - name: mongo mapreduce reduce literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection) {\n  return collection.mapReduce(function map() {}, function reduce() {});\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.mapReduce(map, reduce, options) — tainted reduce JavaScript is evaluated server-side."
+- id: typescript.nosql.mongo_mapreduce_options
+  enabled: true
+  language: typescript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - mapReduce
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: mongo mapreduce options finalize
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return collection.mapReduce(function map() {}, function reduce() {}, input);\n}\n"
+  - name: mongo mapreduce options literal negative
+    code: "const _u = require(\"mongodb\");\nfunction demo(collection) {\n  return collection.mapReduce(function map() {}, function reduce() {}, { out: \"tmp\" });\n}\n"
+    expect_no_match: true
+  description: "mongodb collection.mapReduce(map, reduce, options) — tainted options can carry server-side finalize JavaScript."
+- id: typescript.nosql.mongo_db_eval
+  enabled: false
+  language: typescript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - eval
+  match_examples:
+  - name: mongo db eval
+    code: "const _u = require(\"mongodb\");\nfunction demo(input, req, obj) {\n  return db.eval(input, { \"$where\": input });\n}\n"
+  description: "mongodb db.eval(script) — runs an arbitrary JS program inside mongod (legacy <4.2)."
+  disabled_reason:
+    code: over-broad
+- id: typescript.nosql.mongoose_aggregate
+  enabled: false
+  language: typescript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Model
+      - aggregate
+  match_examples:
+  - name: mongoose aggregate
+    code: "const _u = require(\"mongoose\");\nfunction demo(input, req, obj) {\n  return Model.aggregate(input, { \"$where\": input });\n}\n"
+  description: "Mongoose Model.aggregate — tainted pipeline stages allow $where/$expr/$function code execution."
+  disabled_reason:
+    code: over-broad
+- id: typescript.nosql.prisma_queryraw
+  enabled: true
+  language: typescript
+  tag: sqli
+  severity: high
+  packages:
+  - '@prisma/client'
+  - prisma
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrismaClient
+      - $queryRaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prisma queryraw
+    code: "const _u = require(\"@prisma/client\");\nfunction demo(input, req, obj) {\n  return PrismaClient.$queryRaw(input, { \"$where\": input });\n}\n"
+  - name: prisma queryraw literal negative
+    code: "const _u = require(\"@prisma/client\");\nfunction demo() {\n  return PrismaClient.$queryRaw`SELECT 1`;\n}\n"
+    expect_no_match: true
+  description: "Prisma $queryRaw with a tainted template — string interpolation bypasses parameterization. Use Prisma.sql template literal."
+- id: typescript.nosql.prisma_executeraw
+  enabled: true
+  language: typescript
+  tag: sqli
+  severity: high
+  packages:
+  - '@prisma/client'
+  - prisma
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PrismaClient
+      - $executeRaw
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prisma executeraw
+    code: "const _u = require(\"@prisma/client\");\nfunction demo(input, req, obj) {\n  return PrismaClient.$executeRaw(input, { \"$where\": input });\n}\n"
+  - name: prisma executeraw literal negative
+    code: "const _u = require(\"@prisma/client\");\nfunction demo() {\n  return PrismaClient.$executeRaw`DELETE FROM sessions WHERE expired = true`;\n}\n"
+    expect_no_match: true
+  description: "Prisma $executeRaw with tainted template — same hazard as $queryRaw."

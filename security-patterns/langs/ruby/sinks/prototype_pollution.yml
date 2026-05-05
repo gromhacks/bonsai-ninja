@@ -1,0 +1,32 @@
+# ruby prototype_pollution sinks.
+
+# Prototype-pollution sinks (round 3 — cross-language).
+- id: ruby.proto_pollution.deep_merge_bang
+  enabled: true
+  language: ruby
+  tag: prototype-pollution
+  severity: medium
+  packages: [activesupport]
+  cwe: [CWE-1321]
+  match:
+    kind: call
+    callee:
+      attribute: [Hash, deep_merge!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.proto_pollution.deep_merge_bang example
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        Hash.deep_merge!(params)
+      end
+  - name: ruby.proto_pollution.deep_merge_bang literal negative
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        Hash.deep_merge!({feature: true})
+      end
+    expect_no_match: true
+  description: 'Hash#deep_merge!(params) — ActiveSupport recursive merge into the receiver; attacker keys shadow defaults including config flags.'

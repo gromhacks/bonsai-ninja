@@ -1,0 +1,921 @@
+- id: javascript.nosql.mongo_find
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  imports:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: (?:^|\.)(?:find|findOne|findOneAnd(?:Update|Delete|Replace))$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo find
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.find(input, { "$where": input });
+      }
+  - name: mongo findOne destructured shorthand
+    code: |
+      const _u = require("mongodb");
+      function login(collection, req) {
+        const { username, password } = req.body;
+        return collection.findOne({ username, password });
+      }
+    expect_match_text:
+    - collection.findOne
+  - name: mongoose model findOne destructured shorthand
+    code: |
+      const _u = require("mongodb");
+      function login(UserModel, req) {
+        const { email, password } = req.body;
+        return UserModel.findOne({ email, password });
+      }
+    expect_match_text:
+    - UserModel.findOne
+  - name: couchdb selector find
+    code: |
+      const _u = require("mongodb");
+      function query(db, selector) {
+        return db.find(selector);
+      }
+    expect_match_text:
+    - db.find
+  - name: literal mongo find negative
+    code: |
+      const _u = require("mongodb");
+      function query(collection) {
+        return collection.find({ active: true });
+      }
+    expect_no_match: true
+  description: "Mongo-style find/findOne filter APIs — tainted object-form filters enable $where/$regex/operator injection. Merged collision aliases: javascript.nosql.mongo_findone, javascript.nosql.mongo_credential_object_filter, javascript.nosql.mongo_caller_controlled_filter_value, javascript.nosql.mongoose_find, javascript.nosql.couchdb_find."
+  aliases:
+  - javascript.nosql.mongo_findone
+  - javascript.nosql.mongo_credential_object_filter
+  - javascript.nosql.mongo_caller_controlled_filter_value
+  - javascript.nosql.mongo_findone_body_spread
+  - javascript.nosql.mongo_shorthand_credential_filter
+  - javascript.nosql.mongoose_find
+  - javascript.nosql.mongoose_findone
+  - javascript.nosql.mongoose_credential_object_filter
+  - javascript.nosql.mongoose_caller_controlled_filter_value
+  - javascript.nosql.mongoose_shorthand_credential_filter
+  - javascript.nosql.mongoose_findoneandupdate
+  - javascript.nosql.mongoose_findoneanddelete
+  - javascript.nosql.mongoose_findoneandreplace
+  - javascript.nosql.nedb_find
+  - javascript.nosql.mongoose_model_findone_body_spread
+  - javascript.nosql.couchdb_find
+- id: javascript.nosql.mongo_aggregate
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo aggregate
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.aggregate(input, { "$where": input });
+      }
+  - name: literal mongo aggregate negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.aggregate([{ $match: { active: true } }]);
+      }
+    expect_no_match: true
+  description: "mongodb collection.aggregate — tainted pipeline stages allow $where/$expr code execution."
+- id: javascript.nosql.mongo_updateone
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - updateOne
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo updateone
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.updateOne(input, { "$where": input });
+      }
+  - name: literal mongo updateone filter negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.updateOne({ id: 1 }, { $set: { active: true } });
+      }
+    expect_no_match: true
+  description: "mongodb collection.updateOne(tainted filter, update) — operator injection in the selector."
+- id: javascript.nosql.mongo_updateone_update_doc
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - updateOne
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo updateone tainted update
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.updateOne({ id: 1 }, input);
+      }
+  - name: literal mongo updateone update negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.updateOne({ id: 1 }, { $set: { active: true } });
+      }
+    expect_no_match: true
+  description: "mongodb collection.updateOne(filter, tainted update) — attacker-controlled update documents can inject operators."
+- id: javascript.nosql.mongo_updatemany
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - updateMany
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo updatemany
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.updateMany(input, { "$where": input });
+      }
+  - name: literal mongo updatemany filter negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.updateMany({ active: false }, { $set: { active: true } });
+      }
+    expect_no_match: true
+  description: "mongodb collection.updateMany(tainted filter, update) — same selector hazard as updateOne."
+- id: javascript.nosql.mongo_updatemany_update_doc
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - updateMany
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo updatemany tainted update
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.updateMany({ active: false }, input);
+      }
+  - name: literal mongo updatemany update negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.updateMany({ active: false }, { $set: { active: true } });
+      }
+    expect_no_match: true
+  description: "mongodb collection.updateMany(filter, tainted update) — attacker-controlled update documents can inject operators."
+- id: javascript.nosql.mongo_deletemany
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - deleteMany
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo deletemany
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.deleteMany(input, { "$where": input });
+      }
+  - name: literal mongo deletemany negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.deleteMany({ active: false });
+      }
+    expect_no_match: true
+  description: "mongodb collection.deleteMany — operator injection in filter can match unintended docs."
+- id: javascript.nosql.mongo_command
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - command
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo command
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return db.command(input, { "$where": input });
+      }
+  - name: literal mongo command negative
+    code: |
+      const _u = require("mongodb");
+      function demo(db) {
+        return db.command({ ping: 1 });
+      }
+    expect_no_match: true
+  description: "mongodb db.command runs an arbitrary command document — tainted input can invoke admin commands."
+- id: javascript.nosql.mongoose_find
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  - nedb
+  - '@seald-io/nedb'
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^Model\.find(?:One)?$
+  match_examples:
+  - name: mongoose find
+    code: |
+      const _u = require("mongoose");
+      function demo(input, req, obj) {
+        return Model.find(input, { "$where": input });
+      }
+  - name: mongoose findOne destructured shorthand
+    code: |
+      const _u = require("mongoose");
+      function login(Model, req) {
+        const { username, password } = req.body;
+        return Model.findOne({ username, password });
+      }
+    expect_match_text:
+    - Model.findOne
+  description: "Disabled duplicate - covered by canonical javascript.nosql.mongo_find generic Mongo-style find/findOne sink."
+  aliases:
+  - javascript.nosql.mongoose_findone
+  - javascript.nosql.mongoose_credential_object_filter
+  - javascript.nosql.mongoose_caller_controlled_filter_value
+  - javascript.nosql.mongoose_shorthand_credential_filter
+  - javascript.nosql.mongoose_findoneandupdate
+  - javascript.nosql.mongoose_findoneanddelete
+  - javascript.nosql.mongoose_findoneandreplace
+  - javascript.nosql.nedb_find
+  - javascript.nosql.mongoose_model_findone_body_spread
+- id: javascript.nosql.mongoose_where
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  imports:
+  - mongoose
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Model
+      - where
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongoose where
+    code: |
+      const _u = require("mongoose");
+      function demo(input, req, obj) {
+        return Model.where(input, { "$where": input });
+      }
+  - name: literal mongoose where negative
+    code: |
+      const _u = require("mongoose");
+      function demo(Model) {
+        return Model.where({ active: true });
+      }
+    expect_no_match: true
+  description: "Mongoose Model.where — tainted $where string is evaluated as server-side JavaScript."
+- id: javascript.nosql.elasticsearch_search
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - '@elastic/elasticsearch'
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Client
+      - search
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: elasticsearch search
+    code: |
+      const _u = require("@elastic/elasticsearch");
+      function demo(input, req, obj) {
+        return Client.search(input, { "$where": input });
+      }
+  - name: literal elasticsearch search negative
+    code: |
+      const _u = require("@elastic/elasticsearch");
+      function demo(Client) {
+        return Client.search({ index: "users", query: { match_all: {} } });
+      }
+    expect_no_match: true
+  description: "elasticsearch Client.search with a tainted `body` DSL — attacker controls query shape."
+- id: javascript.nosql.couchdb_find
+  enabled: false
+  disabled_reason:
+    code: subsumed
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - nano
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - find
+  match_examples:
+  - name: couchdb find
+    code: |
+      const _u = require("nano");
+      function demo(input, req, obj) {
+        return db.find(input, { "$where": input });
+      }
+  description: "Disabled duplicate - covered by canonical javascript.nosql.mongo_find generic Mongo-style find/findOne sink."
+- id: javascript.nosql.dynamodb_scan
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - '@aws-sdk/client-dynamodb'
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DynamoDBClient
+      - send
+  description: "Disabled — DynamoDB scan/query runs via generic .send(Command); flag only when the FilterExpression is string-built."
+- id: javascript.nosql.dynamodb_scan_command
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - '@aws-sdk/client-dynamodb'
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: ScanCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dynamodb scan command
+    code: |
+      const _u = require("@aws-sdk/client-dynamodb");
+      function demo(input, req, obj) {
+        return new ScanCommand(input);
+      }
+  - name: literal dynamodb scan command negative
+    code: |
+      const _u = require("@aws-sdk/client-dynamodb");
+      function demo() {
+        return new ScanCommand({ TableName: "Users" });
+      }
+    expect_no_match: true
+  description: "new ScanCommand({FilterExpression, ProjectionExpression, ...}) — tainted expressions build a DynamoDB query shape."
+- id: javascript.nosql.dynamodb_query_command
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - '@aws-sdk/client-dynamodb'
+  cwe:
+  - CWE-943
+  match:
+    kind: new
+    callee:
+      name: QueryCommand
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dynamodb query command
+    code: |
+      const _u = require("@aws-sdk/client-dynamodb");
+      function demo(input, req, obj) {
+        return new QueryCommand(input);
+      }
+  - name: literal dynamodb query command negative
+    code: |
+      const _u = require("@aws-sdk/client-dynamodb");
+      function demo() {
+        return new QueryCommand({ TableName: "Users" });
+      }
+    expect_no_match: true
+  description: "new QueryCommand({KeyConditionExpression, FilterExpression, ...}) — tainted expressions drive DynamoDB query logic."
+- id: javascript.nosql.mongo_findandmodify
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - findAndModify
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo findandmodify
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.findAndModify(input, { "$where": input });
+      }
+  - name: literal mongo findandmodify negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.findAndModify({ active: true }, []);
+      }
+    expect_no_match: true
+  description: "mongodb collection.findAndModify (legacy 2.x driver) — operator injection in filter/update/sort; tainted $where in filter is server-side JS exec."
+- id: javascript.nosql.mongo_replaceone
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - replaceOne
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo replaceone
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.replaceOne(input, { "$where": input });
+      }
+  - name: literal mongo replaceone negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.replaceOne({ id: 1 }, { active: true });
+      }
+    expect_no_match: true
+  description: "mongodb collection.replaceOne — operator injection in filter; replacement document can clobber unintended fields."
+- id: javascript.nosql.mongo_deleteone
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - deleteOne
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo deleteone
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.deleteOne(input, { "$where": input });
+      }
+  - name: literal mongo deleteone negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.deleteOne({ active: false });
+      }
+    expect_no_match: true
+  description: "mongodb collection.deleteOne — operator injection in filter can match unintended docs."
+- id: javascript.nosql.mongo_bulkwrite
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongodb
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.bulkWrite$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo bulkwrite
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.bulkWrite(input, { "$where": input });
+      }
+  - name: literal mongo bulkwrite negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.bulkWrite([{ insertOne: { document: { active: true } } }]);
+      }
+    expect_no_match: true
+  description: "mongodb collection.bulkWrite — array of operations; any tainted filter/update inherits per-op operator injection."
+- id: javascript.nosql.mongo_mapreduce
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - mapReduce
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo mapreduce map
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.mapReduce(input, function reduce() {});
+      }
+  - name: literal mongo mapreduce map negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.mapReduce(function map() {}, function reduce() {});
+      }
+    expect_no_match: true
+  description: "mongodb collection.mapReduce(map, reduce, options) — tainted map JavaScript is evaluated server-side."
+- id: javascript.nosql.mongo_mapreduce_reduce
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - mapReduce
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: mongo mapreduce reduce
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.mapReduce(function map() {}, input);
+      }
+  - name: literal mongo mapreduce reduce negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.mapReduce(function map() {}, function reduce() {});
+      }
+    expect_no_match: true
+  description: "mongodb collection.mapReduce(map, reduce, options) — tainted reduce JavaScript is evaluated server-side."
+- id: javascript.nosql.mongo_mapreduce_options
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - collection
+      - mapReduce
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: mongo mapreduce options finalize
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return collection.mapReduce(function map() {}, function reduce() {}, input);
+      }
+  - name: literal mongo mapreduce options negative
+    code: |
+      const _u = require("mongodb");
+      function demo(collection) {
+        return collection.mapReduce(function map() {}, function reduce() {}, { out: "tmp" });
+      }
+    expect_no_match: true
+  description: "mongodb collection.mapReduce(map, reduce, options) — tainted options can carry server-side finalize JavaScript."
+- id: javascript.nosql.mongo_db_eval
+  enabled: true
+  language: javascript
+  tag: code-injection
+  severity: critical
+  packages:
+  - mongodb
+  cwe:
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - db
+      - eval
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongo db eval
+    code: |
+      const _u = require("mongodb");
+      function demo(input, req, obj) {
+        return db.eval(input, { "$where": input });
+      }
+  - name: literal mongo db eval negative
+    code: |
+      const _u = require("mongodb");
+      function demo(db) {
+        return db.eval("return 1");
+      }
+    expect_no_match: true
+  description: "mongodb db.eval(script) — runs an arbitrary JavaScript program inside the mongod server. Removed in 4.2 but still present on legacy clusters; tainted script = RCE."
+- id: javascript.nosql.mongoose_aggregate
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Model
+      - aggregate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongoose aggregate
+    code: |
+      const _u = require("mongoose");
+      function demo(input, req, obj) {
+        return Model.aggregate(input, { "$where": input });
+      }
+  - name: literal mongoose aggregate negative
+    code: |
+      const _u = require("mongoose");
+      function demo(Model) {
+        return Model.aggregate([{ $match: { active: true } }]);
+      }
+    expect_no_match: true
+  description: "Mongoose Model.aggregate — tainted pipeline stages allow $where/$expr/$function code execution."
+- id: javascript.nosql.mongoose_bulkwrite
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: high
+  packages:
+  - mongoose
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      regex: ^Model\.bulkWrite$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: mongoose bulkwrite
+    code: |
+      const _u = require("mongoose");
+      function demo(input, req, obj) {
+        return Model.bulkWrite(input, { "$where": input });
+      }
+  - name: literal mongoose bulkwrite negative
+    code: |
+      const _u = require("mongoose");
+      function demo(Model) {
+        return Model.bulkWrite([{ insertOne: { document: { active: true } } }]);
+      }
+    expect_no_match: true
+  description: "Mongoose Model.bulkWrite — array of operations; per-op operator injection inherited."
+- id: javascript.nosql.nedb_update
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - nedb
+  - '@seald-io/nedb'
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Datastore
+      - update
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: nedb update
+    code: |
+      const _u = require("nedb");
+      function demo(input, req, obj) {
+        return Datastore.update(input, { "$where": input });
+      }
+  - name: literal nedb update selector negative
+    code: |
+      const _u = require("nedb");
+      function demo(Datastore) {
+        return Datastore.update({ id: 1 }, { $set: { active: true } });
+      }
+    expect_no_match: true
+  description: "NeDB Datastore.update(tainted selector, modifier) — operator injection in selector."
+- id: javascript.nosql.nedb_update_modifier
+  enabled: true
+  language: javascript
+  tag: nosql-injection
+  severity: medium
+  packages:
+  - nedb
+  - '@seald-io/nedb'
+  cwe:
+  - CWE-943
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Datastore
+      - update
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: nedb update tainted modifier
+    code: |
+      const _u = require("nedb");
+      function demo(input, req, obj) {
+        return Datastore.update({ id: 1 }, input);
+      }
+  - name: literal nedb update modifier negative
+    code: |
+      const _u = require("nedb");
+      function demo(Datastore) {
+        return Datastore.update({ id: 1 }, { $set: { active: true } });
+      }
+    expect_no_match: true
+  description: "NeDB Datastore.update(selector, tainted modifier) — attacker-controlled modifiers can inject operators."

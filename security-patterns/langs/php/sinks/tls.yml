@@ -1,0 +1,71 @@
+- id: php.tls.guzzle_verify_false
+  enabled: true
+  language: php
+  tag: weak-tls
+  severity: high
+  packages:
+  - guzzlehttp/guzzle
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: verify
+  match_examples:
+  - name: php.tls.guzzle_verify_false example
+    code: |
+      <?php
+      use guzzlehttp\guzzle;
+      use guzzlehttp\guzzle;
+      function example($input, $url, $id, $payload, $request) {
+        $verify = false;;
+      }
+  description: Guzzle 'verify' => false.
+  imports:
+  - guzzlehttp\guzzle
+  - guzzlehttp
+- id: php.tls.stream_context_verify_peer_off
+  enabled: true
+  language: php
+  tag: weak-tls
+  severity: high
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: verify_peer
+  match_examples:
+  - name: php.tls.stream_context_verify_peer_off example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $verify_peer = false;;\n}\n"
+  description: stream context 'verify_peer' => false.
+- id: php.tls.stream_context_verify_peer_name_off
+  enabled: true
+  language: php
+  tag: weak-tls
+  severity: high
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: verify_peer_name
+  match_examples:
+  - name: php.tls.stream_context_verify_peer_name_off example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $verify_peer_name = false;;\n}\n"
+  description: stream context 'verify_peer_name' => false.
+- id: php.tls.allow_self_signed
+  enabled: true
+  language: php
+  tag: weak-tls
+  severity: medium
+  cwe:
+  - CWE-295
+  match:
+    kind: write
+    target:
+      name: allow_self_signed
+  match_examples:
+  - name: php.tls.allow_self_signed example
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $allow_self_signed = false;;\n}\n"
+  description: stream context 'allow_self_signed' => true.

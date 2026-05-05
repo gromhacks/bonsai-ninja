@@ -1,0 +1,123 @@
+# Ruby open-redirect sinks (Rails / Sinatra / Grape / Hanami).
+# Rails `redirect_to` and Hanami `redirect_to` match identically on name.
+# Sinatra `redirect` and Grape `redirect` also match identically.
+# Consolidated to avoid double-firing on the same call site.
+- id: ruby.open_redirect.redirect_to
+  enabled: true
+  language: ruby
+  tag: open-redirect
+  severity: high
+  packages: [actionpack, hanami]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: redirect_to
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.open_redirect.redirect_to example
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        redirect_to(url)
+      end
+  - name: ruby.open_redirect.redirect_to literal negative
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        redirect_to("/dashboard")
+      end
+    expect_no_match: true
+  description: "redirect_to(tainted) — Rails / Hanami controller action."
+
+- id: ruby.open_redirect.rails_redirect_back
+  enabled: true
+  language: ruby
+  tag: open-redirect
+  severity: medium
+  packages: [actionpack]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: redirect_back
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.open_redirect.rails_redirect_back example
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        redirect_back(url)
+      end
+  - name: ruby.open_redirect.rails_redirect_back literal negative
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        redirect_back("/dashboard")
+      end
+    expect_no_match: true
+  description: "redirect_back — flag tainted fallback_location."
+
+- id: ruby.open_redirect.rails_redirect_back_or_to
+  enabled: true
+  language: ruby
+  tag: open-redirect
+  severity: medium
+  packages: [actionpack]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: redirect_back_or_to
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.open_redirect.rails_redirect_back_or_to example
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        redirect_back_or_to(url)
+      end
+  - name: ruby.open_redirect.rails_redirect_back_or_to literal negative
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        redirect_back_or_to("/dashboard")
+      end
+    expect_no_match: true
+  description: "redirect_back_or_to — flag tainted fallback."
+
+- id: ruby.open_redirect.redirect
+  enabled: true
+  language: ruby
+  tag: open-redirect
+  severity: high
+  packages: [sinatra, grape]
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.open_redirect.redirect example
+    code: |
+      require "sinatra"
+      def example(input, url, id, payload, request, params)
+        redirect(input)
+      end
+  - name: ruby.open_redirect.redirect literal negative
+    code: |
+      require "sinatra"
+      def example(input, url, id, payload, request, params)
+        redirect("/dashboard")
+      end
+    expect_no_match: true
+  description: "redirect(tainted) — Sinatra / Grape helper."

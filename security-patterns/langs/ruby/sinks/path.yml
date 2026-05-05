@@ -1,0 +1,602 @@
+- id: ruby.path.file_read
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - read
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.file_read example
+    code: "def example(input, url, id, payload, request, params)\n  File.read(input)\nend\n"
+  - name: ruby.path.file_read literal negative
+    code: "def example(input, url, id, payload, request, params)\n  File.read(\"config/settings.yml\")\nend\n"
+    expect_no_match: true
+  description: File.read with tainted path.
+- id: ruby.path.file_write
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.file_write example
+    code: "def example(input, url, id, payload, request, params)\n  File.write(input, \"ok\")\nend\n"
+  - name: ruby.path.file_write literal negative
+    code: "def example(input, url, id, payload, request, params)\n  File.write(\"tmp/report.txt\", \"ok\")\nend\n"
+    expect_no_match: true
+  description: "File.write with tainted path. TODO(only_when_packaged): `file_write` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'write']` match only."
+- id: ruby.path.file_readlines
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - readlines
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.file_readlines example
+    code: "def example(input, url, id, payload, request, params)\n  File.readlines(input)\nend\n"
+  - name: ruby.path.file_readlines literal negative
+    code: "def example(input, url, id, payload, request, params)\n  File.readlines(\"config/settings.yml\")\nend\n"
+    expect_no_match: true
+  description: "File.readlines. TODO(only_when_packaged): `file_readlines` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'readlines']` match only."
+- id: ruby.path.file_delete
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: critical
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.file_delete example
+    code: "def example(input, url, id, payload, request, params)\n  File.delete(input)\nend\n"
+  - name: ruby.path.file_delete literal negative
+    code: "def example(input, url, id, payload, request, params)\n  File.delete(\"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "File.delete with tainted path. TODO(only_when_packaged): `file_delete` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'delete']` match only."
+- id: ruby.path.file_unlink
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: critical
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - unlink
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.file_unlink example
+    code: "def example(input, url, id, payload, request, params)\n  File.unlink(input)\nend\n"
+  - name: ruby.path.file_unlink literal negative
+    code: "def example(input, url, id, payload, request, params)\n  File.unlink(\"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "File.unlink with tainted path. TODO(only_when_packaged): `file_unlink` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'unlink']` match only."
+- id: ruby.path.fileutils_rm
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: critical
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - rm
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.fileutils_rm example
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.rm(input)\nend\n"
+  - name: ruby.path.fileutils_rm literal negative
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.rm(\"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "FileUtils.rm — destructive."
+- id: ruby.path.fileutils_rm_rf
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: critical
+  packages:
+  - fileutils
+  imports:
+  - fileutils
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - rm_rf
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.fileutils_rm_rf example
+    code: |
+      require "fileutils"
+      def example(input, url, id, payload, request, params)
+        FileUtils.rm_rf(input)
+      end
+  - name: ruby.path.fileutils_rm_rf literal negative
+    code: |
+      require "fileutils"
+      def example(input, url, id, payload, request, params)
+        FileUtils.rm_rf("tmp/cache")
+      end
+    expect_no_match: true
+  description: "FileUtils.rm_rf — destructive recursive."
+- id: ruby.path.fileutils_cp
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - cp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.fileutils_cp source example
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.cp(input, \"tmp/report.txt\")\nend\n"
+  - name: ruby.path.fileutils_cp source literal negative
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.cp(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "FileUtils.cp(tainted_source, dest) — attacker-controlled paths can copy arbitrary files."
+- id: ruby.path.fileutils_cp_dest
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - cp
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ruby.path.fileutils_cp destination example
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.cp(\"public/report.txt\", input)\nend\n"
+  - name: ruby.path.fileutils_cp destination literal negative
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.cp(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "FileUtils.cp(source, tainted_dest) — attacker-controlled destinations can overwrite targets."
+- id: ruby.path.fileutils_mv
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - mv
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.fileutils_mv source example
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.mv(input, \"tmp/report.txt\")\nend\n"
+  - name: ruby.path.fileutils_mv source literal negative
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.mv(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "FileUtils.mv(tainted_source, dest) — attacker-controlled paths can move arbitrary files."
+- id: ruby.path.fileutils_mv_dest
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - mv
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ruby.path.fileutils_mv destination example
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.mv(\"public/report.txt\", input)\nend\n"
+  - name: ruby.path.fileutils_mv destination literal negative
+    code: "def example(input, url, id, payload, request, params)\n  FileUtils.mv(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "FileUtils.mv(source, tainted_dest) — attacker-controlled destinations can relocate files outside the intended root."
+- id: ruby.path.dir_glob
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Dir
+      - glob
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.dir_glob example
+    code: "def example(input, url, id, payload, request, params)\n  Dir.glob(input)\nend\n"
+  - name: ruby.path.dir_glob literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Dir.glob(\"app/**/*.rb\")\nend\n"
+    expect_no_match: true
+  description: Dir.glob with tainted pattern.
+- id: ruby.path.send_file
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  packages:
+  - rails
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: send_file
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.send_file example
+    code: |
+      require "rails"
+      def example(input, url, id, payload, request, params)
+        send_file(input)
+      end
+  - name: ruby.path.send_file literal negative
+    code: |
+      require "rails"
+      def example(input, url, id, payload, request, params)
+        send_file("public/report.pdf")
+      end
+    expect_no_match: true
+  description: Rails send_file with tainted path.
+- id: ruby.path.send_data
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: path-traversal
+  severity: medium
+  packages:
+  - rails
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: send_data
+  description: "Disabled — send_data takes bytes, not a path."
+- id: ruby.path.kernel_require
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: path-traversal
+  severity: critical
+  cwe:
+  - CWE-22
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      name: require
+  match_examples:
+  - name: ruby.path.kernel_require example
+    code: "def example(input, url, id, payload, request, params)\n  require(input)\nend\n"
+  description: "Disabled — bare `name: require` matches every literal `require \"lib\"` import, the canonical Ruby module-loading statement. Every fixture's import line collides with this rule, so it cannot stay enabled without an arg-shape constraint that excludes literal strings."
+- id: ruby.path.io_read
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - IO
+      - read
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.io_read example
+    code: "def example(input, url, id, payload, request, params)\n  IO.read(input)\nend\n"
+  - name: ruby.path.io_read literal negative
+    code: "def example(input, url, id, payload, request, params)\n  IO.read(\"config/settings.yml\")\nend\n"
+    expect_no_match: true
+  description: IO.read with tainted path.
+- id: ruby.path.io_binread
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - IO
+      - binread
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.io_binread example
+    code: "def example(input, url, id, payload, request, params)\n  IO.binread(input)\nend\n"
+  - name: ruby.path.io_binread literal negative
+    code: "def example(input, url, id, payload, request, params)\n  IO.binread(\"config/settings.bin\")\nend\n"
+    expect_no_match: true
+  description: "IO.binread with tainted path. TODO(only_when_packaged): `io_binread` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['IO', 'binread']` match only."
+- id: ruby.path.io_write
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - IO
+      - write
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.io_write example
+    code: "def example(input, url, id, payload, request, params)\n  IO.write(input, \"ok\")\nend\n"
+  - name: ruby.path.io_write literal negative
+    code: "def example(input, url, id, payload, request, params)\n  IO.write(\"tmp/report.txt\", \"ok\")\nend\n"
+    expect_no_match: true
+  description: "IO.write with tainted path. TODO(only_when_packaged): `io_write` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['IO', 'write']` match only."
+- id: ruby.path.io_binwrite
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - IO
+      - binwrite
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.io_binwrite example
+    code: "def example(input, url, id, payload, request, params)\n  IO.binwrite(input, \"ok\")\nend\n"
+  - name: ruby.path.io_binwrite literal negative
+    code: "def example(input, url, id, payload, request, params)\n  IO.binwrite(\"tmp/report.bin\", \"ok\")\nend\n"
+    expect_no_match: true
+  description: "IO.binwrite with tainted path. TODO(only_when_packaged): `io_binwrite` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['IO', 'binwrite']` match only."
+- id: ruby.path.dir_mkdir
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Dir
+      - mkdir
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.dir_mkdir example
+    code: "def example(input, url, id, payload, request, params)\n  Dir.mkdir(input)\nend\n"
+  - name: ruby.path.dir_mkdir literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Dir.mkdir(\"tmp/uploads\")\nend\n"
+    expect_no_match: true
+  description: "Dir.mkdir with tainted path. TODO(only_when_packaged): `dir_mkdir` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Dir', 'mkdir']` match only."
+- id: ruby.path.file_rename
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - rename
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.file_rename source example
+    code: "def example(input, url, id, payload, request, params)\n  File.rename(input, \"tmp/report.txt\")\nend\n"
+  - name: ruby.path.file_rename source literal negative
+    code: "def example(input, url, id, payload, request, params)\n  File.rename(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "File.rename(tainted_src, dst) — attacker-controlled source paths can move arbitrary files. TODO(only_when_packaged): `file_rename` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'rename']` match only."
+- id: ruby.path.file_rename_dest
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - rename
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ruby.path.file_rename destination example
+    code: "def example(input, url, id, payload, request, params)\n  File.rename(\"public/report.txt\", input)\nend\n"
+  - name: ruby.path.file_rename destination literal negative
+    code: "def example(input, url, id, payload, request, params)\n  File.rename(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "File.rename(src, tainted_dst) — attacker-controlled destinations can overwrite arbitrary files. TODO(only_when_packaged): `file_rename_dest` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'rename']` match only."
+- id: ruby.path.fileutils_mv_alias
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: path-traversal
+  severity: high
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - File
+      - move
+  description: "Disabled — File.move is not stdlib; kept as placeholder only if custom helper."
+- id: ruby.path.pathname_new
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Pathname
+      - new
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.pathname_new example
+    code: "def example(input, url, id, payload, request, params)\n  Pathname.new(input)\nend\n"
+  - name: ruby.path.pathname_new literal negative
+    code: "def example(input, url, id, payload, request, params)\n  Pathname.new(\"tmp/report.txt\")\nend\n"
+    expect_no_match: true
+  description: "Pathname.new(tainted) — construction alone is safe; flag when later passed to a file sink without root-prefix check."
+- id: ruby.path.pathname_join
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: ruby
+  tag: path-traversal
+  severity: medium
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      name: join
+  description: "Disabled — bare `name: join` tail-matches Array#join / String#join everywhere; enable only with receiver-type narrowing for Pathname#join."
+- id: ruby.path.fileutils_mkdir_p
+  enabled: true
+  language: ruby
+  tag: path-traversal
+  severity: medium
+  packages:
+  - fileutils
+  imports:
+  - fileutils
+  cwe:
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - FileUtils
+      - mkdir_p
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.path.fileutils_mkdir_p example
+    code: |
+      require "fileutils"
+      def example(input, url, id, payload, request, params)
+        FileUtils.mkdir_p(input)
+      end
+  - name: ruby.path.fileutils_mkdir_p literal negative
+    code: |
+      require "fileutils"
+      def example(input, url, id, payload, request, params)
+        FileUtils.mkdir_p("tmp/uploads")
+      end
+    expect_no_match: true
+  description: FileUtils.mkdir_p with tainted path.

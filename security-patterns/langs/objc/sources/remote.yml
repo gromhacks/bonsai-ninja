@@ -1,0 +1,302 @@
+# Objective-C remote-trust HTTP / IPC / push / deeplink sources (Cocoa + UIKit).
+#
+# ── Adapter gap (audited 2026-04) ────────────────────────────────────────────
+# UIKit/Foundation deliver remote input through Objective-C selector handlers
+# whose taintable values are *individual selector pieces* of a multi-part
+# message, e.g.
+#
+#   - application:openURL:options:                     -> `url`, `options`
+#   - application:didReceiveRemoteNotification:        -> `userInfo`
+#   - application:continueUserActivity:restorationHandler:
+#                                                      -> `userActivity`
+#   - userContentController:didReceiveScriptMessage:   -> `message`
+#   - URLSession:dataTask:didReceiveData:              -> `data`
+#   - completionHandler:(NSData*, NSURLResponse*, NSError*)
+#                                                      -> `data`
+#
+# `kind: param` matches against the parameter identifier. The
+# push-notification `userInfo` shape is enabled because that parameter name
+# is stable in ordinary UIKit delegates. Other selector-piece-driven handler
+# values remain disabled until the adapter binds selector pieces to parameter
+# identities, and ObjC dot-notation property reads (e.g.
+# `notification.userInfo`, `pasteboard.string`) still need `read` facts.
+#
+# Per docs/pattern-guide.mdx the fix belongs in the ObjC adapter
+# (crates/lang_objc), not in YAML. Tracking task: extend the adapter to
+# (a) emit param facts keyed by selector-piece, and (b) emit `read` events
+# for property_expression accesses. Once shipped, flip the remaining
+# `enabled: false` rules below to true and re-run `pack --audit`.
+#
+# Below this header: rules using call-shape with receiver narrowing — these
+# work today.
+
+- id: objc.source.nsurlsession_datataskwithurl
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  payload_types: [url, binary, json]
+  match:
+    kind: call
+    callee:
+      name: dataTaskWithURL
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; dataTaskWithURL(input); }
+  description: "NSURLSession -dataTaskWithURL: / -dataTaskWithURL:completionHandler: — remote HTTP fetch. Response body becomes tainted input."
+
+- id: objc.source.nsurlsession_datataskwithrequest
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  payload_types: [binary, json]
+  match:
+    kind: call
+    callee:
+      name: dataTaskWithRequest
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; dataTaskWithRequest(input); }
+  description: "NSURLSession -dataTaskWithRequest: / -dataTaskWithRequest:completionHandler: — outbound HTTP; response body becomes tainted input."
+
+- id: objc.source.nsurlsession_downloadtask
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  payload_types: [binary]
+  match:
+    kind: call
+    callee:
+      regex: "^(downloadTaskWithURL|downloadTaskWithRequest)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; downloadTaskWithURL(input); }
+  description: "NSURLSession -downloadTaskWithURL: / -downloadTaskWithRequest: — file downloaded from remote endpoint; bytes are tainted input."
+
+- id: objc.source.nsurlconnection_send_synchronous
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  payload_types: [binary, text]
+  match:
+    kind: call
+    callee:
+      regex: "^(sendSynchronousRequest|sendAsynchronousRequest)$"
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; sendSynchronousRequest(input); }
+  description: "NSURLConnection +sendSynchronousRequest:returningResponse:error: / +sendAsynchronousRequest:queue:completionHandler: (deprecated) — returns server-controlled NSData."
+
+- id: objc.source.nsdata_contents_of_url
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  match:
+    kind: call
+    callee:
+      name: dataWithContentsOfURL
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; dataWithContentsOfURL(input); }
+  description: "NSData +dataWithContentsOfURL: — blocking fetch. Response bytes are remote input."
+
+- id: objc.source.nsstring_contents_of_url
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  match:
+    kind: call
+    callee:
+      name: stringWithContentsOfURL
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; stringWithContentsOfURL(input); }
+  description: "NSString +stringWithContentsOfURL: — blocking HTTP GET returning tainted text."
+
+- id: objc.source.afnetworking_response
+  enabled: true
+  language: objc
+  trust: remote
+  tag: http-input
+  payload_types: [json, binary]
+  packages: [AFNetworking]
+  match:
+    kind: call
+    callee:
+      regex: "^(?:.*\\.)?(GET|POST|PUT|DELETE|PATCH|HEAD)$"
+  constraints:
+  - receiver_name_in: [AFHTTPSessionManager, AFHTTPRequestOperationManager, manager, sessionManager, httpManager, client]
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(id input) { id target = input; int amount = 1; [AFHTTPSessionManager GET:input]; }
+  description: "AFNetworking AFHTTPSessionManager -GET:/-POST: — success block receives server-controlled responseObject (deserialized JSON)."
+
+- id: objc.source.nsurlrequest_param
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: http-input
+  payload_types: [url]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — bare param name 'request' fires on every handler arg. Re-enable once adapter binds selector-pieces to param identifiers."
+
+- id: objc.source.nsurlsession_completion_data
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: http-input
+  payload_types: [binary, json]
+  match:
+    kind: param
+    target:
+      name: completionHandler
+  description: "Disabled — NSURLSession completion block `data` arg is not observable by param-name match; needs adapter selector-piece -> param binding (see header)."
+
+- id: objc.source.openurl_options_url
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: deep-link
+  payload_types: [url]
+  match:
+    kind: param
+    target:
+      name: url
+  description: "Disabled — `application:openURL:options:` deep-link handler `url` parameter. Needs adapter selector-piece -> param binding to scope match to handler enclosing function (see header)."
+
+- id: objc.source.openurl_options_dict
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: deep-link
+  payload_types: [json]
+  match:
+    kind: param
+    target:
+      name: options
+  description: "Disabled — `application:openURL:options:` `options` dict (UIApplicationOpenURLOptionsKey -> NSObject) carries attacker-controlled source-app payload. Needs adapter binding (see header)."
+
+- id: objc.source.universal_link_continueuseractivity
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: deep-link
+  payload_types: [url]
+  match:
+    kind: param
+    target:
+      name: userActivity
+  description: "Disabled — `application:continueUserActivity:restorationHandler:` Universal Link handler. NSUserActivity.webpageURL is attacker-controlled. Needs adapter binding (see header)."
+
+- id: objc.source.push_notification_userinfo
+  enabled: true
+  language: objc
+  trust: remote
+  tag: push-input
+  payload_types: [json]
+  match:
+    kind: param
+    target:
+      name: userInfo
+  match_examples:
+  - name: declared shape
+    code: |
+      void handle(id userInfo) { }
+  description: "`application:didReceiveRemoteNotification:` / `:fetchCompletionHandler:` APNS `userInfo` payload — remote push-notification data."
+
+- id: objc.source.push_notification_userinfo_property
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: push-input
+  payload_types: [json]
+  match:
+    kind: read
+    target:
+      attribute: [notification, userInfo]
+  description: "Disabled — property read `notification.userInfo` on UNNotification. Needs adapter property_expression read events (see header)."
+
+- id: objc.source.wkwebview_usercontentcontroller_message
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: ipc-input
+  payload_types: [json, text]
+  match:
+    kind: param
+    target:
+      name: message
+  description: "Disabled — `userContentController:didReceiveScriptMessage:` JS->native bridge payload (WKScriptMessage.body). Needs adapter selector-piece -> param binding (see header)."
+
+- id: objc.source.message_compose_body
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: objc
+  trust: remote
+  tag: deep-link
+  payload_types: [text]
+  match:
+    kind: write
+    target:
+      name: body
+  constraints:
+  - receiver_name_in: [MFMessageComposeViewController, composeVC, controller]
+  description: "Disabled — MFMessageComposeViewController.body assignment with attacker-controlled deep-link content; can hijack outbound SMS draft. Reflects sink-direction; enable only when modeling outbound-SMS surfaces."
+
+- id: objc.source.app_extension_input_items
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: objc
+  trust: remote
+  tag: ipc-input
+  payload_types: [json]
+  match:
+    kind: read
+    target:
+      attribute: [extensionContext, inputItems]
+  description: "Disabled — Share/Action extension `self.extensionContext.inputItems` carries NSExtensionItem from the host app (any installed app on device). Needs adapter property_expression read events (see header)."
+
+- id: objc.source.nsurlprotocol_canonical_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  trust: remote
+  tag: http-input
+  match:
+    kind: param
+    target:
+      name: canonicalRequestForRequest
+  description: "Disabled — NSURLProtocol subclass hook sees every outbound request; too noisy without receiver narrowing."

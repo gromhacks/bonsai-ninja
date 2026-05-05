@@ -1,0 +1,111 @@
+# Dart file-upload sinks.
+- id: dart.upload.http_multipartfile_from_path
+  enabled: true
+  language: dart
+  tag: file-upload
+  severity: medium
+  packages: [http]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [MultipartFile, fromPath]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted upload path
+    code: |
+      import 'package:http/http.dart';
+      import 'package:http/http.dart';
+      import 'package:http/http.dart';
+      import 'package:http/http.dart';
+      import 'package:http/http.dart' as http;
+      void test(String input) { MultipartFile.fromPath("avatar", input); }
+  - name: literal upload path negative
+    code: |
+      import 'package:http/http.dart';
+      void test(String input) { MultipartFile.fromPath(input, "assets/avatar.png"); }
+    expect_no_match: true
+  description: "http MultipartFile.fromPath(field, tainted path)."
+
+  imports:
+  - http/http.dart
+- id: dart.upload.http_multipartfile_from_bytes
+  enabled: true
+  language: dart
+  tag: file-upload
+  severity: medium
+  packages: [http]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [MultipartFile, fromBytes]
+  constraints:
+  - arg_tainted:
+      kw: filename
+  match_examples:
+  - name: tainted upload filename
+    code: |
+      import 'package:http/http.dart';
+      import 'package:http/http.dart';
+      import 'package:http/http.dart';
+      import 'package:http/http.dart';
+      import 'package:http/http.dart' as http;
+      void test(String input, List<int> bytes) { MultipartFile.fromBytes("avatar", bytes, filename: input); }
+  - name: literal upload filename negative
+    code: |
+      import 'package:http/http.dart';
+      void test(List<int> bytes) { MultipartFile.fromBytes("avatar", bytes, filename: "avatar.png"); }
+    expect_no_match: true
+  description: "http MultipartFile.fromBytes(field, bytes, filename: tainted)."
+
+  imports:
+  - http/http.dart
+- id: dart.upload.dio_multipartfile_from_file
+  enabled: true
+  language: dart
+  tag: file-upload
+  severity: medium
+  packages: [dio]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [MultipartFile, fromFile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted dio upload path
+    code: |
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      import 'package:dio/dio.dart';
+      void test(String input) { MultipartFile.fromFile(input); }
+  - name: literal dio upload path negative
+    code: |
+      import 'package:dio/dio.dart';
+      void test() { MultipartFile.fromFile("assets/avatar.png"); }
+    expect_no_match: true
+  description: "dio MultipartFile.fromFile(tainted path)."
+
+  imports:
+  - dio/dio.dart
+- id: dart.upload.file_picker_pickfiles
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: file-upload
+  severity: medium
+  packages: [file_picker]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [FilePicker, platform]
+  description: "Disabled — FilePicker is user-initiated; flag only if result.path flows to server upload."

@@ -1,0 +1,181 @@
+# Swift deserialization sinks.
+- id: swift.deser.nskeyedunarchiver_unarchiveobject
+  enabled: true
+  language: swift
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unarchiveObject
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: Data) { unarchiveObject(input) }
+  - name: literal archive data negative
+    code: |
+      func test() { unarchiveObject("safe") }
+    expect_no_match: true
+  description: "NSKeyedUnarchiver.unarchiveObject — without secureCoding = RCE."
+
+- id: swift.deser.nskeyedunarchiver_unarchivetoplevel
+  enabled: true
+  language: swift
+  tag: insecure-deserialization
+  severity: critical
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unarchiveTopLevelObjectWithData
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: Data) { unarchiveTopLevelObjectWithData(input) }
+  - name: literal top level archive data negative
+    code: |
+      func test() { unarchiveTopLevelObjectWithData("safe") }
+    expect_no_match: true
+  description: "NSKeyedUnarchiver.unarchiveTopLevelObjectWithData."
+
+- id: swift.deser.nskeyedunarchiver_init
+  enabled: true
+  language: swift
+  tag: insecure-deserialization
+  severity: high
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: NSKeyedUnarchiver
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; NSKeyedUnarchiver(input) }
+  description: "NSKeyedUnarchiver(forReadingFrom:/forReadingWith:) — review requiresSecureCoding."
+
+- id: swift.deser.requiressecurecoding_false
+  enabled: true
+  language: swift
+  tag: insecure-deserialization
+  severity: high
+  cwe: [CWE-502]
+  match:
+    kind: write
+    target:
+      name: requiresSecureCoding
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; requiresSecureCoding = input }
+  description: "NSKeyedUnarchiver.requiresSecureCoding = false — disables secure coding enforcement."
+
+- id: swift.deser.nskeyedunarchiver_unarchivedobject_class
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  tag: insecure-deserialization
+  severity: medium
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      name: unarchivedObject
+  description: "Disabled — class-bounded unarchive; flag with [Any].self constraint."
+
+- id: swift.deser.propertylist_serialization
+  enabled: true
+  language: swift
+  tag: insecure-deserialization
+  severity: medium
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [PropertyListSerialization, propertyList]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: Data) { PropertyListSerialization.propertyList(input) }
+  - name: literal property list data negative
+    code: |
+      func test() { PropertyListSerialization.propertyList("safe") }
+    expect_no_match: true
+  description: "PropertyListSerialization.propertyList(from:) with MutableContainers allows object substitution."
+
+- id: swift.deser.propertylistdecoder_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: insecure-deserialization
+  severity: low
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [PropertyListDecoder, decode]
+  description: "Disabled — type-bounded decoder; not directly exploitable."
+
+- id: swift.deser.yams_load
+  enabled: true
+  language: swift
+  tag: insecure-deserialization
+  severity: high
+  packages: [Yams]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Yams, load]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import Yams // Yams
+      func test(input: String) { Yams.load(input) }
+  - name: literal yaml load negative
+    code: |
+      import Yams // Yams
+      func test() { Yams.load("name: safe") }
+    expect_no_match: true
+  description: "Yams.load — flag if untrusted input."
+
+- id: swift.deser.yams_load_all
+  enabled: true
+  language: swift
+  tag: insecure-deserialization
+  severity: high
+  packages: [Yams]
+  cwe: [CWE-502]
+  match:
+    kind: call
+    callee:
+      attribute: [Yams, load_all]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import Yams // Yams
+      func test(input: String) { Yams.load_all(input) }
+  - name: literal yaml load all negative
+    code: |
+      import Yams // Yams
+      func test() { Yams.load_all("name: safe") }
+    expect_no_match: true
+  description: "Yams.load_all — multi-doc YAML load."

@@ -1,0 +1,94 @@
+# C# response header / CRLF injection.
+- id: csharp.header.response_headers_add
+  aliases:
+    - csharp.smuggle.headers_add_dual_cl_te
+  enabled: true
+  language: csharp
+  tag: header-injection
+  severity: high
+  cwe: [CWE-113, CWE-444]
+  match:
+    kind: call
+    callee:
+      attribute: [Headers, Add]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted header value
+      code: |
+        class App { void Test(string input) { Headers.Add("X-Name", input); } }
+    - name: literal header value negative
+      code: |
+        class App { void Test() { Headers.Add("X-Name", "safe"); } }
+      expect_no_match: true
+  description: "Response.Headers.Add(name, tainted_value) — flag tainted header value (CRLF). Also covers merged aliases: csharp.smuggle.headers_add_dual_cl_te."
+
+- id: csharp.header.response_addheader
+  enabled: true
+  language: csharp
+  tag: header-injection
+  severity: high
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, AddHeader]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted header value
+      code: |
+        class App { void Test(string input) { Response.AddHeader("X-Name", input); } }
+    - name: literal header value negative
+      code: |
+        class App { void Test() { Response.AddHeader("X-Name", "safe"); } }
+      expect_no_match: true
+  description: "Response.AddHeader(name, tainted_value) (legacy ASP.NET)."
+
+- id: csharp.header.response_appendheader
+  enabled: true
+  language: csharp
+  tag: header-injection
+  severity: high
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Response, AppendHeader]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted header value
+      code: |
+        class App { void Test(string input) { Response.AppendHeader("X-Name", input); } }
+    - name: literal header value negative
+      code: |
+        class App { void Test() { Response.AppendHeader("X-Name", "safe"); } }
+      expect_no_match: true
+  description: "Response.AppendHeader(name, tainted_value)."
+
+- id: csharp.header.response_cookie_value
+  enabled: true
+  language: csharp
+  tag: header-injection
+  severity: high
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Cookies, Append]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+    - name: tainted cookie value
+      code: |
+        class App { void Test(string input) { Cookies.Append("session", input); } }
+    - name: literal cookie value negative
+      code: |
+        class App { void Test() { Cookies.Append("session", "safe"); } }
+      expect_no_match: true
+  description: "Response.Cookies.Append(name, tainted_value) — flag tainted value."

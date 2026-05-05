@@ -1,0 +1,404 @@
+//! Tests for the rulepack matcher's call-site, regex, and constraint
+//! evaluators. Extracted from `matcher/mod.rs` so the matcher's
+//! production code is reviewable in one read without scrolling past
+//! the test fixtures.
+
+use super::*;
+
+fn span() -> Span {
+    Span {
+        file: FileId::new(0),
+        start: 7,
+        end: 15,
+    }
+}
+
+fn rule_from_yaml(yaml: &str, kind: crate::rule::RuleKind) -> Rule {
+    let mut rule: Rule = serde_yaml::from_str(yaml).expect("rule yaml parses");
+    rule.kind = kind;
+    rule
+}
+
+#[test]
+fn collect_calls_includes_assignment_source_call_metadata() {
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "result".to_string(),
+        source_name: None,
+        source_call: Some("os.system".to_string()),
+        source_call_args: vec!["cmd".to_string(), "env".to_string()],
+        source_names: Vec::new(),
+    }];
+
+    let calls = collect_calls(&events);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].callee, "os.system");
+    assert_eq!(calls[0].span, span());
+    assert_eq!(calls[0].origin, CallFactOrigin::AssignmentSourceCall);
+    assert_eq!(
+        calls[0]
+            .args
+            .iter()
+            .map(|arg| arg.value_text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cmd", "env"]
+    );
+}
+
+#[test]
+fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
+    let events = vec![
+        FlowEvent::Call {
+            name: "eval".to_string(),
+            receiver: None,
+            args: vec![
+                CallArg {
+                    span: span(),
+                    name: None,
+                    place: None,
+                    value_text: "py_expr".to_string(),
+                },
+                CallArg {
+                    span: span(),
+                    name: None,
+                    place: None,
+                    value_text: "{\"attributes\": attributes}".to_string(),
+                },
+            ],
+            span: span(),
+            call_kind: CallKind::Function,
+        },
+        FlowEvent::Assign {
+            span: span(),
+            target: "result".to_string(),
+            source_name: None,
+            source_call: Some("eval".to_string()),
+            source_call_args: vec!["py_expr".to_string(), "{\"attributes\": attributes}".to_string()],
+            source_names: Vec::new(),
+        },
+    ];
+
+    let calls = collect_calls(&events);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].callee, "eval");
+    assert_eq!(calls[0].origin, CallFactOrigin::RealCall);
+    assert_eq!(
+        calls[0]
+            .args
+            .iter()
+            .map(|arg| arg.value_text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["py_expr", "{\"attributes\": attributes}"]
+    );
+}
+
+#[test]
+fn return_flow_reads_strip_call_callee_but_keep_argument_reads() {
+    let mut reads = Vec::new();
+    collect_flow_read_sites(
+        &[FlowEvent::Return {
+            span: span(),
+            value_text: Some("params(input)".to_string()),
+            value_name: None,
+        }],
+        &mut reads,
+    );
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].1, vec!["input"]);
+
+    reads.clear();
+    collect_flow_read_sites(
+        &[FlowEvent::Return {
+            span: span(),
+            value_text: Some(r#"render(params["name"])"#.to_string()),
+            value_name: None,
+        }],
+        &mut reads,
+    );
+    assert_eq!(reads.len(), 1);
+    assert_eq!(reads[0].1, vec!["params", "name"]);
+}
+
+#[test]
+fn method_chain_fallback_requires_chain_head_match() {
+    let attr = vec!["Command".to_string(), "new".to_string()];
+
+    assert!(callee_matches(
+        r#"Command::new("sh").arg("-c").output"#,
+        None,
+        Some(&attr),
+        None,
+        false
+    ));
+    assert!(callee_matches(
+        r#"std/process/Command::new("sh").arg("-c").output"#,
+        None,
+        Some(&attr),
+        None,
+        false
+    ));
+    assert!(
+        !callee_matches(
+            r#"callbacks.add(Command::new("sh"))"#,
+            None,
+            Some(&attr),
+            None,
+            false
+        ),
+        "callback-passing expressions must not match the inner method-chain head"
+    );
+    assert!(
+        !callee_matches(
+            r#"callbacks.add(std/process/Command::new("sh"))"#,
+            None,
+            Some(&attr),
+            None,
+            false
+        ),
+        "import-path chain heads inside callback arguments must not match"
+    );
+}
+
+#[test]
+fn same_receiver_call_count_constraint_requires_repeated_receiver() {
+    let constraint = vec![ConstraintKind::SameReceiverCallCountAtLeast {
+        same_receiver_call_count_at_least: 2,
+    }];
+    let constraint_regexes =
+        compile_constraint_regexes("test.same_receiver", &constraint).expect("non-regex constraints compile");
+
+    assert!(constraints_pass(ConstraintEval {
+        rule_id: "test.same_receiver",
+        callee: "balance.lock",
+        args: &[],
+        span: Span::new(FileId::new(0), 0, 0),
+        call_origin: None,
+        constraints: &constraint,
+        constraint_regexes: &constraint_regexes,
+        receiver_call_count: Some(2),
+        assignment_texts: None,
+        mode: ConstraintMode::Strict,
+        taint_view: None,
+        enclosing_decorators: None,
+        alias_chains: None,
+        runtime_types: None,
+        lifecycle_transitions: None,
+    }));
+    assert!(!constraints_pass(ConstraintEval {
+        rule_id: "test.same_receiver",
+        callee: "stdin.lock",
+        args: &[],
+        span: Span::new(FileId::new(0), 0, 0),
+        call_origin: None,
+        constraints: &constraint,
+        constraint_regexes: &constraint_regexes,
+        receiver_call_count: Some(1),
+        assignment_texts: None,
+        mode: ConstraintMode::Strict,
+        taint_view: None,
+        enclosing_decorators: None,
+        alias_chains: None,
+        runtime_types: None,
+        lifecycle_transitions: None,
+    }));
+    assert!(!constraints_pass(ConstraintEval {
+        rule_id: "test.same_receiver",
+        callee: "lock",
+        args: &[],
+        span: Span::new(FileId::new(0), 0, 0),
+        call_origin: None,
+        constraints: &constraint,
+        constraint_regexes: &constraint_regexes,
+        receiver_call_count: None,
+        assignment_texts: None,
+        mode: ConstraintMode::Strict,
+        taint_view: None,
+        enclosing_decorators: None,
+        alias_chains: None,
+        runtime_types: None,
+        lifecycle_transitions: None,
+    }));
+}
+
+#[test]
+fn invalid_constraint_regex_fails_closed() {
+    let constraint = vec![ConstraintKind::AnyArgMatchesRegex {
+        any_arg_matches_regex: "[".to_string(),
+    }];
+    assert!(
+        compile_constraint_regexes("test.invalid_regex", &constraint).is_none(),
+        "invalid constraint regexes must fail rule preparation instead of silently compiling to None"
+    );
+}
+
+#[test]
+fn prepared_rule_drops_rule_with_invalid_constraint_regex() {
+    let rule = rule_from_yaml(
+        r#"
+id: python.sqli.invalid_constraint_regex
+enabled: true
+language: python
+tag: sql-injection
+severity: high
+cwe: [CWE-89]
+match:
+  kind: call
+  callee:
+    name: execute
+constraints:
+  - any_arg_matches_regex: "["
+match_examples:
+  - name: example
+    code: "def demo(cursor, sql): cursor.execute(sql)"
+description: Invalid regex fixture.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+
+    assert!(
+        PreparedRule::new(&rule).is_none(),
+        "an invalid constraint regex should disable the full rule for this analysis run"
+    );
+}
+
+#[test]
+fn empty_inferred_type_alias_does_not_panic() {
+    let mut aliases = std::collections::HashMap::new();
+    aliases.insert(
+        "client".to_string(),
+        AliasTarget::Type {
+            type_name: String::new(),
+        },
+    );
+    let attr = vec!["HttpClient".to_string(), "execute".to_string()];
+
+    assert_eq!(
+        callee_or_alias_matches("client.execute", None, Some(&attr), None, &aliases, false),
+        None
+    );
+}
+
+#[test]
+fn receiver_method_call_counts_group_by_receiver_and_method() {
+    let calls = vec![
+        test_call_fact("balance.lock", CallFactOrigin::RealCall),
+        test_call_fact("balance.lock", CallFactOrigin::RealCall),
+        test_call_fact("stdin.lock", CallFactOrigin::RealCall),
+        test_call_fact("balance.clone", CallFactOrigin::RealCall),
+        test_call_fact("balance.lock", CallFactOrigin::AssignmentSourceCall),
+    ];
+    let counts = receiver_method_call_counts(&calls);
+
+    assert_eq!(
+        counts
+            .get(&receiver_method_key("balance.lock").expect("balance key"))
+            .copied(),
+        Some(2)
+    );
+    assert_eq!(
+        counts
+            .get(&receiver_method_key("stdin.lock").expect("stdin key"))
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(
+        counts
+            .get(&receiver_method_key("balance.clone").expect("clone key"))
+            .copied(),
+        Some(1)
+    );
+}
+
+#[test]
+fn arg_value_identifier_fallback_ignores_quoted_literals() {
+    assert!(
+        !arg_matches_tainted_value(r#""SELECT * FROM users WHERE name = ?""#, "name"),
+        "identifier fallback must not treat words inside string literals as variable references"
+    );
+    assert!(arg_matches_tainted_value("fmt.Sprintf(query, name)", "name"));
+}
+
+fn test_call_fact(callee: &str, origin: CallFactOrigin) -> CallFact {
+    CallFact {
+        callee: callee.to_string(),
+        span: span(),
+        args: Vec::new(),
+        call_kind: CallKind::Method,
+        origin,
+    }
+}
+
+// --- P3: integer-literal parsing + arg_lt/arg_le/arg_gt/arg_ge tests ---
+
+#[test]
+fn parse_int_literal_decimal_forms() {
+    assert_eq!(super::parse_int_literal("1024"), Some(1024));
+    assert_eq!(super::parse_int_literal("-5"), Some(-5));
+    assert_eq!(super::parse_int_literal("+42"), Some(42));
+    assert_eq!(super::parse_int_literal("1_000_000"), Some(1_000_000));
+    assert_eq!(super::parse_int_literal(" 256 "), Some(256));
+}
+
+#[test]
+fn parse_int_literal_hex_oct_bin() {
+    assert_eq!(super::parse_int_literal("0xFF"), Some(255));
+    assert_eq!(super::parse_int_literal("0Xff"), Some(255));
+    assert_eq!(super::parse_int_literal("0o777"), Some(0o777));
+    assert_eq!(super::parse_int_literal("0b1010"), Some(0b1010));
+    assert_eq!(super::parse_int_literal("0B1111_0000"), Some(0b1111_0000));
+}
+
+#[test]
+fn parse_int_literal_rejects_non_literals() {
+    // Variables and expressions must never speculate to a value.
+    assert_eq!(super::parse_int_literal("size"), None);
+    assert_eq!(super::parse_int_literal("2048 + 0"), None);
+    assert_eq!(super::parse_int_literal("Math.pow(2, 10)"), None);
+    assert_eq!(super::parse_int_literal(""), None);
+    assert_eq!(super::parse_int_literal("null"), None);
+}
+
+#[test]
+fn arg_int_compare_threshold_semantics() {
+    let args = vec![CallArg {
+        span: span(),
+        name: None,
+        place: None,
+        value_text: "1024".to_string(),
+    }];
+    // arg_lt: 2048 should pass (1024 < 2048).
+    assert!(super::arg_int_compare(&args, 0, |literal| literal < 2048));
+    // arg_lt: 1024 fails on equality.
+    assert!(!super::arg_int_compare(&args, 0, |literal| literal < 1024));
+    // arg_le: 1024 passes on equality.
+    assert!(super::arg_int_compare(&args, 0, |literal| literal <= 1024));
+    // arg_gt: 512 passes (1024 > 512).
+    assert!(super::arg_int_compare(&args, 0, |literal| literal > 512));
+    // arg_ge: 1024 passes on equality.
+    assert!(super::arg_int_compare(&args, 0, |literal| literal >= 1024));
+}
+
+#[test]
+fn arg_int_compare_unknown_arg_fails_conservatively() {
+    let args = vec![CallArg {
+        span: span(),
+        name: None,
+        place: None,
+        value_text: "user_size".to_string(),
+    }];
+    // Variable arg → no literal → constraint fails. This is the
+    // conservative choice: don't speculate.
+    assert!(!super::arg_int_compare(&args, 0, |_| true));
+}
+
+#[test]
+fn arg_int_compare_out_of_bounds_fails() {
+    let args = vec![CallArg {
+        span: span(),
+        name: None,
+        place: None,
+        value_text: "1024".to_string(),
+    }];
+    // index 1 is out of bounds — constraint fails.
+    assert!(!super::arg_int_compare(&args, 1, |_| true));
+}

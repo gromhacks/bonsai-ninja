@@ -1,0 +1,197 @@
+- id: php.open_redirect.header_location
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: php
+  tag: open-redirect
+  severity: high
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: header
+  description: 'Disabled — header("Location: $url") is the canonical sink, but constraint requires literal-prefix detection.'
+- id: php.open_redirect.symfony_redirect
+  enabled: true
+  language: php
+  tag: open-redirect
+  severity: high
+  packages:
+  - symfony/http-foundation
+  cwe:
+  - CWE-601
+  match:
+    kind: new
+    callee:
+      name: RedirectResponse
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.open_redirect.symfony_redirect example
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      use symfony\httpfoundation;
+      use symfony\http-foundation;
+      function example($input, $url, $id, $payload, $request) {
+        new RedirectResponse($url);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use symfony\httpfoundation;
+      function example($input, $url, $id, $payload, $request) {
+        new RedirectResponse("/dashboard");
+      }
+    expect_no_match: true
+  description: Symfony RedirectResponse(tainted).
+  imports:
+  - symfony
+  - symfony/httpfoundation
+  - symfony\httpfoundation
+- id: php.open_redirect.laravel_redirect_to
+  enabled: true
+  language: php
+  tag: open-redirect
+  severity: high
+  packages:
+  - illuminate/routing
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Redirect
+      - to
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.open_redirect.laravel_redirect_to example
+    code: |
+      <?php
+      use illuminate\routing;
+      use illuminate\routing;
+      function example($input, $url, $id, $payload, $request) {
+        Redirect::to($url);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\routing;
+      function example($input, $url, $id, $payload, $request) {
+        Redirect::to("/dashboard");
+      }
+    expect_no_match: true
+  description: Laravel Redirect::to(tainted).
+  imports:
+  - illuminate\routing
+  - illuminate
+- id: php.open_redirect.laravel_redirect_away
+  enabled: true
+  language: php
+  tag: open-redirect
+  severity: high
+  packages:
+  - illuminate/routing
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Redirect
+      - away
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.open_redirect.laravel_redirect_away example
+    code: |
+      <?php
+      use illuminate\routing;
+      use illuminate\routing;
+      function example($input, $url, $id, $payload, $request) {
+        Redirect::away($url);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use illuminate\routing;
+      function example($input, $url, $id, $payload, $request) {
+        Redirect::away("https://example.com/signed-out");
+      }
+    expect_no_match: true
+  description: Laravel Redirect::away(tainted) — explicit external redirect.
+  imports:
+  - illuminate\routing
+  - illuminate
+- id: php.open_redirect.wp_redirect
+  enabled: true
+  language: php
+  tag: open-redirect
+  severity: high
+  packages:
+  - wordpress
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: wp_redirect
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: php.open_redirect.wp_redirect example
+    code: |
+      <?php
+      use wordpress;
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        wp_redirect($url);
+      }
+  - name: arg tainted literal negative
+    code: |
+      <?php
+      use wordpress;
+      function example($input, $url, $id, $payload, $request) {
+        wp_redirect("/wp-admin/");
+      }
+    expect_no_match: true
+  description: WordPress wp_redirect — flag if not wp_safe_redirect.
+- id: php.open_redirect.wp_safe_redirect
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: open-redirect
+  severity: low
+  packages:
+  - wordpress
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: wp_safe_redirect
+  description: Disabled — wp_safe_redirect enforces allowlist.
+- id: php.open_redirect.laravel_redirect_helper
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: php
+  tag: open-redirect
+  severity: high
+  packages:
+  - laravel/framework
+  cwe:
+  - CWE-601
+  match:
+    kind: call
+    callee:
+      name: redirect
+  description: Disabled — bare redirect() collides with non-Laravel helpers such as Guzzle redirect middleware tests; enable only with Laravel package/import gating.

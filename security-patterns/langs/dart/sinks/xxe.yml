@@ -1,0 +1,175 @@
+# Dart XXE sinks.
+#
+# package:xml (the de facto standard Dart XML parser) does NOT
+# resolve external entities by default, so parse calls alone are
+# low-risk. However:
+#   - package:xml accepts a custom `entityMapping:` parameter that
+#     can load external resources; parse calls with tainted input
+#     AND a non-default entity mapping are XXE.
+#   - package:xml_events exposes event streams that include DOCTYPE
+#     events the caller may resolve manually.
+#   - Dart bindings to libxml / expat DO expand entities by default.
+#
+# We flag the parse calls as medium (audit / review required) with
+# a packages guard so rule authors can tune per codebase.
+
+- id: dart.xxe.xml_document_parse
+  enabled: true
+  language: dart
+  tag: xxe
+  severity: medium
+  packages: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XmlDocument, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted xml document
+    code: |
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart'; // xml
+      // uses xml
+      void test(String input) { XmlDocument.parse(input); }
+  - name: literal xml document negative
+    code: |
+      import 'package:xml/xml.dart';
+      void test() { XmlDocument.parse("<root/>"); }
+    expect_no_match: true
+  description: "package:xml XmlDocument.parse(tainted) — package:xml ignores entities by default but accepts a custom `entityMapping:` that can fetch external resources; flag for audit."
+
+  imports:
+  - xml/xml.dart
+- id: dart.xxe.xml_document_parse_events
+  enabled: true
+  language: dart
+  tag: xxe
+  severity: medium
+  packages: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XmlDocument, parseEvents]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted xml parse events
+    code: |
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart'; // xml
+      void test(String input) { XmlDocument.parseEvents(input); }
+  - name: literal xml parse events negative
+    code: |
+      import 'package:xml/xml.dart';
+      void test() { XmlDocument.parseEvents("<root/>"); }
+    expect_no_match: true
+  description: "package:xml XmlDocument.parseEvents — streaming parse surfaces DOCTYPE events the caller may resolve manually; tainted XML with entity references becomes XXE."
+
+  imports:
+  - xml/xml.dart
+- id: dart.xxe.xml_parse_fragment
+  enabled: true
+  language: dart
+  tag: xxe
+  severity: medium
+  packages: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [XmlDocumentFragment, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted xml fragment
+    code: |
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart';
+      import 'package:xml/xml.dart'; // xml
+      // uses xml
+      void test(String input) { XmlDocumentFragment.parse(input); }
+  - name: literal xml fragment negative
+    code: |
+      import 'package:xml/xml.dart';
+      void test() { XmlDocumentFragment.parse("<child/>"); }
+    expect_no_match: true
+  description: "package:xml XmlDocumentFragment.parse — fragment parser with the same entity-mapping surface as XmlDocument.parse."
+
+  imports:
+  - xml/xml.dart
+- id: dart.xxe.xml_parse_events_fn
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: xxe
+  severity: low
+  packages: [xml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      name: parseEvents
+  description: "Disabled — bare parseEvents() without receiver context is too broad; the XmlDocument.parseEvents rule above is the narrower form."
+
+- id: dart.xxe.xml2json_parse
+  enabled: true
+  language: dart
+  tag: xxe
+  severity: medium
+  packages: [xml2json]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [Xml2Json, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted xml2json parse
+    code: |
+      import 'package:xml2json/xml2json.dart';
+      import 'package:xml2json/xml2json.dart';
+      import 'package:xml2json/xml2json.dart';
+      import 'package:xml2json/xml2json.dart';
+      import 'package:xml2json/xml2json.dart'; // xml2json
+      // uses xml2json
+      void test(String input) { Xml2Json.parse(input); }
+  - name: literal xml2json parse negative
+    code: |
+      import 'package:xml2json/xml2json.dart';
+      void test() { Xml2Json.parse("<root/>"); }
+    expect_no_match: true
+  description: "xml2json Xml2Json.parse — builds on package:xml internally; tainted XML input inherits the same DOCTYPE-surface caveats."
+
+  imports:
+  - xml2json/xml2json.dart
+- id: dart.xxe.libxml_bindings_parse
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: dart
+  tag: xxe
+  severity: high
+  packages: [libxml]
+  cwe: [CWE-611]
+  match:
+    kind: call
+    callee:
+      attribute: [LibXml, parse]
+  description: "Disabled placeholder — enable when the codebase calls dart:ffi libxml2 bindings that expand entities by default; the real danger lives in native-library shims."

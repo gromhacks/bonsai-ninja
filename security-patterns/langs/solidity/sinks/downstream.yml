@@ -1,0 +1,139 @@
+# Downstream-flow sinks for Solidity — event emission with
+# user-controlled payload, external contract calls, and storage writes
+# with user-controlled key/value. These are what lets `security flows`
+# find taint paths in framework-less controller-shape contracts
+# (Gateway → Service → emit / storage-write) — common in the Solidity
+# ecosystem but not covered by the reentrancy / delegatecall families.
+#
+# ─── Why the canonical web-sink families are missing for Solidity ───
+# `pack --audit` reports `MISSING canonical families: cmdi, sqli,
+# nosql, path, ssrf, xss, eval, deserialization, xxe, ldap, jwt,
+# crypto, tls, template, open_redirect, file_upload, header_injection`
+# for `lang: solidity`. That warning is N/A and intentionally not
+# silenced: Solidity is a pure-EVM language with no syscalls, no
+# filesystem, no socket layer, no SQL/NoSQL bindings, no HTML render
+# pipeline, no shell, no JWT primitives, and no native XML/LDAP
+# clients. The attack surface is on-chain — reentrancy, delegatecall,
+# selfdestruct, oracle manipulation, signature replay, integer math,
+# access control. Those families are covered by the dedicated files
+# under `solidity/sinks/`. Adding stub `cmdi.yml` / `sqli.yml` etc.
+# just to flatten the audit table would be a lie about the ecosystem.
+#
+# Rules match on tree-sitter-grounded call shapes:
+#   * `emit Foo(args)` surfaces through the adapter's `emit_statement`
+#     node kind as a call whose callee name is `emit.Foo`. The rule
+#     below keys on the `emit.` prefix so every emit fires regardless
+#     of the specific event name.
+#   * `.call(bytes)` is a member call with a fixed-name method.
+#   * Storage writes match on `target.name: balances` — the adapter
+#     emits a Write fact for member-write LHSes.
+#
+# `emit` is a Solidity language KEYWORD, not a library function.
+# `fp_audit.py` flags it as "bare generic verb name with no scoping",
+# but for Solidity that's a false positive: there is no `packages:`
+# / receiver scope to narrow on — this IS the API surface. The
+# taint engine still gates the finding on tainted-arg flow into
+# the emit's payload.
+
+- id: solidity.sink.emit_with_payload
+  enabled: true
+  language: solidity
+  tag: information-exposure
+  severity: medium
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      # The adapter emits a synthetic `emit` call ref whenever it sees
+      # an `emit_statement` tree-sitter node. Matching `name: emit`
+      # fires for every event emission without needing a regex or a
+      # PascalCase-detection hack.
+      name: emit
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { emit Seen(input); } }
+  description: "Solidity event emission with attacker-controlled payload — leaks untrusted data onto the on-chain event log. The synthetic `emit` call ref is the only Solidity call shape with this name (no `obj.emit(...)` user code is normally surfaced); the bare-name match is correct here and the mega_flow gate catches FP regressions."
+
+- id: solidity.sink.external_contract_call
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: solidity
+  tag: external-call
+  severity: high
+  cwe: [CWE-829]
+  match:
+    kind: call
+    callee:
+      name: call
+  description: "Disabled duplicate — low-level .call is classified by the reentrancy family in v1; use a future receiver/return-shape rule for generic downstream-call inventory."
+
+- id: solidity.sink.state_balances_write
+  enabled: true
+  language: solidity
+  tag: state-manipulation
+  severity: medium
+  cwe: [CWE-732]
+  match:
+    kind: write
+    target:
+      name: balances
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { balances = amount; } }
+  description: "Storage write to `balances` with attacker-controlled key/value — classic mapping-authorisation exploit surface."
+
+- id: solidity.sink.state_allowances_write
+  enabled: true
+  language: solidity
+  tag: state-manipulation
+  severity: medium
+  cwe: [CWE-732]
+  match:
+    kind: write
+    target:
+      name: allowances
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { allowances = amount; } }
+  description: "Storage write to `allowances` with attacker-controlled key/value — ERC-20 approval surface."
+
+- id: solidity.sink.state_owners_write
+  enabled: true
+  language: solidity
+  tag: state-manipulation
+  severity: medium
+  cwe: [CWE-732]
+  match:
+    kind: write
+    target:
+      name: owners
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { owners = amount; } }
+  description: "Storage write to `owners` with attacker-controlled key/value — ownership-transfer surface."
+
+- id: solidity.sink.state_whitelist_write
+  enabled: true
+  language: solidity
+  tag: state-manipulation
+  severity: medium
+  cwe: [CWE-732]
+  match:
+    kind: write
+    target:
+      name: whitelist
+  match_examples:
+    - name: declared shape
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { whitelist = amount; } }
+  description: "Storage write to `whitelist` with attacker-controlled key/value — authorisation bypass surface."

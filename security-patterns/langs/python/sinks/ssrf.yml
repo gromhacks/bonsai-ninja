@@ -1,0 +1,991 @@
+- id: python.ssrf.requests_get
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests get
+    code: "import requests\ndef example(user_input):\n    return requests.get(user_input)\n"
+  - name: requests get literal negative
+    code: "import requests\n\ndef example(user_input):\n    return requests.get('safe')\n"
+    expect_no_match: true
+  description: 'requests.get(tainted URL). Merged aliases: python.tls.requests_verify_false.'
+  aliases:
+  - python.tls.requests_verify_false
+- id: python.ssrf.requests_post
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests post
+    code: "import requests\ndef example(user_input):\n    return requests.post(user_input)\n"
+  - name: requests post literal negative
+    code: "import requests\n\ndef example(user_input):\n    return requests.post('safe')\n"
+    expect_no_match: true
+  description: "requests.post(url) — HTTP POST to tainted URL allows SSRF with request-body exfiltration. Merged aliases: python.tls.requests_post_verify_false."
+  aliases:
+  - python.tls.requests_post_verify_false
+- id: python.ssrf.requests_put
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests
+      - put
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests put
+    code: "import requests\ndef example(user_input):\n    return requests.put(user_input)\n"
+  - name: requests put literal negative
+    code: "import requests\n\ndef example(user_input):\n    return requests.put('safe')\n"
+    expect_no_match: true
+  description: "requests.put(url) — HTTP PUT to tainted URL allows SSRF with write-capable verbs."
+- id: python.ssrf.requests_delete
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests delete
+    code: "import requests\ndef example(user_input):\n    return requests.delete(user_input)\n"
+  - name: requests delete literal negative
+    code: "import requests\n\ndef example(user_input):\n    return requests.delete('safe')\n"
+    expect_no_match: true
+  description: requests.delete.
+- id: python.ssrf.requests_patch
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests
+      - patch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests patch
+    code: "import requests\ndef example(user_input):\n    return requests.patch(user_input)\n"
+  - name: requests patch literal negative
+    code: "import requests\n\ndef example(user_input):\n    return requests.patch('safe')\n"
+    expect_no_match: true
+  description: requests.patch.
+- id: python.ssrf.requests_head
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: medium
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests
+      - head
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests head
+    code: "import requests\ndef example(user_input):\n    return requests.head(user_input)\n"
+  - name: requests head literal negative
+    code: "import requests\n\ndef example(user_input):\n    return requests.head('safe')\n"
+    expect_no_match: true
+  description: "requests.head(url) — HTTP HEAD to tainted URL allows SSRF reconnaissance (probing internal services)."
+- id: python.ssrf.requests_request
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests
+      - request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ssrf requests request
+    code: "import requests\ndef example(user_input):\n    return requests.request(\"GET\", user_input)\n"
+  - name: requests request literal negative
+    code: "import requests\n\ndef example(user_input):\n    return requests.request('GET', 'safe')\n"
+    expect_no_match: true
+  description: requests.request(method, url).
+- id: python.ssrf.requests_session_get
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Session
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests session get
+    code: "import requests\ndef example(user_input):\n    return Session.get(user_input)\n"
+  - name: requests session get literal negative
+    code: "import requests\n\ndef example(user_input):\n    return Session.get('safe')\n"
+    expect_no_match: true
+  description: requests.Session().get.
+- id: python.ssrf.urlopen
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^urlopen$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf urlopen
+    code: "def example(user_input):\n    return urlopen(user_input)\n"
+  - name: urlopen literal negative
+    code: "def example(user_input):\n    return urlopen('safe')\n"
+    expect_no_match: true
+  description: "Bare urlopen — matches `from urllib.request import urlopen; urlopen(url)`; also covers file:// path read."
+- id: python.ssrf.urllib_request_urlopen
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^urllib\.request\.urlopen$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf urllib request urlopen
+    code: "def example(user_input):\n    return urllib.request.urlopen(user_input)\n"
+  - name: urllib request urlopen literal negative
+    code: "def example(user_input):\n    return urllib.request.urlopen('safe')\n"
+    expect_no_match: true
+  description: "urllib.request.urlopen — fully-qualified chain."
+- id: python.ssrf.urllib_request
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^request\.urlopen$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf urllib request
+    code: "def example(user_input):\n    return request.urlopen(user_input)\n"
+  - name: urllib request literal negative
+    code: "def example(user_input):\n    return request.urlopen('safe')\n"
+    expect_no_match: true
+  description: urlopen via `from urllib import request`.
+- id: python.ssrf.urllib2_urlopen
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^urllib2\.urlopen$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf urllib2 urlopen
+    code: "def example(user_input):\n    return urllib2.urlopen(user_input)\n"
+  - name: urllib2 urlopen literal negative
+    code: "def example(user_input):\n    return urllib2.urlopen('safe')\n"
+    expect_no_match: true
+  description: Python 2 urllib2.urlopen.
+- id: python.ssrf.urllib3_request
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - urllib3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - PoolManager
+      - request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ssrf urllib3 request
+    code: "import urllib3\ndef example(user_input):\n    return PoolManager.request(\"GET\", user_input)\n"
+  - name: urllib3 request literal negative
+    code: "import urllib3\n\ndef example(user_input):\n    return PoolManager.request('GET', 'safe')\n"
+    expect_no_match: true
+  description: urllib3 PoolManager.request.
+- id: python.ssrf.httpx_get
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httpx
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx get
+    code: "import httpx\ndef example(user_input):\n    return httpx.get(user_input)\n"
+  - name: httpx get literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return httpx.get('safe')\n"
+    expect_no_match: true
+  description: "httpx.get(url) — async HTTP GET to tainted URL allows SSRF to internal services / cloud metadata. Merged aliases: python.tls.httpx_verify_false."
+  aliases:
+  - python.tls.httpx_verify_false
+- id: python.ssrf.httpx_post
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httpx
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx post
+    code: "import httpx\ndef example(user_input):\n    return httpx.post(user_input)\n"
+  - name: httpx post literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return httpx.post('safe')\n"
+    expect_no_match: true
+  description: "httpx.post(url) — async HTTP POST to tainted URL allows SSRF with request-body exfiltration."
+- id: python.ssrf.httpx_request
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httpx
+      - request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ssrf httpx request
+    code: "import httpx\ndef example(user_input):\n    return httpx.request(\"GET\", user_input)\n"
+  - name: httpx request literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return httpx.request('GET', 'safe')\n"
+    expect_no_match: true
+  description: httpx.request(method, url).
+- id: python.ssrf.httpx_put
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httpx
+      - put
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx put
+    code: "import httpx\ndef example(user_input):\n    return httpx.put(user_input)\n"
+  - name: httpx put literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return httpx.put('safe')\n"
+    expect_no_match: true
+  description: "httpx.put(url) — write-capable HTTP request to a tainted URL allows SSRF."
+- id: python.ssrf.httpx_delete
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httpx
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx delete
+    code: "import httpx\ndef example(user_input):\n    return httpx.delete(user_input)\n"
+  - name: httpx delete literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return httpx.delete('safe')\n"
+    expect_no_match: true
+  description: "httpx.delete(url) — tainted URL can reach internal HTTP services with a destructive verb."
+- id: python.ssrf.httpx_patch
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httpx
+      - patch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx patch
+    code: "import httpx\ndef example(user_input):\n    return httpx.patch(user_input)\n"
+  - name: httpx patch literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return httpx.patch('safe')\n"
+    expect_no_match: true
+  description: "httpx.patch(url) — tainted URL can reach internal HTTP services with a write-capable verb."
+- id: python.ssrf.httpx_head
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: medium
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - httpx
+      - head
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx head
+    code: "import httpx\ndef example(user_input):\n    return httpx.head(user_input)\n"
+  - name: httpx head literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return httpx.head('safe')\n"
+    expect_no_match: true
+  description: "httpx.head(url) — tainted URL allows SSRF reconnaissance of internal services."
+- id: python.ssrf.httpx_async_client_get
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncClient
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx async client get
+    code: "import httpx\ndef example(user_input):\n    return AsyncClient.get(user_input)\n"
+  - name: httpx async client get literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return AsyncClient.get('safe')\n"
+    expect_no_match: true
+  description: httpx.AsyncClient.get.
+- id: python.ssrf.httpx_async_client_get_variable
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.get$
+  constraints:
+  - receiver_name_in:
+    - client
+    - http_client
+    - async_client
+    - httpx_client
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: httpx async client variable get
+    code: "import httpx\nasync def example(client, user_input):\n    return await client.get(user_input)\n"
+    expect_match_text:
+    - client.get
+  - name: httpx async client get variable literal negative
+    code: "import httpx\n\nasync def example(client, user_input):\n    return await client.get('safe')\n"
+    expect_no_match: true
+  - name: dict get is not httpx client negative
+    code: "import httpx\n\nasync def example(envelope, user_input):\n    return envelope.get(user_input)\n"
+    expect_no_match: true
+  description: httpx AsyncClient instance get(url) through conventional client variable names - tainted URL allows SSRF.
+- id: python.ssrf.httpx_async_client_post
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncClient
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx async client post
+    code: "import httpx\ndef example(user_input):\n    return AsyncClient.post(user_input)\n"
+  - name: httpx async client post literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return AsyncClient.post('safe')\n"
+    expect_no_match: true
+  description: "httpx.AsyncClient.post(url) — async HTTP POST to a tainted URL allows SSRF."
+- id: python.ssrf.httpx_async_client_request
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncClient
+      - request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ssrf httpx async client request
+    code: "import httpx\ndef example(client, user_input):\n    return client.request(\"GET\", user_input)\n"
+    expect_match_text:
+    - client.request
+  - name: httpx async client request literal negative
+    code: "import httpx\n\ndef example(client, user_input):\n    return client.request('GET', 'safe')\n"
+    expect_no_match: true
+  description: "httpx.AsyncClient.request(method, url) — tainted URL sink for arbitrary async HTTP verbs."
+- id: python.ssrf.httpx_async_client_put
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncClient
+      - put
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx async client put
+    code: "import httpx\ndef example(user_input):\n    return AsyncClient.put(user_input)\n"
+  - name: httpx async client put literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return AsyncClient.put('safe')\n"
+    expect_no_match: true
+  description: "httpx.AsyncClient.put(url) — async write-capable HTTP request to a tainted URL."
+- id: python.ssrf.httpx_async_client_delete
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncClient
+      - delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx async client delete
+    code: "import httpx\ndef example(client, user_input):\n    return client.delete(user_input)\n"
+    expect_match_text:
+    - client.delete
+  - name: httpx async client delete literal negative
+    code: "import httpx\n\ndef example(client, user_input):\n    return client.delete('safe')\n"
+    expect_no_match: true
+  description: "httpx.AsyncClient.delete(url) — tainted URL can reach internal HTTP services with a destructive verb."
+- id: python.ssrf.httpx_async_client_patch
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncClient
+      - patch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx async client patch
+    code: "import httpx\ndef example(client, user_input):\n    return client.patch(user_input)\n"
+    expect_match_text:
+    - client.patch
+  - name: httpx async client patch literal negative
+    code: "import httpx\n\ndef example(client, user_input):\n    return client.patch('safe')\n"
+    expect_no_match: true
+  description: "httpx.AsyncClient.patch(url) — async write-capable HTTP request to a tainted URL."
+- id: python.ssrf.httpx_async_client_head
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: medium
+  packages:
+  - httpx
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncClient
+      - head
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf httpx async client head
+    code: "import httpx\ndef example(user_input):\n    return AsyncClient.head(user_input)\n"
+  - name: httpx async client head literal negative
+    code: "import httpx\n\ndef example(user_input):\n    return AsyncClient.head('safe')\n"
+    expect_no_match: true
+  description: "httpx.AsyncClient.head(url) — tainted URL allows async SSRF reconnaissance."
+- id: python.ssrf.aiohttp_get
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - aiohttp
+  cwe:
+  - CWE-918
+  - CWE-295
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ClientSession
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf aiohttp get
+    code: "import aiohttp\ndef example(user_input):\n    return ClientSession.get(user_input)\n"
+  - name: aiohttp get literal negative
+    code: "import aiohttp\n\ndef example(user_input):\n    return ClientSession.get('safe')\n"
+    expect_no_match: true
+  description: 'aiohttp ClientSession.get. Merged aliases: python.tls.aiohttp_ssl_false.'
+  aliases:
+  - python.tls.aiohttp_ssl_false
+- id: python.ssrf.aiohttp_post
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - aiohttp
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - ClientSession
+      - post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf aiohttp post
+    code: "import aiohttp\ndef example(user_input):\n    return ClientSession.post(user_input)\n"
+  - name: aiohttp post literal negative
+    code: "import aiohttp\n\ndef example(user_input):\n    return ClientSession.post('safe')\n"
+    expect_no_match: true
+  description: aiohttp ClientSession.post.
+- id: python.ssrf.aiohttp_request
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - aiohttp
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - aiohttp
+      - request
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ssrf aiohttp request
+    code: "import aiohttp\ndef example(user_input):\n    return aiohttp.request(\"GET\", user_input)\n"
+  - name: aiohttp request literal negative
+    code: "import aiohttp\n\ndef example(user_input):\n    return aiohttp.request('GET', 'safe')\n"
+    expect_no_match: true
+  description: aiohttp.request.
+- id: python.ssrf.tornado_async_http_client
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - tornado
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - AsyncHTTPClient
+      - fetch
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf tornado async http client
+    code: "import tornado\ndef example(user_input):\n    return AsyncHTTPClient.fetch(user_input)\n"
+  - name: tornado async http client literal negative
+    code: "import tornado\n\ndef example(user_input):\n    return AsyncHTTPClient.fetch('safe')\n"
+    expect_no_match: true
+  description: tornado AsyncHTTPClient.fetch.
+- id: python.ssrf.pycurl_perform
+  enabled: false
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - pycurl
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Curl
+      - perform
+  match_examples:
+  - name: ssrf pycurl perform
+    code: "import pycurl\ndef example(user_input):\n    return Curl.perform(user_input)\n"
+  description: "pycurl Curl.perform — flag URL set via setopt(URL)."
+  disabled_reason:
+    code: over-broad
+- id: python.ssrf.curl_setopt_url
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - pycurl
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Curl
+      - setopt
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ssrf curl setopt url
+    code: "import pycurl\ndef example(user_input):\n    return Curl.setopt(pycurl.URL, user_input)\n"
+  - name: curl setopt url literal negative
+    code: "import pycurl\n\ndef example(user_input):\n    return Curl.setopt(pycurl.URL, 'safe')\n"
+    expect_no_match: true
+  description: pycurl Curl.setopt(URL, tainted).
+- id: python.ssrf.urllib3_poolmanager_urlopen
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - urllib3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      regex: ^PoolManager\.urlopen$
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ssrf urllib3 poolmanager urlopen
+    code: "import urllib3\ndef example(user_input):\n    return PoolManager.urlopen(\"GET\", user_input)\n"
+  - name: urllib3 poolmanager urlopen literal negative
+    code: "import urllib3\n\ndef example(user_input):\n    return PoolManager.urlopen('GET', 'safe')\n"
+    expect_no_match: true
+  description: urllib3 PoolManager.urlopen.
+- id: python.ssrf.requests_async_get
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - requests_async
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - requests_async
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf requests async get
+    code: "import requestsasync\ndef example(user_input):\n    return requests_async.get(user_input)\n"
+  - name: requests async get literal negative
+    code: "import requestsasync\n\ndef example(user_input):\n    return requests_async.get('safe')\n"
+    expect_no_match: true
+  description: requests-async get.
+  imports:
+  - requestsasync
+- id: python.ssrf.grequests_get
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  packages:
+  - grequests
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - grequests
+      - get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf grequests get
+    code: "import grequests\ndef example(user_input):\n    return grequests.get(user_input)\n"
+  - name: grequests get literal negative
+    code: "import grequests\n\ndef example(user_input):\n    return grequests.get('safe')\n"
+    expect_no_match: true
+  description: "grequests.get(url) — concurrent HTTP GET to tainted URL allows SSRF."
+- id: python.ssrf.gevent_socket
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: ssrf
+  severity: medium
+  packages:
+  - gevent
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - gevent
+      - socket
+  description: "Disabled — raw socket SSRF; rare entry point."
+- id: python.ssrf.urllib_urlretrieve
+  enabled: true
+  language: python
+  tag: ssrf
+  severity: high
+  cwe:
+  - CWE-918
+  - CWE-22
+  match:
+    kind: call
+    callee:
+      attribute:
+      - request
+      - urlretrieve
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ssrf urllib urlretrieve
+    code: "def example(user_input):\n    return request.urlretrieve(user_input)\n"
+  - name: urllib urlretrieve literal negative
+    code: "def example(user_input):\n    return request.urlretrieve('safe')\n"
+    expect_no_match: true
+  description: "urllib.request.urlretrieve — fetches and writes to disk."
+- id: python.ssrf.boto3_client_request
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: ssrf
+  severity: medium
+  packages:
+  - boto3
+  cwe:
+  - CWE-918
+  match:
+    kind: call
+    callee:
+      attribute:
+      - boto3
+      - client
+  description: "Disabled — boto3 client itself isn't SSRF; flag specific S3 download with tainted bucket."

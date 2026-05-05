@@ -1,0 +1,42 @@
+# rust race / TOCTOU sinks (T501).
+
+# TOCTOU check sites — pair with subsequent open/chmod use-sites
+# in source order to identify the race window.
+- id: rust.toctou.path_exists
+  enabled: true
+  language: rust
+  tag: race
+  severity: medium
+  packages: [std]
+  cwe: [CWE-367]
+  match:
+    kind: call
+    callee:
+      attribute: [Path, exists]
+  match_examples:
+    - name: generated direct match
+      code: |
+        use std::path::Path;
+        fn example() {
+            let target = "tainted";
+            let query = "user";
+            Path::exists(target);
+        }
+  description: "std::path::Path::exists() — check site preceding File::open is TOCTOU."
+
+# Disabled until the matcher can prove the receiver type is a mutex-like
+# guard. Matching repeated bare `.lock()` calls over-reports stdout,
+# parser caches, page-cache state, and other ordinary lock sites.
+- id: rust.race.mutex_double_lock
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: rust
+  tag: race
+  severity: high
+  cwe: [CWE-362, CWE-833]
+  match:
+    kind: call
+    callee:
+      name: lock
+  description: "Disabled — repeated bare `.lock()` calls on the same receiver overmatch non-mutex and ordinary lock sites; re-enable only with receiver type proof for std::sync or parking_lot mutex guards."

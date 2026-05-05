@@ -1,0 +1,21 @@
+# ruby CORS misconfiguration sinks (T403).
+- id: ruby.cors.rack_cors_wildcard
+  enabled: true
+  language: ruby
+  tag: cors
+  severity: medium
+  packages: [rack-cors]
+  cwe: [CWE-942]
+  match:
+    kind: call
+    callee:
+      name: origins
+  match_examples:
+  - name: ruby.cors.rack_cors_wildcard example
+    code: |
+      require "rack-cors"
+      def example(input, url, id, payload, request, params)
+        origins("*")
+      end
+  description: |-
+    rack-cors origins '*' — wildcard CORS allow-all.

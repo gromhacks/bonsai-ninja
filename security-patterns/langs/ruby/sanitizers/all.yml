@@ -1,0 +1,920 @@
+# Ruby sanitizers — declared safe by us; downstream taint stops here.
+- id: ruby.sanitizer.cgi_escape_html
+  enabled: true
+  language: ruby
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [CGI, escapeHTML]
+  match_examples:
+  - name: ruby.sanitizer.cgi_escape_html example
+    code: |
+      def example(input, url, id, payload, request, params)
+        CGI.escapeHTML(input)
+      end
+    expect_match_text: ["CGI.escapeHTML"]
+  description: "CGI.escapeHTML — HTML entity escape."
+
+- id: ruby.sanitizer.erb_html_escape
+  enabled: true
+  language: ruby
+  tag: html-encode
+  match:
+    kind: call
+    callee:
+      attribute: [ERB::Util, html_escape]
+  match_examples:
+  - name: ruby.sanitizer.erb_html_escape example
+    code: |
+      def example(input, url, id, payload, request, params)
+        ERB::Util.html_escape(input)
+      end
+    expect_match_text: ["ERB::Util.html_escape"]
+  description: "ERB::Util.html_escape."
+
+- id: ruby.sanitizer.cgi_escape
+  enabled: true
+  language: ruby
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^CGI\\.escape$"
+  match_examples:
+  - name: ruby.sanitizer.cgi_escape example
+    code: |
+      def example(input, url, id, payload, request, params)
+        CGI.escape(input)
+      end
+    expect_match_text: ["CGI.escape"]
+  description: "CGI.escape — URL component encode."
+
+- id: ruby.sanitizer.uri_encode_www_form
+  enabled: true
+  language: ruby
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, encode_www_form]
+  match_examples:
+  - name: ruby.sanitizer.uri_encode_www_form example
+    code: |
+      def example(input, url, id, payload, request, params)
+        URI.encode_www_form(input)
+      end
+    expect_match_text: ["URI.encode_www_form"]
+  description: "URI.encode_www_form."
+
+- id: ruby.sanitizer.uri_encode_www_form_component
+  enabled: true
+  language: ruby
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, encode_www_form_component]
+  match_examples:
+  - name: ruby.sanitizer.uri_encode_www_form_component example
+    code: |
+      def example(input, url, id, payload, request, params)
+        URI.encode_www_form_component(input)
+      end
+    expect_match_text: ["URI.encode_www_form_component"]
+  description: "URI.encode_www_form_component."
+
+- id: ruby.sanitizer.shellwords_escape
+  enabled: true
+  language: ruby
+  tag: shell-escape
+  match:
+    kind: call
+    callee:
+      regex: "^Shellwords\\.escape$"
+  match_examples:
+  - name: ruby.sanitizer.shellwords_escape example
+    code: |
+      def example(input, url, id, payload, request, params)
+        Shellwords.escape(input)
+      end
+    expect_match_text: ["Shellwords.escape"]
+  description: "Shellwords.escape — neutralises argv injection."
+
+- id: ruby.sanitizer.shellwords_shellescape
+  enabled: true
+  language: ruby
+  tag: shell-escape
+  match:
+    kind: call
+    callee:
+      attribute: [Shellwords, shellescape]
+  match_examples:
+  - name: ruby.sanitizer.shellwords_shellescape example
+    code: |
+      def example(input, url, id, payload, request, params)
+        Shellwords.shellescape(input)
+      end
+    expect_match_text: ["Shellwords.shellescape"]
+  description: "Shellwords.shellescape."
+
+- id: ruby.sanitizer.action_controller_strong_params
+  enabled: true
+  language: ruby
+  tag: validation
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      name: permit
+  match_examples:
+  - name: ruby.sanitizer.action_controller_strong_params example
+    code: |
+      require "actionpack"
+      def example(input, url, id, payload, request, params)
+        permit(input)
+      end
+    expect_match_text: ["permit"]
+  description: "Strong Parameters #permit — whitelists keys."
+
+- id: ruby.sanitizer.action_view_sanitize
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: html-sanitize
+  packages: [actionview]
+  match:
+    kind: call
+    callee:
+      name: sanitize
+  description: "Disabled — bare sanitize overmatches unrelated helpers; use receiver-qualified Loofah/Rails sanitizer rules."
+
+- id: ruby.sanitizer.loofah_scrub
+  enabled: true
+  language: ruby
+  tag: html-sanitize
+  packages: [loofah]
+  match:
+    kind: call
+    callee:
+      attribute: [Loofah, scrub_fragment]
+  match_examples:
+  - name: ruby.sanitizer.loofah_scrub example
+    code: |
+      require "loofah"
+      def example(input, url, id, payload, request, params)
+        Loofah.scrub_fragment(input)
+      end
+    expect_match_text: ["Loofah.scrub_fragment"]
+  description: "Loofah scrub_fragment."
+
+- id: ruby.sanitizer.rails_html_sanitizer
+  enabled: true
+  language: ruby
+  tag: html-sanitize
+  packages: [rails-html-sanitizer]
+  match:
+    kind: call
+    callee:
+      regex: "^(Rails::Html|Rails\\.Html)\\.sanitize$"
+  match_examples:
+  - name: ruby.sanitizer.rails_html_sanitizer example
+    code: |
+      require "rails-html-sanitizer"
+      def example(input, url, id, payload, request, params)
+        Rails::Html.sanitize(input)
+      end
+    expect_match_text: ["Rails::Html.sanitize"]
+  description: "Rails::Html::Sanitizer."
+
+- id: ruby.sanitizer.activerecord_sanitize_sql
+  enabled: true
+  language: ruby
+  tag: sql-parameter
+  packages: [activerecord]
+  match:
+    kind: call
+    callee:
+      name: sanitize_sql_array
+  match_examples:
+  - name: ruby.sanitizer.activerecord_sanitize_sql example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        sanitize_sql_array(input)
+      end
+    expect_match_text: ["sanitize_sql_array"]
+  description: "ActiveRecord sanitize_sql_array."
+
+- id: ruby.sanitizer.activerecord_quote
+  enabled: true
+  language: ruby
+  tag: sql-parameter
+  packages: [activerecord]
+  match:
+    kind: call
+    callee:
+      regex: "^connection\\.quote$"
+  match_examples:
+  - name: ruby.sanitizer.activerecord_quote example
+    code: |
+      require "activerecord"
+      def example(input, url, id, payload, request, params)
+        connection.quote(input)
+      end
+    expect_match_text: ["connection.quote"]
+  description: "AR connection.quote."
+
+- id: ruby.sanitizer.openssl_escape_filter
+  enabled: true
+  language: ruby
+  tag: ldap-escape
+  packages: [net-ldap]
+  match:
+    kind: call
+    callee:
+      regex: "^(Net::LDAP::Filter|Net\\.LDAP\\.Filter)\\.escape$"
+  match_examples:
+  - name: ruby.sanitizer.openssl_escape_filter example
+    code: |
+      require "net-ldap"
+      def example(input, url, id, payload, request, params)
+        Net::LDAP::Filter.escape(input)
+      end
+    expect_match_text: ["Net::LDAP::Filter.escape"]
+  description: "Net::LDAP::Filter.escape."
+
+- id: ruby.sanitizer.json_dump
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [JSON, dump]
+  description: "Disabled — JSON.dump escapes for JSON context, not HTML."
+
+- id: ruby.sanitizer.integer_coerce
+  enabled: true
+  language: ruby
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: to_i
+  match_examples:
+  - name: ruby.sanitizer.integer_coerce example
+    code: |
+      def example(input, url, id, payload, request, params)
+        to_i(input)
+      end
+    expect_match_text: ["to_i"]
+  description: "to_i — coerces to integer; flag-clears for SQL/path concat."
+
+- id: ruby.sanitizer.float_coerce
+  enabled: true
+  language: ruby
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: to_f
+  match_examples:
+  - name: ruby.sanitizer.float_coerce example
+    code: |
+      def example(input, url, id, payload, request, params)
+        to_f(input)
+      end
+    expect_match_text: ["to_f"]
+  description: "to_f — coerces the receiver to a float; clears taint for SQL / path concat contexts because the result can no longer carry arbitrary payload bytes."
+
+- id: ruby.sanitizer.rack_escape_html
+  enabled: true
+  language: ruby
+  tag: html-encode
+  packages: [rack]
+  match:
+    kind: call
+    callee:
+      attribute: [Rack::Utils, escape_html]
+  match_examples:
+  - name: ruby.sanitizer.rack_escape_html example
+    code: |
+      require "rack"
+      def example(input, url, id, payload, request, params)
+        Rack::Utils.escape_html(input)
+      end
+    expect_match_text: ["Rack::Utils.escape_html"]
+  description: "Rack::Utils.escape_html."
+
+- id: ruby.sanitizer.erb_h
+  enabled: true
+  language: ruby
+  tag: html-encode
+  packages: [actionview]
+  match:
+    kind: call
+    callee:
+      name: h
+  match_examples:
+  - name: ruby.sanitizer.erb_h example
+    code: |
+      require "actionview"
+      def example(input, url, id, payload, request, params)
+        h(input)
+      end
+    expect_match_text: ["h"]
+  description: "Rails view helper #h alias for ERB::Util.html_escape."
+
+- id: ruby.sanitizer.loofah_fragment
+  enabled: true
+  language: ruby
+  tag: html-sanitize
+  packages: [loofah]
+  match:
+    kind: call
+    callee:
+      regex: "^Loofah\\.fragment$"
+  match_examples:
+  - name: ruby.sanitizer.loofah_fragment example
+    code: |
+      require "loofah"
+      def example(input, url, id, payload, request, params)
+        Loofah.fragment(input)
+      end
+    expect_match_text: ["Loofah.fragment"]
+  description: "Loofah.fragment — HTML sanitizer."
+
+- id: ruby.sanitizer.rack_secure_compare
+  enabled: true
+  language: ruby
+  tag: constant-time
+  packages: [rack]
+  match:
+    kind: call
+    callee:
+      regex: "^Rack::Utils\\.secure_compare$"
+  match_examples:
+  - name: ruby.sanitizer.rack_secure_compare example
+    code: |
+      require "rack"
+      def example(input, url, id, payload, request, params)
+        Rack::Utils.secure_compare(input)
+      end
+    expect_match_text: ["Rack::Utils.secure_compare"]
+  description: "Rack::Utils.secure_compare — constant-time string compare."
+
+- id: ruby.sanitizer.openssl_fixed_length_secure_compare
+  enabled: true
+  language: ruby
+  tag: constant-time
+  match:
+    kind: call
+    callee:
+      regex: "^OpenSSL\\.fixed_length_secure_compare$"
+  match_examples:
+  - name: ruby.sanitizer.openssl_fixed_length_secure_compare example
+    code: |
+      def example(input, url, id, payload, request, params)
+        OpenSSL.fixed_length_secure_compare(input)
+      end
+    expect_match_text: ["OpenSSL.fixed_length_secure_compare"]
+  description: "OpenSSL.fixed_length_secure_compare — constant-time compare for HMACs."
+
+- id: ruby.sanitizer.securerandom_uuid
+  enabled: true
+  language: ruby
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [SecureRandom, uuid]
+  match_examples:
+  - name: ruby.sanitizer.securerandom_uuid example
+    code: |
+      def example(input, url, id, payload, request, params)
+        SecureRandom.uuid(input)
+      end
+    expect_match_text: ["SecureRandom.uuid"]
+  description: "SecureRandom.uuid — cryptographically random UUID, safe as path/ID."
+
+- id: ruby.sanitizer.securerandom_hex
+  enabled: true
+  language: ruby
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [SecureRandom, hex]
+  match_examples:
+  - name: ruby.sanitizer.securerandom_hex example
+    code: |
+      def example(input, url, id, payload, request, params)
+        SecureRandom.hex(input)
+      end
+    expect_match_text: ["SecureRandom.hex"]
+  description: "SecureRandom.hex — cryptographically random hex."
+
+- id: ruby.sanitizer.integer_fn
+  enabled: true
+  language: ruby
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      name: Integer
+  match_examples:
+  - name: ruby.sanitizer.integer_fn example
+    code: |
+      def example(input, url, id, payload, request, params)
+        Integer(input)
+      end
+    expect_match_text: ["Integer"]
+  description: "Integer(str[, base]) — raises on non-numeric; safer than to_i for path/ID coercion."
+
+- id: ruby.sanitizer.pathname_expand_path
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      name: expand_path
+  description: "Disabled — expand_path normalizes paths but does not enforce root containment."
+
+- id: ruby.sanitizer.activesupport_secure_compare
+  enabled: true
+  language: ruby
+  tag: constant-time
+  packages: [activesupport]
+  match:
+    kind: call
+    callee:
+      regex: "^ActiveSupport::SecurityUtils\\.secure_compare$"
+  match_examples:
+  - name: ruby.sanitizer.activesupport_secure_compare example
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        ActiveSupport::SecurityUtils.secure_compare(input)
+      end
+    expect_match_text: ["ActiveSupport::SecurityUtils.secure_compare"]
+  description: "ActiveSupport::SecurityUtils.secure_compare — constant-time string compare (Rails)."
+
+- id: ruby.sanitizer.activesupport_fixed_length_secure_compare
+  enabled: true
+  language: ruby
+  tag: constant-time
+  packages: [activesupport]
+  match:
+    kind: call
+    callee:
+      regex: "^ActiveSupport::SecurityUtils\\.fixed_length_secure_compare$"
+  match_examples:
+  - name: ruby.sanitizer.activesupport_fixed_length_secure_compare example
+    code: |
+      require "activesupport"
+      def example(input, url, id, payload, request, params)
+        ActiveSupport::SecurityUtils.fixed_length_secure_compare(input)
+      end
+    expect_match_text: ["ActiveSupport::SecurityUtils.fixed_length_secure_compare"]
+  description: "ActiveSupport::SecurityUtils.fixed_length_secure_compare — constant-time HMAC compare."
+
+- id: ruby.sanitizer.bcrypt_password_eq
+  enabled: true
+  language: ruby
+  tag: constant-time
+  packages: [bcrypt]
+  match:
+    kind: call
+    callee:
+      attribute: [BCrypt::Password, "=="]
+  match_examples:
+  - name: ruby.sanitizer.bcrypt_password_eq example
+    code: |
+      require "bcrypt"
+      def example(input, url, id, payload, request, params)
+        BCrypt::Password.==(input)
+      end
+    expect_match_text: ["BCrypt::Password.=="]
+  description: "BCrypt::Password#== — constant-time hash compare; clears taint on password verify."
+
+- id: ruby.sanitizer.argon2_verify_password
+  enabled: true
+  language: ruby
+  tag: constant-time
+  packages: [argon2]
+  match:
+    kind: call
+    callee:
+      attribute: [Argon2::Password, verify_password]
+  match_examples:
+  - name: ruby.sanitizer.argon2_verify_password example
+    code: |
+      require "argon2"
+      def example(input, url, id, payload, request, params)
+        Argon2::Password.verify_password(input)
+      end
+    expect_match_text: ["Argon2::Password.verify_password"]
+  description: "Argon2::Password.verify_password — constant-time password verify."
+
+- id: ruby.sanitizer.erb_url_encode
+  enabled: true
+  language: ruby
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [ERB::Util, url_encode]
+  match_examples:
+  - name: ruby.sanitizer.erb_url_encode example
+    code: |
+      def example(input, url, id, payload, request, params)
+        ERB::Util.url_encode(input)
+      end
+    expect_match_text: ["ERB::Util.url_encode"]
+  description: "ERB::Util.url_encode — URL-encodes a string for safe URL composition."
+
+- id: ruby.sanitizer.shellwords_shelljoin
+  enabled: true
+  language: ruby
+  tag: shell-escape
+  match:
+    kind: call
+    callee:
+      attribute: [Shellwords, shelljoin]
+  match_examples:
+  - name: ruby.sanitizer.shellwords_shelljoin example
+    code: |
+      def example(input, url, id, payload, request, params)
+        Shellwords.shelljoin(input)
+      end
+    expect_match_text: ["Shellwords.shelljoin"]
+  description: "Shellwords.shelljoin — joins an argv array with proper shell escaping."
+
+- id: ruby.sanitizer.loofah_clean
+  enabled: true
+  language: ruby
+  tag: html-sanitize
+  packages: [loofah]
+  match:
+    kind: call
+    callee:
+      attribute: [Loofah, clean]
+  match_examples:
+  - name: ruby.sanitizer.loofah_clean example
+    code: |
+      require "loofah"
+      def example(input, url, id, payload, request, params)
+        Loofah.clean(input)
+      end
+    expect_match_text: ["Loofah.clean"]
+  description: "Loofah.clean — sanitizes an HTML fragment using the configured scrubber."
+
+- id: ruby.sanitizer.sanitize_gem_clean
+  enabled: true
+  language: ruby
+  tag: html-sanitize
+  packages: [sanitize]
+  match:
+    kind: call
+    callee:
+      regex: "^Sanitize\\.fragment$"
+  match_examples:
+  - name: ruby.sanitizer.sanitize_gem_clean example
+    code: |
+      require "sanitize"
+      def example(input, url, id, payload, request, params)
+        Sanitize.fragment(input)
+      end
+    expect_match_text: ["Sanitize.fragment"]
+  description: "Sanitize.fragment — gem-based HTML allowlist sanitizer."
+
+- id: ruby.sanitizer.jwt_decode_verify
+  enabled: true
+  language: ruby
+  tag: jwt-verify
+  packages: [jwt]
+  match:
+    kind: call
+    callee:
+      regex: "^JWT\\.decode$"
+  constraints:
+  - keyword_arg_equals:
+      name: verify
+      value: "true"
+  match_examples:
+  - name: ruby.sanitizer.jwt_decode_verify example
+    code: |
+      require "jwt"
+      def example(input, url, id, payload, request, params)
+        JWT.decode(input, input, verify: true)
+      end
+    expect_match_text: ["JWT.decode"]
+  - name: ruby.sanitizer.jwt_decode_verify example negative constraint boundary
+    code: "require \"jwt\"\ndef example(input, url, id, payload, request, params)\n  JWT.decode()\nend\n"
+    expect_no_match: true
+  description: "JWT.decode(..., verify: true, algorithm: 'HS256'/'RS256') - signature verified; clears JWT taint."
+
+# -- Open-redirect mitigations -------------------------------------------------
+- id: ruby.sanitizer.url_for_only_path
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: open-redirect-sanitize
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      name: url_for
+  description: "Disabled - Rails url_for(only_path: true) is safe but bare url_for is not. Enable with kwarg-presence narrowing."
+
+- id: ruby.sanitizer.redirect_to_only_path
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: open-redirect-sanitize
+  packages: [actionpack]
+  match:
+    kind: call
+    callee:
+      name: redirect_to
+  description: "Disabled - redirect_to(allow_other_host: false) is safe in Rails 7+. Enable with kwarg-presence narrowing for allow_other_host."
+
+# -- Audit-derived validation / binding sanitizers -----------------------------
+- id: ruby.sanitizer.same_origin_start_with
+  enabled: true
+  language: ruby
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      name: start_with?
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^['\"]/"
+  match_examples:
+  - name: ruby.sanitizer.same_origin_start_with example
+    code: |
+      def example(url)
+        url.start_with?("/")
+      end
+    expect_match_text: ["url.start_with?"]
+  - name: ruby.sanitizer.same_origin_start_with example negative constraint boundary
+    code: "def example(url)\n  url.start_with?()\nend\n"
+    expect_no_match: true
+  description: "String#start_with?(\"/\") — same-origin redirect/path guard for root-relative targets."
+
+- id: ruby.sanitizer.include_allowlist
+  enabled: true
+  language: ruby
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      name: include?
+  constraints:
+  - receiver_name_in: [ALLOWED, ALLOWLIST, allowed, allowlist, allowed_roles, permitted, valid_values]
+  match_examples:
+  - name: ruby.sanitizer.include_allowlist example
+    code: |
+      ALLOWED = %w[user admin]
+      def example(role)
+        ALLOWED.include?(role)
+      end
+    expect_match_text: ["ALLOWED.include?"]
+  description: "allowlist.include?(value) — enum/set membership validator for constrained values."
+
+- id: ruby.sanitizer.match_full_string_shape
+  enabled: true
+  language: ruby
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      name: match?
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(\\\\A|\\^).*(\\\\z|\\$)"
+  match_examples:
+  - name: ruby.sanitizer.match_full_string_shape example
+    code: |
+      def example(slug)
+        slug.match?(/\A[a-z0-9_-]+\z/)
+      end
+    expect_match_text: ["slug.match?"]
+  - name: ruby.sanitizer.match_full_string_shape example negative constraint boundary
+    code: "def example(slug)\n  slug.match?()\nend\n"
+    expect_no_match: true
+  description: "String#match? with full-string anchors — shape validator for UUIDs, slugs, emails, and similar bounded formats."
+
+- id: ruby.sanitizer.activerecord_where_bind_array
+  enabled: true
+  language: ruby
+  tag: db-bind-parameter
+  packages: [activerecord]
+  match:
+    kind: call
+    callee:
+      name: where
+  constraints:
+  - any_arg_matches_regex: "\\?"
+  match_examples:
+  - name: ruby.sanitizer.activerecord_where_bind_array example
+    code: |
+      require "activerecord"
+      def example(id)
+        User.where(["id = ?", id])
+      end
+    expect_match_text: [User.where]
+  - name: ruby.sanitizer.activerecord_where_bind_array example negative constraint boundary
+    code: "require \"activerecord\"\ndef example(id)\n  User.where()\nend\n"
+    expect_no_match: true
+  description: "ActiveRecord where([\"col = ?\", value]) — bind-array form keeps values outside the SQL template."
+
+- id: ruby.sanitizer.activerecord_find_by_sql_bind_array
+  enabled: true
+  language: ruby
+  tag: db-bind-parameter
+  packages: [activerecord]
+  match:
+    kind: call
+    callee:
+      name: find_by_sql
+  constraints:
+  - any_arg_matches_regex: "\\?"
+  match_examples:
+  - name: ruby.sanitizer.activerecord_find_by_sql_bind_array example
+    code: |
+      require "activerecord"
+      def example(id)
+        User.find_by_sql(["select * from users where id = ?", id])
+      end
+    expect_match_text: [User.find_by_sql]
+  - name: ruby.sanitizer.activerecord_find_by_sql_bind_array example negative constraint boundary
+    code: "require \"activerecord\"\ndef example(id)\n  User.find_by_sql()\nend\n"
+    expect_no_match: true
+  description: "ActiveRecord find_by_sql([sql, binds...]) — bind-array form parameterizes dynamic values."
+
+- id: ruby.sanitizer.gsub_char_allowlist
+  enabled: true
+  language: ruby
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      name: gsub
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "\\[\\^"
+  - arg_equals:
+      index: 1
+      value: "\"\""
+  match_examples:
+  - name: ruby.sanitizer.gsub_char_allowlist example
+    code: |
+      def example(input)
+        input.gsub(/[^A-Za-z0-9_-]/, "")
+      end
+    expect_match_text: [input.gsub]
+  - name: ruby.sanitizer.gsub_char_allowlist example negative constraint boundary
+    code: "def example(input)\n  input.gsub()\nend\n"
+    expect_no_match: true
+  description: "String#gsub(/[^safe]/, \"\") — strips every character outside an explicit allowlist."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: ruby.passthrough.cgi_unescape
+  enabled: true
+  language: ruby
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [CGI, unescape]
+  match_examples:
+  - name: ruby.passthrough.cgi_unescape example
+    code: |
+      def example(input, url, id, payload, request, params)
+        CGI.unescape(input)
+      end
+    expect_match_text: ["CGI.unescape"]
+  description: "CGI.unescape(s) — preserves taint; classic Rack/CGI decode."
+- id: ruby.passthrough.uri_decode_www_form_component
+  enabled: true
+  language: ruby
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, decode_www_form_component]
+  match_examples:
+  - name: ruby.passthrough.uri_decode_www_form_component example
+    code: |
+      def example(input, url, id, payload, request, params)
+        URI.decode_www_form_component(input)
+      end
+    expect_match_text: ["URI.decode_www_form_component"]
+  description: "URI.decode_www_form_component(s) — preserves taint."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: ruby.csrf.protect_from_forgery
+  enabled: true
+  language: ruby
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: protect_from_forgery
+  match_examples:
+  - name: ruby.csrf.protect_from_forgery example
+    code: |
+      def example(input, url, id, payload, request, params)
+        protect_from_forgery(input)
+      end
+    expect_match_text: ["protect_from_forgery"]
+  description: "Rails ApplicationController#protect_from_forgery — global CSRF token check."
+
+# Lock-acquire sanitizers (T502). Tagged `lock-acquire` so
+# reviewer enumerates guarded sections; the in-scope-cleanse
+# semantics handle 'while lock is held, accesses are safe'.
+- id: ruby.lock.mutex_synchronize
+  enabled: true
+  language: ruby
+  tag: lock-acquire
+  match:
+    kind: call
+    callee:
+      attribute: [Mutex, synchronize]
+  match_examples:
+  - name: ruby.lock.mutex_synchronize example
+    code: |
+      def example(input, url, id, payload, request, params)
+        Mutex.synchronize(input)
+      end
+    expect_match_text: ["Mutex.synchronize"]
+  description: "Mutex#synchronize { ... } — guards the block body."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: ruby.cookie.cookies_set_httponly
+  enabled: true
+  language: ruby
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [cookies, signed]
+  constraints:
+  - any_arg_matches_regex: |-
+      httponly.*true|secure.*true
+  match_examples:
+  - name: ruby.cookie.cookies_set_httponly example
+    code: |
+      def example(input, url, id, payload, request, params)
+        cookies.signed(httponly: true)
+      end
+    expect_match_text: ["cookies.signed"]
+  - name: ruby.cookie.cookies_set_httponly example negative constraint boundary
+    code: "def example(input, url, id, payload, request, params)\n  cookies.signed()\nend\n"
+    expect_no_match: true
+  description: "Rails cookies.signed[name] = {value: ..., httponly: true, secure: true}."
+
+# Rate-limit middleware presence sanitizers (architectural).
+- id: ruby.ratelimit.rack_attack_throttle
+  enabled: true
+  language: ruby
+  tag: rate-limit
+  packages: [rack-attack]
+  match:
+    kind: call
+    callee:
+      attribute: [Rack::Attack, throttle]
+  match_examples:
+  - name: ruby.ratelimit.rack_attack_throttle example
+    code: |
+      require "rack-attack"
+      def example(input, url, id, payload, request, params)
+        Rack::Attack.throttle(input)
+      end
+    expect_match_text: ["Rack::Attack.throttle"]
+  description: "Rack::Attack.throttle declaration — sensitive-route throttling."

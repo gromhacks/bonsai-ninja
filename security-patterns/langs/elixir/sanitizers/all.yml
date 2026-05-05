@@ -1,0 +1,856 @@
+# Elixir sanitizers. Tag values follow the spec-canonical names
+# (html-encode, html-sanitize, url-encode, shell-escape, sql-parameter,
+# constant-time, jwt-verify, path-sanitize, xxe-sanitizer, ldap-escape,
+# numeric-coerce, validation). Non-canonical tags are rejected by the
+# pack audit.
+
+# -- HTML ------------------------------------------------------------
+- id: elixir.sanitizer.phoenix_html_html_escape
+  enabled: true
+  language: elixir
+  tag: html-encode
+  frameworks: [phoenix]
+  packages: [phoenix_html]
+  match:
+    kind: call
+    callee:
+      regex: "^Phoenix\\.HTML\\.html_escape$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Phoenix_html
+      defmodule App do
+        def test(input) do
+          Phoenix.HTML.html_escape(input)
+        end
+      end
+    expect_match_text: [Phoenix.HTML.html_escape]
+  description: "Phoenix.HTML.html_escape/1 — escapes `<`, `>`, `&`, `\"`, `'` and returns a :safe tuple; neutralises reflected XSS in EEx/HEEx templates."
+
+  imports:
+  - Phoenix_html
+- id: elixir.sanitizer.html_sanitize_ex_strip_tags
+  enabled: true
+  language: elixir
+  tag: html-sanitize
+  packages: [html_sanitize_ex]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlSanitizeEx, strip_tags]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Html_sanitize_ex
+      defmodule App do
+        def test(input) do
+          HtmlSanitizeEx.strip_tags(input)
+        end
+      end
+    expect_match_text: [HtmlSanitizeEx.strip_tags]
+  description: "HtmlSanitizeEx.strip_tags/1 — drops every HTML tag, leaving only text; safe for plain-text contexts."
+
+  imports:
+  - Html_sanitize_ex
+- id: elixir.sanitizer.html_sanitize_ex_basic_html
+  enabled: true
+  language: elixir
+  tag: html-sanitize
+  packages: [html_sanitize_ex]
+  match:
+    kind: call
+    callee:
+      attribute: [HtmlSanitizeEx, basic_html]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Html_sanitize_ex
+      defmodule App do
+        def test(input) do
+          HtmlSanitizeEx.basic_html(input)
+        end
+      end
+    expect_match_text: [HtmlSanitizeEx.basic_html]
+  description: "HtmlSanitizeEx.basic_html/1 — allow-lists a safe subset of HTML tags / attributes."
+
+# -- URL -------------------------------------------------------------
+  imports:
+  - Html_sanitize_ex
+- id: elixir.sanitizer.uri_encode
+  enabled: true
+  language: elixir
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      regex: "^URI\\.encode$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.encode(input)
+        end
+      end
+    expect_match_text: [URI.encode]
+  description: "URI.encode/1 — percent-encodes reserved URL characters; breaks injection payloads embedded in URL paths."
+
+- id: elixir.sanitizer.uri_encode_www_form
+  enabled: true
+  language: elixir
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, encode_www_form]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.encode_www_form(input)
+        end
+      end
+    expect_match_text: [URI.encode_www_form]
+  description: "URI.encode_www_form/1 — percent-encodes for application/x-www-form-urlencoded (also encodes `+` and spaces)."
+
+- id: elixir.sanitizer.uri_encode_query
+  enabled: true
+  language: elixir
+  tag: url-encode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, encode_query]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.encode_query(input)
+        end
+      end
+    expect_match_text: [URI.encode_query]
+  description: "URI.encode_query/1 — builds an encoded query string from a keyword list; each value is escaped."
+
+# -- SQL parameterisation -------------------------------------------
+- id: elixir.sanitizer.ecto_query_from
+  enabled: true
+  language: elixir
+  tag: sql-parameter
+  packages: [ecto]
+  match:
+    kind: call
+    callee:
+      attribute: [Ecto, Query, from]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          Ecto.Query.from(input)
+        end
+      end
+    expect_match_text: [Ecto.Query.from]
+  description: "Ecto.Query.from/2 — interpolated `^var` pins bind through the Ecto parameter engine, not string concatenation."
+
+# -- Constant-time comparison ---------------------------------------
+  imports:
+  - Ecto
+- id: elixir.sanitizer.plug_crypto_secure_compare
+  enabled: true
+  language: elixir
+  tag: constant-time
+  packages: [plug_crypto]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Crypto, secure_compare]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug_crypto
+      defmodule App do
+        def test(input) do
+          Plug.Crypto.secure_compare(input)
+        end
+      end
+    expect_match_text: [Plug.Crypto.secure_compare]
+  description: "Plug.Crypto.secure_compare/2 — constant-time byte comparison; defeats timing oracles on session tokens / HMACs."
+
+# -- Signed-token / JWT verify --------------------------------------
+  imports:
+  - Plug_crypto
+- id: elixir.sanitizer.phoenix_token_verify
+  enabled: true
+  language: elixir
+  tag: jwt-verify
+  frameworks: [phoenix]
+  match:
+    kind: call
+    callee:
+      regex: "^Phoenix\\.Token\\.verify$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Phoenix.Token.verify(input)
+        end
+      end
+    expect_match_text: [Phoenix.Token.verify]
+  description: "Phoenix.Token.verify/4 — HMAC-signed token with max-age; payload integrity is checked before use."
+
+- id: elixir.sanitizer.plug_crypto_message_verifier_verify
+  enabled: true
+  language: elixir
+  tag: jwt-verify
+  packages: [plug_crypto]
+  match:
+    kind: call
+    callee:
+      regex: "^Plug\\.Crypto\\.MessageVerifier\\.verify$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug_crypto
+      defmodule App do
+        def test(input) do
+          Plug.Crypto.MessageVerifier.verify(input)
+        end
+      end
+    expect_match_text: [Plug.Crypto.MessageVerifier.verify]
+  description: "Plug.Crypto.MessageVerifier.verify/2 — verifies a signed binary produced by `sign/2`; rejects tampered data."
+
+# -- Path sanitisation ----------------------------------------------
+  imports:
+  - Plug_crypto
+- id: elixir.sanitizer.path_safe_relative_to
+  enabled: true
+  language: elixir
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, safe_relative_to]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Path.safe_relative_to(input)
+        end
+      end
+    expect_match_text: [Path.safe_relative_to]
+  description: "Path.safe_relative_to/2 — returns `:error` if the resolved path escapes the given root; canonical chroot check."
+
+- id: elixir.sanitizer.path_safe_relative
+  enabled: true
+  language: elixir
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, safe_relative]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Path.safe_relative(input)
+        end
+      end
+    expect_match_text: [Path.safe_relative]
+  description: "Path.safe_relative/1,2 — rejects absolute paths and traversal components; returns `:error` on unsafe input."
+
+- id: elixir.sanitizer.path_expand_with_root
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: elixir
+  tag: path-sanitize
+  match:
+    kind: call
+    callee:
+      attribute: [Path, expand]
+  description: "Disabled — Path.expand/2 normalises `..` but does NOT enforce a root on its own. Only counts as a sanitiser when paired with a `String.starts_with?(root)` check; enable manually once that pattern is confirmed."
+
+# -- Numeric coercion -----------------------------------------------
+- id: elixir.sanitizer.string_to_integer
+  enabled: true
+  language: elixir
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [String, to_integer]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          String.to_integer(input)
+        end
+      end
+    expect_match_text: [String.to_integer]
+  description: "String.to_integer/1 — raises on non-integer input, so any injection payload blows up before reaching the sink."
+
+- id: elixir.sanitizer.string_to_float
+  enabled: true
+  language: elixir
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      attribute: [String, to_float]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          String.to_float(input)
+        end
+      end
+    expect_match_text: [String.to_float]
+  description: "String.to_float/1 — raises on non-numeric input; narrows taint to a float."
+
+- id: elixir.sanitizer.integer_parse
+  enabled: true
+  language: elixir
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      regex: "^Integer\\.parse$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Integer.parse(input)
+        end
+      end
+    expect_match_text: [Integer.parse]
+  description: "Integer.parse/1 — returns `:error` for non-numeric input; the numeric result carries no injection payload."
+
+- id: elixir.sanitizer.float_parse
+  enabled: true
+  language: elixir
+  tag: numeric-coerce
+  match:
+    kind: call
+    callee:
+      regex: "^Float\\.parse$"
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Float.parse(input)
+        end
+      end
+    expect_match_text: [Float.parse]
+  description: "Float.parse/1 — returns `:error` for non-numeric input."
+
+# -- Validation / bounded atom creation -----------------------------
+- id: elixir.sanitizer.string_to_existing_atom
+  enabled: true
+  language: elixir
+  tag: validation
+  match:
+    kind: call
+    callee:
+      attribute: [String, to_existing_atom]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          String.to_existing_atom(input)
+        end
+      end
+    expect_match_text: [String.to_existing_atom]
+  description: "String.to_existing_atom/1 — raises if the atom doesn't already exist; bounds atom-table growth (anti-DoS)."
+
+- id: elixir.sanitizer.ecto_changeset_cast
+  enabled: true
+  language: elixir
+  tag: validation
+  packages: [ecto]
+  match:
+    kind: call
+    callee:
+      attribute: [Ecto, Changeset, cast]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          Ecto.Changeset.cast(input)
+        end
+      end
+    expect_match_text: [Ecto.Changeset.cast]
+  description: "Ecto.Changeset.cast/4 — restricts input to declared fields and coerces types; invalid values land in errors rather than flowing through."
+
+  imports:
+  - Ecto
+- id: elixir.sanitizer.ecto_changeset_validate_format
+  enabled: true
+  language: elixir
+  tag: validation
+  packages: [ecto]
+  match:
+    kind: call
+    callee:
+      attribute: [Ecto, Changeset, validate_format]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          Ecto.Changeset.validate_format(input)
+        end
+      end
+    expect_match_text: [Ecto.Changeset.validate_format]
+  description: "Ecto.Changeset.validate_format/4 — regex allow-list over a field; rejects values that don't match."
+
+  imports:
+  - Ecto
+- id: elixir.sanitizer.ecto_changeset_validate_inclusion
+  enabled: true
+  language: elixir
+  tag: validation
+  packages: [ecto]
+  match:
+    kind: call
+    callee:
+      attribute: [Ecto, Changeset, validate_inclusion]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          Ecto.Changeset.validate_inclusion(input)
+        end
+      end
+    expect_match_text: [Ecto.Changeset.validate_inclusion]
+  description: "Ecto.Changeset.validate_inclusion/4 — enum allow-list; values outside the set are rejected."
+
+# -- Plug HTML escaping ---------------------------------------------
+  imports:
+  - Ecto
+- id: elixir.sanitizer.plug_html_html_escape
+  enabled: true
+  language: elixir
+  tag: html-encode
+  packages: [plug]
+  match:
+    kind: call
+    callee:
+      regex: "^Plug\\.HTML\\.html_escape$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(input) do
+          Plug.HTML.html_escape(input)
+        end
+      end
+    expect_match_text: [Plug.HTML.html_escape]
+  description: "Plug.HTML.html_escape/1 — escapes `&`, `<`, `>`, `\"`, `'` in a binary; safe for embedding inside HTML text/attribute contexts."
+
+# -- Password / KDF constant-time verifiers -------------------------
+# Tag `constant-time` because these compare against a stored hash in
+# constant time; they sanitize the secret-comparison sink, not the
+# password value itself.
+  imports:
+  - Plug
+- id: elixir.sanitizer.argon2_verify_pass
+  enabled: true
+  language: elixir
+  tag: constant-time
+  packages: [argon2_elixir]
+  match:
+    kind: call
+    callee:
+      regex: "^Argon2\\.verify_pass$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Argon2_elixir
+      defmodule App do
+        def test(input) do
+          Argon2.verify_pass(input)
+        end
+      end
+    expect_match_text: [Argon2.verify_pass]
+  description: "Argon2.verify_pass/2 — constant-time Argon2id password verification; defeats timing oracles on credential checks."
+
+  imports:
+  - Argon2_elixir
+- id: elixir.sanitizer.pbkdf2_verify_pass
+  enabled: true
+  language: elixir
+  tag: constant-time
+  packages: [pbkdf2_elixir]
+  match:
+    kind: call
+    callee:
+      regex: "^Pbkdf2\\.verify_pass$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Pbkdf2_elixir
+      defmodule App do
+        def test(input) do
+          Pbkdf2.verify_pass(input)
+        end
+      end
+    expect_match_text: [Pbkdf2.verify_pass]
+  description: "Pbkdf2.verify_pass/2 — constant-time PBKDF2-HMAC password verification."
+
+  imports:
+  - Pbkdf2_elixir
+- id: elixir.sanitizer.bcrypt_verify_pass
+  enabled: true
+  language: elixir
+  tag: constant-time
+  packages: [bcrypt_elixir]
+  match:
+    kind: call
+    callee:
+      regex: "^Bcrypt\\.verify_pass$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Bcrypt_elixir
+      defmodule App do
+        def test(input) do
+          Bcrypt.verify_pass(input)
+        end
+      end
+    expect_match_text: [Bcrypt.verify_pass]
+  description: "Bcrypt.verify_pass/2 — constant-time bcrypt password verification."
+
+  imports:
+  - Bcrypt_elixir
+- id: elixir.sanitizer.comeonin_verify_pass
+  enabled: true
+  language: elixir
+  tag: constant-time
+  packages: [comeonin]
+  match:
+    kind: call
+    callee:
+      regex: "^Comeonin\\.verify_pass$"
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Comeonin
+      defmodule App do
+        def test(input) do
+          Comeonin.verify_pass(input)
+        end
+      end
+    expect_match_text: [Comeonin.verify_pass]
+  description: "Comeonin.verify_pass/3 — constant-time hash comparison that dispatches to the configured Argon2/Bcrypt/Pbkdf2 backend."
+
+# -- Ecto parameterised splice (^var) -------------------------------
+# The `^expr` operator inside an Ecto query/fragment is what marks a
+# value as a bound parameter. The matcher cannot see the `^` operator
+# directly, but the Ecto.Query.dynamic/2 builder always parameterises
+# its interpolations.
+  imports:
+  - Comeonin
+- id: elixir.sanitizer.ecto_query_dynamic
+  enabled: true
+  language: elixir
+  tag: sql-parameter
+  packages: [ecto]
+  match:
+    kind: call
+    callee:
+      attribute: [Ecto, Query, dynamic]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Ecto
+      defmodule App do
+        def test(input) do
+          Ecto.Query.dynamic(input)
+        end
+      end
+    expect_match_text: [Ecto.Query.dynamic]
+  description: "Ecto.Query.dynamic/2 — builds a composable WHERE clause; `^value` interpolations bind through the parameter engine instead of string-concat."
+
+  imports:
+  - Ecto
+- id: elixir.sanitizer.string_starts_with_same_origin
+  enabled: true
+  language: elixir
+  tag: same-origin-path
+  match:
+    kind: call
+    callee:
+      attribute: [String, "starts_with?"]
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '^"/[^"]*"$'
+  match_examples:
+  - name: starts_with local path
+    code: |
+      defmodule App do
+        def test(input) do
+          String.starts_with?(input, "/app/")
+        end
+      end
+    expect_match_text: ["String.starts_with?"]
+  - name: starts_with local path negative constraint boundary
+    code: "defmodule App do\n  def test(input) do\n    String.starts_with?()\n  end\nend\n"
+    expect_no_match: true
+  description: "String.starts_with?(input, \"/...\") — same-origin redirect/path guard for slash-rooted local paths."
+
+- id: elixir.sanitizer.allowlist_member
+  enabled: true
+  language: elixir
+  tag: allowlist-validate
+  match:
+    kind: call
+    callee:
+      regex: "^(Enum\\.member\\?|MapSet\\.member\\?|Map\\.has_key\\?)$"
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^(allowed|allowlist|whitelist|safe_values|safe_paths)$"
+  match_examples:
+  - name: enum member allowlist
+    code: |
+      defmodule App do
+        def test(input) do
+          Enum.member?(allowed, input)
+        end
+      end
+    expect_match_text: ["Enum.member?"]
+  - name: enum member allowlist negative constraint boundary
+    code: "defmodule App do\n  def test(input) do\n    Enum.member?()\n  end\nend\n"
+    expect_no_match: true
+  description: "Enum.member?/MapSet.member?/Map.has_key? against an allowlist-named collection — validates membership in a finite accepted set."
+
+- id: elixir.sanitizer.regex_match_full
+  enabled: true
+  language: elixir
+  tag: regex-validate
+  match:
+    kind: call
+    callee:
+      attribute: [Regex, "match?"]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "^~r/\\^.*\\$/"
+  match_examples:
+  - name: anchored Regex.match?
+    code: |
+      defmodule App do
+        def test(input) do
+          Regex.match?(~r/^[a-z0-9_-]+$/, input)
+        end
+      end
+    expect_match_text: ["Regex.match?"]
+  - name: anchored Regex.match? negative constraint boundary
+    code: "defmodule App do\n  def test(input) do\n    Regex.match?()\n  end\nend\n"
+    expect_no_match: true
+  description: "Regex.match? with an anchored full-string allowlist pattern — validates slug/UUID-style shape before downstream use."
+
+- id: elixir.sanitizer.postgrex_query_bind
+  enabled: true
+  language: elixir
+  tag: db-bind-parameter
+  packages: [postgrex]
+  match:
+    kind: call
+    callee:
+      attribute: [Postgrex, query]
+  constraints:
+  - min_args: 3
+  match_examples:
+  - name: Postgrex parameter list
+    code: |
+      alias Postgrex
+      defmodule App do
+        def test(conn, input) do
+          Postgrex.query(conn, "select * from users where name = $1", [input])
+        end
+      end
+    expect_match_text: [Postgrex.query]
+  description: "Postgrex.query(conn, sql, params) — sends a separate parameter list for $N placeholders instead of SQL concatenation."
+
+  imports:
+  - Postgrex
+- id: elixir.sanitizer.string_replace_char_allowlist
+  enabled: true
+  language: elixir
+  tag: char-allowlist
+  match:
+    kind: call
+    callee:
+      attribute: [String, replace]
+  constraints:
+  - any_arg_matches_regex: "\\[\\^[^\\]]+\\]"
+  - any_arg_matches_regex: '^""$'
+  match_examples:
+  - name: strip non slug chars
+    code: |
+      defmodule App do
+        def test(input) do
+          String.replace(input, ~r/[^A-Za-z0-9_-]/, "")
+        end
+      end
+    expect_match_text: [String.replace]
+  - name: strip non slug chars negative constraint boundary
+    code: "defmodule App do\n  def test(input) do\n    String.replace()\n  end\nend\n"
+    expect_no_match: true
+  description: "String.replace(input, ~r/[^safe]/, \"\") — strips characters outside a safe allowlist."
+
+# URL decode passthrough sanitizers (T301). Tagged
+# `passthrough-decode` so the engine treats the call as an
+# identity edge (T104) — taint propagates THROUGH instead of
+# being cleared. Bludit CVE-2019-16113 used urldecode to
+# turn %2F%2E%2E%2F into /../ AFTER the path safety check.
+- id: elixir.passthrough.uri_decode
+  enabled: true
+  language: elixir
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, decode]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.decode(input)
+        end
+      end
+    expect_match_text: [URI.decode]
+  description: "URI.decode(s) — preserves taint."
+- id: elixir.passthrough.uri_decode_www_form
+  enabled: true
+  language: elixir
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [URI, decode_www_form]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          URI.decode_www_form(input)
+        end
+      end
+    expect_match_text: [URI.decode_www_form]
+  description: "URI.decode_www_form(s) — preserves taint."
+
+# CSRF middleware / decorator presence sanitizers (T303).
+# Tagged `csrf-protect` so the engine credits the `csrf` sink
+# class. Reviewer enumerates with `security sanitizers --tag
+# csrf-protect` to find sites that DO have CSRF protection;
+# absence is the architectural finding (no taint chain).
+- id: elixir.csrf.plug_csrf_protection
+  enabled: true
+  language: elixir
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, CSRFProtection, call]
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Plug.CSRFProtection.call(input)
+        end
+      end
+    expect_match_text: [Plug.CSRFProtection.call]
+  description: "Plug.CSRFProtection — Phoenix's default CSRF plug."
+- id: elixir.csrf.protect_from_forgery
+  enabled: true
+  language: elixir
+  tag: csrf-protect
+  match:
+    kind: call
+    callee:
+      name: protect_from_forgery
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          protect_from_forgery(input)
+        end
+      end
+    expect_match_text: [protect_from_forgery]
+  description: "Phoenix protect_from_forgery — controller CSRF enforcement."
+
+# Cookie-secure sanitizers (T402). Cookie-set calls with
+# httpOnly + secure flags are the SAFE shape; reviewer
+# enumerates with `security sanitizers --tag cookie-secure`
+# and audits routes that set cookies WITHOUT them.
+- id: elixir.cookie.put_resp_cookie_with_secure
+  enabled: true
+  language: elixir
+  tag: cookie-secure
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, put_resp_cookie]
+  constraints:
+  - any_arg_matches_regex: |-
+      http_only.*true|secure.*true
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Plug.put_resp_cookie(http_only: true)
+        end
+      end
+    expect_match_text: [Plug.put_resp_cookie]
+  - name: declared shape negative constraint boundary
+    code: "defmodule App do\n  def test(input) do\n    Plug.put_resp_cookie()\n  end\nend\n"
+    expect_no_match: true
+  description: "Plug.Conn.put_resp_cookie(conn, key, val, http_only: true, secure: true)."
+
+# Rate-limit middleware presence sanitizers (round 2 fill).
+- id: elixir.ratelimit.hammer_check_rate
+  enabled: true
+  language: elixir
+  tag: rate-limit
+  packages: [hammer]
+  match:
+    kind: call
+    callee:
+      attribute: [Hammer, check_rate]
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Hammer
+      defmodule App do
+        def test(input) do
+          Hammer.check_rate(input)
+        end
+      end
+    expect_match_text: [Hammer.check_rate]
+  description: 'Hammer.check_rate — Elixir rate-limit primitive.'
+  imports:
+  - Hammer

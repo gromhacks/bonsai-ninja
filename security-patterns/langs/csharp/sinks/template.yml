@@ -1,0 +1,174 @@
+# C# template-injection / SSTI. Razor / Liquid / Scriban / Handlebars.NET.
+- id: csharp.template.razor_engine_compile
+  enabled: true
+  language: csharp
+  tag: ssti
+  severity: critical
+  packages: [RazorEngine]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Engine, RunCompile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using RazorEngine;
+      class App { void Test(string input) { Engine.RunCompile(input); } }
+  - name: literal template negative
+    code: |
+      using RazorEngine;
+      class App { void Test() { Engine.RunCompile("Hello @Model.Name"); } }
+    expect_no_match: true
+  description: "RazorEngine Engine.RunCompile(tainted) — full SSTI to RCE."
+
+- id: csharp.template.razor_engine_parse
+  enabled: true
+  language: csharp
+  tag: ssti
+  severity: critical
+  packages: [RazorEngine]
+  cwe: [CWE-94, CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Razor, Parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using RazorEngine;
+      class App { void Test(string input) { Razor.Parse(input); } }
+  - name: literal template negative
+    code: |
+      using RazorEngine;
+      class App { void Test() { Razor.Parse("Hello @Model.Name"); } }
+    expect_no_match: true
+  description: "RazorEngine.Razor.Parse."
+
+- id: csharp.template.scriban_template_parse
+  enabled: true
+  language: csharp
+  tag: ssti
+  severity: high
+  packages: [Scriban, DotLiquid]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Template, Parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Scriban;
+      class App { void Test(string input) { Template.Parse(input); } }
+  - name: literal template negative
+    code: |
+      using Scriban;
+      class App { void Test() { Template.Parse("Hello {{ name }}"); } }
+    expect_no_match: true
+  description: "Template.Parse(tainted) — covers Scriban and DotLiquid (same `[Template, Parse]` attribute chain)."
+
+- id: csharp.template.dotliquid_template_parse
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: ssti
+  severity: high
+  packages: [DotLiquid]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Template, Parse]
+  description: "Disabled — merged into csharp.template.scriban_template_parse."
+
+- id: csharp.template.handlebars_compile
+  enabled: true
+  language: csharp
+  tag: ssti
+  severity: high
+  packages: [Handlebars.Net]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [Handlebars, Compile]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Handlebars.Net;
+      class App { void Test(string input) { Handlebars.Compile(input); } }
+  - name: literal template negative
+    code: |
+      using Handlebars.Net;
+      class App { void Test() { Handlebars.Compile("Hello {{name}}"); } }
+    expect_no_match: true
+  description: "Handlebars.Net Handlebars.Compile(tainted)."
+
+- id: csharp.template.fluid_parse
+  enabled: true
+  language: csharp
+  tag: ssti
+  severity: high
+  packages: [Fluid]
+  cwe: [CWE-1336]
+  match:
+    kind: call
+    callee:
+      attribute: [FluidParser, Parse]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Fluid;
+      class App { void Test(string input) { FluidParser.Parse(input); } }
+  - name: literal template negative
+    code: |
+      using Fluid;
+      class App { void Test() { FluidParser.Parse("Hello {{ name }}"); } }
+    expect_no_match: true
+  description: "Fluid FluidParser.Parse."
+
+# Templating engine autoescape disabled (T302). Config-shape
+# sinks: when the developer explicitly turns off the engine's
+# default HTML autoescape, every subsequent render is XSS-prone.
+- id: csharp.template.razor_writeliteral
+  enabled: true
+  language: csharp
+  tag: xss
+  severity: high
+  packages: [Microsoft.AspNetCore.Mvc.Razor]
+  cwe: [CWE-79]
+  match:
+    kind: call
+    callee:
+      attribute: [Razor, WriteLiteral]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Microsoft.AspNetCore.Mvc.Razor;
+      class App { void Test(string input) { Razor.WriteLiteral(input); } }
+  - name: literal html negative
+    code: |
+      using Microsoft.AspNetCore.Mvc.Razor;
+      class App { void Test() { Razor.WriteLiteral("<p>safe</p>"); } }
+    expect_no_match: true
+  description: "Razor WriteLiteral(tainted) — bypasses HTML encoding; XSS for tainted input."

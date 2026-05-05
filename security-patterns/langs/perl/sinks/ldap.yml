@@ -1,0 +1,161 @@
+# Perl LDAP-injection (Net::LDAP).
+# $ldap->search(filter => $tainted) matches as bare name call.
+- id: perl.ldap.net_ldap_search
+  enabled: true
+  language: perl
+  tag: ldap-injection
+  severity: high
+  packages: ["Net::LDAP"]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: search
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.ldap.net_ldap_search example
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->search(filter => $input)
+      }
+  - name: literal ldap search negative
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->search(filter => "(uid=alice)")
+      }
+    expect_no_match: true
+  description: "Net::LDAP $ldap->search(filter => tainted)."
+
+- id: perl.ldap.net_ldap_add
+  enabled: true
+  language: perl
+  tag: ldap-injection
+  severity: high
+  packages: ["Net::LDAP"]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: add
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ldap.net_ldap_add example
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->add($input)
+      }
+  - name: literal ldap add negative
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->add("uid=alice,ou=people,dc=example,dc=com")
+      }
+    expect_no_match: true
+  description: "Net::LDAP $ldap->add(dn => tainted)."
+
+- id: perl.ldap.net_ldap_modify
+  enabled: true
+  language: perl
+  tag: ldap-injection
+  severity: high
+  packages: ["Net::LDAP"]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: modify
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ldap.net_ldap_modify example
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->modify($input)
+      }
+  - name: literal ldap modify negative
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->modify("uid=alice,ou=people,dc=example,dc=com")
+      }
+    expect_no_match: true
+  description: "Net::LDAP $ldap->modify."
+
+- id: perl.ldap.net_ldap_delete
+  enabled: true
+  language: perl
+  tag: ldap-injection
+  severity: critical
+  packages: ["Net::LDAP"]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: delete
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ldap.net_ldap_delete example
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->delete($input)
+      }
+  - name: literal ldap delete negative
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->delete("uid=alice,ou=people,dc=example,dc=com")
+      }
+    expect_no_match: true
+  description: "Net::LDAP $ldap->delete(dn => tainted)."
+
+- id: perl.ldap.net_ldap_bind
+  enabled: true
+  language: perl
+  tag: ldap-injection
+  severity: high
+  packages: ["Net::LDAP"]
+  cwe: [CWE-90]
+  match:
+    kind: call
+    callee:
+      name: bind
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ldap.net_ldap_bind example
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->bind($input)
+      }
+  - name: literal ldap bind negative
+    code: |
+      use Net::LDAP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ldap->bind("uid=alice,ou=people,dc=example,dc=com")
+      }
+    expect_no_match: true
+  description: "Net::LDAP $ldap->bind(dn => tainted)."

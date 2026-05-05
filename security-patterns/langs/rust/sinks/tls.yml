@@ -1,0 +1,138 @@
+# Rust TLS misconfiguration — disabling cert / hostname verification
+# exposes the client to MITM.
+- id: rust.tls.danger_accept_invalid_certs
+  enabled: true
+  language: rust
+  tag: weak-tls
+  severity: high
+  packages: [reqwest]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [ClientBuilder, danger_accept_invalid_certs]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use reqwest::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ClientBuilder::danger_accept_invalid_certs(target);
+      }
+  description: "reqwest ClientBuilder::danger_accept_invalid_certs(true) — disables the TLS certificate chain check, enabling MITM with any self-signed cert."
+
+- id: rust.tls.danger_accept_invalid_hostnames
+  enabled: true
+  language: rust
+  tag: weak-tls
+  severity: high
+  packages: [reqwest]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [ClientBuilder, danger_accept_invalid_hostnames]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use reqwest::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ClientBuilder::danger_accept_invalid_hostnames(target);
+      }
+  description: "reqwest ClientBuilder::danger_accept_invalid_hostnames(true) — accepts any SAN/CN, MITM with any valid cert."
+
+- id: rust.tls.rustls_dangerous_set_certificate_verifier
+  enabled: true
+  language: rust
+  tag: weak-tls
+  severity: critical
+  packages: [rustls]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [ClientConfig, dangerous]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use rustls::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          ClientConfig::dangerous(target);
+      }
+  description: "rustls ClientConfig::dangerous() — sets a no-op certificate verifier (NoCertVerification pattern); completely disables the TLS trust anchor check."
+
+- id: rust.tls.rustls_dangerous_config_set_verifier
+  enabled: true
+  language: rust
+  tag: weak-tls
+  severity: critical
+  packages: [rustls]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [DangerousClientConfig, set_certificate_verifier]
+  match_examples:
+  - name: rustls dangerous verifier setter
+    code: |
+      use rustls::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          DangerousClientConfig::set_certificate_verifier(target);
+      }
+    expect_match_text: [DangerousClientConfig::set_certificate_verifier]
+  description: "rustls DangerousClientConfig::set_certificate_verifier — custom verifier hook commonly used for no-op certificate validation."
+
+- id: rust.tls.openssl_verify_none
+  enabled: true
+  language: rust
+  tag: weak-tls
+  severity: high
+  packages: [openssl]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [SslConnectorBuilder, set_verify]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use openssl::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          SslConnectorBuilder::set_verify(target);
+      }
+  description: "openssl SslConnectorBuilder::set_verify — flag when argument is SslVerifyMode::NONE (disables peer cert verification)."
+
+- id: rust.tls.native_tls_danger
+  enabled: true
+  language: rust
+  tag: weak-tls
+  severity: high
+  packages: [native_tls]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [TlsConnectorBuilder, danger_accept_invalid_certs]
+  match_examples:
+  - name: generated direct match
+    code: |
+      use native_tls;
+      use native_tls;
+      use native_tls::dummy;
+      fn example() {
+          let target = "tainted";
+          let query = "user";
+          TlsConnectorBuilder::danger_accept_invalid_certs(target);
+      }
+  description: "native-tls TlsConnectorBuilder::danger_accept_invalid_certs(true) — disables certificate chain validation, enabling MITM."
+  imports:
+  - native_tls

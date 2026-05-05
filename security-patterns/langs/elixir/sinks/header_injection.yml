@@ -1,0 +1,181 @@
+# Elixir response-header / CRLF injection (Plug + Phoenix).
+- id: elixir.header.plug_put_resp_header
+  enabled: true
+  language: elixir
+  tag: header-injection
+  severity: high
+  packages: [plug]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, put_resp_header]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.put_resp_header(conn, "x-user", input)
+        end
+      end
+  - name: literal put resp header negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.put_resp_header(conn, "x-user", "safe")
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Conn.put_resp_header(conn, name, tainted) — value is written verbatim; `\\r\\n` splits the response / injects cookies."
+
+  imports:
+  - Plug
+- id: elixir.header.plug_put_resp_cookie
+  enabled: true
+  language: elixir
+  tag: header-injection
+  severity: medium
+  packages: [plug]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, put_resp_cookie]
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted response cookie value
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.put_resp_cookie(conn, "session", input)
+        end
+      end
+  - name: literal response cookie value negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn) do
+          Plug.Conn.put_resp_cookie(conn, "session", "safe")
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Conn.put_resp_cookie(conn, name, tainted value) — cookie value written verbatim into Set-Cookie; `\\r\\n` enables response splitting."
+
+  imports:
+  - Plug
+- id: elixir.header.plug_merge_resp_headers
+  enabled: true
+  language: elixir
+  tag: header-injection
+  severity: medium
+  packages: [plug]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, merge_resp_headers]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.merge_resp_headers(conn, input)
+        end
+      end
+  - name: literal merge resp headers negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.merge_resp_headers(conn, [{"x-user", "safe"}])
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Conn.merge_resp_headers/2 — list entries become response headers without CRLF filtering."
+
+  imports:
+  - Plug
+- id: elixir.header.plug_prepend_resp_headers
+  enabled: true
+  language: elixir
+  tag: header-injection
+  severity: medium
+  packages: [plug]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, prepend_resp_headers]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.prepend_resp_headers(conn, input)
+        end
+      end
+  - name: literal prepend resp headers negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.prepend_resp_headers(conn, [{"x-user", "safe"}])
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Conn.prepend_resp_headers/2 — same CRLF risk as merge_resp_headers; tainted list entries land verbatim in the response."
+
+  imports:
+  - Plug
+- id: elixir.header.phoenix_put_resp_content_type
+  enabled: true
+  language: elixir
+  tag: header-injection
+  severity: low
+  frameworks: [phoenix]
+  packages: [plug]
+  cwe: [CWE-113]
+  match:
+    kind: call
+    callee:
+      attribute: [Plug, Conn, put_resp_content_type]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.put_resp_content_type(conn, input)
+        end
+      end
+  - name: literal content type negative
+    code: |
+      alias Plug
+      defmodule App do
+        def test(conn, input) do
+          Plug.Conn.put_resp_content_type(conn, "text/plain")
+        end
+      end
+    expect_no_match: true
+  description: "Plug.Conn.put_resp_content_type(conn, tainted) — MIME string written into Content-Type; CRLF / mime-type confusion can bypass content sniffing defences."
+  imports:
+  - Plug

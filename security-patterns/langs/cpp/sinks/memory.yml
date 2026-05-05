@@ -1,0 +1,427 @@
+- id: cpp.memory.strcpy
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  - CWE-121
+  match:
+    kind: call
+    callee:
+      name: strcpy
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  strcpy(arg);\n}\n"
+  description: "strcpy(dst, src) \u2014 unbounded copy; src length controls overflow."
+- id: cpp.memory.stpcpy
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: stpcpy
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  stpcpy(arg);\n}\n"
+  description: "stpcpy \u2014 unbounded copy variant."
+- id: cpp.memory.strcat
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: strcat
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  strcat(arg);\n}\n"
+  description: "strcat(dst, src) \u2014 unbounded concat."
+- id: cpp.memory.strncat
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-193
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: strncat
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  strncat(arg);\n}\n"
+  description: "strncat \u2014 easy to get wrong (n is remaining space, not total)."
+- id: cpp.memory.wcscpy
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: wcscpy
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  wcscpy(arg);\n}\n"
+  description: "wcscpy \u2014 wide-char unbounded copy."
+- id: cpp.memory.wcscat
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: wcscat
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  wcscat(arg);\n}\n"
+  description: "wcscat \u2014 wide-char unbounded concat."
+- id: cpp.memory.gets
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  - CWE-242
+  match:
+    kind: call
+    callee:
+      name: gets
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  gets(arg);\n}\n"
+  description: "gets \u2014 always unsafe, removed in C11."
+- id: cpp.memory.vsprintf
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: vsprintf
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  vsprintf(arg, \"%s\", arg);\n}\n"
+  description: "vsprintf \u2014 va_list variant of sprintf; unbounded output into\
+    \ destination buffer; tainted-format cases are covered by cpp format-string rules."
+- id: cpp.memory.wsprintf
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: wsprintfA
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt =\
+      \ arg;\n  const char *query = arg;\n  wsprintfA(arg);\n}\n"
+  description: "Win32 wsprintfA \u2014 unbounded; caps at 1024 chars but still overflow-prone."
+- id: cpp.memory.memcpy
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-120
+  - CWE-125
+  - CWE-787
+  match:
+    kind: call
+    callee:
+      name: memcpy
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted length
+    code: "void example(char *dst, const char *src, unsigned long n) {\n  memcpy(dst,\
+      \ src, n);\n}\n"
+  - name: fixed length is not tainted n
+    code: "#define FIXED_LEN 40\nvoid example(char *dst, const char *src) {\n  memcpy(dst,\
+      \ src, FIXED_LEN);\n}\n"
+    expect_no_match: true
+  description: "memcpy(dst, src, n) \u2014 tainted n past dst is OOB write (CWE-787,\
+    \ e.g. Sudo Baron Samedit); tainted n past src is OOB read (CWE-125, e.g. Heartbleed);\
+    \ generic copy-overflow is CWE-120."
+- id: cpp.memory.memmove
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-120
+  - CWE-125
+  - CWE-787
+  match:
+    kind: call
+    callee:
+      name: memmove
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted length
+    code: "void example(char *dst, const char *src, unsigned long n) {\n  memmove(dst,\
+      \ src, n);\n}\n"
+  - name: fixed length is not tainted n
+    code: "#define FIXED_LEN 40\nvoid example(char *dst, const char *src) {\n  memmove(dst,\
+      \ src, FIXED_LEN);\n}\n"
+    expect_no_match: true
+  description: "memmove(dst, src, n) \u2014 tainted n past dst is OOB write (CWE-787);\
+    \ tainted n past src is OOB read (CWE-125); generic copy-overflow is CWE-120."
+- id: cpp.memory.bcopy
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      name: bcopy
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted length
+    code: "void example(const char *src, char *dst, unsigned long n) {\n  bcopy(src,\
+      \ dst, n);\n}\n"
+  - name: fixed length is not tainted n
+    code: "#define FIXED_LEN 40\nvoid example(const char *src, char *dst) {\n  bcopy(src,\
+      \ dst, FIXED_LEN);\n}\n"
+    expect_no_match: true
+  description: "bcopy \u2014 legacy memmove with tainted length."
+- id: cpp.memory.alloca
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-770
+  - CWE-789
+  match:
+    kind: call
+    callee:
+      name: alloca
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted stack allocation size
+    code: "void *alloca(unsigned long size);\nint main(int argc, char **argv) {\n  alloca(argv);\n  return argc;\n}\n"
+  - name: fixed stack allocation size
+    code: "void *alloca(unsigned long size);\nint main(int argc, char **argv) {\n  alloca(64);\n  return argc;\n}\n"
+    expect_no_match: true
+  description: "alloca(n) with tainted n \u2014 stack exhaustion / stack clash."
+- id: cpp.memory.std_string_assign
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: memory-safety
+  severity: medium
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      attribute:
+      - string
+      - assign
+  description: "Disabled \u2014 std::string::assign(buf, n) with tainted n reads past\
+    \ source buffer; flag only with source-length analysis."
+- id: cpp.memory.std_vector_resize_tainted
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: memory-safety
+  severity: medium
+  cwe:
+  - CWE-770
+  - CWE-789
+  match:
+    kind: call
+    callee:
+      attribute:
+      - vector
+      - resize
+  description: "Disabled \u2014 std::vector::resize(n) with tainted n; potential allocation\
+    \ DoS; flag with bound analysis."
+- id: cpp.memory.std_fill_n_tainted
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: memory-safety
+  severity: medium
+  cwe:
+  - CWE-120
+  match:
+    kind: call
+    callee:
+      attribute:
+      - std
+      - fill_n
+  description: "Disabled \u2014 std::fill_n(dst, n, v) with tainted n; flag with dst-bound\
+    \ analysis."
+- id: cpp.memory.reinterpret_cast
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: cpp
+  tag: memory-safety
+  severity: medium
+  cwe:
+  - CWE-704
+  match:
+    kind: call
+    callee:
+      name: reinterpret_cast
+  description: "Disabled \u2014 reinterpret_cast is often legitimate (network byte-order,\
+    \ POD serialization)."
+- id: cpp.memory.malloc_tainted_size
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-190
+  - CWE-789
+  - CWE-787
+  match:
+    kind: call
+    callee:
+      name: malloc
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted allocation size
+    code: "void *malloc(unsigned long size);\nint main(int argc, char **argv) {\n  malloc(argv);\n  return argc;\n}\n"
+  - name: sizeof operand is not runtime size taint
+    code: "void *malloc(unsigned long size);\nint main(int argc, char **argv) {\n  unsigned long cap = 32;\n  malloc(sizeof(argv) * cap);\n  return argc;\n}\n"
+    expect_no_match: true
+  description: "malloc(n) \u2014 tainted n with multiplicative computation can overflow\
+    \ size_t; subsequent copies against the un-overflowed value go OOB (CWE-787)."
+- id: cpp.memory.calloc_tainted_size
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-190
+  - CWE-789
+  - CWE-787
+  match:
+    kind: call
+    callee:
+      name: calloc
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted element count
+    code: "void *calloc(unsigned long count, unsigned long size);\nint main(int argc, char **argv) {\n  calloc(argv, sizeof(char));\n  return argc;\n}\n"
+  - name: fixed element count and size
+    code: "void *calloc(unsigned long count, unsigned long size);\nint main(int argc, char **argv) {\n  calloc(32, sizeof(char));\n  return argc;\n}\n"
+    expect_no_match: true
+  description: "calloc(nmemb, size) \u2014 tainted nmemb can overflow."
+- id: cpp.memory.calloc_tainted_element_size
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-190
+  - CWE-789
+  - CWE-787
+  match:
+    kind: call
+    callee:
+      name: calloc
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted element size
+    code: "void *calloc(unsigned long count, unsigned long size);\nint main(int argc, char **argv) {\n  calloc(32, argv);\n  return argc;\n}\n"
+  - name: fixed element size
+    code: "void *calloc(unsigned long count, unsigned long size);\nint main(int argc, char **argv) {\n  calloc(32, sizeof(char));\n  return argc;\n}\n"
+    expect_no_match: true
+  description: "calloc(nmemb, size) \u2014 tainted element size can overflow nmemb*size."
+- id: cpp.memory.realloc_tainted_size
+  enabled: true
+  language: cpp
+  tag: memory-safety
+  severity: high
+  cwe:
+  - CWE-190
+  - CWE-789
+  - CWE-787
+  match:
+    kind: call
+    callee:
+      name: realloc
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted new size
+    code: "void *realloc(void *ptr, unsigned long size);\nint main(int argc, char **argv) {\n  void *ptr = 0;\n  realloc(ptr, argv);\n  return argc;\n}\n"
+  - name: tainted pointer is not tainted new size
+    code: "void *realloc(void *ptr, unsigned long size);\nint main(int argc, char **argv) {\n  realloc(argv, 64);\n  return argc;\n}\n"
+    expect_no_match: true
+  description: "realloc(ptr, n) with tainted size \u2014 overflow path same as malloc."
+- id: cpp.memory.delete_use_after
+  enabled: false
+  language: cpp
+  tag: memory-safety
+  severity: critical
+  cwe:
+  - CWE-416
+  - CWE-415
+  match:
+    kind: call
+    callee:
+      name: delete
+  match_examples:
+  - name: generated direct match
+    code: "void example() {\n  int *ptr = new int;\n  delete ptr;\n}\n"
+  description: "C++ `delete p` audit hint \u2014 sink fires on the free site; UAF\
+    \ correlation requires the engine to flag a later dereference of the same pointer\
+    \ (CWE-416). Also covers double-free shapes (CWE-415) when the same pointer reaches\
+    \ two delete sites."
+  disabled_reason:
+    code: over-broad

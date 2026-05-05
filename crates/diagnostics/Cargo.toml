@@ -1,0 +1,15 @@
+[package]
+name = "bonsai_diagnostics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Diagnostic model for bonsai-ninja."
+
+[dependencies]
+bonsai_common = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "bonsai_lang_typescript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TypeScript language adapter."
+
+[dependencies]
+bonsai_common = { workspace = true }
+bonsai_lang_api = { workspace = true }
+bonsai_lang_javascript = { workspace = true }
+tree-sitter = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+bonsai_conformance = { workspace = true }
+bonsai_testkit = { workspace = true }
+bonsai_workspace = { workspace = true }

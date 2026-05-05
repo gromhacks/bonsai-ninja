@@ -1,0 +1,48 @@
+---
+title: "Custom Rules"
+description: "Use workspace-local rules, understand precedence, and disable shipped rules."
+---
+
+# Custom Rules
+
+Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same layout as the shipped pack.
+
+```text
+.bonsai/rules/
+└── python/
+    └── sinks/
+        └── cmdi.yml
+```
+
+| Layer | Precedence | Use case |
+|---|---:|---|
+| Bundled or `--rules-dir` pack | Base | Standard shipped rules. |
+| `<workspace>/.bonsai/rules/langs/<lang>/...` | Overlay | Project-specific sources, sinks, and sanitizers. |
+| `<workspace>/.bonsai/rules/<kind>s/*.yml` | Overlay | Small flat local packs. |
+| Duplicate `id` in overlay | Replaces base rule | Disable or tighten a shipped rule for a workspace. |
+
+## Disable A Shipped Rule
+
+```yaml
+- id: python.cmdi.os_system
+  enabled: false
+  disabled_reason:
+    code: project-policy
+  language: python
+  tag: command-injection
+  match:
+    kind: call
+    callee:
+      attribute: [os, system]
+  description: "Disabled locally; project uses a wrapper rule instead."
+```
+
+## Run With A Local Pack
+
+```bash
+bonsai-ninja security ./src taint-analysis --rules-dir ./security-patterns
+```
+
+<Note>
+Rule IDs are stable API. Prefer adding a more specific rule ID over changing the meaning of an existing shipped ID.
+</Note>

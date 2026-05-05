@@ -1,0 +1,102 @@
+# Perl JWT sinks.
+# Flag when accepted_alg omits a whitelist or verify => 0 / alg => 'none'.
+- id: perl.jwt.crypt_jwt_decode
+  enabled: true
+  language: perl
+  tag: jwt
+  severity: high
+  packages: ["Crypt::JWT", "JSON::WebToken"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: decode_jwt
+  match_examples:
+  - name: perl.jwt.crypt_jwt_decode example
+    code: |
+      use Crypt::JWT;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        decode_jwt($input)
+      }
+  description: "decode_jwt — Crypt::JWT / JSON::WebToken share this exported name. Without `accepted_alg => [...]` the library accepts alg=none and forged HS256-via-RS256-pubkey tokens."
+
+- id: perl.jwt.json_webtoken_decode
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: perl
+  tag: jwt
+  severity: high
+  packages: ["JSON::WebToken"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: decode_jwt
+  description: "Disabled — merged into perl.jwt.crypt_jwt_decode (same bare `decode_jwt` name)."
+
+- id: perl.jwt.mojo_jwt_decode
+  enabled: true
+  language: perl
+  tag: jwt
+  severity: high
+  packages: ["Mojo::JWT"]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: decode
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.jwt.mojo_jwt_decode example
+    code: |
+      use Mojo::JWT;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        decode($input)
+      }
+  - name: literal mojo jwt decode negative
+    code: |
+      use Mojo::JWT;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        decode("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzYWZlIn0.sig")
+      }
+    expect_no_match: true
+  description: "Mojo::JWT $jwt->decode — only safe if `algorithm`/`secret` are set before decode; missing verification = accept any signature."
+
+- id: perl.jwt_jwt_decode_no_verify
+  enabled: true
+  language: perl
+  tag: jwt
+  severity: high
+  packages: [JWT]
+  cwe: [CWE-347]
+  match:
+    kind: call
+    callee:
+      name: decode_jwt_no_verify
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl jwt decode no verify
+    code: |
+      use JWT;
+      sub example {
+        my ($input) = @_;
+        decode_jwt_no_verify($input);
+      }
+    expect_match_text: [decode_jwt_no_verify]
+  - name: literal jwt no verify negative
+    code: |
+      use JWT;
+      sub example {
+        my ($input) = @_;
+        decode_jwt_no_verify("eyJhbGciOiJub25lIn0.eyJzdWIiOiJzYWZlIn0.");
+      }
+    expect_no_match: true
+  description: "decode_jwt_no_verify-style helpers — parses attacker-controlled claims without validating signature / algorithm."

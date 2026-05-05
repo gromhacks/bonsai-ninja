@@ -1,0 +1,437 @@
+# Python weak / broken cryptography. hashlib + Crypto + cryptography + bcrypt.
+- id: python.crypto.hashlib_md5
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: low
+  imports: [hashlib]
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [hashlib, md5]
+  match_examples:
+  - name: crypto hashlib md5
+    code: |
+      import hashlib
+      def example(user_input):
+          return hashlib.md5(user_input)
+  description: "hashlib.md5 — broken hash."
+
+- id: python.crypto.hashlib_sha1
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: low
+  imports: [hashlib]
+  cwe: [CWE-327, CWE-328]
+  match:
+    kind: call
+    callee:
+      attribute: [hashlib, sha1]
+  match_examples:
+  - name: crypto hashlib sha1
+    code: |
+      import hashlib
+      def example(user_input):
+          return hashlib.sha1(user_input)
+  description: "hashlib.sha1 — collision-vulnerable."
+
+- id: python.crypto.hashlib_new_md4
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: medium
+  imports: [hashlib]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [hashlib, new]
+  match_examples:
+  - name: crypto hashlib new md4
+    code: |
+      import hashlib
+      def example(user_input):
+          return hashlib.new("md4")
+  description: "hashlib.new('md4')."
+
+- id: python.crypto.pycryptodome_des
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [Crypto, Cryptodome]
+  imports: [Crypto]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [DES, new]
+  match_examples:
+  - name: crypto pycryptodome des
+    code: |
+      from Crypto.Cipher import DES
+      def example(user_input):
+          return DES.new(user_input)
+  description: "DES.new — broken cipher."
+
+- id: python.crypto.pycryptodome_des3
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: medium
+  packages: [Crypto, Cryptodome]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [DES3, new]
+  match_examples:
+  - name: crypto pycryptodome des3
+    code: |
+      from Crypto.Cipher import DES3
+      def example(user_input):
+          return DES3.new(user_input)
+  description: "DES3.new — deprecated for new designs."
+
+- id: python.crypto.pycryptodome_arc4
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [Crypto, Cryptodome]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [ARC4, new]
+  match_examples:
+  - name: crypto pycryptodome arc4
+    code: |
+      from Crypto.Cipher import ARC4
+      def example(user_input):
+          return ARC4.new(user_input)
+  description: "ARC4.new (RC4) — broken stream cipher."
+
+- id: python.crypto.pycryptodome_blowfish
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: medium
+  packages: [Crypto, Cryptodome]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [Blowfish, new]
+  match_examples:
+  - name: crypto pycryptodome blowfish
+    code: |
+      from Crypto.Cipher import Blowfish
+      def example(user_input):
+          return Blowfish.new(user_input)
+  description: "Blowfish.new — small block size, deprecated."
+
+- id: python.crypto.pycryptodome_aes_ecb
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [Crypto, Cryptodome]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [AES, new]
+  match_examples:
+  - name: crypto pycryptodome aes ecb
+    code: |
+      from Crypto.Cipher import AES
+      def example(user_input):
+          return AES.new(user_input, AES.MODE_ECB)
+  description: "AES.new(..., MODE_ECB) — leaks block patterns."
+
+- id: python.crypto.cryptography_des_cbc
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [cryptography]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      attribute: [algorithms, TripleDES]
+  match_examples:
+  - name: crypto cryptography des cbc
+    code: |
+      import cryptography
+      class TripleDES:
+          pass
+
+      def example(user_input):
+          return algorithms.TripleDES(user_input)
+  description: "cryptography algorithms.TripleDES — deprecated."
+
+- id: python.crypto.cryptography_blowfish
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [cryptography]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      attribute: [algorithms, Blowfish]
+  match_examples:
+  - name: crypto cryptography blowfish
+    code: |
+      import cryptography
+      class Blowfish:
+          pass
+
+      def example(user_input):
+          return algorithms.Blowfish(user_input)
+  description: "cryptography algorithms.Blowfish."
+
+- id: python.crypto.cryptography_arc4
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [cryptography]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      attribute: [algorithms, ARC4]
+  match_examples:
+  - name: crypto cryptography arc4
+    code: |
+      import cryptography
+      class ARC4:
+          pass
+
+      def example(user_input):
+          return algorithms.ARC4(user_input)
+  description: "cryptography algorithms.ARC4."
+
+- id: python.crypto.cryptography_md5
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: low
+  packages: [cryptography]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      attribute: [hashes, MD5]
+  match_examples:
+  - name: crypto cryptography md5
+    code: |
+      import cryptography
+      class MD5:
+          pass
+
+      def example(user_input):
+          return hashes.MD5(user_input)
+  description: "cryptography hashes.MD5."
+
+- id: python.crypto.cryptography_sha1
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: low
+  packages: [cryptography]
+  cwe: [CWE-327]
+  match:
+    kind: new
+    callee:
+      attribute: [hashes, SHA1]
+  match_examples:
+  - name: crypto cryptography sha1
+    code: |
+      import cryptography
+      class SHA1:
+          pass
+
+      def example(user_input):
+          return hashes.SHA1(user_input)
+  description: "cryptography hashes.SHA1."
+
+- id: python.crypto.weak_random
+  enabled: true
+  language: python
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [random, random]
+  match_examples:
+  - name: crypto weak random
+    code: |
+      def example(user_input):
+          return random.random(user_input)
+  description: "random.random — not crypto-secure."
+
+- id: python.crypto.weak_random_int
+  enabled: true
+  language: python
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [random, randint]
+  match_examples:
+  - name: crypto weak random int
+    code: |
+      def example(user_input):
+          return random.randint(user_input)
+  description: "random.randint."
+
+- id: python.crypto.weak_random_choice
+  enabled: true
+  language: python
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330, CWE-338]
+  match:
+    kind: call
+    callee:
+      attribute: [random, choice]
+  match_examples:
+  - name: crypto weak random choice
+    code: |
+      def example(user_input):
+          return random.choice(user_input)
+  description: "random.choice — not for cryptographic selection."
+
+- id: python.crypto.weak_random_uniform
+  enabled: true
+  language: python
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      attribute: [random, uniform]
+  match_examples:
+  - name: crypto weak random uniform
+    code: |
+      def example(user_input):
+          return random.uniform(user_input)
+  description: "random.uniform."
+
+- id: python.crypto.weak_random_sample
+  enabled: true
+  language: python
+  tag: weak-randomness
+  severity: medium
+  cwe: [CWE-330]
+  match:
+    kind: call
+    callee:
+      attribute: [random, sample]
+  match_examples:
+  - name: crypto weak random sample
+    code: |
+      def example(user_input):
+          return random.sample(user_input)
+  description: "random.sample() — non-cryptographic PRNG; predictable and unsafe for tokens / secrets."
+
+- id: python.crypto.bcrypt_low_rounds
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: medium
+  packages: [bcrypt]
+  cwe: [CWE-916]
+  match:
+    kind: call
+    callee:
+      attribute: [bcrypt, gensalt]
+  constraints:
+  - arg_lt: { index: 0, value: 10 }
+  match_examples:
+  - name: bcrypt gensalt low rounds
+    code: |
+      import bcrypt
+      def hash_pw(pw):
+          return bcrypt.hashpw(pw, bcrypt.gensalt(4))
+    expect_match_text: [bcrypt.gensalt]
+  - name: bcrypt gensalt high rounds negative
+    code: |
+      import bcrypt
+      def hash_pw(pw):
+          return bcrypt.hashpw(pw, bcrypt.gensalt(12))
+    expect_no_match: true
+  description: "bcrypt.gensalt(rounds) with rounds < 10 — too cheap to compute, attackers can brute-force the hash. Use 10-12 for typical hardware."
+
+- id: python.crypto.passlib_md5_crypt
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [passlib]
+  cwe: [CWE-327]
+  match:
+    kind: call
+    callee:
+      attribute: [md5_crypt, hash]
+  match_examples:
+  - name: crypto passlib md5 crypt
+    code: |
+      import passlib
+      def example(user_input):
+          return md5_crypt.hash(user_input)
+  description: "passlib md5_crypt — broken."
+
+- id: python.crypto.cryptography_constant_time_eq_missing
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: python
+  tag: timing-attack
+  severity: medium
+  packages: [cryptography]
+  cwe: [CWE-208]
+  match:
+    kind: call
+    callee:
+      name: __eq__
+  description: "Disabled — flag custom comparators that should use hmac.compare_digest."
+- id: python.crypto.rsa_weak_key_size
+  enabled: true
+  language: python
+  tag: weak-crypto
+  severity: high
+  packages: [cryptography, Crypto]
+  cwe: [CWE-326]
+  match:
+    kind: call
+    callee:
+      attribute: [rsa, generate_private_key]
+  constraints:
+  - keyword_arg_equals: { name: key_size, value: '1024' }
+  match_examples:
+  - name: rsa generate 1024 weak
+    code: |
+      from cryptography.hazmat.primitives.asymmetric import rsa
+      def gen():
+          return rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    expect_match_text: [rsa.generate_private_key]
+  - name: rsa generate 2048 strong negative
+    code: |
+      from cryptography.hazmat.primitives.asymmetric import rsa
+      def gen():
+          return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    expect_no_match: true
+  description: "rsa.generate_private_key(key_size=1024) — RSA below 2048 bits is broken in 2026. Use 2048+ (3072 for long-lived keys)."

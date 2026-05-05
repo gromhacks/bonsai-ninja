@@ -1,0 +1,521 @@
+# Swift remote-trust sources — Vapor / Hummingbird / URLSession / Perfect / Kitura.
+#
+# Vapor is the dominant server-side Swift framework; Hummingbird is its
+# async competitor. Both expose request data through attribute-read
+# and decode-call shapes. We target the specific receiver-qualified
+# call sites (Request.query.decode, Request.content.decode, etc.) so
+# the match doesn't leak into unrelated `.decode` calls on Codable
+# types.
+#
+# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# Swift HTTP frameworks (Vapor, Hummingbird, Perfect, Kitura) expose almost
+# every request surface as a property access on `Request` (req.query,
+# req.content, req.headers, req.parameters, req.cookies, req.body). The
+# shared adapter kit now emits member-access reads for the Vapor shapes
+# below, so those rules are enabled. Framework/callback shapes that still
+# need result binding or receiver-type proof remain disabled. Per
+# docs/pattern-guide.mdx the fix for unsupported shapes is in the Swift
+# adapter, not YAML.
+#
+# Below this header: callable-shape rules plus enabled Vapor property-read
+# rules that work today.
+
+- id: swift.vapor.request_content_decode
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [content, decode]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; content.decode(input) }
+  description: "Vapor req.content.decode(T.self) — decodes the request body into a model; payload is attacker-controlled."
+
+- id: swift.vapor.request_query_decode
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [query, decode]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; query.decode(input) }
+  description: "Vapor req.query.decode(T.self) — decodes the query-string into a model; attacker-controlled."
+
+- id: swift.vapor.request_headers_first
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [headers, first]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; headers.first(input) }
+  description: "Vapor req.headers.first(name:) — header value lookup; attacker-controlled."
+
+- id: swift.vapor.request_parameters_get
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [parameters, get]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; parameters.get(input) }
+  description: "Vapor req.parameters.get(_:) — URL path parameter; attacker-controlled."
+
+- id: swift.uipasteboard_general
+  enabled: true
+  language: swift
+  trust: local
+  tag: clipboard-input
+  packages: [UIKit]
+  match:
+    kind: call
+    callee:
+      attribute: [UIPasteboard, general]
+  match_examples:
+  - name: declared shape
+    code: |
+      import UIKit
+      func test() { let input = "x"; let amount = 1; UIPasteboard.general(input) }
+  description: "UIPasteboard.general.string — clipboard contents are user-mutable; treat as untrusted when used in security-sensitive flows."
+
+- id: swift.vapor.request_query
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [Request, query]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; let result = Request.query }
+  description: "Vapor req.query property read — query-string container from the remote request."
+
+- id: swift.vapor.request_content
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [json, text]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [Request, content]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; let result = Request.content }
+  description: "Vapor req.content property read — request content container controlled by the client."
+
+- id: swift.vapor.request_parameters
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [Request, parameters]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; let result = Request.parameters }
+  description: "Vapor req.parameters property read — route parameters from the remote request."
+
+- id: swift.vapor.request_headers
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [Request, headers]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; let result = Request.headers }
+  description: "Vapor req.headers property read — client-supplied HTTP headers."
+
+- id: swift.vapor.request_cookies
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [text]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [Request, cookies]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; let result = Request.cookies }
+  description: "Vapor req.cookies property read — client-supplied cookie values."
+
+- id: swift.vapor.request_url
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [url]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [Request, url]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; let result = Request.url }
+  description: "Vapor req.url property read — URL supplied by the client."
+
+- id: swift.vapor.request_body
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [json, text]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [Request, body]
+  match_examples:
+  - name: declared shape
+    code: |
+      import Vapor
+      func test() { let input = "x"; let amount = 1; let result = Request.body }
+  description: "Vapor req.body property read — raw request body bytes controlled by the client."
+
+- id: swift.vapor.file_filename
+  enabled: true
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: read
+    target:
+      attribute: [File, filename]
+  match_examples:
+  - name: swift.vapor.file_filename example
+    code: |
+      import Vapor
+      func test() { let result = File.filename }
+  description: "Vapor File.filename — multipart Content-Disposition filename supplied by the client."
+
+- id: swift.hummingbird.request_query
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [hummingbird]
+  packages: [hummingbird]
+  match:
+    kind: read
+    target:
+      attribute: [Request, uri, query]
+  description: "Disabled — the current Swift adapter does not index property reads like `req.uri.query`."
+
+- id: swift.hummingbird.request_body
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [json, text]
+  frameworks: [hummingbird]
+  packages: [hummingbird]
+  match:
+    kind: read
+    target:
+      attribute: [Request, body]
+  description: "Disabled — the current Swift adapter does not index property reads like `req.body`."
+
+- id: swift.kitura.request_query
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  frameworks: [kitura]
+  packages: [Kitura]
+  match:
+    kind: read
+    target:
+      attribute: [RouterRequest, queryParameters]
+  description: "Disabled — the current Swift adapter does not index property reads like `request.queryParameters`."
+
+- id: swift.kitura.request_body
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [json, text]
+  frameworks: [kitura]
+  packages: [Kitura]
+  match:
+    kind: read
+    target:
+      attribute: [RouterRequest, body]
+  description: "Disabled — the current Swift adapter does not index property reads like `request.body`."
+
+- id: swift.perfect.request_param
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: remote
+  tag: http-input
+  payload_types: [query, json]
+  frameworks: [perfect]
+  packages: ["PerfectHTTP"]
+  match:
+    kind: call
+    callee:
+      attribute: [HTTPRequest, param]
+  description: "Disabled — adapters index local receivers like `request.param(...)`, and bare `param` is too broad to tail-match safely."
+
+- id: swift.urlsession_response_data
+  enabled: true
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [text, json]
+  match:
+    kind: call
+    callee:
+      attribute: [URLSession, shared, data]
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; URLSession.shared.data(input) }
+  description: "URLSession.shared.data(for:) — returns (Data, URLResponse) from a remote server; payload may be attacker-controlled (supply-chain / redirection)."
+
+- id: swift.alamofire_response
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [json, text]
+  frameworks: [alamofire]
+  packages: [Alamofire]
+  match:
+    kind: call
+    callee:
+      name: responseData
+  description: "Disabled — responseData call is not itself tainted; needs callback/result binding support."
+
+- id: swift.alamofire_response_json
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [json]
+  frameworks: [alamofire]
+  packages: [Alamofire]
+  match:
+    kind: call
+    callee:
+      name: responseJSON
+  description: "Disabled — responseJSON call is not itself tainted; needs callback/result binding support."
+
+- id: swift.alamofire_response_decodable
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [json]
+  frameworks: [alamofire]
+  packages: [Alamofire]
+  match:
+    kind: call
+    callee:
+      name: responseDecodable
+  description: "Disabled — responseDecodable call is not itself tainted; needs callback/result binding support."
+
+- id: swift.alamofire_publish_data
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [binary]
+  frameworks: [alamofire]
+  packages: [Alamofire]
+  match:
+    kind: call
+    callee:
+      name: publishData
+  description: "Disabled — publishData call is not itself tainted; needs Combine output binding support."
+
+- id: swift.alamofire_publish_decodable
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [json]
+  frameworks: [alamofire]
+  packages: [Alamofire]
+  match:
+    kind: call
+    callee:
+      name: publishDecodable
+  description: "Disabled — publishDecodable call is not itself tainted; needs Combine output binding support."
+
+- id: swift.alamofire_serializing_data
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [binary]
+  frameworks: [alamofire]
+  packages: [Alamofire]
+  match:
+    kind: call
+    callee:
+      name: serializingData
+  description: "Disabled — serializingData call is not itself tainted; needs async result binding support."
+
+- id: swift.alamofire_serializing_decodable
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: swift
+  trust: remote
+  tag: network-response
+  payload_types: [json]
+  frameworks: [alamofire]
+  packages: [Alamofire]
+  match:
+    kind: call
+    callee:
+      name: serializingDecodable
+  description: "Disabled — serializingDecodable call is not itself tainted; needs async result binding support."
+
+- id: swift.nio.channel_read
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: remote
+  tag: network-input
+  payload_types: [text]
+  frameworks: ["swift-nio"]
+  packages: ["NIO"]
+  match:
+    kind: call
+    callee:
+      attribute: [ChannelHandlerContext, fireChannelRead]
+  description: "Disabled — adapters index local receivers like `ctx.fireChannelRead(...)`, and the typed receiver match never fired."
+
+- id: swift.grpc.request_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  trust: remote
+  tag: rpc-input
+  payload_types: [json]
+  frameworks: ["grpc-swift"]
+  packages: [GRPC]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — `kind: param` cannot currently prove the enclosing function is a grpc-swift service handler, so bare `request` overmatches ordinary Swift APIs."
+
+- id: swift.websocket_on_text
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: swift
+  trust: remote
+  tag: ws-input
+  payload_types: [text]
+  frameworks: [vapor]
+  packages: [Vapor]
+  match:
+    kind: call
+    callee:
+      attribute: [WebSocket, onText]
+  description: "Disabled — adapters index local receivers like `ws.onText(...)`, and the typed receiver match never fired."

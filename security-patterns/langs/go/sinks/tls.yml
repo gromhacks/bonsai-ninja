@@ -1,0 +1,102 @@
+# Go TLS misconfiguration. Writes to fields of tls.Config; engine's
+# constraint support for write-targets is limited, so these match the
+# assignment shape and rely on reviewers to see the RHS. Descriptions
+# call out the actual risky value.
+- id: go.tls.insecure_skip_verify
+  enabled: true
+  language: go
+  tag: weak-tls
+  severity: high
+  packages: ["crypto/tls"]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: InsecureSkipVerify
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/tls"
+      package main
+
+      func example() {
+        cfg.InsecureSkipVerify = true
+      }
+  description: "tls.Config.InsecureSkipVerify assignment — setting true disables certificate verification (MITM)."
+
+- id: go.tls.minversion_old
+  enabled: true
+  language: go
+  tag: weak-tls
+  severity: medium
+  packages: ["crypto/tls"]
+  cwe: [CWE-326]
+  match:
+    kind: write
+    target:
+      name: MinVersion
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "crypto/tls"
+      package main
+
+      func example() {
+        cfg.MinVersion = true
+      }
+  description: "tls.Config.MinVersion — values VersionTLS10 / VersionTLS11 allow deprecated-protocol downgrade."
+
+- id: go.tls.weak_ciphersuites
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: weak-tls
+  severity: medium
+  packages: ["crypto/tls"]
+  cwe: [CWE-326]
+  match:
+    kind: write
+    target:
+      name: CipherSuites
+  description: "Disabled — tls.Config.CipherSuites write; enable when the list contains known-weak suites (RC4, 3DES, CBC with SHA1)."
+
+- id: go.tls.servername_unset
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: weak-tls
+  severity: low
+  packages: ["crypto/tls"]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: ServerName
+  description: "Disabled — unset ServerName defeats SNI-based hostname verification; enable with a more specific constraint."
+
+- id: go.tls.grpc_with_insecure
+  enabled: true
+  language: go
+  tag: weak-tls
+  severity: high
+  packages: ["google.golang.org/grpc"]
+  cwe: [CWE-295, CWE-319]
+  match:
+    kind: call
+    callee:
+      attribute: [grpc, WithInsecure]
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "google.golang.org/grpc"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        grpc.WithInsecure(target)
+      }
+  description: "grpc.WithInsecure() — disables TLS entirely on gRPC client; plaintext transport."

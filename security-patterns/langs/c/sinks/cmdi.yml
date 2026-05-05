@@ -1,0 +1,972 @@
+- id: c.cmdi.system
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  category: process-exec
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: system
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted command string
+    code: |
+      void example(char *input) {
+        system(input);
+      }
+  - name: literal command negative
+    code: |
+      void example(void) {
+        system("safe");
+      }
+    expect_no_match: true
+  description: "libc system() — passes the string to /bin/sh -c; any attacker metacharacter (;|`$()) runs arbitrary commands."
+- id: c.cmdi.popen
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: popen
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted command string
+    code: |
+      void example(char *input) {
+        popen(input);
+      }
+  - name: literal command negative
+    code: |
+      void example(void) {
+        popen("safe");
+      }
+    expect_no_match: true
+  description: "popen() — wraps fork+exec of /bin/sh -c; same shell-injection surface as system()."
+- id: c.cmdi.execl
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execl
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        execl(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        execl("safe");
+      }
+    expect_no_match: true
+  description: "execl(path, arg0, ...) — tainted path runs an attacker-chosen binary."
+- id: c.cmdi.execlp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execlp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        execlp(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        execlp("safe");
+      }
+    expect_no_match: true
+  description: "execlp(file, ...) — PATH-resolves the program name; tainted file can pick up an attacker binary from $PATH."
+- id: c.cmdi.execv
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execv
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        execv(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        execv("safe");
+      }
+    expect_no_match: true
+  description: "execv(path, argv) — tainted path or argv lets attacker choose the binary / flags."
+- id: c.cmdi.execv_argv
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execv
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      void example(char *input) {
+        execv("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        execv("safe", "safe");
+      }
+    expect_no_match: true
+  description: "execv(path, argv) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+- id: c.cmdi.execvp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execvp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted program name
+    code: |
+      void example(char *input) {
+        execvp(input);
+      }
+  - name: literal program negative
+    code: |
+      void example(void) {
+        execvp("safe");
+      }
+    expect_no_match: true
+  description: "execvp(file, argv) — PATH-resolved; tainted file hijacks via $PATH, tainted argv passes attacker flags."
+- id: c.cmdi.execvp_argv
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execvp
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted argv vector
+    code: |
+      void example(char **args) {
+        execvp("git", args);
+      }
+  - name: literal argv vector negative
+    code: |
+      void example(void) {
+        char *args[] = {"git", "status", 0};
+        execvp("git", args);
+      }
+    expect_no_match: true
+  description: "execvp(file, argv) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+- id: c.cmdi.execve
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execve
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        execve(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        execve("safe");
+      }
+    expect_no_match: true
+  description: "execve(path, argv, envp) — tainted path = arbitrary binary; tainted envp can also set LD_PRELOAD etc."
+- id: c.cmdi.execve_argv
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execve
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted arg 1
+    code: |
+      void example(char *input) {
+        execve("safe", input);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        execve("safe", "safe");
+      }
+    expect_no_match: true
+  description: "execve(path, argv, envp) — tainted argv can pass attacker-controlled flags or subcommands to a fixed executable."
+- id: c.cmdi.execve_envp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execve
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted arg 2
+    code: |
+      void example(char *input) {
+        execve("safe", "safe", input);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        execve("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "execve(path, argv, envp) — tainted envp can influence loader/search behavior such as LD_PRELOAD or PATH."
+- id: c.cmdi.posix_spawn
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: posix_spawn
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        posix_spawn(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        posix_spawn("safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawn — spawns process with argv list."
+- id: c.cmdi.posix_spawn_argv
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: posix_spawn
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: tainted arg 4
+    code: |
+      void example(char *input) {
+        posix_spawn("safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 4 negative
+    code: |
+      void example(void) {
+        posix_spawn("safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted argv reaches the spawned process."
+- id: c.cmdi.posix_spawn_envp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: posix_spawn
+  constraints:
+  - arg_tainted:
+      index: 5
+  match_examples:
+  - name: tainted arg 5
+    code: |
+      void example(char *input) {
+        posix_spawn("safe", "safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 5 negative
+    code: |
+      void example(void) {
+        posix_spawn("safe", "safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawn(pid, path, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+- id: c.cmdi.posix_spawnp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: posix_spawnp
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        posix_spawnp(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        posix_spawnp("safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawnp — PATH-resolved spawn."
+- id: c.cmdi.posix_spawnp_argv
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: posix_spawnp
+  constraints:
+  - arg_tainted:
+      index: 4
+  match_examples:
+  - name: tainted arg 4
+    code: |
+      void example(char *input) {
+        posix_spawnp("safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 4 negative
+    code: |
+      void example(void) {
+        posix_spawnp("safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted argv reaches the PATH-resolved process."
+- id: c.cmdi.posix_spawnp_envp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: posix_spawnp
+  constraints:
+  - arg_tainted:
+      index: 5
+  match_examples:
+  - name: tainted arg 5
+    code: |
+      void example(char *input) {
+        posix_spawnp("safe", "safe", "safe", "safe", "safe", input);
+      }
+  - name: literal arg 5 negative
+    code: |
+      void example(void) {
+        posix_spawnp("safe", "safe", "safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "posix_spawnp(pid, file, actions, attrs, argv, envp) — tainted envp reaches the spawned process."
+- id: c.cmdi.wordexp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: wordexp
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        wordexp(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        wordexp("safe");
+      }
+    expect_no_match: true
+  description: "wordexp — performs shell word expansion on a string (command substitution)."
+- id: c.cmdi.execle
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: execle
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        execle(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        execle("safe");
+      }
+    expect_no_match: true
+  description: "execle — exec with caller-supplied environment."
+- id: c.cmdi.g_spawn_command_line_async
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [glib]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: g_spawn_command_line_async
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <glib.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        g_spawn_command_line_async(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        g_spawn_command_line_async("safe");
+      }
+    expect_no_match: true
+  description: "GLib g_spawn_command_line_async — shell-parsed command string."
+- id: c.cmdi.g_spawn_command_line_sync
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [glib]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: g_spawn_command_line_sync
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <glib.h>
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        g_spawn_command_line_sync(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        g_spawn_command_line_sync("safe");
+      }
+    expect_no_match: true
+  description: "GLib g_spawn_command_line_sync — shell-parsed command string."
+- id: c.cmdi.win_create_process_a
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: CreateProcessA
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        CreateProcessA(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        CreateProcessA("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Win32 CreateProcessA(NULL, tainted_cmdline, ...) — Windows command-line is parsed by the child; tainted lpCommandLine = arbitrary process exec."
+  imports:
+  - windows
+  - windows.h
+- id: c.cmdi.win_create_process_a_application
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: CreateProcessA
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      #include <windows.h>
+      void example(char *input) {
+        CreateProcessA(input);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        CreateProcessA("safe");
+      }
+    expect_no_match: true
+  description: "CreateProcessA(lpApplicationName, lpCommandLine, ...) — tainted application name selects the executable."
+  imports:
+  - windows
+  - windows.h
+- id: c.cmdi.win_create_process_w
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: CreateProcessW
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        CreateProcessW(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        CreateProcessW("safe", "safe");
+      }
+    expect_no_match: true
+  description: "Win32 CreateProcessW — UTF-16 variant; same command-line injection surface as CreateProcessA."
+  imports:
+  - windows
+  - windows.h
+- id: c.cmdi.win_create_process_w_application
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: CreateProcessW
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted arg 0
+    code: |
+      #include <windows.h>
+      void example(char *input) {
+        CreateProcessW(input);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        CreateProcessW("safe");
+      }
+    expect_no_match: true
+  description: "CreateProcessW(lpApplicationName, lpCommandLine, ...) — tainted application name selects the executable."
+  imports:
+  - windows
+  - windows.h
+- id: c.cmdi.win_shell_execute_a
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32-shell]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: ShellExecuteA
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <shellapi.h>
+      #include <shellapi.h>
+      #include <shellapi.h> /* win32-shell */
+      #include <shellapi.h> /* win32-shell */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        ShellExecuteA(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        ShellExecuteA("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "Win32 ShellExecuteA(hwnd, verb, tainted_file, params, dir, show) — invokes the shell handler for the given file/URL; tainted file or params runs arbitrary command."
+  imports:
+  - shellapi.h
+  - shellapi
+- id: c.cmdi.win_shell_execute_a_params
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32-shell]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: ShellExecuteA
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: tainted arg 3
+    code: |
+      #include <shellapi.h>
+      void example(char *input) {
+        ShellExecuteA("safe", "safe", "safe", input);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        ShellExecuteA("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "ShellExecuteA(..., lpFile, lpParameters, ...) — tainted parameters influence the shell-handled command."
+  imports:
+  - shellapi.h
+  - shellapi
+- id: c.cmdi.win_shell_execute_w
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32-shell]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: ShellExecuteW
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <shellapi.h>
+      #include <shellapi.h>
+      #include <shellapi.h> /* win32-shell */
+      #include <shellapi.h> /* win32-shell */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        ShellExecuteW(arg);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        ShellExecuteW("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "Win32 ShellExecuteW — UTF-16 variant; same shell-handler injection."
+  imports:
+  - shellapi.h
+  - shellapi
+- id: c.cmdi.win_shell_execute_w_params
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32-shell]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: ShellExecuteW
+  constraints:
+  - arg_tainted:
+      index: 3
+  match_examples:
+  - name: tainted arg 3
+    code: |
+      #include <shellapi.h>
+      void example(char *input) {
+        ShellExecuteW("safe", "safe", "safe", input);
+      }
+  - name: literal arg 3 negative
+    code: |
+      void example(void) {
+        ShellExecuteW("safe", "safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "ShellExecuteW(..., lpFile, lpParameters, ...) — tainted parameters influence the shell-handled command."
+  imports:
+  - shellapi.h
+  - shellapi
+- id: c.cmdi.win_shell_execute_ex_a
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32-shell]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: ShellExecuteExA
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <shellapi.h>
+      #include <shellapi.h>
+      #include <shellapi.h> /* win32-shell */
+      #include <shellapi.h> /* win32-shell */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        ShellExecuteExA(arg);
+      }
+  description: "Disabled — ShellExecuteExA stores lpFile/lpParameters inside SHELLEXECUTEINFO; accurate matching needs struct-field tracking, so the call-only rule is over-broad."
+  imports:
+  - shellapi.h
+  - shellapi
+- id: c.cmdi.win_winexec
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  packages: [win32]
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: WinExec
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: generated direct match
+    code: |
+      #include <windows.h>
+      #include <windows.h>
+      #include <windows.h> /* win32 */
+      #include <windows.h> /* win32 */
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        WinExec(arg);
+      }
+  - name: literal arg 0 negative
+    code: |
+      void example(void) {
+        WinExec("safe");
+      }
+    expect_no_match: true
+  description: "Win32 WinExec(tainted_cmdline, show) — legacy command-line exec; deprecated but still in use."
+  imports:
+  - windows
+  - windows.h
+- id: c.cmdi.fexecve
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: fexecve
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: generated direct match
+    code: |
+      void example(void) {
+        char *arg = "tainted";
+        char *fmt = arg;
+        fexecve(arg);
+      }
+  - name: literal arg 1 negative
+    code: |
+      void example(void) {
+        fexecve("safe", "safe");
+      }
+    expect_no_match: true
+  description: "fexecve(fd, argv, envp) — exec from an open fd; tainted fd / argv runs attacker-chosen binary."
+- id: c.cmdi.fexecve_envp
+  enabled: true
+  language: c
+  tag: command-injection
+  severity: critical
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: fexecve
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted arg 2
+    code: |
+      void example(char *input) {
+        fexecve("safe", "safe", input);
+      }
+  - name: literal arg 2 negative
+    code: |
+      void example(void) {
+        fexecve("safe", "safe", "safe");
+      }
+    expect_no_match: true
+  description: "fexecve(fd, argv, envp) — tainted envp reaches the spawned process."
+- id: c.cmdi.fork_exec
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: c
+  tag: command-injection
+  severity: medium
+  cwe: [CWE-78]
+  match:
+    kind: call
+    callee:
+      name: fork
+  description: "Disabled — fork by itself is fine; flag with adjacent execve."

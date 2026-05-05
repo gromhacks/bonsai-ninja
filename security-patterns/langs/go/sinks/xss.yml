@@ -1,0 +1,236 @@
+- id: go.xss.html_template_html
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  - github.com/labstack/echo
+  - github.com/kataras/iris/v12
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - HTML
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        template.HTML(target)
+      }
+  description: "template.HTML(tainted) — cast opts the string out of html/template auto-escape. Direct XSS (CWE-79); also CWE-94 since the cast lets attacker text inject template directives / scripts the engine would otherwise neutralize. Merged collision aliases: go.xss.echo_html."
+  aliases:
+  - go.xss.echo_html
+  frameworks:
+  - echo
+  - iris
+- id: go.xss.template_jsstr
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - JSStr
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        template.JSStr(target)
+      }
+  description: "template.JSStr(tainted) — marks string as safe inside a JS string literal context."
+- id: go.xss.template_js
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - JS
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        template.JS(target)
+      }
+  description: "template.JS(tainted) — marks string as safe JavaScript; XSS if attacker-controlled."
+- id: go.xss.template_htmlattr
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - html/template
+  cwe:
+  - CWE-79
+  - CWE-94
+  match:
+    kind: call
+    callee:
+      attribute:
+      - template
+      - HTMLAttr
+  match_examples:
+  - name: generated direct match
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        target := "tainted"
+        name := "user"
+        value := "value"
+        template.HTMLAttr(target)
+      }
+  description: "template.HTMLAttr(tainted) — marks string as a safe HTML attribute; enables attribute-break XSS."
+- id: go.xss.fmt_fprintf_w
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: go
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - fmt
+      - Fprintf
+  description: "Disabled — generic fmt.Fprintf; enable with a Content-Type: text/html response constraint."
+- id: go.xss.responsewriter_write
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: \.Write$
+  description: "Disabled — w.Write([]byte(tainted)); enable when response Content-Type is text/html."
+- id: go.xss.fmt_fprint_html_response
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - fmt
+  - net/http
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - fmt
+      - Fprint
+  match_examples:
+  - name: stdlib html response fprint
+    code: "package main\nimport (\n  \"fmt\"\n  \"net/http\"\n)\nfunc handler(w http.ResponseWriter, r *http.Request) {\n  body := \"<h1>\" + input + \"</h1>\"\n  w.Header()[\"Content-Type\"] = []string{\"text/html; charset=utf-8\"}\n  fmt.Fprint(w, body)\n}\n"
+    expect_match_text:
+    - fmt.Fprint
+  description: "fmt.Fprint(w, taintedHTML) after a text/html response Content-Type — stdlib raw HTML response body without template escaping. The matcher anchors to common ResponseWriter variables; review surrounding headers for text/html."
+- id: go.xss.gin_data
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  packages:
+  - github.com/gin-gonic/gin
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: \.Data$
+  match_examples:
+  - name: gin raw html data
+    code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc handler(c *gin.Context, body []byte) {\n  c.Data(200, \"text/html; charset=utf-8\", body)\n}\n"
+    expect_match_text:
+    - c.Data
+  - name: gin raw html concat data
+    code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc handler(c *gin.Context, name string) {\n  c.Data(200, \"text/html\", []byte(\"<h1>\" + name + \"</h1>\"))\n}\n"
+    expect_match_text:
+    - c.Data
+  description: "gin Context.Data(status, \"text/html...\", tainted) — writes raw HTML bytes, including concatenated response fragments, without auto-escape."
+- id: go.xss.fiber_send_string
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: go
+  tag: xss
+  severity: medium
+  packages:
+  - github.com/gofiber/fiber
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: \.SendString$
+  description: "Disabled — fiber Ctx.SendString; enable when response Content-Type is text/html."
+- id: go.xss.buffalo_render_string
+  enabled: true
+  language: go
+  tag: xss
+  severity: high
+  frameworks:
+  - buffalo
+  packages:
+  - github.com/gobuffalo/buffalo
+  - github.com/gobuffalo/buffalo/render
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: \.Render$
+  match_examples:
+  - name: buffalo render raw string
+    code: "package main\nimport (\n  \"github.com/gobuffalo/buffalo\"\n  \"github.com/gobuffalo/buffalo/render\"\n)\nfunc handler(c buffalo.Context, r *render.Engine, name string) error {\n  return c.Render(200, r.String(\"<h1>\" + name + \"</h1>\"))\n}\n"
+    expect_match_text:
+    - c.Render
+  description: "buffalo Context.Render(status, r.String(taintedHTML)) — renders raw string content as an HTTP response without template auto-escaping."

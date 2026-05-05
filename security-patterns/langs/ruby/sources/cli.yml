@@ -1,0 +1,57 @@
+# Ruby CLI / environment sources. trust: local — attacker with shell access.
+# Disabled by default; enable for CLI-tool audits.
+- id: ruby.source.argv
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: cli-input
+  trust: local
+  match:
+    kind: read
+    target:
+      name: ARGV
+  description: "Disabled — ARGV is CLI input; enable for CLI / bin script audits."
+
+- id: ruby.source.stdin_gets
+  enabled: true
+  language: ruby
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      name: gets
+  match_examples:
+    - name: ruby.source.stdin_gets example
+      code: |
+        def example(input, url, id, item, req_obj, options)
+          gets(input)
+        end
+  description: "Kernel#gets / STDIN.gets — reads one tainted line from stdin."
+
+- id: ruby.source.stdin_read
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: ruby
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      attribute: [STDIN, read]
+  description: "Disabled — STDIN.read."
+
+- id: ruby.source.env_read
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: ruby
+  tag: env-input
+  trust: local
+  match:
+    kind: read
+    target:
+      name: ENV
+  description: "Disabled by default — flag only when crossing trust boundary."

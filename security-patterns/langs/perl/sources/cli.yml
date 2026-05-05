@@ -1,0 +1,36 @@
+# Perl CLI / local sources.
+- id: perl.source.argv
+  enabled: true
+  language: perl
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      name: ARGV
+  match_examples:
+    - name: perl.source.argv example
+      code: |
+        sub example {
+          my ($input, $url, $id, $payload, $request) = @_;
+          my $value = $ARGV[0];
+        }
+  description: "@ARGV — command-line arguments."
+
+- id: perl.source.stdin
+  enabled: true
+  language: perl
+  trust: local
+  tag: cli-input
+  match:
+    kind: read
+    target:
+      name: STDIN
+  match_examples:
+    - name: perl.source.stdin example
+      code: |
+        sub example {
+          my ($input, $url, $id, $payload, $request) = @_;
+          my $value = $STDIN;
+        }
+  description: "STDIN — local interactive input."

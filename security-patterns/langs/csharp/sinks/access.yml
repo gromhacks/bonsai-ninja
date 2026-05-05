@@ -1,0 +1,325 @@
+- id: csharp.access.aws_s3_get_object
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [AWSSDK.S3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [AmazonS3Client, GetObjectAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using AWSSDK.S3;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonS3Client.GetObjectAsync(input); } }
+  - name: literal s3 request negative
+    code: |
+      using AWSSDK.S3;
+      class App { void Test() { AmazonS3Client.GetObjectAsync("reports"); } }
+    expect_no_match: true
+  description: "AmazonS3Client.GetObjectAsync(bucket/key) — tainted selector can read arbitrary object data."
+
+- id: csharp.access.aws_s3_get_object_key
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [AWSSDK.S3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [AmazonS3Client, GetObjectAsync]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted s3 object key
+    code: |
+      using AWSSDK.S3;
+      class App { void Test(string input) { AmazonS3Client.GetObjectAsync("reports", input); } }
+  - name: literal s3 object key negative
+    code: |
+      using AWSSDK.S3;
+      class App { void Test() { AmazonS3Client.GetObjectAsync("reports", "safe.json"); } }
+    expect_no_match: true
+  description: "AmazonS3Client.GetObjectAsync(bucket, taintedKey) — tainted selector can read arbitrary object data."
+
+- id: csharp.access.aws_s3_put_object
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [AWSSDK.S3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [AmazonS3Client, PutObjectAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using AWSSDK.S3;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonS3Client.PutObjectAsync(input); } }
+  - name: literal s3 put request negative
+    code: |
+      using AWSSDK.S3;
+      class App { void Test() { AmazonS3Client.PutObjectAsync("reports"); } }
+    expect_no_match: true
+  description: "AmazonS3Client.PutObjectAsync(bucket/key) — tainted selector can overwrite arbitrary object keys."
+
+- id: csharp.access.aws_s3_put_object_key
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [AWSSDK.S3]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [AmazonS3Client, PutObjectAsync]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted s3 put object key
+    code: |
+      using AWSSDK.S3;
+      class App { void Test(string input) { AmazonS3Client.PutObjectAsync("reports", input); } }
+  - name: literal s3 put object key negative
+    code: |
+      using AWSSDK.S3;
+      class App { void Test() { AmazonS3Client.PutObjectAsync("reports", "safe.json"); } }
+    expect_no_match: true
+  description: "AmazonS3Client.PutObjectAsync(bucket, taintedKey) — tainted selector can overwrite arbitrary object keys."
+
+- id: csharp.access.aws_secretsmanager_get_secret_value
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [AWSSDK.SecretsManager]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [AmazonSecretsManagerClient, GetSecretValueAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using AWSSDK.SecretsManager;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; AmazonSecretsManagerClient.GetSecretValueAsync(input); } }
+  - name: literal secret id negative
+    code: |
+      using AWSSDK.SecretsManager;
+      class App { void Test() { AmazonSecretsManagerClient.GetSecretValueAsync("prod/db/password"); } }
+    expect_no_match: true
+  description: "AmazonSecretsManagerClient.GetSecretValueAsync — tainted secret id reads arbitrary secret material."
+
+- id: csharp.access.azure_blob_download_content
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Azure.Storage.Blobs]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [BlobClient, DownloadContentAsync]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Azure.Storage.Blobs;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BlobClient.DownloadContentAsync(input); } }
+  description: "Disabled — BlobClient.DownloadContentAsync carries the container/blob selector in receiver state, not a call argument."
+
+- id: csharp.access.azure_blob_upload
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Azure.Storage.Blobs]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [BlobClient, UploadAsync]
+  match_examples:
+  - name: declared shape
+    code: |
+      using Azure.Storage.Blobs;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BlobClient.UploadAsync(input); } }
+  description: "Disabled — BlobClient.UploadAsync carries the container/blob selector in receiver state; the first argument is content, not the destination selector."
+
+- id: csharp.access.azure_keyvault_get_secret
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Azure.Security.KeyVault.Secrets]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [SecretClient, GetSecretAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Azure.Security.KeyVault.Secrets;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SecretClient.GetSecretAsync(input); } }
+  - name: literal key vault secret negative
+    code: |
+      using Azure.Security.KeyVault.Secrets;
+      class App { void Test() { SecretClient.GetSecretAsync("prod-db-password"); } }
+    expect_no_match: true
+  description: "SecretClient.GetSecretAsync — tainted secret name reads arbitrary Key Vault material."
+
+- id: csharp.access.gcp_storage_download_object
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Google.Cloud.Storage.V1]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [StorageClient, DownloadObject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; StorageClient.DownloadObject(input); } }
+  - name: literal gcs download selector negative
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test() { StorageClient.DownloadObject("reports"); } }
+    expect_no_match: true
+  description: "StorageClient.DownloadObject(bucket, object, ...) — tainted selector reads arbitrary GCS objects."
+
+- id: csharp.access.gcp_storage_download_object_name
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Google.Cloud.Storage.V1]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [StorageClient, DownloadObject]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted gcs object name
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test(string input) { StorageClient.DownloadObject("reports", input); } }
+  - name: literal gcs object name negative
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test() { StorageClient.DownloadObject("reports", "safe.json"); } }
+    expect_no_match: true
+  description: "StorageClient.DownloadObject(bucket, taintedObject, ...) — tainted selector reads arbitrary GCS objects."
+
+- id: csharp.access.gcp_storage_upload_object
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Google.Cloud.Storage.V1]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [StorageClient, UploadObject]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; StorageClient.UploadObject(input); } }
+  - name: literal gcs upload selector negative
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test() { StorageClient.UploadObject("reports"); } }
+    expect_no_match: true
+  description: "StorageClient.UploadObject(bucket, object, ...) — tainted selector writes attacker-chosen GCS objects."
+
+- id: csharp.access.gcp_storage_upload_object_name
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Google.Cloud.Storage.V1]
+  cwe: [CWE-284, CWE-639]
+  match:
+    kind: call
+    callee:
+      attribute: [StorageClient, UploadObject]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted gcs upload object name
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test(string input) { StorageClient.UploadObject("reports", input); } }
+  - name: literal gcs upload object name negative
+    code: |
+      using Google.Cloud.Storage.V1;
+      class App { void Test() { StorageClient.UploadObject("reports", "safe.json"); } }
+    expect_no_match: true
+  description: "StorageClient.UploadObject(bucket, taintedObject, ...) — tainted selector writes attacker-chosen GCS objects."
+
+- id: csharp.access.gcp_secretmanager_access_secret_version
+  enabled: true
+  language: csharp
+  tag: access-control
+  severity: high
+  packages: [Google.Cloud.SecretManager.V1]
+  cwe: [CWE-284]
+  match:
+    kind: call
+    callee:
+      attribute: [SecretManagerServiceClient, AccessSecretVersion]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      using Google.Cloud.SecretManager.V1;
+      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; SecretManagerServiceClient.AccessSecretVersion(input); } }
+  - name: literal secret version negative
+    code: |
+      using Google.Cloud.SecretManager.V1;
+      class App { void Test() { SecretManagerServiceClient.AccessSecretVersion("projects/p/secrets/s/versions/latest"); } }
+    expect_no_match: true
+  description: "SecretManagerServiceClient.AccessSecretVersion — tainted resource name reads arbitrary secret versions."

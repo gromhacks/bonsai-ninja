@@ -1,0 +1,15 @@
+[package]
+name = "bonsai_common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared IDs, spans, and precision model for bonsai-ninja."
+
+[dependencies]
+bonsai_hash = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

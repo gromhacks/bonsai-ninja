@@ -1,0 +1,134 @@
+# Scala TLS misconfig sinks (Akka HTTP / Play / sttp / okhttp interop).
+- id: scala.tls.sttp_options_disable_cert_check
+  enabled: true
+  language: scala
+  tag: weak-tls
+  severity: high
+  packages: [sttp]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: disableCertVerification
+  match_examples:
+  - name: generated shape example
+    code: |
+      import sttp._
+      object App {
+        def handle(input: String): Unit = {
+          disableCertVerification(input)
+        }
+      }
+  description: "sttp backend with disableCertVerification — trusts any server cert."
+
+- id: scala.tls.akka_http_https_permissive
+  enabled: true
+  language: scala
+  tag: weak-tls
+  severity: high
+  packages: [akka.http.scaladsl]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [ConnectionContext, https]
+  match_examples:
+  - name: generated shape example
+    code: |
+      import akka.http.scaladsl._
+      // uses akka.http.scaladsl
+      object App {
+        def handle(input: String): Unit = {
+          ConnectionContext.https(input)
+        }
+      }
+  description: "Akka HTTP ConnectionContext.https(...) — dangerous if SSLContext trusts all / hostnameVerifier is noop."
+
+  imports:
+  - akka.http.scaladsl
+- id: scala.tls.play_ws_acceptanycertificate
+  enabled: true
+  language: scala
+  tag: weak-tls
+  severity: high
+  packages: [play.api.libs.ws]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: acceptAnyCertificate
+  match_examples:
+  - name: generated shape example
+    code: |
+      import play.api.libs.ws._
+      object App {
+        def handle(input: String): Unit = {
+          acceptAnyCertificate = input
+        }
+      }
+  description: "Play WS acceptAnyCertificate=true — disables TLS cert validation."
+
+  imports:
+  - play.api.libs.ws
+- id: scala.tls.okhttp_hostnameverifier
+  enabled: true
+  language: scala
+  tag: weak-tls
+  severity: high
+  packages: [okhttp]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: hostnameVerifier
+  match_examples:
+  - name: generated shape example
+    code: |
+      import okhttp._
+      object App {
+        def handle(input: String): Unit = {
+          hostnameVerifier(input)
+        }
+      }
+  description: "okhttp builder.hostnameVerifier(...) — flag when set to allow-all implementation."
+
+- id: scala.tls.x509_trust_manager_empty
+  enabled: true
+  language: scala
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: new
+    callee:
+      name: X509TrustManager
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          new X509TrustManager(input)
+        }
+      }
+      class X509TrustManager(args: Any*)
+  description: "Anonymous X509TrustManager — flag when checkClient/ServerTrusted is empty."
+
+- id: scala.tls.ssl_context_init
+  enabled: true
+  language: scala
+  tag: weak-tls
+  severity: medium
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      attribute: [SSLContext, init]
+  match_examples:
+  - name: generated shape example
+    code: |
+      object App {
+        def handle(input: String): Unit = {
+          SSLContext.init(input)
+        }
+      }
+  description: "SSLContext.init(_, trustManagers, _) — flag when trustManagers contains TrustAll."

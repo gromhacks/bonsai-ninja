@@ -1,0 +1,100 @@
+# Objective-C TLS misconfiguration sinks.
+- id: objc.tls.urlsession_disable_evaluation
+  enabled: true
+  language: objc
+  tag: weak-tls
+  severity: critical
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: URLSessionDidReceiveChallenge
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; URLSessionDidReceiveChallenge(input); }
+  description: "NSURLSessionDelegate URLSession:didReceiveChallenge: completionHandler returning NSURLSessionAuthChallengeUseCredential without SecTrustEvaluate — disables cert validation."
+
+- id: objc.tls.challenge_use_credential
+  enabled: true
+  language: objc
+  tag: weak-tls
+  severity: critical
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: credentialForTrust
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; credentialForTrust(input); }
+  description: "NSURLCredential +credentialForTrust: invoked inside didReceiveChallenge: without prior SecTrustEvaluateWithError — accepts any server cert."
+
+- id: objc.tls.afnetworking_pinningmode_none
+  enabled: true
+  language: objc
+  tag: weak-tls
+  severity: high
+  packages: [AFNetworking]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: SSLPinningMode
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(id input) { id target = input; int amount = 1; SSLPinningMode = input; }
+  description: "AFSecurityPolicy.SSLPinningMode = AFSSLPinningModeNone — disables AFNetworking certificate pinning."
+
+- id: objc.tls.afnetworking_allow_invalid
+  enabled: true
+  language: objc
+  tag: weak-tls
+  severity: high
+  packages: [AFNetworking]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: allowInvalidCertificates
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(id input) { id target = input; int amount = 1; allowInvalidCertificates = input; }
+  description: "AFSecurityPolicy.allowInvalidCertificates = YES — accepts self-signed / expired certs."
+
+- id: objc.tls.afnetworking_validate_domain_no
+  enabled: true
+  language: objc
+  tag: weak-tls
+  severity: high
+  packages: [AFNetworking]
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: validatesDomainName
+  match_examples:
+  - name: declared shape
+    code: |
+      #import <AFNetworking/AFNetworking.h>
+      void test(id input) { id target = input; int amount = 1; validatesDomainName = input; }
+  description: "AFSecurityPolicy.validatesDomainName = NO — skips hostname verification; any valid cert accepted."
+
+- id: objc.tls.allow_arbitrary_loads
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: objc
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: NSAllowsArbitraryLoads
+  description: "Disabled — Info.plist ATS setting; surface via plist scanner, not the code tree."

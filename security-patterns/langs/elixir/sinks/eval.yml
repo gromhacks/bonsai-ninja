@@ -1,0 +1,253 @@
+# Elixir code-execution sinks. Code.eval_* compiles and runs arbitrary
+# Elixir source; :erl_eval is the Erlang analogue; apply/3 dispatches
+# to any exported function; String.to_atom leaks into atom-table DoS.
+- id: elixir.eval.code_eval_string
+  enabled: true
+  language: elixir
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Code, eval_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.eval_string(input)
+        end
+      end
+  - name: arg tainted literal negative
+    code: "defmodule App do\n  def test(input) do\n    Code.eval_string(\"safe\")\n  end\nend\n"
+    expect_no_match: true
+  description: "Code.eval_string/1 — compiles and evaluates arbitrary Elixir source at runtime; full RCE if the string is tainted."
+- id: elixir.eval.code_eval_quoted
+  enabled: true
+  language: elixir
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Code, eval_quoted]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.eval_quoted(input)
+        end
+      end
+  - name: literal quoted eval negative
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.eval_quoted(quote do: 1 + 1)
+        end
+      end
+    expect_no_match: true
+  description: "Code.eval_quoted/2 — executes any AST, including attacker-built quoted expressions."
+- id: elixir.eval.code_compile_string
+  enabled: true
+  language: elixir
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Code, compile_string]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.compile_string(input)
+        end
+      end
+  - name: literal compile string negative
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.compile_string("defmodule SafeModule do end")
+        end
+      end
+    expect_no_match: true
+  description: "Code.compile_string/1 — compiles arbitrary Elixir at runtime."
+- id: elixir.eval.code_eval_file
+  enabled: true
+  language: elixir
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Code, eval_file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.eval_file(input)
+        end
+      end
+  - name: literal eval file negative
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.eval_file("priv/safe.exs")
+        end
+      end
+    expect_no_match: true
+  description: "Code.eval_file/1 — executes whatever is at the (tainted) path."
+- id: elixir.eval.code_require_file
+  enabled: true
+  language: elixir
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      attribute: [Code, require_file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.require_file(input)
+        end
+      end
+  - name: literal require file negative
+    code: |
+      defmodule App do
+        def test(input) do
+          Code.require_file("config/runtime.exs")
+        end
+      end
+    expect_no_match: true
+  description: "Code.require_file/1 — loads and evaluates the file."
+- id: elixir.eval.kernel_apply
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: elixir
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      name: apply
+  description: "Disabled — only tainted module/function args are code injection; v1 sink taint checks any arg, making apply/3 too noisy."
+- id: elixir.eval.string_to_atom
+  enabled: true
+  language: elixir
+  tag: dos
+  severity: medium
+  cwe: [CWE-770]
+  match:
+    kind: call
+    callee:
+      attribute: [String, to_atom]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          String.to_atom(input)
+        end
+      end
+  - name: literal string to atom negative
+    code: |
+      defmodule App do
+        def test(input) do
+          String.to_atom("ready")
+        end
+      end
+    expect_no_match: true
+  description: "String.to_atom/1 — unbounded atom creation exhausts the BEAM atom table (max ~1M, not GC'd); prefer String.to_existing_atom/1."
+
+- id: elixir.eval.list_to_atom
+  enabled: true
+  language: elixir
+  tag: dos
+  severity: medium
+  cwe: [CWE-770]
+  match:
+    kind: call
+    callee:
+      attribute: [List, to_atom]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          List.to_atom(input)
+        end
+      end
+  - name: literal list to atom negative
+    code: |
+      defmodule App do
+        def test(input) do
+          List.to_atom('ready')
+        end
+      end
+    expect_no_match: true
+  description: "List.to_atom/1 — charlist variant; same unbounded atom-table growth risk as String.to_atom."
+
+- id: elixir.eval.erl_eval
+  enabled: true
+  language: elixir
+  tag: code-injection
+  severity: critical
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^:erl_eval\\.exprs$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      defmodule App do
+        def test(input) do
+          :erl_eval.exprs(input)
+        end
+      end
+  - name: literal erl eval negative
+    code: |
+      defmodule App do
+        def test(input) do
+          :erl_eval.exprs([])
+        end
+      end
+    expect_no_match: true
+  description: "Erlang :erl_eval.exprs/2 — evaluates an Erlang AST; tainted AST = arbitrary code execution."

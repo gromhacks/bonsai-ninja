@@ -1,0 +1,70 @@
+- id: javascript.oauth.passport_use_no_secret
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: javascript
+  tag: oauth
+  severity: medium
+  packages: [passport]
+  cwe: [CWE-287]
+  match:
+    kind: call
+    callee:
+      attribute: [passport, use]
+  description: "Disabled — passport.use needs strategy-aware analysis."
+
+# OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
+# id_token verify off, redirect_uri substring match.
+- id: javascript.oauth.passport_state_disabled
+  enabled: true
+  language: javascript
+  tag: oauth
+  severity: high
+  packages: [passport]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [passport, authenticate]
+  match_examples:
+  - name: passport state disabled
+    code: |
+      const _u = require("passport");
+      function demo(input, req, obj) {
+        return passport.authenticate(input, { state: false });
+      }
+  description: "passport.authenticate({state: false}) — disables OAuth state-CSRF defense."
+
+- id: javascript.oauth.openid_client_callback_no_state
+  enabled: true
+  language: javascript
+  tag: oauth
+  severity: high
+  packages: [openid-client]
+  imports: [openid-client]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.callback$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: openid-client callback tainted params
+    code: |
+      const _u = require("openid-client");
+      function done(client, redirectUri, input) {
+        return client.callback(redirectUri, input);
+      }
+      done({ callback: () => null }, "", "");
+    expect_match_text: [client.callback]
+  - name: openid-client callback literal negative
+    code: |
+      const _u = require("openid-client");
+      function done(client, redirectUri) {
+        return client.callback(redirectUri, { state: "fixed-csrf-token", code: "fixed" });
+      }
+      done({ callback: () => null }, "");
+    expect_no_match: true
+  description: "openid-client client.callback(redirect_uri, tainted_params) — attacker-controlled callback parameters bypass state/nonce binding when not validated against a server-bound expectedState."

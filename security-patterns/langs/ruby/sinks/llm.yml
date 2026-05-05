@@ -1,0 +1,92 @@
+- id: ruby.llm.openai_client_chat
+  enabled: true
+  language: ruby
+  tag: web-llm
+  severity: medium
+  packages: [ruby-openai]
+  cwe: [CWE-20, CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.chat$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: openai client chat
+    code: |
+      require "ruby-openai"
+      def example(client, input)
+        client.chat(parameters: input)
+      end
+    expect_match_text: [client.chat]
+  - name: ruby.llm.openai_client_chat literal negative
+    code: |
+      require "ruby-openai"
+      def example(client, input)
+        client.chat(parameters: {messages: [{role: "user", content: "hello"}]})
+      end
+    expect_no_match: true
+  description: "OpenAI client.chat(parameters:) — tainted prompt/tool content reaches an LLM instruction surface."
+
+- id: ruby.llm.anthropic_messages
+  enabled: true
+  language: ruby
+  tag: web-llm
+  severity: medium
+  packages: [anthropic]
+  cwe: [CWE-20, CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.messages$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: anthropic messages
+    code: |
+      require "anthropic"
+      def example(client, input)
+        client.messages(parameters: input)
+      end
+    expect_match_text: [client.messages]
+  - name: ruby.llm.anthropic_messages literal negative
+    code: |
+      require "anthropic"
+      def example(client, input)
+        client.messages(parameters: {messages: [{role: "user", content: "hello"}]})
+      end
+    expect_no_match: true
+  description: "Anthropic client.messages(parameters:) — tainted prompt content can steer model output or tool calls."
+
+- id: ruby.llm.bedrock_invoke_model
+  enabled: true
+  language: ruby
+  tag: web-llm
+  severity: medium
+  packages: [aws-sdk-bedrockruntime]
+  cwe: [CWE-20, CWE-200]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.invoke_model$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: bedrock invoke model
+    code: |
+      require "aws-sdk-bedrockruntime"
+      def example(bedrock, input)
+        bedrock.invoke_model(body: input)
+      end
+    expect_match_text: [bedrock.invoke_model]
+  - name: ruby.llm.bedrock_invoke_model literal negative
+    code: |
+      require "aws-sdk-bedrockruntime"
+      def example(bedrock, input)
+        bedrock.invoke_model(body: "{\"prompt\":\"hello\"}")
+      end
+    expect_no_match: true
+  description: "bedrock.invoke_model(body:) — tainted model body reaches a foundation-model execution surface."

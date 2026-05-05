@@ -1,0 +1,40 @@
+# Erlang information-disclosure sinks (logs, debug output, error responses).
+- id: erlang.info_disclosure.logger_error_secret
+  enabled: true
+  language: erlang
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-200]
+  match:
+    kind: call
+    callee:
+      attribute: [logger, error]
+  match_examples:
+    - name: erlang logger error secret-shaped data
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Token) ->
+          logger:error("token=~p", [Token]).
+      expect_match_text: [logger:error]
+  description: "logger:error with secret-shaped data — credentials or tokens can leak to Erlang logs."
+
+- id: erlang.info_disclosure.error_logger_stack
+  enabled: true
+  language: erlang
+  tag: information-disclosure
+  severity: medium
+  cwe: [CWE-209]
+  match:
+    kind: call
+    callee:
+      attribute: [error_logger, error_msg]
+  match_examples:
+    - name: erlang error logger stack details
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Stack) ->
+          error_logger:error_msg("stack trace ~p", [Stack]).
+      expect_match_text: [error_logger:error_msg]
+  description: "error_logger:error_msg with stack / crash diagnostics — exposes internals through logs."

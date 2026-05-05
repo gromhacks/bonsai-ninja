@@ -1,0 +1,54 @@
+# C# CLI / environment sources. trust: local.
+- id: csharp.source.console_readline
+  enabled: true
+  language: csharp
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      name: ReadLine
+  match_examples:
+    - name: declared shape
+      code: |
+        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ReadLine(input); } }
+  description: "Console.ReadLine — local CLI input from stdin."
+
+- id: csharp.source.environment_args
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: cli-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      attribute: [Environment, GetCommandLineArgs]
+  description: "Disabled — argv; flag only across a trust boundary."
+
+- id: csharp.source.environment_getenv
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: env-input
+  trust: local
+  match:
+    kind: call
+    callee:
+      attribute: [Environment, GetEnvironmentVariable]
+  description: "Disabled — Environment.GetEnvironmentVariable; flag only across trust boundary."
+
+- id: csharp.source.main_args_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: csharp
+  tag: cli-input
+  trust: local
+  match:
+    kind: param
+    target:
+      name: args
+  description: "Disabled — Main(string[] args); enable when CLI faces untrusted input."

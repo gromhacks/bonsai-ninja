@@ -1,0 +1,27 @@
+- id: kotlin.format.string_format_tainted
+  enabled: true
+  language: kotlin
+  tag: format-string
+  severity: medium
+  cwe: [CWE-134]
+  match:
+    kind: call
+    callee:
+      attribute: [String, format]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted format string
+    code: |
+      fun handle(input: String): String {
+        return String.format(input)
+      }
+    expect_match_text: [String.format]
+  - name: literal format negative
+    code: |
+      fun handle(): String {
+        return String.format("%s", "safe")
+      }
+    expect_no_match: true
+  description: "String.format(tainted_fmt, ...) — attacker-controlled format string."

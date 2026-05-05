@@ -1,0 +1,23 @@
+# ruby oauth sinks.
+
+# OAuth misconfig sinks. State-CSRF disabled, PKCE missing,
+# id_token verify off, redirect_uri substring match.
+- id: ruby.oauth.omniauth_state_check_skip
+  enabled: true
+  language: ruby
+  tag: oauth
+  severity: high
+  packages: [omniauth]
+  cwe: [CWE-352]
+  match:
+    kind: call
+    callee:
+      attribute: [OmniAuth, config]
+  match_examples:
+  - name: ruby.oauth.omniauth_state_check_skip example
+    code: |
+      require "omniauth"
+      def example(input, url, id, payload, request, params)
+        OmniAuth.config(allowed_request_methods: [:get])
+      end
+  description: "OmniAuth config disabling origin check / allowing GET initiation — CSRF on the OAuth callback flow."

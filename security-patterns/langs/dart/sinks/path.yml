@@ -1,0 +1,462 @@
+# Dart path-traversal sinks (dart:io File/Directory + archive zip-slip).
+- id: dart.path.file_read_as_string
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, readAsString]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file read path
+    code: |
+      void test(String input) { File.readAsString(input); }
+  - name: literal file read path negative
+    code: |
+      void test() { File.readAsString("config/app.txt"); }
+    expect_no_match: true
+  description: "File.readAsString."
+
+- id: dart.path.file_read_as_string_sync
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, readAsStringSync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted sync file read path
+    code: |
+      void test(String input) { File.readAsStringSync(input); }
+  - name: literal sync file read path negative
+    code: |
+      void test() { File.readAsStringSync("config/app.txt"); }
+    expect_no_match: true
+  description: "File.readAsStringSync."
+
+- id: dart.path.file_read_as_bytes
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, readAsBytes]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file bytes path
+    code: |
+      void test(String input) { File.readAsBytes(input); }
+  - name: literal file bytes path negative
+    code: |
+      void test() { File.readAsBytes("config/app.bin"); }
+    expect_no_match: true
+  description: "File.readAsBytes."
+
+- id: dart.path.file_read_as_lines
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, readAsLines]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file lines path
+    code: |
+      void test(String input) { File.readAsLines(input); }
+  - name: literal file lines path negative
+    code: |
+      void test() { File.readAsLines("config/app.txt"); }
+    expect_no_match: true
+  description: "File.readAsLines."
+
+- id: dart.path.file_open_read
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, openRead]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted open read path
+    code: |
+      void test(String input) { File.openRead(input); }
+  - name: literal open read path negative
+    code: |
+      void test() { File.openRead("config/app.txt"); }
+    expect_no_match: true
+  description: "File.openRead — streaming read."
+
+- id: dart.path.file_open_write
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, openWrite]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted open write path
+    code: |
+      void test(String input) { File.openWrite(input); }
+  - name: literal open write path negative
+    code: |
+      void test() { File.openWrite("tmp/output.txt"); }
+    expect_no_match: true
+  description: "File.openWrite."
+
+- id: dart.path.file_write_as_string
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, writeAsString]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file write path
+    code: |
+      void test(String input) { File.writeAsString(input); }
+  - name: literal file write path negative
+    code: |
+      void test(String input) { File.writeAsString("tmp/output.txt"); }
+    expect_no_match: true
+  description: "File.writeAsString."
+
+- id: dart.path.file_write_as_bytes
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, writeAsBytes]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file bytes write path
+    code: |
+      void test(String input) { File.writeAsBytes(input); }
+  - name: literal file bytes write path negative
+    code: |
+      void test(List<int> input) { File.writeAsBytes("tmp/output.bin"); }
+    expect_no_match: true
+  description: "File.writeAsBytes."
+
+- id: dart.path.file_delete
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  packages: [dart:io]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, delete]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file delete path
+    code: |
+      import 'dart:io';
+      void test(String input) { File.delete(input); }
+  - name: literal file delete path negative
+    code: |
+      import 'dart:io';
+      void test() { File.delete("tmp/output.txt"); }
+    expect_no_match: true
+  description: "File.delete with tainted path — attacker-controlled paths let the attacker delete arbitrary files on disk."
+
+- id: dart.path.file_rename
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  packages: [dart:io]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file rename destination
+    code: |
+      import 'dart:io';
+      void test(String input) { File.rename(input); }
+  - name: literal file rename destination negative
+    code: |
+      import 'dart:io';
+      void test() { File.rename("tmp/output.txt"); }
+    expect_no_match: true
+  description: "File.rename — destination is tainted."
+
+- id: dart.path.file_copy
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, copy]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file copy destination
+    code: |
+      void test(String input) { File.copy(input); }
+  - name: literal file copy destination negative
+    code: |
+      void test() { File.copy("tmp/output.txt"); }
+    expect_no_match: true
+  description: "File.copy — destination is tainted."
+
+- id: dart.path.directory_create
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: medium
+  packages: [dart:io]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, create]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted directory create path
+    code: |
+      import 'dart:io';
+      void test(String input) { Directory.create(input); }
+  - name: literal directory create path negative
+    code: |
+      import 'dart:io';
+      void test() { Directory.create("tmp/uploads"); }
+    expect_no_match: true
+  description: "Directory.create with tainted path."
+
+- id: dart.path.directory_delete
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  packages: [dart:io]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, delete]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted directory delete path
+    code: |
+      import 'dart:io';
+      void test(String input) { Directory.delete(input); }
+  - name: literal directory delete path negative
+    code: |
+      import 'dart:io';
+      void test() { Directory.delete("tmp/uploads"); }
+    expect_no_match: true
+  description: "Directory.delete — recursive deletion risk."
+
+- id: dart.path.directory_rename
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  packages: [dart:io]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Directory, rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted directory rename destination
+    code: |
+      import 'dart:io';
+      void test(String input) { Directory.rename(input); }
+  - name: literal directory rename destination negative
+    code: |
+      import 'dart:io';
+      void test() { Directory.rename("tmp/archive"); }
+    expect_no_match: true
+  description: "Directory.rename."
+
+- id: dart.path.archive_extract_archive_to
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  packages: [archive]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: extractArchiveToDisk
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted archive extraction input
+    code: |
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      void test(dynamic input) { extractArchiveToDisk(input); }
+  - name: literal archive extraction input negative
+    code: |
+      import 'package:archive/archive.dart';
+      void test() { extractArchiveToDisk("fixtures/safe.zip"); }
+    expect_no_match: true
+  description: "archive extractArchiveToDisk — zip-slip if member filenames contain ../ and are not validated before write."
+
+  imports:
+  - archive/archive.dart
+- id: dart.path.archive_extract_file_to
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: high
+  packages: [archive]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: extractFileToDisk
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted archive file extraction input
+    code: |
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      import 'package:archive/archive.dart';
+      void test(dynamic input) { extractFileToDisk(input); }
+  - name: literal archive file extraction input negative
+    code: |
+      import 'package:archive/archive.dart';
+      void test() { extractFileToDisk("fixtures/safe.zip"); }
+    expect_no_match: true
+  description: "archive extractFileToDisk — zip-slip."
+
+  imports:
+  - archive/archive.dart
+- id: dart.path.uri_file
+  enabled: true
+  language: dart
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [Uri, file]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file uri path
+    code: |
+      void test(String input) { Uri.file(input); }
+  - name: literal file uri path negative
+    code: |
+      void test() { Uri.file("config/app.txt"); }
+    expect_no_match: true
+  description: "Uri.file(tainted) — constructs a file:// URI that can later be fed to File/HttpClient.openUrl, enabling local file disclosure when paired with traversal payloads."
+
+- id: dart.path.file_constructor
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: File
+  match_examples:
+  - name: declared shape
+    code: |
+      class File { File([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var input = "x"; var result = File(input); }
+  description: "Disabled broad duplicate — v1 adapter facts cannot distinguish File(path) construction from File.* operation receivers; concrete File read/write/delete/copy/rename operation rules are the canonical path-traversal sinks."
+
+- id: dart.path.directory_constructor
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: dart
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: new
+    callee:
+      name: Directory
+  match_examples:
+  - name: declared shape
+    code: |
+      class Directory { Directory([dynamic input, {dynamic htmlEscapeValues}]); }
+      void test() { var input = "x"; var result = Directory(input); }
+  description: "Disabled broad duplicate — v1 adapter facts cannot distinguish Directory(path) construction from Directory.* operation receivers; concrete Directory create/delete/rename operation rules are the canonical path-traversal sinks."

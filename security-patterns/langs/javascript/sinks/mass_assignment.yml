@@ -1,0 +1,42 @@
+# javascript mass_assignment sinks.
+
+# Mass-assignment sinks (T400 follow-on). Bulk-attribute APIs
+# that accept the request body without an explicit allowlist.
+- id: javascript.mass_assign.mongoose_set_body
+  enabled: true
+  language: javascript
+  tag: mass-assignment
+  severity: high
+  packages: [mongoose]
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [Document, set]
+  match_examples:
+  - name: mongoose set body
+    code: |
+      const _u = require("mongoose");
+      function demo(input, req, obj) {
+        return Document.set(input, req.body);
+      }
+  description: "Mongoose Document.set(req.body) — bulk-merges request body into the document; admin / role fields slip through."
+- id: javascript.mass_assign.object_assign_body
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: javascript
+  tag: mass-assignment
+  severity: medium
+  cwe: [CWE-915]
+  match:
+    kind: call
+    callee:
+      attribute: [Object, assign]
+  match_examples:
+  - name: object assign body
+    code: |
+      function demo(input, req, obj) {
+        return Object.assign(input, req.body);
+      }
+  description: "Disabled duplicate — without source-name taint proxies, Object.assign(target, request data) is the same API/arity shape as javascript.proto_pollution.object_assign_request_body; keep the prototype-pollution rule as the canonical Object.assign bulk-merge sink and let taint decide attacker control."

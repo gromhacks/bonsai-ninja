@@ -1,0 +1,1914 @@
+# Java HTTP / Servlet / JAX-RS / Spring remote input sources.
+#
+# ── Adapter coverage notes (audited 2026-04) ─────────────────────────────────
+# Most modern Java web frameworks bind HTTP input to method parameters via
+# annotations: Spring MVC (@RequestParam, @RequestBody, @PathVariable,
+# @RequestHeader, @CookieValue, @RequestPart, @MatrixVariable,
+# @ModelAttribute), JAX-RS (@QueryParam, @PathParam, @HeaderParam,
+# @FormParam, @CookieParam, @MatrixParam, @BeanParam), and several
+# cloud/event triggers (@HttpTrigger, @KafkaListener, @RabbitListener,
+# @JmsListener, @SqsListener, @OnMessage). The shared adapter kit now emits
+# parameter annotation metadata for common Java grammar shapes, so the Spring
+# annotation rules below are enabled. Remaining gaps are receiver-type
+# precision and framework-specific annotation shapes that are not surfaced
+# yet. The current Java adapter:
+#
+#   1. Surfaces parameter identifiers plus common parameter annotations.
+#   2. Indexes call receivers by *local identifier* rather than by
+#      *receiver type*, so `attribute: [HttpServletRequest, getParameter]`
+#      style rules under-fire compared to the `name: getParameter` +
+#      `receiver_name_in: [request, req, ...]` shape used below.
+#
+# Per docs/pattern-guide.mdx:
+#
+#   > If a source-visible value flow is missing, fix adapter extraction or
+#   > the semantic graph. Do not encode the missing edge in YAML.
+#
+# Tracking task: expose receiver type information for callable matching and
+# add any missing framework-specific annotation shapes. Once that ships, flip
+# the remaining `enabled: false` typed rules below to true and re-run the
+# audit.
+#
+# Below this header: enabled annotation sources and callable-shape sources
+# that work today.
+
+- id: java.source.spring_request_param
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: RequestParam
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@RequestParam String value) {
+        }
+      }
+    expect_match_text: [value]
+  description: "Spring @RequestParam annotated parameter — query/form value bound from the HTTP request, including raw String values that can flow to XSS sinks."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_request_body
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: RequestBody
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@RequestBody String value) {
+        }
+      }
+  description: "Spring @RequestBody annotated parameter — request body payload bound to the handler."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_request_part
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file, multipart]
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: RequestPart
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@RequestPart String value) {
+        }
+      }
+  - name: spring request part multipart file
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void upload(@RequestPart MultipartFile file) {
+        }
+      }
+      class MultipartFile {}
+    expect_match_text: [file]
+  description: "Spring @RequestPart annotated parameter — multipart part or MultipartFile supplied by the client."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_path_variable
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: PathVariable
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@PathVariable String value) {
+        }
+      }
+  description: "Spring @PathVariable annotated parameter — URL path segment supplied by the client."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_request_header
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: RequestHeader
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@RequestHeader String value) {
+        }
+      }
+  description: "Spring @RequestHeader annotated parameter — client-supplied HTTP header."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_cookie_value
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: CookieValue
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@CookieValue String value) {
+        }
+      }
+  description: "Spring @CookieValue annotated parameter — client-supplied cookie value."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_matrix_variable
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: MatrixVariable
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@MatrixVariable String value) {
+        }
+      }
+  description: "Spring @MatrixVariable annotated parameter — matrix URI variable supplied by the client."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_model_attribute
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [org.springframework.web.bind.annotation]
+  match:
+    kind: param
+    target:
+      annotation: ModelAttribute
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.bind.annotation.*;
+      class App {
+        void handle(@ModelAttribute String value) {
+        }
+      }
+  description: "Spring @ModelAttribute annotated parameter — request values bound onto a model object."
+
+  imports:
+  - org.springframework.web.bind.annotation
+- id: java.source.spring_multipart_originalfilename
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file]
+  packages: [org.springframework.web.multipart]
+  match:
+    kind: call
+    callee:
+      name: getOriginalFilename
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.web.multipart.*;
+      class App {
+        void handle(String input) throws Exception {
+          getOriginalFilename(input);
+        }
+      }
+  description: "Spring getOriginalFilename() — tail-match across local multipart-file variable names."
+
+  imports:
+  - org.springframework.web.multipart
+- id: java.source.spring_multipart_getname
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [org.springframework.web.multipart]
+  match:
+    kind: call
+    callee:
+      attribute: [MultipartFile, getName]
+  description: "Disabled — `getName` is too broad to tail-match safely, and typed receiver matching does not work for local multipart-file variables."
+
+- id: java.source.servlet_getparameter
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      name: getParameter
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getParameter(input);
+        }
+      }
+  description: "HttpServletRequest.getParameter."
+
+- id: java.source.servlet_getparametervalues
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getParameterValues
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getParameterValues(input);
+        }
+      }
+  description: "HttpServletRequest.getParameterValues."
+
+- id: java.source.servlet_getparametermap
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getParameterMap
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getParameterMap(input);
+        }
+      }
+  description: "HttpServletRequest.getParameterMap."
+
+- id: java.source.servlet_getheader
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  match:
+    kind: call
+    callee:
+      name: getHeader
+  constraints:
+  - receiver_name_in:
+    - request
+    - servletRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getHeader(input);
+        }
+      }
+  description: "HttpServletRequest.getHeader."
+
+- id: java.source.servlet_getheaders
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getHeaders
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getHeaders(input);
+        }
+      }
+  description: "HttpServletRequest.getHeaders."
+
+- id: java.source.servlet_getheadernames
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getHeaderNames
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getHeaderNames(input);
+        }
+      }
+  description: "HttpServletRequest.getHeaderNames."
+
+- id: java.source.servlet_getcookies
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  match:
+    kind: call
+    callee:
+      name: getCookies
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getCookies(input);
+        }
+      }
+  description: "HttpServletRequest.getCookies."
+
+- id: java.source.servlet_getinputstream
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getInputStream
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getInputStream(input);
+        }
+      }
+  description: "HttpServletRequest.getInputStream — raw body."
+
+- id: java.source.servlet_getreader
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  match:
+    kind: call
+    callee:
+      name: getReader
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getReader(input);
+        }
+      }
+  description: "HttpServletRequest.getReader."
+
+- id: java.source.servlet_getquerystring
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      name: getQueryString
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getQueryString(input);
+        }
+      }
+  description: "HttpServletRequest.getQueryString."
+
+- id: java.source.servlet_getrequesturi
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      name: getRequestURI
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getRequestURI(input);
+        }
+      }
+  description: "HttpServletRequest.getRequestURI."
+
+- id: java.source.servlet_getrequesturl
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      name: getRequestURL
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getRequestURL(input);
+        }
+      }
+  description: "HttpServletRequest.getRequestURL."
+
+- id: java.source.servlet_getpathinfo
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  match:
+    kind: call
+    callee:
+      name: getPathInfo
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          request.getPathInfo(input);
+        }
+      }
+  description: "HttpServletRequest.getPathInfo."
+
+- id: java.source.servlet_part_getsubmittedfilename
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file]
+  match:
+    kind: call
+    callee:
+      name: getSubmittedFileName
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          getSubmittedFileName(input);
+        }
+      }
+  description: "Servlet getSubmittedFileName() — tail-match across local upload-part variable names."
+
+- id: java.source.jaxrs_queryparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: QueryParam
+  match_examples:
+  - name: jax-rs query param
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(@QueryParam String value) {
+        }
+      }
+  description: "JAX-RS / Quarkus @QueryParam annotated parameter — query value bound from the HTTP request."
+
+- id: java.source.jaxrs_pathparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: PathParam
+  match_examples:
+  - name: jax-rs path param
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(@PathParam String value) {
+        }
+      }
+  description: "JAX-RS / Quarkus @PathParam annotated parameter — path value bound from the HTTP request."
+
+- id: java.source.jaxrs_headerparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: HeaderParam
+  match_examples:
+  - name: jax-rs header param
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(@HeaderParam String value) {
+        }
+      }
+  description: "JAX-RS / Quarkus @HeaderParam annotated parameter — client-supplied header."
+
+- id: java.source.jaxrs_formparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [form]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: FormParam
+  match_examples:
+  - name: jax-rs form param
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(@FormParam String value) {
+        }
+      }
+  description: "JAX-RS / Quarkus @FormParam annotated parameter — form body value bound from the HTTP request."
+
+- id: java.source.jaxrs_cookieparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: CookieParam
+  match_examples:
+  - name: jax-rs cookie param
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(@CookieParam String value) {
+        }
+      }
+  description: "JAX-RS / Quarkus @CookieParam annotated parameter — client-supplied cookie."
+
+- id: java.source.jaxrs_matrixparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: MatrixParam
+  match_examples:
+  - name: jax-rs matrix param
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(@MatrixParam String value) {
+        }
+      }
+  description: "JAX-RS / Quarkus @MatrixParam annotated parameter — matrix URI value supplied by the HTTP request."
+
+- id: java.source.jaxrs_beanparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: param
+    target:
+      annotation: BeanParam
+  match_examples:
+  - name: jax-rs bean param
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(@BeanParam String value) {
+        }
+      }
+  description: "JAX-RS / Quarkus @BeanParam annotated parameter — request parameters bound into a bean."
+
+- id: java.source.jaxrs_quarkus_body_param
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["jakarta.ws.rs", "javax.ws.rs", "io.quarkus"]
+  match:
+    kind: param
+    target:
+      regex: "^(entity|requestBody)$"
+  match_examples:
+  - name: jax-rs string entity parameter
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void post(String entity) {
+        }
+      }
+    expect_match_text: [entity]
+  - name: quarkus map request body parameter
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void post(Map requestBody) {
+        }
+      }
+      class Map {}
+    expect_match_text: [requestBody]
+  description: "JAX-RS / Quarkus entity body parameter convention — unannotated String or Map body supplied by the HTTP request."
+
+- id: java.source.azure_http_trigger
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: remote
+  tag: cloud-event
+  packages: ["com.microsoft.azure.functions"]
+  match:
+    kind: param
+    target:
+      name: HttpTrigger
+  description: "Disabled — matcher only sees parameter identifiers, not Azure @HttpTrigger annotations."
+
+- id: java.source.gcf_http_function_service
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: remote
+  tag: cloud-event
+  packages: ["com.google.cloud.functions"]
+  match:
+    kind: param
+    target:
+      name: service
+  description: "Disabled — `service` is the handler method name; `kind: param` only matches parameter identifiers."
+
+- id: java.source.websocket_onmessage
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: ["javax.websocket", "jakarta.websocket"]
+  match:
+    kind: param
+    target:
+      name: OnMessage
+  description: "Disabled — matcher only sees parameter identifiers, not @OnMessage annotations."
+
+- id: java.source.android_intent_getdata
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  packages: [android]
+  match:
+    kind: call
+    callee:
+      attribute: [Intent, getData]
+  description: "Disabled — `getData` is too broad to tail-match safely, and typed receiver matching does not work for local intent variables."
+
+# Callable-shape rules — work without the annotation/receiver-type adapter
+# fix above. Use receiver-name constraints to keep matches scoped.
+
+- id: java.source.spring_httpentity_getbody
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: [org.springframework.http]
+  match:
+    kind: call
+    callee:
+      name: getBody
+  constraints:
+  - receiver_name_in:
+    - entity
+    - httpEntity
+    - requestEntity
+    - request
+    - req
+  match_examples:
+  - name: generated shape example
+    code: |
+      import org.springframework.http.*;
+      class App {
+        void handle(String input) throws Exception {
+          entity.getBody(input);
+        }
+      }
+  description: "Spring HttpEntity / RequestEntity getBody() — request body via Spring's typed entity wrapper."
+
+  imports:
+  - org.springframework.http
+- id: java.source.jaxrs_uriinfo_getqueryparameters
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: call
+    callee:
+      name: getQueryParameters
+  constraints:
+  - receiver_name_in:
+    - uriInfo
+    - info
+    - ui
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          uriInfo.getQueryParameters(input);
+        }
+      }
+  description: "JAX-RS UriInfo.getQueryParameters — returns multivalued query params from the request URI."
+
+- id: java.source.jaxrs_uriinfo_getpathparameters
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: call
+    callee:
+      name: getPathParameters
+  constraints:
+  - receiver_name_in:
+    - uriInfo
+    - info
+    - ui
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          uriInfo.getPathParameters(input);
+        }
+      }
+  description: "JAX-RS UriInfo.getPathParameters — returns matched @Path template variables."
+
+- id: java.source.jaxrs_httpheaders_getrequestheader
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: call
+    callee:
+      name: getRequestHeader
+  constraints:
+  - receiver_name_in:
+    - headers
+    - httpHeaders
+    - hdrs
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          headers.getRequestHeader(input);
+        }
+      }
+  description: "JAX-RS HttpHeaders.getRequestHeader — single-valued header lookup."
+
+- id: java.source.jaxrs_httpheaders_getcookies
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: call
+    callee:
+      name: getCookies
+  constraints:
+  - receiver_name_in:
+    - headers
+    - httpHeaders
+    - hdrs
+  match_examples:
+  - name: generated shape example
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        void handle(String input) throws Exception {
+          headers.getCookies(input);
+        }
+      }
+  description: "JAX-RS HttpHeaders.getCookies — request cookie map."
+
+- id: java.source.jaxrs_containerrequestcontext_getentitystream
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  packages: ["jakarta.ws.rs", "javax.ws.rs"]
+  match:
+    kind: call
+    callee:
+      name: getEntityStream
+  constraints:
+  - receiver_name_in:
+    - context
+    - ctx
+    - requestContext
+    - containerRequestContext
+  - max_args: 0
+  match_examples:
+  - name: jaxrs context entity stream
+    code: |
+      import jakarta.ws.rs.*;
+      class App {
+        Object filter(ContainerRequestContext requestContext) {
+          return requestContext.getEntityStream();
+        }
+      }
+      class ContainerRequestContext {
+        Object getEntityStream(Object... args) { return null; }
+      }
+    expect_match_text: [requestContext.getEntityStream]
+  description: "JAX-RS ContainerRequestContext.getEntityStream() — request body stream accessed from an injected @Context request context."
+
+- id: java.source.grpc_request_getter
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: java
+  trust: remote
+  tag: rpc-input
+  packages: ["io.grpc"]
+  match:
+    kind: call
+    callee:
+      name: getRequest
+  constraints:
+  - receiver_name_in:
+    - call
+    - serverCall
+  description: "Disabled — gRPC ServerCall.getRequest pattern is rare; most generated stubs surface the request as a method parameter (see grpc_service_request)."
+
+- id: java.source.grpc_service_request_param
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: java
+  trust: remote
+  tag: rpc-input
+  packages: ["io.grpc"]
+  match:
+    kind: param
+    target:
+      name: request
+  description: "Disabled — generated gRPC stubs name the request parameter `request`, but bare-name param matching overmatches every method with a parameter called `request`. Enable per-project once a `@GrpcService` annotation pivot is available."
+
+- id: java.source.grpc_streamobserver_value
+  enabled: true
+  language: java
+  trust: remote
+  tag: rpc-input
+  packages: ["io.grpc"]
+  match:
+    kind: call
+    callee:
+      name: onNext
+  constraints:
+  - receiver_name_in:
+    - responseObserver
+    - observer
+    - streamObserver
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.grpc.*;
+      class App {
+        void handle(String input) throws Exception {
+          responseObserver.onNext(input);
+        }
+      }
+  description: "gRPC StreamObserver.onNext — when the value being forwarded is derived from a peer-supplied request message."
+
+- id: java.source.netty_fullhttprequest_content
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [binary]
+  packages: ["io.netty"]
+  match:
+    kind: call
+    callee:
+      name: content
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - httpRequest
+    - fullRequest
+  match_examples:
+  - name: generated shape example
+    code: |
+      import io.netty.*;
+      class App {
+        void handle(String input) throws Exception {
+          request.content(input);
+        }
+      }
+  description: "Netty FullHttpRequest.content() — raw request body buffer."
+
+# Generic untrusted-bytes parameter for deserialization-style entry
+# points. The typical shape is `void deserialize(byte[] data)` /
+# `Object readObject(byte[] payload)` — the byte-array param is the
+# wire/cache/queue blob. Bare-name match overmatches, but the deser
+# sinks (ObjectInputStream.readObject, Kryo, XMLDecoder,
+# jackson-databind default typing) are the second gate.
+- id: java.source.bytes_blob_param
+  enabled: true
+  language: java
+  trust: remote
+  tag: caller-input
+  payload_types: [binary]
+  match:
+    kind: param
+    target:
+      regex: "^(data|blob|payload|bytes|buf|buffer)$"
+  match_examples:
+  - name: generated shape example
+    code: |
+      class App {
+        void handle(String payload) {
+        }
+      }
+  description: "Generic `byte[] data | blob | payload | bytes | buf | buffer` parameter on deserialization-style entry points. Pairs with java.deser.* sinks (ObjectInputStream.readObject, Kryo, XMLDecoder, jackson-databind). Engine taint flow + sink shape are the second gate."
+
+- id: java.source.graphql_datafetching_environment_getargument
+  enabled: true
+  language: java
+  trust: remote
+  tag: graphql-input
+  payload_types: [json]
+  packages: ["graphql"]
+  match:
+    kind: call
+    callee:
+      name: getArgument
+  constraints:
+  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
+  - min_args: 1
+  match_examples:
+  - name: graphql data fetching argument
+    code: |
+      import graphql.schema.*;
+      class App {
+        Object handle(DataFetchingEnvironment env, String name) {
+          return env.getArgument(name);
+        }
+      }
+      class DataFetchingEnvironment {
+        Object getArgument(Object... args) { return null; }
+      }
+    expect_match_text: [env.getArgument]
+  description: "graphql-java DataFetchingEnvironment.getArgument(name) — resolver argument supplied by the GraphQL caller."
+
+  imports:
+  - graphql.schema
+  - graphql.schema
+- id: java.source.graphql_datafetching_environment_getarguments
+  enabled: true
+  language: java
+  trust: remote
+  tag: graphql-input
+  payload_types: [json]
+  packages: ["graphql"]
+  match:
+    kind: call
+    callee:
+      name: getArguments
+  constraints:
+  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
+  - max_args: 0
+  match_examples:
+  - name: graphql all resolver arguments
+    code: |
+      import graphql.schema.*;
+      class App {
+        Object handle(DataFetchingEnvironment environment) {
+          return environment.getArguments();
+        }
+      }
+      class DataFetchingEnvironment {
+        Object getArguments(Object... args) { return null; }
+      }
+    expect_match_text: [environment.getArguments]
+  description: "graphql-java DataFetchingEnvironment.getArguments() — map of caller-controlled resolver arguments."
+
+  imports:
+  - graphql.schema
+  - graphql.schema
+- id: java.source.spring_graphql_argument
+  enabled: true
+  language: java
+  trust: remote
+  tag: graphql-input
+  payload_types: [json]
+  packages: ["org.springframework.graphql"]
+  match:
+    kind: param
+    target:
+      annotation: Argument
+  match_examples:
+  - name: spring graphql argument annotation
+    code: |
+      import org.springframework.graphql.*;
+      class App {
+        Object bookById(@Argument String id) {
+          return id;
+        }
+      }
+  description: "Spring GraphQL @Argument annotated resolver parameter — value supplied by the GraphQL caller."
+
+- id: java.source.micronaut_queryvalue
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["io.micronaut.http"]
+  match:
+    kind: param
+    target:
+      annotation: QueryValue
+  match_examples:
+  - name: micronaut query value
+    code: |
+      import io.micronaut.http.*;
+      class App {
+        void handle(@QueryValue String value) {
+        }
+      }
+  description: "Micronaut @QueryValue annotated parameter — query value bound from the HTTP request."
+
+- id: java.source.micronaut_body
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["io.micronaut.http"]
+  match:
+    kind: param
+    target:
+      annotation: Body
+  match_examples:
+  - name: micronaut body
+    code: |
+      import io.micronaut.http.*;
+      class App {
+        void handle(@Body String value) {
+        }
+      }
+  - name: micronaut map body
+    code: |
+      import io.micronaut.http.*;
+      class App {
+        void handle(@Body Map body) {
+        }
+      }
+      class Map {}
+    expect_match_text: [body]
+  description: "Micronaut @Body annotated parameter — request body supplied by the HTTP caller."
+
+- id: java.source.micronaut_header
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["io.micronaut.http"]
+  match:
+    kind: param
+    target:
+      annotation: Header
+  match_examples:
+  - name: micronaut header
+    code: |
+      import io.micronaut.http.*;
+      class App {
+        void handle(@Header String value) {
+        }
+      }
+  description: "Micronaut @Header annotated parameter — client-supplied HTTP header."
+
+- id: java.source.spring_webflux_serverrequest_queryparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["org.springframework.web.reactive"]
+  match:
+    kind: call
+    callee:
+      name: queryParam
+  constraints:
+  - receiver_name_in: [request, req, serverRequest]
+  - min_args: 1
+  match_examples:
+  - name: spring webflux functional query param
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        Object handle(ServerRequest request, String name) {
+          return request.queryParam(name);
+        }
+      }
+      class ServerRequest {
+        Object queryParam(Object... args) { return null; }
+      }
+    expect_match_text: [request.queryParam]
+  description: "Spring WebFlux ServerRequest.queryParam(name) — query-string value from a functional endpoint."
+
+- id: java.source.spring_webflux_serverrequest_pathvariable
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [path]
+  packages: ["org.springframework.web.reactive"]
+  match:
+    kind: call
+    callee:
+      name: pathVariable
+  constraints:
+  - receiver_name_in: [request, req, serverRequest]
+  - min_args: 1
+  match_examples:
+  - name: spring webflux functional path variable
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        Object handle(ServerRequest serverRequest, String name) {
+          return serverRequest.pathVariable(name);
+        }
+      }
+      class ServerRequest {
+        Object pathVariable(Object... args) { return null; }
+      }
+    expect_match_text: [serverRequest.pathVariable]
+  description: "Spring WebFlux ServerRequest.pathVariable(name) — path segment from a functional endpoint."
+
+- id: java.source.spring_webflux_serverrequest_bodytomono
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["org.springframework.web.reactive"]
+  match:
+    kind: call
+    callee:
+      name: bodyToMono
+  constraints:
+  - receiver_name_in: [request, req, serverRequest]
+  - min_args: 1
+  match_examples:
+  - name: spring webflux functional body mono
+    code: |
+      import org.springframework.web.reactive.*;
+      class App {
+        Object handle(ServerRequest request) {
+          return request.bodyToMono(String.class);
+        }
+      }
+      class ServerRequest {
+        Object bodyToMono(Object... args) { return null; }
+      }
+    expect_match_text: [request.bodyToMono]
+  description: "Spring WebFlux ServerRequest.bodyToMono(...) — request body decoded by a functional endpoint."
+
+- id: java.source.vertx_request_getparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["io.vertx"]
+  match:
+    kind: call
+    callee:
+      name: getParam
+  constraints:
+  - receiver_name_in: [request, req, httpRequest, httpServerRequest]
+  - min_args: 1
+  match_examples:
+  - name: vertx request get param
+    code: |
+      import io.vertx.*;
+      class App {
+        Object handle(HttpServerRequest request, String name) {
+          return request.getParam(name);
+        }
+      }
+      class HttpServerRequest {
+        Object getParam(Object... args) { return null; }
+      }
+    expect_match_text: [request.getParam]
+  description: "Vert.x HttpServerRequest.getParam(name) — query/form parameter supplied by the HTTP caller."
+
+- id: java.source.vertx_request_getheader
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["io.vertx"]
+  match:
+    kind: call
+    callee:
+      name: getHeader
+  constraints:
+  - receiver_name_in: [req, httpRequest, httpServerRequest]
+  - min_args: 1
+  match_examples:
+  - name: vertx request get header
+    code: |
+      import io.vertx.*;
+      class App {
+        Object handle(HttpServerRequest req, String name) {
+          return req.getHeader(name);
+        }
+      }
+      class HttpServerRequest {
+        Object getHeader(Object... args) { return null; }
+      }
+    expect_match_text: [req.getHeader]
+  description: "Vert.x HttpServerRequest.getHeader(name) — client-supplied header."
+
+- id: java.source.vertx_json_body_getstring
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["io.vertx"]
+  match:
+    kind: call
+    callee:
+      name: getString
+  constraints:
+  - receiver_name_in: [body, json, jsonBody, payload]
+  - min_args: 1
+  match_examples:
+  - name: vertx json body get string
+    code: |
+      import io.vertx.*;
+      class App {
+        Object handle(JsonObject body, String name) {
+          return body.getString(name);
+        }
+      }
+      class JsonObject {
+        Object getString(Object... args) { return null; }
+      }
+    expect_match_text: [body.getString]
+  description: "Vert.x JsonObject body.getString(name) — JSON request body field."
+
+- id: java.source.vertx_json_body_getvalue
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["io.vertx"]
+  match:
+    kind: call
+    callee:
+      name: getValue
+  constraints:
+  - receiver_name_in: [body, json, jsonBody, payload]
+  - min_args: 1
+  match_examples:
+  - name: vertx json body get value
+    code: |
+      import io.vertx.*;
+      class App {
+        Object handle(JsonObject jsonBody, String name) {
+          return jsonBody.getValue(name);
+        }
+      }
+      class JsonObject {
+        Object getValue(Object... args) { return null; }
+      }
+    expect_match_text: [jsonBody.getValue]
+  description: "Vert.x JsonObject body.getValue(name) — JSON request body field."
+
+- id: java.source.wicket_pageparameters_get
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, path]
+  packages: ["org.apache.wicket"]
+  match:
+    kind: call
+    callee:
+      name: get
+  constraints:
+  - receiver_name_in: [parameters, params, pageParameters]
+  - min_args: 1
+  match_examples:
+  - name: wicket page parameters get
+    code: |
+      import org.apache.wicket.*;
+      class App {
+        Object handle(PageParameters pageParameters, String name) {
+          return pageParameters.get(name);
+        }
+      }
+      class PageParameters {
+        Object get(Object... args) { return null; }
+      }
+    expect_match_text: [pageParameters.get]
+  description: "Apache Wicket PageParameters.get(name) — request page parameter value."
+
+- id: java.source.wicket_stringvalue_tooptionalstring
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query, path]
+  packages: ["org.apache.wicket"]
+  match:
+    kind: call
+    callee:
+      name: toOptionalString
+  constraints:
+  - receiver_name_in: [value, stringValue, parameter, param]
+  - max_args: 0
+  match_examples:
+  - name: wicket page parameter optional string
+    code: |
+      import org.apache.wicket.*;
+      class App {
+        Object handle(StringValue value) {
+          return value.toOptionalString();
+        }
+      }
+      class StringValue {
+        Object toOptionalString(Object... args) { return null; }
+      }
+    expect_match_text: [value.toOptionalString]
+  description: "Apache Wicket StringValue.toOptionalString() — string form of a PageParameters value."
+
+- id: java.source.helidon_queryparams_first
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["io.helidon"]
+  match:
+    kind: call
+    callee:
+      name: first
+  constraints:
+  - receiver_name_in: [queryParams, params, parameters]
+  - min_args: 1
+  match_examples:
+  - name: helidon query params first
+    code: |
+      import io.helidon.*;
+      class App {
+        Object handle(Parameters queryParams, String name) {
+          return queryParams.first(name);
+        }
+      }
+      class Parameters {
+        Object first(Object... args) { return null; }
+      }
+    expect_match_text: [queryParams.first]
+  description: "Helidon request queryParams().first(name) — query parameter supplied by the HTTP caller."
+
+- id: java.source.play_request_body_asjson
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["com.typesafe.play", "play.mvc"]
+  match:
+    kind: call
+    callee:
+      name: asJson
+  constraints:
+  - receiver_name_in: [body, requestBody]
+  - max_args: 0
+  match_examples:
+  - name: play body as json
+    code: |
+      import com.typesafe.play.*;
+      class App {
+        Object handle(RequestBody body) {
+          return body.asJson();
+        }
+      }
+      class RequestBody {
+        Object asJson(Object... args) { return null; }
+      }
+    expect_match_text: [body.asJson]
+  description: "Play Framework request body().asJson() — JSON body supplied by the HTTP caller."
+
+- id: java.source.play_jsonnode_astext
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["com.typesafe.play", "play.mvc"]
+  match:
+    kind: call
+    callee:
+      name: asText
+  constraints:
+  - receiver_name_in: [node, json, jsonNode, path]
+  - max_args: 0
+  match_examples:
+  - name: play json path as text
+    code: |
+      import com.typesafe.play.*;
+      class App {
+        Object handle(JsonNode node) {
+          return node.asText();
+        }
+      }
+      class JsonNode {
+        Object asText(Object... args) { return null; }
+      }
+    expect_match_text: [node.asText]
+  description: "Play Framework req.body().asJson().path(...).asText() — JSON field text supplied by the HTTP caller."
+
+- id: java.source.websocket_message_payload_text
+  enabled: true
+  language: java
+  trust: remote
+  tag: ws-input
+  payload_types: [text]
+  packages: ["org.springframework.web.socket", "javax.websocket", "jakarta.websocket"]
+  match:
+    kind: call
+    callee:
+      name: getPayloadAsText
+  constraints:
+  - receiver_name_in: [message, msg, webSocketMessage, wsMessage]
+  - max_args: 0
+  match_examples:
+  - name: spring websocket text payload
+    code: |
+      import org.springframework.web.socket.*;
+      class App {
+        String handle(WebSocketMessage message) {
+          return message.getPayloadAsText();
+        }
+      }
+      class WebSocketMessage {
+        String getPayloadAsText(Object... args) { return ""; }
+      }
+    expect_match_text: [message.getPayloadAsText]
+  description: "Spring WebSocketMessage.getPayloadAsText() — text frame payload supplied by the websocket peer."
+
+- id: java.source.websocket_message_payload
+  enabled: true
+  language: java
+  trust: remote
+  tag: ws-input
+  payload_types: [binary, text]
+  packages: ["org.springframework.web.socket", "javax.websocket", "jakarta.websocket"]
+  match:
+    kind: call
+    callee:
+      name: getPayload
+  constraints:
+  - receiver_name_in: [message, msg, webSocketMessage, wsMessage]
+  - max_args: 0
+  match_examples:
+  - name: spring websocket payload
+    code: |
+      import org.springframework.web.socket.*;
+      class App {
+        Object handle(WebSocketMessage msg) {
+          return msg.getPayload();
+        }
+      }
+      class WebSocketMessage {
+        Object getPayload(Object... args) { return null; }
+      }
+    expect_match_text: [msg.getPayload]
+  description: "Spring WebSocketMessage.getPayload() — raw websocket frame payload supplied by the peer."
+
+- id: java.source.slf4j_mdc_get
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [header]
+  packages: ["org.slf4j", "org.apache.logging.log4j"]
+  match:
+    kind: call
+    callee:
+      regex: "^(MDC|ThreadContext)\\.get$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: slf4j mdc get
+    code: |
+      import org.slf4j.*;
+      class App {
+        String handle() {
+          return MDC.get("x-request-id");
+        }
+      }
+      class MDC {
+        static String get(Object... args) { return ""; }
+      }
+    expect_match_text: [MDC.get]
+  - name: log4j thread context get
+    code: |
+      import org.slf4j.*;
+      class App {
+        String handle() {
+          return ThreadContext.get("x-forwarded-for");
+        }
+      }
+      class ThreadContext {
+        static String get(Object... args) { return ""; }
+      }
+    expect_match_text: [ThreadContext.get]
+  description: "MDC/ThreadContext values often hold request headers or correlation IDs copied at the web boundary; treat reads as remote-controlled logging context input."
+
+- id: java.source.stomp_message_headers_get
+  enabled: true
+  language: java
+  trust: remote
+  tag: ws-input
+  payload_types: [header]
+  packages: ["org.springframework.messaging"]
+  match:
+    kind: call
+    callee:
+      name: getNativeHeader
+  constraints:
+  - receiver_name_in: [headers, accessor, headerAccessor, simpMessageHeaderAccessor, stompHeaderAccessor]
+  match_examples:
+  - name: stomp simp header accessor getNativeHeader
+    code: |
+      import org.springframework.messaging.simp.stomp.*;
+      class App {
+        Object handle(StompHeaderAccessor headers) {
+          return headers.getNativeHeader("X-Auth");
+        }
+      }
+      class StompHeaderAccessor {
+        Object getNativeHeader(Object... args) { return null; }
+      }
+    expect_match_text: [headers.getNativeHeader]
+  description: "Spring Messaging StompHeaderAccessor.getNativeHeader(name) — STOMP/WebSocket headers supplied by the remote peer; receiver-name pin avoids generic header maps."
+
+- id: java.source.sse_event_data
+  enabled: true
+  language: java
+  trust: remote
+  tag: network-input
+  payload_types: [text, json]
+  packages: ["jakarta.ws.rs.sse", "javax.ws.rs.sse"]
+  match:
+    kind: call
+    callee:
+      name: getData
+  constraints:
+  - receiver_name_in: [event, sseEvent, inboundEvent, msg, message]
+  - max_args: 0
+  match_examples:
+  - name: jakarta SSE inbound event getData
+    code: |
+      import jakarta.ws.rs.sse.*;
+      class App {
+        Object handle(InboundSseEvent event) {
+          return event.getData();
+        }
+      }
+      class InboundSseEvent {
+        Object getData(Object... args) { return null; }
+      }
+    expect_match_text: [event.getData]
+  description: "Jakarta/JAX-RS InboundSseEvent.getData() — Server-Sent Event payload received from a remote SSE producer."

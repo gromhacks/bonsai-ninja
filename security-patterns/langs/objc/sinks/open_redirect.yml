@@ -1,0 +1,23 @@
+# Objective-C open-redirect sinks (UIApplication / NSWorkspace openURL:).
+- id: objc.open_redirect.openurl
+  enabled: true
+  language: objc
+  tag: open-redirect
+  severity: high
+  cwe: [CWE-601]
+  match:
+    kind: call
+    callee:
+      name: openURL
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: declared shape
+      code: |
+        void test(id input) { id target = input; int amount = 1; [UIApplication openURL:input]; }
+    - name: literal open url negative
+      code: |
+        void test(void) { [UIApplication openURL:@"myapp://home"]; }
+      expect_no_match: true
+  description: "[UIApplication.sharedApplication openURL:] / -[UIApplication openURL:options:completionHandler:] / [NSWorkspace openURL:] — redirects into attacker-chosen URL scheme (http/custom-scheme phishing). Constrained to app/workspace receivers; bare openURL: is too ubiquitous."

@@ -1,0 +1,34 @@
+- id: rust.xpath.sxd_xpath_factory_build
+  enabled: true
+  language: rust
+  tag: xpath-injection
+  severity: high
+  packages: ["sxd_xpath"]
+  imports: ["sxd_xpath"]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      attribute: [Factory, build]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sxd xpath factory build
+    code: |
+      use sxd_xpath::Factory;
+      fn handle(name: &str) {
+        let factory = Factory::new();
+        let expr = format!("//user[name=\"{}\"]", name);
+        let _ = factory.build(&expr);
+      }
+    expect_match_text: [factory.build]
+  - name: literal xpath negative
+    code: |
+      use sxd_xpath::Factory;
+      fn handle() {
+        let factory = Factory::new();
+        let _ = factory.build("//safe");
+      }
+    expect_no_match: true
+  description: "sxd_xpath Factory::build — compile XPath from user-supplied string; later evaluation injects."

@@ -1,0 +1,360 @@
+# Lua path-traversal sinks (stdlib io / LuaFileSystem / lua-luv).
+- id: lua.path.io_open_read
+  aliases:
+  - lua.upload_io_open_client_filename
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22, CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [io, open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.io_open_read example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        io.open(input)
+      end
+  - name: literal path negative
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        io.open("data/report.txt")
+      end
+    expect_no_match: true
+  description: "io.open(path, mode) — reads/writes arbitrary filesystem path when tainted. Also covers merged aliases: lua.upload_io_open_client_filename."
+
+- id: lua.path.io_lines
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [io, lines]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.io_lines example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        io.lines(input)
+      end
+  - name: literal path negative
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        io.lines("data/report.txt")
+      end
+    expect_no_match: true
+  description: "io.lines(path) — reads an arbitrary path line-by-line."
+
+- id: lua.path.os_remove
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, remove]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.os_remove example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.remove(input)
+      end
+  - name: literal path negative
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.remove("tmp/session.lock")
+      end
+    expect_no_match: true
+  description: "os.remove(path) — deletes arbitrary filesystem path when tainted."
+
+- id: lua.path.os_rename_source
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.os_rename source example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.rename(input, "tmp/out.dat")
+      end
+  - name: literal rename source negative
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.rename("tmp/in.dat", "tmp/out.dat")
+      end
+    expect_no_match: true
+  description: "os.rename(old, new) — attacker-controlled source path enables traversal."
+- id: lua.path.os_rename_dest
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [os, rename]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: lua.path.os_rename destination example
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.rename("tmp/in.dat", input)
+      end
+  - name: literal rename destination negative
+    code: |
+      function example(input, url, id, payload, request, params, user)
+        os.rename("tmp/in.dat", "tmp/out.dat")
+      end
+    expect_no_match: true
+  description: "os.rename(old, new) — attacker-controlled destination path enables overwrite."
+
+- id: lua.path.lfs_attributes
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: lua
+  tag: path-traversal
+  severity: medium
+  packages: [luafilesystem]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [lfs, attributes]
+  description: "Disabled — lfs.attributes leaks filesystem metadata; enable with sensitive-path narrowing."
+
+- id: lua.path.lfs_rmdir
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  packages: [luafilesystem]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [lfs, rmdir]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.lfs_rmdir example
+    code: |
+      local _luafilesystem = require("luafilesystem")
+      function example(input, url, id, payload, request, params, user)
+        lfs.rmdir(input)
+      end
+  - name: literal path negative
+    code: |
+      local _luafilesystem = require("luafilesystem")
+      function example(input, url, id, payload, request, params, user)
+        lfs.rmdir("tmp/cache")
+      end
+    expect_no_match: true
+  description: "lfs.rmdir(path) — deletes arbitrary directory when tainted."
+
+- id: lua.path.lfs_mkdir
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: medium
+  packages: [luafilesystem]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [lfs, mkdir]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.lfs_mkdir example
+    code: |
+      local _luafilesystem = require("luafilesystem")
+      function example(input, url, id, payload, request, params, user)
+        lfs.mkdir(input)
+      end
+  - name: literal path negative
+    code: |
+      local _luafilesystem = require("luafilesystem")
+      function example(input, url, id, payload, request, params, user)
+        lfs.mkdir("tmp/cache")
+      end
+    expect_no_match: true
+  description: "lfs.mkdir(path) — creates directories at attacker-controlled location."
+
+- id: lua.path.lfs_dir
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: medium
+  packages: [luafilesystem]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [lfs, dir]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.lfs_dir example
+    code: |
+      local _luafilesystem = require("luafilesystem")
+      function example(input, url, id, payload, request, params, user)
+        lfs.dir(input)
+      end
+  - name: literal path negative
+    code: |
+      local _luafilesystem = require("luafilesystem")
+      function example(input, url, id, payload, request, params, user)
+        lfs.dir("tmp/cache")
+      end
+    expect_no_match: true
+  description: "lfs.dir(path) — lists arbitrary directory contents."
+
+- id: lua.path.luv_fs_open
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  packages: [luv, luvit]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [uv, fs_open]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.luv_fs_open example
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_open(input)
+      end
+  - name: literal path negative
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_open("data/report.txt")
+      end
+    expect_no_match: true
+  description: "libuv uv.fs_open (lua-luv) — opens arbitrary path."
+
+- id: lua.path.luv_fs_unlink
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  packages: [luv, luvit]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [uv, fs_unlink]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.luv_fs_unlink example
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_unlink(input)
+      end
+  - name: literal path negative
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_unlink("tmp/session.lock")
+      end
+    expect_no_match: true
+  description: "libuv uv.fs_unlink — deletes arbitrary path."
+
+- id: lua.path.luv_fs_rename_source
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  packages: [luv, luvit]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [uv, fs_rename]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lua.path.luv_fs_rename source example
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_rename(input, "tmp/out.dat")
+      end
+  - name: literal luv rename source negative
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_rename("tmp/in.dat", "tmp/out.dat")
+      end
+    expect_no_match: true
+  description: "libuv uv.fs_rename — tainted source path moves arbitrary files."
+- id: lua.path.luv_fs_rename_dest
+  enabled: true
+  language: lua
+  tag: path-traversal
+  severity: high
+  packages: [luv, luvit]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [uv, fs_rename]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: lua.path.luv_fs_rename destination example
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_rename("tmp/in.dat", input)
+      end
+  - name: literal luv rename destination negative
+    code: |
+      local _luv = require("luv")
+      function example(input, url, id, payload, request, params, user)
+        uv.fs_rename("tmp/in.dat", "tmp/out.dat")
+      end
+    expect_no_match: true
+  description: "libuv uv.fs_rename — tainted destination path overwrites arbitrary files."

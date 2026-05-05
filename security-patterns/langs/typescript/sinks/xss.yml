@@ -1,0 +1,667 @@
+- id: typescript.xss.innerhtml
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: innerHTML
+  match_examples:
+  - name: innerhtml
+    code: "function demo(input, req, obj) {\n  innerHTML = input; return innerHTML;\n}\n"
+  description: Element.innerHTML = tainted.
+- id: typescript.xss.outerhtml
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: outerHTML
+  match_examples:
+  - name: outerhtml
+    code: "function demo(input, req, obj) {\n  outerHTML = input; return outerHTML;\n}\n"
+  description: Element.outerHTML = tainted.
+- id: typescript.xss.insertadjacenthtml
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: insertAdjacentHTML
+  description: "Disabled — bare `insertAdjacentHTML` name has no receiver constraint; flag via Element receiver when analysis supports it."
+- id: typescript.xss.document_write
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - document
+      - write
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: document write
+    code: "function demo(input, req, obj) {\n  return document.write(input);\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      function demo(input, req, obj) {
+        return document.write("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "document.write — legacy DOM XSS vector."
+- id: typescript.xss.document_writeln
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - document
+      - writeln
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: document writeln
+    code: "function demo(input, req, obj) {\n  return document.writeln(input);\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      function demo(input, req, obj) {
+        return document.writeln("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: document.writeln.
+- id: typescript.xss.html_return
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: return
+    target:
+      regex: "(?is)^\\s*(?:`|'|\").*(<!doctype|<html\\b|<[a-z][a-z0-9:-]*\\b[^>]*>)"
+  match_examples:
+  - name: raw html template return
+    code: "function page(q: string) {\n  return `<!doctype html><h1>${q}</h1>`;\n}\n"
+    expect_match_text:
+    - "`<!doctype html><h1>${q}</h1>`"
+  description: "Route/helper return of raw HTML expression. Taint reachability decides whether interpolated content is attacker controlled."
+- id: typescript.xss.serialize_javascript_unsafe_embed
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - serialize-javascript
+  imports:
+  - serialize-javascript
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^(serialize|serializeJavascript|serializeJavaScript)$
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: serialize-javascript unsafe option
+    code: "import serialize from \"serialize-javascript\";\nfunction embed(input: unknown) {\n  return serialize(input, { unsafe: true });\n}\n"
+    expect_match_text:
+    - serialize
+  - name: serializeJavaScript unsafe option
+    code: |
+      const _u = require("serialize-javascript");
+      function embed(serializeJavaScript: any, input: unknown) {
+        return serializeJavaScript(input, { unsafe: true });
+      }
+    expect_match_text:
+    - serializeJavaScript
+  - name: arg tainted literal negative
+    code: |
+      import serialize from "serialize-javascript";
+      function embed(input: unknown) {
+        return serialize("safe", { unsafe: true });
+      }
+    expect_no_match: true
+  description: serialize-javascript with unsafe embedding options can emit attacker-controlled script-context content.
+- id: typescript.xss.dangerously_set_inner_html
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - react
+  - react-dom
+  - solid-js
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: dangerouslySetInnerHTML
+  match_examples:
+  - name: dangerously set inner html
+    code: |
+      const _u = require("react");
+      function demo(input, req, obj) {
+        dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;
+      }
+  description: "React/Solid dangerouslySetInnerHTML — renders raw HTML."
+- id: typescript.xss.vue_v_html
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - vue
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: v-html
+  description: "Disabled — `v-html` is a Vue template directive, not a JS identifier; it appears inside .vue SFC templates and is not emitted as a write-target name by the TS parser. Flag at SFC-template analysis level."
+- id: typescript.xss.angular_bypass_html
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - '@angular/platform-browser'
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustHtml
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: angular bypass html
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustHtml(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustHtml("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "Angular DomSanitizer.bypassSecurityTrustHtml — explicit sanitization escape hatch."
+- id: typescript.xss.angular_bypass_script
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: critical
+  packages:
+  - '@angular/platform-browser'
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustScript
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: angular bypass script
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustScript(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustScript("console.log(1)");
+      }
+    expect_no_match: true
+  description: "Angular bypassSecurityTrustScript — executes arbitrary JS."
+- id: typescript.xss.angular_bypass_url
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - '@angular/platform-browser'
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustUrl
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: angular bypass url
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustUrl(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustUrl("/safe");
+      }
+    expect_no_match: true
+  description: "Angular bypassSecurityTrustUrl — enables javascript: URLs."
+- id: typescript.xss.angular_bypass_resourceurl
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - '@angular/platform-browser'
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustResourceUrl
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: angular bypass resourceurl
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustResourceUrl(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustResourceUrl("/safe.js");
+      }
+    expect_no_match: true
+  description: "Angular bypassSecurityTrustResourceUrl — loads arbitrary iframe/script src."
+- id: typescript.xss.angular_bypass_style
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: medium
+  packages:
+  - '@angular/platform-browser'
+  - '@angular/core'
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DomSanitizer
+      - bypassSecurityTrustStyle
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: angular bypass style
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustStyle(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("@angular/platform-browser");
+      function demo(input, req, obj) {
+        return DomSanitizer.bypassSecurityTrustStyle("color: black");
+      }
+    expect_no_match: true
+  description: "Angular bypassSecurityTrustStyle — allows CSS expression injection."
+- id: typescript.xss.angularjs_sce_trustashtml
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - angular
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^\$sce\.trustAs(Html|Js|Url|ResourceUrl|Css)$
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: angularjs sce trust as html
+    code: |
+      const _u = require("angular");
+      function demo($sce: any, input: string) {
+        return $sce.trustAsHtml(input);
+      }
+    expect_match_text:
+    - $sce.trustAsHtml
+  - name: angularjs sce trust as resource url
+    code: |
+      const _u = require("angular");
+      function demo($sce: any, input: string) {
+        return $sce.trustAsResourceUrl(input);
+      }
+    expect_match_text:
+    - $sce.trustAsResourceUrl
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("angular");
+      function demo($sce: any, input: string) {
+        return $sce.trustAsHtml("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "AngularJS $sce.trustAs* — explicit trust bypass for HTML, script, URL, resource URL, or CSS contexts."
+- id: typescript.xss.angularjs_resource_url_wildcard
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: medium
+  packages:
+  - angular
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^(\$sceDelegateProvider|sceDelegateProvider)\.resourceUrlWhitelist$
+  match_examples:
+  - name: angularjs resource url wildcard
+    code: |
+      const _u = require("angular");
+      function config(sceDelegateProvider: any) {
+        return sceDelegateProvider.resourceUrlWhitelist(["self", "**"]);
+      }
+    expect_match_text:
+    - sceDelegateProvider.resourceUrlWhitelist
+  description: AngularJS resourceUrlWhitelist containing '**' allows templates/resources from arbitrary origins.
+- id: typescript.xss.jquery_html
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: html
+  description: "Disabled — bare `html` name matches any method; need jQuery receiver narrowing."
+- id: typescript.xss.jquery_append
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: append
+  description: "Disabled — bare `append` name is too ubiquitous (Array, FormData, URLSearchParams, etc)."
+- id: typescript.xss.jquery_prepend
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: prepend
+  description: "Disabled — bare `prepend` name too ubiquitous (Node.prepend, etc)."
+- id: typescript.xss.jquery_after
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      name: after
+  description: "Disabled — bare `after` name is too ubiquitous (testing after(), Element.after())."
+- id: typescript.xss.jquery_dollar_html
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - jquery
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      regex: ^\$\([^)]*\)\.html$
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: jquery dollar html
+    code: |
+      const _u = require("jquery");
+      function demo(input, req, obj) {
+        return $("#target").html(input);
+      }
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("jquery");
+      function demo(input, req, obj) {
+        return $("#target").html("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "$(...).html(tainted) — jQuery HTML insertion (receiver $)."
+- id: typescript.xss.location_href_assign
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
+  language: typescript
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: href
+  description: "Disabled — `href = tainted` matches every anchor href; need javascript: constraint."
+- id: typescript.xss.script_src_assign
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: src
+  description: "Disabled — `src = tainted` matches every img/iframe/script src; too broad."
+- id: typescript.xss.iframe_srcdoc
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      name: srcdoc
+  match_examples:
+  - name: iframe srcdoc
+    code: "function demo(input, req, obj) {\n  srcdoc = input; return srcdoc;\n}\n"
+  description: iframe.srcdoc = tainted HTML.
+- id: typescript.xss.range_createcontextualfragment
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Range
+      - createContextualFragment
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: range createcontextualfragment
+    code: "function demo(input, req, obj) {\n  return Range.createContextualFragment(input);\n}\n"
+  - name: arg tainted literal negative
+    code: |
+      function demo(input, req, obj) {
+        return Range.createContextualFragment("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "Range.createContextualFragment(tainted) — parses and renders HTML."
+- id: typescript.xss.dom_parser_parsefromstring
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: typescript
+  tag: xss
+  severity: medium
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - DOMParser
+      - parseFromString
+  description: "Disabled — DOMParser parses but does not auto-render; flag downstream inserts instead."
+- id: typescript.xss.express_res_end_html
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - express
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - res
+      - end
+  constraints:
+  - arg_tainted: {index: 0}
+  match_examples:
+  - name: response end html concat
+    code: |
+      const _u = require("express");
+      function demo(res: any, body: string) {
+        return res.end("<h1>" + body + "</h1>");
+      }
+    expect_match_text:
+    - res.end
+  - name: response end template html
+    code: |
+      const _u = require("express");
+      function demo(res: any, body: string) {
+        return res.end(`<p>${body}</p>`);
+      }
+    expect_match_text:
+    - res.end
+  - name: arg tainted literal negative
+    code: |
+      const _u = require("express");
+      function demo(res: any, body: string) {
+        return res.end("<p>safe</p>");
+      }
+    expect_no_match: true
+  description: "Express/Node res.end with concatenated or template HTML — raw HTTP response body can become reflected XSS."
+- id: typescript.xss.koa_ctx_body_html
+  enabled: true
+  language: typescript
+  tag: xss
+  severity: high
+  packages:
+  - koa
+  cwe:
+  - CWE-79
+  match:
+    kind: write
+    target:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.body$
+  match_examples:
+  - name: koa ctx body doctype concat
+    code: |
+      const _u = require("koa");
+      function demo(ctx: any, q: string) {
+        ctx.body = "<!doctype html>" + q;
+      }
+    expect_match_text:
+    - ctx.body
+  - name: koa ctx body template html
+    code: |
+      const _u = require("koa");
+      function demo(ctx: any, q: string) {
+        ctx.body = `<!doctype html><section>${q}</section>`;
+      }
+    expect_match_text:
+    - ctx.body
+  description: "Koa ctx.body = concatenated/template HTML — raw response body can reflect attacker-controlled markup."

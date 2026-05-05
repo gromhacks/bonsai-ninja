@@ -1,0 +1,194 @@
+# Perl SSRF sinks (HTTP clients).
+# Adapter note: $ua->get(...) matches as call with bare name = method;
+# one rule covers LWP::UserAgent, HTTP::Tiny, Mojo::UserAgent (same verb names).
+- id: perl.ssrf.useragent_get
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["LWP::UserAgent", "HTTP::Tiny", "Mojo::UserAgent"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: get
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ssrf.useragent_get example
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ua->get($input)
+      }
+  - name: literal useragent get negative
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ua->get("https://example.com/health")
+      }
+    expect_no_match: true
+  description: "$ua->get(tainted_url) — LWP::UserAgent / HTTP::Tiny / Mojo::UserAgent share the verb name; tainted URL = SSRF to internal services / cloud metadata. Receiver allowlist filters generic `get` collisions on hash/object accessors that don't actually issue HTTP requests."
+
+- id: perl.ssrf.useragent_post
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["LWP::UserAgent", "HTTP::Tiny", "Mojo::UserAgent"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: post
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ssrf.useragent_post example
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ua->post($input)
+      }
+  - name: literal useragent post negative
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ua->post("https://example.com/submit")
+      }
+    expect_no_match: true
+  description: "$ua->post(tainted_url, ...) — same three clients; tainted URL = SSRF. Receiver allowlist filters generic `post` collisions on non-HTTP-client receivers."
+
+- id: perl.ssrf.useragent_request
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["LWP::UserAgent", "Mojo::UserAgent"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: request
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ssrf.useragent_request example
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ua->request($input)
+      }
+  - name: literal useragent request negative
+    code: |
+      use LWP::UserAgent;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        $ua->request("GET https://example.com/health")
+      }
+    expect_no_match: true
+  description: "$ua->request(HTTP::Request->new(...)) — issues an arbitrary request; tainted URL/method inside the request object = SSRF."
+
+- id: perl.ssrf.http_tiny_mirror
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["HTTP::Tiny"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: mirror
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ssrf.http_tiny_mirror example
+    code: |
+      use HTTP::Tiny;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        mirror($input)
+      }
+  - name: literal http tiny mirror negative
+    code: |
+      use HTTP::Tiny;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        mirror("https://example.com/file")
+      }
+    expect_no_match: true
+  description: "HTTP::Tiny $ht->mirror — fetches tainted URL and writes to disk; combines SSRF with file-write primitive."
+
+- id: perl.ssrf.www_mechanize_get
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["WWW::Mechanize"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      name: follow_link
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: perl.ssrf.www_mechanize_get example
+    code: |
+      use WWW::Mechanize;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        follow_link($input)
+      }
+  - name: literal mechanize follow link negative
+    code: |
+      use WWW::Mechanize;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        follow_link("next")
+      }
+    expect_no_match: true
+  description: "WWW::Mechanize $mech->follow_link — follows tainted URL/name on the current page; SSRF if the hrefs come from attacker HTML."
+
+- id: perl.ssrf.net_http_new
+  enabled: true
+  language: perl
+  tag: ssrf
+  severity: high
+  packages: ["Net::HTTP"]
+  cwe: [CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: ["Net::HTTP", "new"]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: perl.ssrf.net_http_new example
+    code: |
+      use Net::HTTP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Net::HTTP->new(Host => $input)
+      }
+  - name: literal net http host negative
+    code: |
+      use Net::HTTP;
+      sub example {
+        my ($input, $url, $id, $payload, $request) = @_;
+        Net::HTTP->new(Host => "example.com")
+      }
+    expect_no_match: true
+  description: "Net::HTTP->new(Host => tainted) — raw HTTP client; tainted Host = SSRF to arbitrary internal host."

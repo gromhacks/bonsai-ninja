@@ -1,0 +1,172 @@
+---
+title: "Specification"
+description: "Top-level behavioral contract for bonsai-ninja."
+---
+
+# bonsai-ninja specification
+
+Multi-language static analysis platform. This document is the top-level
+behavioural contract; cross-cutting details live in
+[`architecture.mdx`](architecture.mdx),
+[`taint-engine-spec.mdx`](taint-engine-spec.mdx),
+[`../security-spec.mdx`](../security-spec.mdx), and
+[`design-patterns.mdx`](design-patterns.mdx).
+
+## 1. Goals
+
+1. Parse 21 languages: C, C++, C#, Dart, Elixir, Erlang, Go, Java,
+   JavaScript, Kotlin, Lua, Objective-C, Perl, PHP, Python, Ruby, Rust,
+   Scala, Solidity, Swift, TypeScript.
+2. Produce a step-by-step trace that crosses files and modules.
+3. Make the primary output machine-consumable JSON with a stable schema;
+   render text / DOT / SARIF on top.
+4. Degrade explicitly — every step carries `Precision::{Exact, Narrowed,
+   OverApproximate, Unknown}`. Never silently invent precision.
+5. Scale incrementally after edits — parser cache keyed on `(FileId,
+   version)`, dataflow sidecar keyed on content hash + matcher policy
+   fingerprint.
+6. Be easy to extend with a new language without modifying the engine —
+   each adapter implements the trait in `crates/lang_api`; the engine
+   never names a language directly.
+
+## 2. Output schema
+
+### 2.1 `TraceResult` (produced by `trace`)
+
+`crates/trace/src/lib.rs` defines the public schema:
+
+```
+TraceResult {
+  trace_id, query, summary,
+  paths: Vec<PathSummary>,
+  steps: Vec<TraceStep>,
+  edges: Vec<TraceEdge>,
+  states: Vec<StateSnapshot>,
+  diagnostics: Vec<TraceDiagnostic>,
+  metadata: TraceMetadata,
+}
+```
+
+`TraceStep` is `{ ordinal, kind, location, summary, value_id }` with
+`TraceStepKind` covering EnterFunction, EvalExpr, Assign, BranchSplit,
+Return, Throw, etc.
+
+### 2.2 `Finding` (produced by `security taint-analysis`)
+
+`crates/security/src/finding.rs`:
+
+```
+Finding {
+  finding_id, flow_id, group_id,
+  language, severity, precision, status,
+  tag, cwe, owasp,
+  source: FindingMatch,
+  sink: FindingMatch,
+  sanitizers_seen: Vec<FindingMatch>,
+  tainted_args: Vec<TaintedArgInfo>,
+  chain_display: Vec<String>,
+}
+```
+
+Finding IDs are FNV-1a-64 over (source rule, sink rule, group, language)
+formatted as `S:xxxxxxxxxxxxxxxx`. Stable across runs.
+
+### 2.3 Browse output (`*Out` types)
+
+Each browse command emits a stable shape:
+
+- `DefOut { name, qualified_name, kind, file, line, params }`
+- `CallOut { callee, file, line, caller, call_kind }`
+- `RefOut { kind, target, file, line, enclosing_fn }`
+- `ImportOut { module, file, line, kind }`
+- `VarOut { name, file, line, kind, type }`
+- `StringOut { value, file, line, kind }`
+- `ClassOut { name, kind, file, line, bases, fields, methods }`
+
+Field names are part of the public contract.
+
+### 2.4 SARIF 2.1.0
+
+`security taint-analysis --format sarif` emits SARIF for GitHub code
+scanning. See [`../security-spec.mdx`](../security-spec.mdx#sarif-21-mapping).
+
+## 3. Stability
+
+Public type field names in the SDK and CLI output are stable across
+minor versions. Adding a field is a minor change; renaming or removing
+one is a breaking change requiring a major version bump.
+
+The `MATCHER_POLICY_FINGERPRINT` constant in `bonsai_common::policy`
+versions the matcher / engine semantics. When bumped, stale dataflow
+sidecars are invalidated on reload.
+
+## 4. Engine standalone contract
+
+The taint engine is a pure function:
+
+```rust
+interprocedural_taint(entry_func, entry_sources, config, db) -> InterTaintResult
+```
+
+Given an empty `entry_sources`, it produces zero records. The engine
+never invents taint without an explicit source. The security layer is
+one of many possible drivers; the SDK exposes the engine for use in
+custom analyses, language servers, batch review tools, and ad-hoc
+tooling.
+
+CLI and SDK consumers drive the engine through
+`interprocedural_taint_to_completion_with_caches`, which manages the
+fixed-point worklist, caching of `InterTaintCaches`, and budget
+exhaustion. The standalone form documented above is the contract that
+the cache-driven driver respects on every iteration.
+
+## 5. Precision contract
+
+Every fact crossing a layer boundary carries a `Precision`:
+
+- `Exact` — proven correct.
+- `Narrowed` — precise modulo documented caveats.
+- `OverApproximate` — may include spurious paths.
+- `Unknown` — gave up.
+
+`meet(a, b)` returns the worse of the two. Chains take the worst seen.
+Consumers can render Exact / Narrowed evidence prominently and
+OverApproximate / Unknown evidence with a "may include spurious paths"
+caveat.
+
+## 6. Determinism
+
+The same workspace + same config produces the same output across:
+
+- Multiple processes (FNV-1a-64 hashes pin finding / flow / group ids).
+- Different machines (no platform-specific iteration order leaks into
+  output).
+- Cache reload (sidecar validation re-derives identical results).
+
+The pinning test is `finding_ids_deterministic_across_runs`.
+
+## 7. Languages
+
+Each language is implemented as an adapter under `crates/lang_<name>`.
+Adapters declare their `LanguageCapabilities` (modules, generics, macros,
+dynamic dispatch, exceptions, async/await, coroutines, reflection, ffi,
+pattern matching) at `Exact` / `Partial` / `Unsupported`. Consumers
+degrade gracefully on `Unsupported` constructs.
+
+See [`../COVERAGE_BASELINE.md`](../COVERAGE_BASELINE.md) for the
+current matrix.
+
+## 8. Extensibility
+
+- Adding a new language: ~200–500 lines (implement the
+  `LanguageAdapter` trait in `crates/lang_api`).
+- Adding a new rule: ~30–60 lines of YAML (see
+  [`../pattern-guide.mdx`](../pattern-guide.mdx)).
+- Adding a new browse command: ~150 lines of Rust (one source file in
+  `crates/browse/src/`).
+- Adding a new analysis: implement on top of `bonsai_taint`,
+  `bonsai_callgraph`, or `bonsai_abstract_interp`.
+
+The core engine never imports concrete `lang_*` crates; only
+`bonsai_adapters` and the SDK do. This keeps language-specific code out
+of the analysis core.

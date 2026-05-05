@@ -1,0 +1,97 @@
+# Swift TLS misconfig.
+- id: swift.tls.urlsession_disable_evaluation
+  enabled: true
+  language: swift
+  tag: weak-tls
+  severity: critical
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: URLCredential
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; URLCredential(input) }
+  description: "URLCredential(trust:) passed to completion(.useCredential, ...) in urlSession(_:didReceive:completionHandler:) — cert-validation bypass."
+
+- id: swift.tls.alamofire_servertrust_disabled
+  enabled: true
+  language: swift
+  tag: weak-tls
+  severity: high
+  packages: [Alamofire]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: DisabledTrustEvaluator
+  match_examples:
+  - name: declared shape
+    code: |
+      import Alamofire
+      func test() { let input = "x"; let amount = 1; DisabledTrustEvaluator(input) }
+  description: "Alamofire DisabledTrustEvaluator — explicitly disables server trust validation."
+
+- id: swift.tls.alamofire_servertrust_evaluator
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: weak-tls
+  severity: medium
+  packages: [Alamofire]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: ServerTrustEvaluator
+  description: "Disabled — ServerTrustEvaluator is a protocol, not a callable; flag concrete implementors (DisabledTrustEvaluator, PinnedCertificatesTrustEvaluator) instead."
+
+- id: swift.tls.ssl_break_on_server_auth
+  enabled: true
+  language: swift
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: SSLSetSessionOption
+  match_examples:
+  - name: declared shape
+    code: |
+      func test() { let input = "x"; let amount = 1; SSLSetSessionOption(input) }
+  description: "SSLSetSessionOption(kSSLSessionOptionBreakOnServerAuth) — manual cert validation, often skipped."
+
+- id: swift.tls.alamofire_revocation_skip
+  enabled: true
+  language: swift
+  tag: weak-tls
+  severity: medium
+  packages: [Alamofire]
+  cwe: [CWE-295]
+  match:
+    kind: call
+    callee:
+      name: RevocationTrustEvaluator
+  match_examples:
+  - name: declared shape
+    code: |
+      import Alamofire
+      func test() { let input = "x"; let amount = 1; RevocationTrustEvaluator(input) }
+  description: "Alamofire RevocationTrustEvaluator with `performRevocationFlags: []` skips OCSP/CRL revocation checks — review args."
+
+- id: swift.tls.allow_arbitrary_loads_plist
+  enabled: false
+  disabled_reason:
+    code: over-broad
+  language: swift
+  tag: weak-tls
+  severity: high
+  cwe: [CWE-295]
+  match:
+    kind: write
+    target:
+      name: NSAllowsArbitraryLoads
+  description: "Disabled — Info.plist setting; surface via plist scanner."

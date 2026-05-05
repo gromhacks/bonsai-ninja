@@ -1,0 +1,225 @@
+# Swift SQL injection sinks.
+- id: swift.sqli.sqlite3_exec
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_exec
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { sqlite3_exec(db, input, nil, nil, nil) }
+  - name: literal sqlite3 exec negative
+    code: |
+      func test(input: String) { sqlite3_exec(db, "SELECT 1", nil, nil, nil) }
+    expect_no_match: true
+  description: "sqlite3_exec — concatenated SQL."
+- id: swift.sqli.sqlite3_prepare_v2
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_prepare_v2
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { sqlite3_prepare_v2(db, input, -1, nil, nil) }
+  - name: literal sqlite3 prepare v2 negative
+    code: |
+      func test(input: String) { sqlite3_prepare_v2(db, "SELECT 1", -1, nil, nil) }
+    expect_no_match: true
+  description: "sqlite3_prepare_v2 with concatenated SQL."
+- id: swift.sqli.sqlite3_prepare
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: sqlite3_prepare
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: declared shape
+    code: |
+      func test(input: String) { sqlite3_prepare(db, input, -1, nil, nil) }
+  - name: literal sqlite3 prepare negative
+    code: |
+      func test(input: String) { sqlite3_prepare(db, "SELECT 1", -1, nil, nil) }
+    expect_no_match: true
+  description: "sqlite3_prepare (v1) with concatenated SQL."
+- id: swift.sqli.fmdb_executequery
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  packages: [fmdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: executeQuery
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import fmdb // fmdb
+      func test(input: String) { executeQuery(input) }
+  - name: literal fmdb query negative
+    code: |
+      import fmdb // fmdb
+      func test() { executeQuery("SELECT 1") }
+    expect_no_match: true
+  description: "FMDB executeQuery."
+- id: swift.sqli.fmdb_executeupdate
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  packages: [fmdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: executeUpdate
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import fmdb // fmdb
+      func test(input: String) { executeUpdate(input) }
+  - name: literal fmdb update negative
+    code: |
+      import fmdb // fmdb
+      func test() { executeUpdate("UPDATE users SET active = 1") }
+    expect_no_match: true
+  description: "FMDB executeUpdate."
+- id: swift.sqli.fmdb_executestatements
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  packages: [fmdb]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      name: executeStatements
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import fmdb // fmdb
+      func test(input: String) { executeStatements(input) }
+  - name: literal fmdb statements negative
+    code: |
+      import fmdb // fmdb
+      func test() { executeStatements("CREATE TABLE safe(id INTEGER)") }
+    expect_no_match: true
+  description: "FMDB executeStatements — multi-statement raw SQL."
+- id: swift.sqli.grdb_execute
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  packages: [GRDB]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import GRDB
+      func test(input: String) { db.execute(input) }
+  - name: literal grdb execute negative
+    code: |
+      import GRDB
+      func test() { db.execute("SELECT 1") }
+    expect_no_match: true
+  description: "GRDB Database.execute with raw SQL."
+- id: swift.sqli.sqlite_swift_run
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  packages: [SQLite.swift]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, run]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import SQLite // SQLite.swift
+      import SQLite // SQLite.swift
+      func test(input: String) { Connection.run(input) }
+  - name: literal sqlite swift run negative
+    code: |
+      import SQLite // SQLite.swift
+      import SQLite // SQLite.swift
+      func test() { Connection.run("SELECT 1") }
+    expect_no_match: true
+  description: "SQLite.swift Connection.run with raw SQL. Typed-receiver sqli (PATTERN_GUIDE-exempt from SQL-keyword arg shape); `min_args: 1` rejects 0-arg decoys."
+  imports:
+  - SQLite
+- id: swift.sqli.sqlite_swift_scalar
+  enabled: true
+  language: swift
+  tag: sql-injection
+  severity: high
+  packages: [SQLite.swift]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      attribute: [Connection, scalar]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      import SQLite // SQLite.swift
+      import SQLite // SQLite.swift
+      func test(input: String) { Connection.scalar(input) }
+  - name: literal sqlite swift scalar negative
+    code: |
+      import SQLite // SQLite.swift
+      import SQLite // SQLite.swift
+      func test() { Connection.scalar("SELECT 1") }
+    expect_no_match: true
+  description: "SQLite.swift Connection.scalar with raw SQL. Typed-receiver sqli; `min_args: 1` rejects 0-arg decoys."
+  imports:
+  - SQLite
