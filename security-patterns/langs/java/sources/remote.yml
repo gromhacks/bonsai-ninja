@@ -294,11 +294,6 @@
     - theRequest
     - currentRequest
     - originalRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
   match_examples:
   - name: generated shape example
     code: |
@@ -340,6 +335,38 @@
       }
   description: "HttpServletRequest.getParameterValues."
 
+- id: java.source.servlet_getparameternames
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  match:
+    kind: call
+    callee:
+      name: getParameterNames
+  constraints:
+  - receiver_name_in:
+    - request
+    - req
+    - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
+  match_examples:
+  - name: servlet request parameter names
+    code: |
+      class App {
+        void handle() throws Exception {
+          request.getParameterNames();
+        }
+      }
+  description: "HttpServletRequest.getParameterNames() — attacker-controlled query/form parameter names."
+
 - id: java.source.servlet_getparametermap
   enabled: true
   language: java
@@ -365,8 +392,8 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getParameterMap(input);
+        void handle() throws Exception {
+          request.getParameterMap();
         }
       }
   description: "HttpServletRequest.getParameterMap."
@@ -378,6 +405,8 @@
   tag: http-input
   category: http-input
   payload_types: [header]
+  packages: [javax.servlet, jakarta.servlet]
+  imports: [javax.servlet, jakarta.servlet]
   match:
     kind: call
     callee:
@@ -386,12 +415,19 @@
   - receiver_name_in:
     - request
     - servletRequest
+    - httpRequest
+    - hsr
+    - httpReq
+    - theRequest
+    - currentRequest
+    - originalRequest
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.*;
       class App {
-        void handle(String input) throws Exception {
-          request.getHeader(input);
+        void handle() throws Exception {
+          request.getHeader("X-User");
         }
       }
   description: "HttpServletRequest.getHeader."
@@ -452,8 +488,8 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getHeaderNames(input);
+        void handle() throws Exception {
+          request.getHeaderNames();
         }
       }
   description: "HttpServletRequest.getHeaderNames."
@@ -484,11 +520,75 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getCookies(input);
+        void handle() throws Exception {
+          request.getCookies();
         }
       }
   description: "HttpServletRequest.getCookies."
+
+- id: java.source.cookie_getvalue
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  match:
+    kind: call
+    callee:
+      name: getValue
+  constraints:
+  - receiver_name_in:
+    - cookie
+    - c
+    - theCookie
+    - requestCookie
+    - httpCookie
+    - servletCookie
+    - currentCookie
+  match_examples:
+  - name: servlet cookie value
+    code: |
+      import javax.servlet.http.*;
+      class App {
+        void handle(Cookie theCookie) throws Exception {
+          theCookie.getValue();
+        }
+      }
+  description: "Cookie.getValue() on a request-cookie variable — attacker-controlled cookie value."
+
+- id: java.source.cookie_getname
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [cookie]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  match:
+    kind: call
+    callee:
+      name: getName
+  constraints:
+  - receiver_name_in:
+    - cookie
+    - c
+    - theCookie
+    - requestCookie
+    - httpCookie
+    - servletCookie
+    - currentCookie
+  match_examples:
+  - name: servlet cookie name
+    code: |
+      import javax.servlet.http.*;
+      class App {
+        void handle(Cookie theCookie) throws Exception {
+          theCookie.getName();
+        }
+      }
+  description: "Cookie.getName() on a request-cookie variable — attacker-controlled cookie name."
 
 - id: java.source.servlet_getinputstream
   enabled: true
@@ -515,8 +615,8 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getInputStream(input);
+        void handle() throws Exception {
+          request.getInputStream();
         }
       }
   description: "HttpServletRequest.getInputStream — raw body."
@@ -546,8 +646,8 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getReader(input);
+        void handle() throws Exception {
+          request.getReader();
         }
       }
   description: "HttpServletRequest.getReader."
@@ -578,8 +678,8 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getQueryString(input);
+        void handle() throws Exception {
+          request.getQueryString();
         }
       }
   description: "HttpServletRequest.getQueryString."
@@ -610,8 +710,8 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getRequestURI(input);
+        void handle() throws Exception {
+          request.getRequestURI();
         }
       }
   description: "HttpServletRequest.getRequestURI."
@@ -642,8 +742,8 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getRequestURL(input);
+        void handle() throws Exception {
+          request.getRequestURL();
         }
       }
   description: "HttpServletRequest.getRequestURL."
@@ -674,11 +774,32 @@
   - name: generated shape example
     code: |
       class App {
-        void handle(String input) throws Exception {
-          request.getPathInfo(input);
+        void handle() throws Exception {
+          request.getPathInfo();
         }
       }
   description: "HttpServletRequest.getPathInfo."
+
+- id: java.source.servlet_session_getattribute
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: session-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [getSession, getAttribute]
+  match_examples:
+  - name: servlet session attribute chained from request
+    code: |
+      class App {
+        void handle() throws Exception {
+          request.getSession().getAttribute("user");
+        }
+      }
+  description: "HttpServletRequest.getSession().getAttribute(name) — session data previously influenced by the remote client."
 
 - id: java.source.servlet_part_getsubmittedfilename
   enabled: true

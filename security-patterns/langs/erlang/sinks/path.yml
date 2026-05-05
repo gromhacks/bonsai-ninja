@@ -28,9 +28,9 @@
       expect_no_match: true
   description: "file:read_file/1 — reads arbitrary path; traversal via ../ leaks secrets (/etc/passwd, keys)."
 - id: erlang.path.file_write_file
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  aliases:
+  - erlang.upload_file_write_client_filename
+  enabled: true
   language: erlang
   tag: path-traversal
   severity: high
@@ -39,7 +39,24 @@
     kind: call
     callee:
       regex: "^file:write_file"
-  description: "Disabled — only arg 0 is a traversal sink; v1 sink taint checks any arg and over-fires on tainted file content."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted write file path
+      code: |
+        -module(example).
+        -export([test/2]).
+        test(Input, Body) ->
+          file:write_file(Input, Body).
+    - name: tainted write file body negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:write_file("tmp/report.txt", Input).
+      expect_no_match: true
+  description: "file:write_file/2,3 — tainted path lets attacker clobber arbitrary files; tainted file content alone is not a traversal finding."
 - id: erlang.path.file_delete
   enabled: true
   language: erlang
@@ -124,6 +141,34 @@
           file:make_dir("tmp/uploads").
       expect_no_match: true
   description: "file:make_dir/1 — tainted dir name allows directory creation outside intended root."
+- id: erlang.path.file_make_dir_all
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^filelib:ensure_dir$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted ensure dir path
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          filelib:ensure_dir(Input).
+    - name: literal ensure dir negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          filelib:ensure_dir("tmp/uploads/file.txt").
+      expect_no_match: true
+  description: "filelib:ensure_dir/1 — creates parent directories for a tainted path outside the intended root."
 - id: erlang.path.file_rename_source
   enabled: true
   language: erlang
@@ -208,3 +253,59 @@
           zip:extract("priv/archive.zip").
       expect_no_match: true
   description: "zip:extract — archive with ../ entries escapes target dir (zip-slip / arbitrary write)."
+- id: erlang.path.file_list_dir
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:list_dir(_all)?$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted list dir path
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:list_dir(Input).
+    - name: literal list dir negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:list_dir("priv/static").
+      expect_no_match: true
+  description: "file:list_dir/list_dir_all — tainted directory path discloses arbitrary filesystem structure."
+- id: erlang.path.file_del_dir
+  enabled: true
+  language: erlang
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "^file:del_dir(_r)?$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted delete dir path
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          file:del_dir(Input).
+    - name: literal delete dir negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          file:del_dir("tmp/cache").
+      expect_no_match: true
+  description: "file:del_dir/del_dir_r — tainted directory path enables arbitrary directory deletion."

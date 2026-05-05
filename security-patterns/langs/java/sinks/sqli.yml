@@ -23,6 +23,51 @@
       select 1\");\n  }\n}\n"
     expect_no_match: true
   description: "JDBC Statement.executeQuery with string-built SQL \u2014 use PreparedStatement."
+
+- id: java.sqli.statement_execute
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: critical
+  packages:
+  - java.sql
+  - javax.sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      name: execute
+  constraints:
+  - receiver_name_in:
+    - stmt
+    - statement
+    - sqlStatement
+    - rawStatement
+    - jdbcStatement
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: JDBC Statement execute tainted SQL
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(Statement stmt, String input) throws Exception {
+          stmt.execute(input);
+        }
+      }
+    expect_match_text: [stmt.execute]
+  - name: JDBC Statement execute literal negative
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(Statement stmt) throws Exception {
+          stmt.execute("select 1");
+        }
+      }
+    expect_no_match: true
+  description: "JDBC Statement.execute(sql) with tainted SQL text — raw query execution."
+
 - id: java.sqli.statement_executeupdate
   enabled: true
   language: java
@@ -123,6 +168,47 @@
   description: "JDBC Connection.prepareCall \u2014 flag if SQL is string-built. Typed-receiver\
     \ sqli (PATTERN_GUIDE-exempt from SQL-keyword arg shape); `min_args: 1` rejects\
     \ 0-arg decoys."
+
+- id: java.sqli.connection_preparestatement_tainted_sql
+  enabled: true
+  language: java
+  tag: sql-injection
+  severity: high
+  packages:
+  - java.sql
+  - javax.sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Connection
+      - prepareStatement
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: prepareStatement tainted SQL
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(Connection conn, String input) throws Exception {
+          conn.prepareStatement(input);
+        }
+      }
+    expect_match_text: [conn.prepareStatement]
+  - name: prepareStatement literal negative
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(Connection conn) throws Exception {
+          conn.prepareStatement("select * from users where id = ?");
+        }
+      }
+    expect_no_match: true
+  description: "Connection.prepareStatement(taintedSql) — placeholders only protect values when the SQL template itself is not attacker-controlled."
+
 - id: java.sqli.spring_jdbctemplate_query
   enabled: true
   language: java
@@ -234,9 +320,7 @@
     expect_no_match: true
   description: Spring JdbcTemplate.update(sql) raw form.
 - id: java.sqli.spring_jdbctemplate_execute_local
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   tag: sql-injection
   severity: high
@@ -248,6 +332,14 @@
     kind: call
     callee:
       name: execute
+  constraints:
+  - receiver_name_in:
+    - jdbcTemplate
+    - template
+    - jdbc
+    - springJdbcTemplate
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: local jdbc template execute
     code: "import org.springframework.jdbc.*;\nclass App {\n  Object handle(JdbcTemplate\
@@ -256,6 +348,18 @@
       }\n"
     expect_match_text:
     - jdbcTemplate.execute
+  - name: local jdbc template execute literal negative
+    code: |
+      import org.springframework.jdbc.*;
+      class App {
+        Object handle(JdbcTemplate jdbcTemplate) {
+          return jdbcTemplate.execute("select 1");
+        }
+      }
+      class JdbcTemplate {
+        Object execute(Object... args) { return null; }
+      }
+    expect_no_match: true
   description: "Spring JdbcTemplate.execute(sql) on a local JdbcTemplate variable\
     \ \u2014 raw SQL string execution."
   imports:
@@ -651,15 +755,12 @@
     - handle.execute
   description: "JDBI Handle.execute(sql) \u2014 executes raw SQL built by the caller.\
     \ Merged collision aliases: java.cmdi.commons_exec_executor, java.graphql.graphql_execute,\
-    \ java.nosql.cqlsession_execute, java.sqli.statement_execute, java.sqli.spring_jdbctemplate_execute,\
-    \ java.ssrf.httpclient_execute, java.ssrf.closeable_httpclient_execute, java.ssrf.okhttp_call_execute,\
-    \ java.template.mustache_execute."
+    \ java.nosql.cqlsession_execute, java.ssrf.httpclient_execute, java.ssrf.closeable_httpclient_execute,\
+    \ java.ssrf.okhttp_call_execute, java.template.mustache_execute."
   aliases:
   - java.cmdi.commons_exec_executor
   - java.graphql.graphql_execute
   - java.nosql.cqlsession_execute
-  - java.sqli.statement_execute
-  - java.sqli.spring_jdbctemplate_execute
   - java.ssrf.httpclient_execute
   - java.ssrf.closeable_httpclient_execute
   - java.ssrf.okhttp_call_execute

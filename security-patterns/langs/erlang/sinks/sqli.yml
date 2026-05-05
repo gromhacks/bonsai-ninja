@@ -141,7 +141,8 @@
 - id: erlang.sqli.mnesia_match_object
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: erlang.nosql.mnesia_select_matchspec
   language: erlang
   tag: sql-injection
   severity: medium
@@ -151,7 +152,7 @@
     kind: call
     callee:
       regex: "^mnesia:(match_object|select)$"
-  description: "Disabled — mnesia uses term patterns, not SQL; only risk is tainted match_spec (rare)."
+  description: "Disabled — mnesia uses term patterns, not SQL; tainted match-spec/object patterns are covered under erlang.nosql.mnesia_select_matchspec and erlang.nosql.mnesia_match_object."
 - id: erlang.sqli.eredis_q
   enabled: false
   disabled_reason:
@@ -169,7 +170,8 @@
 - id: erlang.sqli.mongo_find
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: erlang.nosql.mongoc_find
   language: erlang
   tag: nosql-injection
   severity: high

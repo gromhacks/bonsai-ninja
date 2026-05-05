@@ -214,7 +214,7 @@
     expect_no_match: true
   description: https.request(tainted URL/options).
 - id: typescript.ssrf.http_get
-  enabled: false
+  enabled: true
   language: typescript
   tag: ssrf
   severity: high
@@ -228,15 +228,20 @@
       attribute:
       - http
       - get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: http get
     code: "const _u = require(\"http\");\nfunction demo(input, req, obj) {\n  return\
       \ http.get(input);\n}\n"
+  - name: http get literal negative
+    code: "const _u = require(\"http\");\nfunction demo(input, req, obj) {\n  return\
+      \ http.get(\"http://example.com\");\n}\n"
+    expect_no_match: true
   description: http.get(tainted URL).
-  disabled_reason:
-    code: over-broad
 - id: typescript.ssrf.https_get
-  enabled: false
+  enabled: true
   language: typescript
   tag: ssrf
   severity: high
@@ -250,13 +255,18 @@
       attribute:
       - https
       - get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: https get
     code: "const _u = require(\"https\");\nfunction demo(input, req, obj) {\n  return\
       \ https.get(input);\n}\n"
+  - name: https get literal negative
+    code: "const _u = require(\"https\");\nfunction demo(input, req, obj) {\n  return\
+      \ https.get(\"https://example.com\");\n}\n"
+    expect_no_match: true
   description: https.get(tainted URL).
-  disabled_reason:
-    code: over-broad
 - id: typescript.ssrf.request_legacy
   enabled: false
   disabled_reason:

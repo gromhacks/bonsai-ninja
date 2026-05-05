@@ -12,9 +12,7 @@
       name: timestamp
   description: "Disabled — duplicate of solidity.block.timestamp source (same `read name: timestamp` shape). The source rule already fires; the analyst will see block.timestamp flowing into entropy-consuming code in the flow report."
 - id: solidity.randomness.now
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: solidity
   tag: weak-randomness
   severity: medium
@@ -23,6 +21,16 @@
     kind: read
     target:
       name: now
+  match_examples:
+    - name: now used as entropy
+      code: |
+        pragma solidity ^0.6.12;
+        contract App { function test(uint256 input) public view returns (uint256) { return now + input; } }
+    - name: literal randomness negative
+      code: |
+        pragma solidity ^0.8.0;
+        contract App { function test(uint256 input) public pure returns (uint256) { return input + 1; } }
+      expect_no_match: true
   description: "`now` is an alias of block.timestamp (removed in 0.7+)."
 - id: solidity.randomness.blockhash
   enabled: true

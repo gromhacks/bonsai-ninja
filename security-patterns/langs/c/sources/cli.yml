@@ -70,13 +70,14 @@
     kind: call
     callee:
       name: fgets
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: generated direct match
     code: |
       void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        fgets(arg);
+        char buf[256];
+        fgets(buf, sizeof(buf), stdin);
       }
   description: "fgets — reads a line from stdin or file."
 - id: c.input.gets_unsafe
@@ -89,13 +90,14 @@
     kind: call
     callee:
       name: gets
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: generated direct match
     code: |
       void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        gets(arg);
+        char buf[256];
+        gets(buf);
       }
   description: "gets — unbounded stdin read (also a memory sink)."
 - id: c.input.read
@@ -134,13 +136,14 @@
     kind: call
     callee:
       name: scanf
+  taint_semantics:
+    source_output_args: [1, 2, 3, 4]
   match_examples:
   - name: generated direct match
     code: |
       void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        scanf(arg);
+        char buf[256];
+        scanf("%255s", buf);
       }
   description: "scanf — reads from stdin."
 - id: c.input.readline
@@ -249,13 +252,15 @@
     kind: call
     callee:
       name: getline
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
   - name: generated direct match
     code: |
       void example(void) {
-        char *arg = "tainted";
-        char *fmt = arg;
-        getline(arg);
+        char *line = 0;
+        unsigned long len = 0;
+        getline(&line, &len, stdin);
       }
   description: "POSIX getline(3) — reads a line from a stream into a heap buffer; stdin/file content is user-supplied."
 - id: c.input.getpass

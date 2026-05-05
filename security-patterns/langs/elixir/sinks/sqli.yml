@@ -239,6 +239,45 @@
   description: "Postgrex.query/3 — raw SQL; $n placeholders only if the caller uses them."
   imports:
   - Postgrex
+- id: elixir.sqli.postgrex_query_bang
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - postgrex
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Postgrex
+      - query!
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted postgrex query bang
+    code: |
+      alias Postgrex
+      defmodule App do
+        def test(conn, input) do
+          Postgrex.query!(conn, input, [])
+        end
+      end
+  - name: literal postgrex query bang negative
+    code: |
+      alias Postgrex
+      defmodule App do
+        def test(conn) do
+          Postgrex.query!(conn, "SELECT 1", [])
+        end
+      end
+    expect_no_match: true
+  description: "Postgrex.query!/3 — bang raw SQL variant; tainted SQL string executes verbatim."
+  imports:
+  - Postgrex
 - id: elixir.sqli.myxql_query
   enabled: true
   language: elixir
@@ -279,6 +318,45 @@
   description: "MyXQL.query/3 — raw MySQL; interpolated string becomes part of the statement."
   imports:
   - Myxql
+- id: elixir.sqli.myxql_query_bang
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - myxql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - MyXQL
+      - query!
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted myxql query bang
+    code: |
+      alias Myxql
+      defmodule App do
+        def test(conn, input) do
+          MyXQL.query!(conn, input, [])
+        end
+      end
+  - name: literal myxql query bang negative
+    code: |
+      alias Myxql
+      defmodule App do
+        def test(conn) do
+          MyXQL.query!(conn, "SELECT 1", [])
+        end
+      end
+    expect_no_match: true
+  description: "MyXQL.query!/3 — bang raw SQL variant; tainted SQL string executes verbatim."
+  imports:
+  - Myxql
 - id: elixir.sqli.exqlite_query
   enabled: true
   language: elixir
@@ -317,5 +395,44 @@
       end
     expect_no_match: true
   description: "Exqlite.query/3 — raw SQLite; bindings are optional, caller may splice strings."
+  imports:
+  - Exqlite
+- id: elixir.sqli.exqlite_query_bang
+  enabled: true
+  language: elixir
+  tag: sql-injection
+  severity: critical
+  packages:
+  - exqlite
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Exqlite
+      - query!
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted exqlite query bang
+    code: |
+      alias Exqlite
+      defmodule App do
+        def test(conn, input) do
+          Exqlite.query!(conn, input)
+        end
+      end
+  - name: literal exqlite query bang negative
+    code: |
+      alias Exqlite
+      defmodule App do
+        def test(conn) do
+          Exqlite.query!(conn, "SELECT 1")
+        end
+      end
+    expect_no_match: true
+  description: "Exqlite.query!/2,3 — bang raw SQLite variant; tainted SQL string executes verbatim."
   imports:
   - Exqlite

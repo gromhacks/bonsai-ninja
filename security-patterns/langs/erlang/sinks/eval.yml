@@ -28,9 +28,7 @@
       expect_no_match: true
   description: "erl_eval — evaluates parsed Erlang AST; tainted forms execute as code (RCE)."
 - id: erlang.eval.erl_scan_string
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: erlang
   tag: code-injection
   severity: medium
@@ -39,7 +37,24 @@
     kind: call
     callee:
       regex: "^erl_scan:string"
-  description: "Disabled — tokenizing alone is harmless; flag only when paired with erl_eval."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted erl scan string
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          erl_scan:string(Input).
+    - name: literal erl scan string negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          erl_scan:string("1 + 1.").
+      expect_no_match: true
+  description: "erl_scan:string on tainted source text — first stage of dynamic Erlang evaluation; report as medium unless the token flow later reaches erl_parse/erl_eval."
 - id: erlang.eval.compile_forms
   enabled: true
   language: erlang
@@ -153,7 +168,9 @@
       expect_no_match: true
   description: "erlang:apply/3 (and bare apply/3) — tainted function atom selects attacker-controlled code to invoke."
 - id: erlang.eval.erlang_apply_args
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: erlang
   tag: code-injection
   severity: high
@@ -181,10 +198,70 @@
       expect_no_match: true
   description: "erlang:apply/3 (and bare apply/3) — tainted argument list reaches a dynamically selected call target."
 
+- id: erlang.eval.erlang_spawn_mfa
+  aliases:
+  - erlang.cmdi.erlang_spawn_mfa
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^erlang:spawn$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted spawn module
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlang:spawn(Input, run, []).
+  - name: tainted spawn args negative
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlang:spawn(safe_module, run, [Input]).
+    expect_no_match: true
+  description: "erlang:spawn(Module, Function, Args) with a tainted Module operand — attacker controls dynamic dispatch. Tainted Args alone are intentionally not a sink."
+
+- id: erlang.eval.erlang_spawn_function
+  aliases:
+  - erlang.cmdi.erlang_spawn_function
+  enabled: true
+  language: erlang
+  tag: code-injection
+  severity: high
+  cwe: [CWE-94]
+  match:
+    kind: call
+    callee:
+      regex: "^erlang:spawn$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted spawn function
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlang:spawn(safe_module, Input, []).
+  - name: tainted spawn args negative
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        erlang:spawn(safe_module, run, [Input]).
+    expect_no_match: true
+  description: "erlang:spawn(Module, Function, Args) with a tainted Function operand — attacker controls which exported function is invoked."
+
 - id: erlang.eval.code_ensure_loaded
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: erlang
   tag: code-injection
   severity: medium
@@ -193,4 +270,21 @@
     kind: call
     callee:
       regex: "^code:(ensure_loaded|load_file)$"
-  description: "Disabled — code:load_file/ensure_loaded loads a module by atom from code path; risky only when atom is attacker-derived. Pair with list_to_existing_atom check before enabling."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+    - name: tainted module load
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(Input) ->
+          code:ensure_loaded(Input).
+    - name: literal module load negative
+      code: |
+        -module(example).
+        -export([test/0]).
+        test() ->
+          code:ensure_loaded(safe_module).
+      expect_no_match: true
+  description: "code:ensure_loaded/load_file with a tainted module atom — attacker controls runtime code loading."

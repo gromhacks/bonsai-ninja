@@ -1,8 +1,6 @@
 # Java CLI / environment / config local-trust sources.
 - id: java.source.main_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: local
   tag: cli-input
@@ -10,7 +8,16 @@
     kind: param
     target:
       name: args
-  description: "Disabled — `String[] args` matches every function named with an `args` parameter; enable per-project or key off a scan-time heuristic (enclosing function == 'main')."
+      in_method: [main]
+  match_examples:
+    - name: Java main args
+      code: |
+        class App {
+          public static void main(String[] args) {
+          }
+        }
+      expect_match_text: [args]
+  description: "String[] args on Java main(...) — command-line arguments supplied by the local invoker."
 
 - id: java.source.system_getenv
   enabled: true
@@ -51,56 +58,92 @@
   description: "System.getProperty — JVM property (config trust)."
 
 - id: java.source.console_readline
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: local
   tag: cli-input
   match:
     kind: call
     callee:
-      attribute: [Console, readLine]
-  description: "Disabled — adapters index local receivers like `console.readLine`, not receiver types like `Console.readLine`."
+      name: readLine
+  constraints:
+  - receiver_name_in: [console, con, sysConsole]
+  match_examples:
+    - name: Console readLine
+      code: |
+        class App {
+          void handle() throws Exception {
+            console.readLine();
+          }
+        }
+      expect_match_text: [console.readLine]
+  description: "Console.readLine() on a console-named receiver — line supplied by the local user."
 
 - id: java.source.console_readpassword
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: local
   tag: cli-input
   match:
     kind: call
     callee:
-      attribute: [Console, readPassword]
-  description: "Disabled — adapters index local receivers like `console.readPassword`, not receiver types like `Console.readPassword`."
+      name: readPassword
+  constraints:
+  - receiver_name_in: [console, con, sysConsole]
+  match_examples:
+    - name: Console readPassword
+      code: |
+        class App {
+          void handle() throws Exception {
+            console.readPassword();
+          }
+        }
+      expect_match_text: [console.readPassword]
+  description: "Console.readPassword() on a console-named receiver — password supplied by the local user."
 
 - id: java.source.scanner_nextline
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: local
   tag: cli-input
   match:
     kind: call
     callee:
-      attribute: [Scanner, nextLine]
-  description: "Disabled — adapters index local receivers like `scanner.nextLine`, not receiver types like `Scanner.nextLine`."
+      name: nextLine
+  constraints:
+  - receiver_name_in: [scanner, sc, inputScanner, stdinScanner]
+  match_examples:
+    - name: Scanner nextLine
+      code: |
+        class App {
+          void handle() throws Exception {
+            scanner.nextLine();
+          }
+        }
+      expect_match_text: [scanner.nextLine]
+  description: "Scanner.nextLine() on a scanner-named receiver — line supplied by a local input stream."
 
 - id: java.source.scanner_next
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: local
   tag: cli-input
   match:
     kind: call
     callee:
-      attribute: [Scanner, next]
-  description: "Disabled — adapters index local receivers like `scanner.next`, not receiver types like `Scanner.next`."
+      name: next
+  constraints:
+  - receiver_name_in: [scanner, sc, inputScanner, stdinScanner]
+  match_examples:
+    - name: Scanner next
+      code: |
+        class App {
+          void handle() throws Exception {
+            scanner.next();
+          }
+        }
+      expect_match_text: [scanner.next]
+  description: "Scanner.next() on a scanner-named receiver — token supplied by a local input stream."
 
 - id: java.source.bufferedreader_readline
   enabled: false

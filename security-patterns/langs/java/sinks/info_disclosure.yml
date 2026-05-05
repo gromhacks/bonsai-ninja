@@ -10,6 +10,9 @@
     callee:
       regex: ^System\.out\.println$
   constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: "(?i)^(e|ex|err|exception|sqlException|throwable)$|\\.getMessage\\s*\\(|\\.toString\\s*\\(|^\"[^\"]*(exception|stack\\s*trace)"
   - arg_tainted:
       index: 0
   match_examples:
@@ -90,7 +93,9 @@
   aliases:
   - java.log_injection.logger_error_concat
 - id: java.info_disclosure.response_writer_exception
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: java
   tag: information-disclosure
   severity: high
@@ -120,7 +125,4 @@
         }
       }
     expect_no_match: true
-  description: 'HttpServletResponse.getWriter().println of exception or stack details exposes internals to clients. Merged
-    aliases: java.xss.response_writer_println.'
-  aliases:
-  - java.xss.response_writer_println
+  description: "Disabled — response.getWriter().println overlaps the XSS sink and the YAML matcher cannot prove the argument is specifically SQLException/exception state without type-aware constraints."

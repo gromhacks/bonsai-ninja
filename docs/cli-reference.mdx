@@ -55,6 +55,10 @@ bonsai-ninja security ./src taint-analysis --trust remote --tag command-injectio
 bonsai-ninja security ./src taint-analysis --format sarif --all > findings.sarif.json
 ```
 
+Text output is labelled `TAINT FLOW`. Each step is derived from the
+finding's source-specific taint path and annotates the source, tainted
+argument propagation, receiver evidence where relevant, and sink operand.
+
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
@@ -78,7 +82,7 @@ bonsai-ninja security ./src taint-analysis --format sarif --all > findings.sarif
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
 | `--no-compact` | false | Expand every flow body. |
-| `--format <FORMAT>` | text | `text`, `json`, or `sarif`. |
+| `--format <FORMAT>` | text | `text`, `json`, or `sarif`. SARIF is supported for `taint-analysis` findings. |
 
 ## inspect
 
@@ -163,6 +167,10 @@ bonsai-ninja security ./src source-analysis --trust remote
 bonsai-ninja security ./src source-analysis --format json --all
 ```
 
+Text output is labelled `SOURCE FLOW`. The command runs taint forward
+from each matched source seed, so it maps where that source value travels
+without requiring a sink rule.
+
 | Flag | Default | Description |
 |---|---:|---|
 | `--rules-dir <DIR>` | Auto-discovered | Rulepack directory. |
@@ -178,4 +186,4 @@ bonsai-ninja security ./src source-analysis --format json --all
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every source flow. |
 | `--no-compact` | false | Expand every flow body. |
-| `--format <FORMAT>` | text | `text`, `json`, or `sarif`. |
+| `--format <FORMAT>` | text | `text` or `json`. `sarif` is rejected because source-analysis is not finding output. |

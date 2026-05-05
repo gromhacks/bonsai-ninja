@@ -25,9 +25,7 @@
     expect_no_match: true
   description: "sqlite3_exec(db, sql, ...) — raw SQL, no binding."
 - id: cpp.sqli.sqlite3_prepare_v2
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: cpp
   tag: sql-injection
   severity: medium
@@ -39,7 +37,25 @@
     kind: call
     callee:
       name: sqlite3_prepare_v2
-  description: "Disabled — sqlite3_prepare_v2 uses placeholders safely; flag only when SQL is string-concatenated from tainted data."
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted sqlite3 prepare sql
+    code: |
+      #include <sqlite3.h>
+      void example(sqlite3 *db) {
+        const char *arg = "tainted";
+        sqlite3_prepare_v2(db, arg, -1, 0, 0);
+      }
+  - name: literal sqlite3 prepare sql negative
+    code: |
+      #include <sqlite3.h>
+      void example(sqlite3 *db) {
+        sqlite3_prepare_v2(db, "SELECT * FROM users WHERE id = ?", -1, 0, 0);
+      }
+    expect_no_match: true
+  description: "sqlite3_prepare_v2(db, tainted_sql, ...) — placeholders are safe, but a tainted SQL string at prepare time still permits query construction injection."
 - id: cpp.sqli.sqlite3_get_table
   enabled: true
   language: cpp
@@ -67,7 +83,7 @@
     expect_no_match: true
   description: "sqlite3_get_table — raw SQL, no binding."
 - id: cpp.sqli.mysqlcppconn_execute
-  enabled: false
+  enabled: true
   language: cpp
   tag: sql-injection
   severity: critical
@@ -81,12 +97,20 @@
       attribute:
       - Statement
       - execute
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted mysql connector execute sql
     code: "#include <mysqlcppconn/mysql_driver.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  Statement::execute(\"SELECT \" + query);\n}\n"
+  - name: literal mysql connector execute negative
+    code: |
+      #include <mysqlcppconn/mysql_driver.h>
+      void example() {
+        Statement::execute("SELECT * FROM users WHERE id = ?");
+      }
+    expect_no_match: true
   description: "MySQL Connector/C++ Statement::execute(sql) — raw SQL."
-  disabled_reason:
-    code: over-broad
 - id: cpp.sqli.mysqlcppconn_executequery
   enabled: true
   language: cpp
@@ -202,7 +226,7 @@
   - mysql/mysql.h
   - mysql
 - id: cpp.sqli.libpqxx_exec
-  enabled: false
+  enabled: true
   language: cpp
   tag: sql-injection
   severity: critical
@@ -216,12 +240,20 @@
       attribute:
       - work
       - exec
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted libpqxx exec sql
     code: "#include <libpqxx/pqxx.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  work::exec(\"SELECT \" + query);\n}\n"
+  - name: literal libpqxx exec negative
+    code: |
+      #include <libpqxx/pqxx.h>
+      void example() {
+        work::exec("SELECT 1");
+      }
+    expect_no_match: true
   description: "libpqxx work::exec(sql) — raw SQL; prefer exec_params / prepared."
-  disabled_reason:
-    code: over-broad
 - id: cpp.sqli.libpqxx_exec0
   enabled: true
   language: cpp
@@ -308,9 +340,7 @@
   - libpq-fe.h
   - libpq-fe
 - id: cpp.sqli.libpq_pqexecparams_string_built
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: cpp
   tag: sql-injection
   severity: medium
@@ -322,7 +352,29 @@
     kind: call
     callee:
       name: PQexecParams
-  description: "Disabled — PQexecParams binds $N placeholders; flag only when SQL is concatenated from tainted data."
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted pqexecparams sql
+    code: |
+      #include <libpq-fe.h> /* libpq */
+      void example(PGconn *conn) {
+        const char *arg = "tainted";
+        PQexecParams(conn, arg, 0, 0, 0, 0, 0, 0);
+      }
+  - name: literal pqexecparams sql negative
+    code: |
+      #include <libpq-fe.h> /* libpq */
+      void example(PGconn *conn, const char *value) {
+        const char *params[] = { value };
+        PQexecParams(conn, "SELECT * FROM users WHERE id = $1", 1, 0, params, 0, 0, 0);
+      }
+    expect_no_match: true
+  description: "PQexecParams(conn, tainted_sql, ...) — parameter values are safe, but a tainted SQL string at prepare/execute time is still raw dynamic SQL."
+  imports:
+  - libpq-fe.h
+  - libpq-fe
 - id: cpp.sqli.odbc_sqlexecdirect
   enabled: true
   language: cpp
@@ -376,7 +428,7 @@
     expect_no_match: true
   description: "ODBC SQLExecDirectW — raw wide SQL."
 - id: cpp.sqli.qsql_qsqlquery_exec
-  enabled: false
+  enabled: true
   language: cpp
   tag: sql-injection
   severity: high
@@ -390,19 +442,25 @@
       attribute:
       - QSqlQuery
       - exec
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted qsqlquery exec sql
     code: "#include <QtCore/Qt>\n#include <QtCore/Qt>\n#include <QtCore/Qt> /* Qt */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  QSqlQuery::exec(\"SELECT \" + query);\n}\n"
+  - name: literal qsqlquery exec negative
+    code: |
+      #include <QtCore/Qt>
+      void example() {
+        QSqlQuery::exec("SELECT 1");
+      }
+    expect_no_match: true
   description: "Qt QSqlQuery::exec(QString) — flag string-built SQL (prefer prepare + bindValue)."
   imports:
   - QtCore
   - QtCore/Qt
-  disabled_reason:
-    code: over-broad
 - id: cpp.sqli.soci_once
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: cpp
   tag: sql-injection
   severity: medium
@@ -416,4 +474,22 @@
       attribute:
       - Session
       - once
-  description: "Disabled — SOCI uses :placeholder syntax; flag only when SQL is concatenated."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted soci once sql
+    code: |
+      #include <soci/soci.h>
+      void example() {
+        const char *arg = "tainted";
+        Session::once(arg);
+      }
+  - name: literal soci once sql negative
+    code: |
+      #include <soci/soci.h>
+      void example() {
+        Session::once("SELECT * FROM users WHERE id = :id");
+      }
+    expect_no_match: true
+  description: "SOCI Session::once(tainted_sql) — placeholders are safe, but string-built SQL is injectable."

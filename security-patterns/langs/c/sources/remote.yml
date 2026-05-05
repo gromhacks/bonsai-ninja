@@ -1,8 +1,6 @@
 # C remote-input sources (network syscalls returning attacker-controlled bytes).
 - id: c.input.recv
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: remote
   tag: network-input
@@ -11,11 +9,20 @@
     kind: call
     callee:
       name: recv
-  description: "Disabled — recv taints an output buffer, not its return value; needs pointer-out source modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: recv output buffer
+    code: |
+      #include <sys/socket.h>
+      void handle(int fd) {
+        char buf[4096];
+        recv(fd, buf, sizeof(buf), 0);
+      }
+    expect_match_text: [recv]
+  description: "recv(fd, buf, len, flags) — remote bytes taint the caller-supplied buffer argument."
 - id: c.input.recvfrom
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: remote
   tag: network-input
@@ -24,11 +31,20 @@
     kind: call
     callee:
       name: recvfrom
-  description: "Disabled — recvfrom taints an output buffer, not its return value; needs pointer-out source modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: recvfrom output buffer
+    code: |
+      #include <sys/socket.h>
+      void handle(int fd) {
+        char buf[4096];
+        recvfrom(fd, buf, sizeof(buf), 0, 0, 0);
+      }
+    expect_match_text: [recvfrom]
+  description: "recvfrom(fd, buf, len, flags, ...) — remote datagram bytes taint the caller-supplied buffer argument."
 - id: c.input.recvmsg
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: remote
   tag: network-input
@@ -37,11 +53,19 @@
     kind: call
     callee:
       name: recvmsg
-  description: "Disabled — recvmsg taints msg iov buffers; needs pointer-out source modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: recvmsg output message
+    code: |
+      #include <sys/socket.h>
+      void handle(int fd, struct msghdr *msg) {
+        recvmsg(fd, msg, 0);
+      }
+    expect_match_text: [recvmsg]
+  description: "recvmsg(fd, msg, flags) — remote bytes taint the caller-supplied message/iov buffer state."
 - id: c.input.ssl_read
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   trust: remote
   tag: network-input
@@ -51,7 +75,18 @@
     kind: call
     callee:
       name: SSL_read
-  description: "Disabled — SSL_read taints an output buffer, not its return value; needs pointer-out source modeling."
+  taint_semantics:
+    source_output_args: [1]
+  match_examples:
+  - name: SSL_read output buffer
+    code: |
+      #include <openssl/ssl.h>
+      void handle(SSL *ssl) {
+        char buf[4096];
+        SSL_read(ssl, buf, sizeof(buf));
+      }
+    expect_match_text: [SSL_read]
+  description: "SSL_read(ssl, buf, len) — TLS peer bytes taint the caller-supplied buffer argument."
 - id: c.input.mhd_lookup_connection_value
   enabled: true
   language: c

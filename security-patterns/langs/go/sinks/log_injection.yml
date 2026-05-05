@@ -11,9 +11,20 @@
       attribute:
       - log
       - Println
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Println(name + value)\n}\n"
+  - name: log println ordinary value negative
+    code: |
+      package main
+      func example(user string) {
+        log.Println(user)
+      }
+    expect_no_match: true
   description: "log.Println(... + tainted) / log.Println(fmt.Sprintf(...)) — CRLF in attacker text forges log entries."
 - id: go.log_injection.log_print_concat
   enabled: true
@@ -28,9 +39,20 @@
       attribute:
       - log
       - Print
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Print(name + value)\n}\n"
+  - name: log print ordinary value negative
+    code: |
+      package main
+      func example(user string) {
+        log.Print(user)
+      }
+    expect_no_match: true
   description: "log.Print — log-injection via concat / Sprintf."
 - id: go.log_injection.log_fatal_concat
   enabled: true
@@ -45,9 +67,20 @@
       attribute:
       - log
       - Fatal
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Fatal(name + value)\n}\n"
+  - name: log fatal ordinary value negative
+    code: |
+      package main
+      func example(user string) {
+        log.Fatal(user)
+      }
+    expect_no_match: true
   description: "log.Fatal — log-injection via concat / Sprintf."
 - id: go.log_injection.log_panic_concat
   enabled: true
@@ -62,9 +95,20 @@
       attribute:
       - log
       - Panic
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Panic(name + value)\n}\n"
+  - name: log panic ordinary value negative
+    code: |
+      package main
+      func example(user string) {
+        log.Panic(user)
+      }
+    expect_no_match: true
   description: "log.Panic — log-injection via concat / Sprintf."
 - id: go.log_injection.logger_info_concat
   enabled: true
@@ -79,9 +123,20 @@
       attribute:
       - logger
       - Info
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Info(name + value)\n}\n"
+  - name: logger info ordinary value negative
+    code: |
+      package main
+      func example(user string) {
+        logger.Info(user)
+      }
+    expect_no_match: true
   description: "logger.Info(... + tainted) — log-injection via concat (logrus/zap/slog)."
 - id: go.log_injection.slog_info_concat
   enabled: true
@@ -98,11 +153,23 @@
       attribute:
       - slog
       - Info
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: slog info concat
     code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Info(\"login user=\" + user)\n}\n"
     expect_match_text:
     - slog.Info
+  - name: slog info ordinary value negative
+    code: |
+      package main
+      import "log/slog"
+      func audit(user string) {
+        slog.Info(user)
+      }
+    expect_no_match: true
   description: "slog.Info(... + tainted) — concatenated attacker text in structured log messages can forge log entries. Merged aliases: go.log_injection.slog_info_message, go.log_injection.slog_info_constant_message_arg."
   aliases:
   - go.log_injection.slog_info_message
@@ -120,15 +187,27 @@
     kind: call
     callee:
       regex: ^slog\.(Debug|Warn|Error)$
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: slog warn tainted message
-    code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Warn(user)\n}\n"
+    code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Warn(\"user=\" + user)\n}\n"
     expect_match_text:
     - slog.Warn
   - name: slog error tainted message
-    code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Error(user)\n}\n"
+    code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Error(\"user=\" + user)\n}\n"
     expect_match_text:
     - slog.Error
+  - name: slog warning ordinary value negative
+    code: |
+      package main
+      import "log/slog"
+      func audit(user string) {
+        slog.Warn(user)
+      }
+    expect_no_match: true
   description: slog Debug/Warn/Error with attacker-controlled message text can inject line breaks or forged structured-log records.
 - id: go.log_injection.zerolog_msg
   enabled: true
@@ -143,8 +222,23 @@
     kind: call
     callee:
       regex: \.Msg$
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: zerolog tainted message
+    code: |
+      import "github.com/rs/zerolog"
+      package main
+      func audit(event Event, user string) {
+        event.Msg("user=" + user)
+      }
+      type Event struct{}
+      func (e Event) Msg(msg string) {}
+    expect_match_text:
+    - event.Msg
+  - name: zerolog ordinary message negative
     code: |
       import "github.com/rs/zerolog"
       package main
@@ -153,8 +247,7 @@
       }
       type Event struct{}
       func (e Event) Msg(msg string) {}
-    expect_match_text:
-    - event.Msg
+    expect_no_match: true
   description: "zerolog Event.Msg(taintedMessage) — attacker-controlled log message text can forge log output. Merged aliases: go.log_injection.zerolog_msg_concat."
   aliases:
   - go.log_injection.zerolog_msg_concat
@@ -171,7 +264,18 @@
       attribute:
       - logger
       - Error
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Error(name + value)\n}\n"
+  - name: logger error ordinary value negative
+    code: |
+      package main
+      func example(user string) {
+        logger.Error(user)
+      }
+    expect_no_match: true
   description: "logger.Error(... + tainted) — log-injection via concat."

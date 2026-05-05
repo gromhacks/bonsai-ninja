@@ -139,6 +139,27 @@
         cowboy_req:match_qs(Input).
   description: "cowboy_req:match_qs — extracts query params by spec; values remain attacker-controlled."
 
+- id: erlang.source.cowboy_qs
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [query]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:qs$"
+  match_examples:
+  - name: cowboy query string
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:qs(Input).
+  description: "cowboy_req:qs — raw query string from the request URL."
+
 - id: erlang.source.cowboy_header
   enabled: true
   language: erlang
@@ -149,7 +170,7 @@
   match:
     kind: call
     callee:
-      regex: "^cowboy_req:header"
+      regex: "^cowboy_req:header$"
   match_examples:
   - name: declared shape
     code: |
@@ -159,6 +180,69 @@
       test(Input) ->
         cowboy_req:header(Input).
   description: "cowboy_req:header — individual request header value sent by the client."
+
+- id: erlang.source.cowboy_headers
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [header]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:headers$"
+  match_examples:
+  - name: cowboy headers map
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:headers(Input).
+  description: "cowboy_req:headers — all request headers supplied by the client."
+
+- id: erlang.source.cowboy_path
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [path]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:path$"
+  match_examples:
+  - name: cowboy request path
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:path(Input).
+  description: "cowboy_req:path — raw request path controlled by the client."
+
+- id: erlang.source.cowboy_uri
+  enabled: true
+  language: erlang
+  trust: remote
+  tag: http-input
+  payload_types: [url]
+  packages: [cowboy]
+  match:
+    kind: call
+    callee:
+      regex: "^cowboy_req:uri$"
+  match_examples:
+  - name: cowboy request uri
+    code: |
+      -include_lib("cowboy/include/cowboy.hrl").
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        cowboy_req:uri(Input).
+  description: "cowboy_req:uri — request URI assembled from client-controlled path and query string."
 
 - id: erlang.source.cowboy_binding
   enabled: true

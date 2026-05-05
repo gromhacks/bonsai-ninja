@@ -39,6 +39,20 @@ flowchart LR
   F --> E
 ```
 
+## Flow Types
+
+`FLOW`, `SOURCE FLOW`, and `TAINT FLOW` are intentionally different text labels.
+
+| Label | Produced by | Meaning |
+|---|---|---|
+| `FLOW` | `inspect`, grouped inspect output, and navigation-oriented views | A resolved call path or fact path that reaches a query. It is useful for code navigation and debugging reachability. |
+| `SOURCE FLOW` | `security source-analysis` | A path produced by running taint forward from a matched source rule. It maps where boundary data can travel without requiring a sink. |
+| `TAINT FLOW` | `security taint-analysis` | A source-to-sink finding path where the security engine proved tainted data reaches the sink operand. Steps include tainted argument indexes or receiver evidence where available. |
+
+<Note>
+Navigation commands may use broad cached dataflow facts to stay fast and discoverable. Security finding flows use source-specific taint seeds so the rendered evidence follows the matched source value instead of every reachable local in the entry function.
+</Note>
+
 ## Lifecycle FSM
 
 Lifecycle rules model state transitions such as open then use, close then use, lock then unlock, allocate then free, or approve then transfer. The rulepack uses `requires_state` when a sink is only meaningful after a prior transition.

@@ -9,6 +9,10 @@
     kind: call
     callee:
       attribute: [logger, error]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
     - name: erlang logger error secret-shaped data
       code: |
@@ -17,6 +21,13 @@
         test(Token) ->
           logger:error("token=~p", [Token]).
       expect_match_text: [logger:error]
+    - name: erlang logger ordinary error negative
+      code: |
+        -module(example).
+        -export([test/1]).
+        test(User) ->
+          logger:error("user=~p", [User]).
+      expect_no_match: true
   description: "logger:error with secret-shaped data — credentials or tokens can leak to Erlang logs."
 
 - id: erlang.info_disclosure.error_logger_stack

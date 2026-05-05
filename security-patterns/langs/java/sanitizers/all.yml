@@ -11,8 +11,20 @@
       attribute: [Connection, prepareStatement]
   constraints:
   - min_args: 1
+  - arg_matches_regex:
+      index: 0
+      regex: "\\?|:[A-Za-z_][A-Za-z0-9_]*"
   match_examples:
   - name: generated shape example
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(String input) throws Exception {
+          Connection.prepareStatement("select * from users where id = ?");
+        }
+      }
+    expect_match_text: [Connection.prepareStatement]
+  - name: prepare statement without placeholder negative
     code: |
       import java.sql.*;
       class App {
@@ -20,8 +32,8 @@
           Connection.prepareStatement(input);
         }
       }
-    expect_match_text: [Connection.prepareStatement]
-  description: "Connection.prepareStatement(sql) — placeholder SQL is static; bound args via setX neutralise injection. `min_args: 1` rejects 0-arg `prepareStatement()` decoys (the SQL string is mandatory)."
+    expect_no_match: true
+  description: "Connection.prepareStatement(static SQL with placeholders) — bound args via setX neutralise SQL value injection. Dynamic SQL text is handled by java.sqli.connection_preparestatement_tainted_sql."
 
 - id: java.sanitizer.prepared_statement_setstring
   enabled: true

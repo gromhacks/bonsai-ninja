@@ -11,9 +11,21 @@
       attribute:
       - MessageDigest
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: (?i)\b(MD5|SHA-?1)\b
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    MessageDigest.getInstance(\"MD5\")\n  }\n}\n"
+  - name: safe digest negative
+    code: |
+      object App {
+        def handle(): Unit = {
+          MessageDigest.getInstance("SHA-256")
+        }
+      }
+    expect_no_match: true
   description: "MessageDigest.getInstance(\"MD5\") — broken hash. Merged aliases: scala.crypto.message_digest_sha1."
   aliases:
   - scala.crypto.message_digest_sha1
@@ -30,9 +42,21 @@
       attribute:
       - Cipher
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: (?i)(\b(DES|DESede|3DES|RC4|ARCFOUR|Blowfish)\b|/ECB/)
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    Cipher.getInstance(\"DES\")\n  }\n}\n"
+  - name: safe aead cipher negative
+    code: |
+      object App {
+        def handle(): Unit = {
+          Cipher.getInstance("AES/GCM/NoPadding")
+        }
+      }
+    expect_no_match: true
   description: "Cipher.getInstance(\"DES\") — broken symmetric cipher. Merged aliases: scala.crypto.cipher_3des, scala.crypto.cipher_rc4, scala.crypto.cipher_ecb, scala.crypto.cipher_blowfish."
   aliases:
   - scala.crypto.cipher_3des
@@ -90,6 +114,75 @@
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    Random.nextLong(input)\n  }\n}\n"
   description: "scala.util.Random.nextLong — non-crypto PRNG."
+- id: scala.crypto.scala_util_random_nextdouble
+  enabled: true
+  language: scala
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Random
+      - nextDouble
+  match_examples:
+  - name: scala random next double
+    code: |
+      object App {
+        def handle(): Unit = {
+          Random.nextDouble()
+        }
+      }
+  description: "scala.util.Random.nextDouble — non-cryptographic PRNG output; use SecureRandom for secrets, tokens, nonces, and keys."
+- id: scala.crypto.scala_util_random_nextfloat
+  enabled: true
+  language: scala
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Random
+      - nextFloat
+  match_examples:
+  - name: scala random next float
+    code: |
+      object App {
+        def handle(): Unit = {
+          Random.nextFloat()
+        }
+      }
+  description: "scala.util.Random.nextFloat — non-cryptographic PRNG output; do not use for security-sensitive randomness."
+- id: scala.crypto.scala_util_random_nextgaussian
+  enabled: true
+  language: scala
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Random
+      - nextGaussian
+  match_examples:
+  - name: scala random next gaussian
+    code: |
+      object App {
+        def handle(): Unit = {
+          Random.nextGaussian()
+        }
+      }
+  description: "scala.util.Random.nextGaussian — non-cryptographic PRNG output; use a CSPRNG for security-sensitive random values."
 - id: scala.crypto.math_random
   enabled: true
   language: scala

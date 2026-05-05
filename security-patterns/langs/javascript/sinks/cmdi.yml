@@ -63,9 +63,7 @@
   description: child_process.execSync — same /bin/sh interpolation hazard as exec, synchronous.
 
 - id: javascript.cmdi.child_process_exec_imported
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: javascript
   tag: command-injection
   severity: critical
@@ -77,7 +75,24 @@
     kind: call
     callee:
       regex: "^exec$"
-  description: "Disabled duplicate — v1 matching normalizes imported `exec(...)` to the same adapter fact as javascript.cmdi.child_process_exec."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process exec imported
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return exec(input);
+      }
+  - name: literal child process exec imported negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return exec("whoami");
+      }
+    expect_no_match: true
+  description: "Destructured/aliased exec from child_process — shell-interprets its first argument."
 
 - id: javascript.cmdi.child_process_exec_sync_imported
   enabled: true
@@ -125,6 +140,7 @@
     callee:
       regex: "^child_process\\.spawn$"
   constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
   - arg_tainted:
       index: 0
   match_examples:
@@ -307,9 +323,7 @@
   description: "Destructured/aliased spawnSync(cmd, taintedArgs, {shell: true}) from child_process — tainted argv is interpreted by the shell."
 
 - id: javascript.cmdi.child_process_execfile_shell
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: javascript
   tag: command-injection
   severity: medium
@@ -319,7 +333,25 @@
     kind: call
     callee:
       attribute: [child_process, execFile]
-  description: "Disabled — execFile is argv-style and safe unless the binary path itself is tainted; flag with source-proximity analysis."
+  constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: child process execfile shell args
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.execFile("sh", input, { shell: true });
+      }
+  - name: literal child process execfile shell args negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.execFile("sh", ["-c", "whoami"], { shell: true });
+      }
+    expect_no_match: true
+  description: "child_process.execFile(cmd, taintedArgs, {shell: true}) — tainted argv is interpreted by the shell."
 
 - id: javascript.cmdi.child_process_execfile
   enabled: true
@@ -444,9 +476,7 @@
   description: "Destructured/aliased execFileSync from child_process — tainted binary path = arbitrary exec."
 
 - id: javascript.cmdi.fork
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: javascript
   tag: command-injection
   severity: medium
@@ -456,7 +486,24 @@
     kind: call
     callee:
       attribute: [child_process, fork]
-  description: "Disabled — fork runs a Node script; tainted module path = RCE but the API is common for legitimate internal workers."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: child process fork tainted module path
+    code: |
+      const _u = require("child_process");
+      function demo(input, req, obj) {
+        return child_process.fork(input);
+      }
+  - name: child process fork literal negative
+    code: |
+      const _u = require("child_process");
+      function demo() {
+        return child_process.fork("./worker.js");
+      }
+    expect_no_match: true
+  description: "child_process.fork(taintedModulePath) — attacker-controlled Node module path is arbitrary code execution."
 
 - id: javascript.cmdi.shelljs_exec
   enabled: true
@@ -515,6 +562,7 @@
     callee:
       name: execa
   constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
   - arg_tainted:
       index: 0
   match_examples:
@@ -650,6 +698,7 @@
     callee:
       regex: "^crossSpawn$"
   constraints:
+  - any_arg_matches_regex: "\\bshell\\s*:\\s*true\\b"
   - arg_tainted:
       index: 0
   match_examples:

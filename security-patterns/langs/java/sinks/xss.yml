@@ -54,6 +54,42 @@
       }
     expect_no_match: true
   description: HttpServletResponse.getWriter().print(tainted).
+
+- id: java.xss.response_writer_println_chained
+  enabled: true
+  language: java
+  tag: xss
+  severity: high
+  cwe:
+  - CWE-79
+  match:
+    kind: call
+    callee:
+      attribute:
+      - getWriter
+      - println
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: chained servlet response writer println
+    code: |
+      class App {
+        void handle(String input) throws Exception {
+          response.getWriter().println(input);
+        }
+      }
+    expect_match_text: [response.getWriter().println]
+  - name: chained servlet response writer println literal negative
+    code: |
+      class App {
+        void handle() throws Exception {
+          response.getWriter().println("safe");
+        }
+      }
+    expect_no_match: true
+  description: "HttpServletResponse.getWriter().println(tainted) — reflected output written directly to the response body."
+
 - id: java.xss.response_outputstream_print
   enabled: true
   language: java
@@ -596,9 +632,7 @@
       - translateVariables
   description: "Disabled — Struts2 TextParseUtil; flag with OGNL scope."
 - id: java.xss.gwt_html_settext
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: java
   tag: xss
   severity: medium
@@ -612,4 +646,32 @@
       attribute:
       - HTML
       - setHTML
-  description: "Disabled — GWT HTML.setHTML; flag with constraint on tainted arg."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: GWT HTML setHTML tainted
+    code: |
+      import com.google.gwt.*;
+      class App {
+        void handle(HTML html, String input) throws Exception {
+          html.setHTML(input);
+        }
+      }
+      class HTML {
+        void setHTML(Object... args) {}
+      }
+    expect_match_text: [html.setHTML]
+  - name: GWT HTML setHTML literal negative
+    code: |
+      import com.google.gwt.*;
+      class App {
+        void handle(HTML html) throws Exception {
+          html.setHTML("safe");
+        }
+      }
+      class HTML {
+        void setHTML(Object... args) {}
+      }
+    expect_no_match: true
+  description: "GWT HTML.setHTML(tainted) — inserts raw attacker-controlled HTML into a widget."

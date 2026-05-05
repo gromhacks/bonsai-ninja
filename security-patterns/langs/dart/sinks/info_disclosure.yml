@@ -11,11 +11,19 @@
     kind: call
     callee:
       name: print
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: dart print secret-shaped data
     code: |
       void test() { var input = "x"; print("api_key=$input"); }
     expect_match_text: [print]
+  - name: dart print ordinary value negative
+    code: |
+      void test(String username) { print(username); }
+    expect_no_match: true
   description: "print(...) with secret-shaped data — credentials or tokens can leak to stdout / platform logs. Also covers merged aliases: dart.log_injection.print_newline."
 
 - id: dart.info_disclosure.shelf_internal_server_error

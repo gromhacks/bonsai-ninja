@@ -23,7 +23,7 @@
     expect_no_match: true
   description: "fopen(path, mode) — tainted path traverses outside base dir."
 - id: cpp.path.open
-  enabled: false
+  enabled: true
   language: cpp
   tag: path-traversal
   severity: high
@@ -33,12 +33,26 @@
     kind: call
     callee:
       name: open
+  constraints:
+  - top_level: true
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
-    code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  open(arg);\n}\n"
+  - name: tainted posix open path
+    code: |
+      #include <fcntl.h>
+      void example() {
+        const char *arg = "tainted";
+        open(arg, 0);
+      }
+  - name: literal open path negative
+    code: |
+      #include <fcntl.h>
+      void example() {
+        open("/tmp/safe", 0);
+      }
+    expect_no_match: true
   description: "POSIX open(path, flags) — tainted path traverses outside base dir. Bare name retained because POSIX open is a true top-level symbol; top_level constraint suppresses ifstream::open / socket::open / QFile::open collisions."
-  disabled_reason:
-    code: over-broad
 - id: cpp.path.openat
   enabled: true
   language: cpp

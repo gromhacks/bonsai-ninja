@@ -116,9 +116,7 @@
   description: "Win32 LoadLibraryW(tainted_path) — UTF-16 variant; tainted DLL path loads attacker-chosen code."
 
 - id: c.eval.dlsym
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   tag: code-injection
   severity: medium
@@ -127,7 +125,22 @@
     kind: call
     callee:
       name: dlsym
-  description: "Disabled — dlsym is benign unless symbol name tainted."
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted symbol name
+    code: |
+      void example(void *handle, char *symbol) {
+        dlsym(handle, symbol);
+      }
+  - name: literal symbol name negative
+    code: |
+      void example(void *handle) {
+        dlsym(handle, "plugin_init");
+      }
+    expect_no_match: true
+  description: "dlsym(handle, tainted_symbol) — resolves an attacker-chosen symbol from a loaded library; unsafe plugin dispatch can become code execution."
 
 - id: c.eval.lua_dostring
   enabled: true

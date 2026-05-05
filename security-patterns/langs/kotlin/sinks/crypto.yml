@@ -12,9 +12,21 @@
       attribute:
       - MessageDigest
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: (?i)\b(MD5|SHA-?1)\b
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    MessageDigest.getInstance(\"MD5\")\n  }\n}\n"
+  - name: safe digest negative
+    code: |
+      class App {
+        fun handle() {
+          MessageDigest.getInstance("SHA-256")
+        }
+      }
+    expect_no_match: true
   description: 'MessageDigest.getInstance("MD5"). Merged aliases: kotlin.crypto.sha1_digest.'
   aliases:
   - kotlin.crypto.sha1_digest
@@ -31,9 +43,21 @@
       attribute:
       - Cipher
       - getInstance
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: (?i)(\b(DES|DESede|3DES|RC4|ARCFOUR|Blowfish)\b|/ECB/)
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    Cipher.getInstance(\"DES\")\n  }\n}\n"
+  - name: safe aead cipher negative
+    code: |
+      class App {
+        fun handle() {
+          Cipher.getInstance("AES/GCM/NoPadding")
+        }
+      }
+    expect_no_match: true
   description: 'Cipher.getInstance("DES"). Merged aliases: kotlin.crypto.cipher_des_cbc, kotlin.crypto.cipher_3des, kotlin.crypto.cipher_rc4, kotlin.crypto.cipher_aes_ecb, kotlin.crypto.cipher_blowfish.'
   aliases:
   - kotlin.crypto.cipher_des_cbc
@@ -140,3 +164,91 @@
         }
       }
   description: "kotlin.random.Random.nextBytes — not cryptographically secure; use java.security.SecureRandom for keys/tokens/IVs."
+
+- id: kotlin.crypto.java_random_nextint
+  enabled: true
+  language: kotlin
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute: [Random, nextInt]
+  match_examples:
+  - name: java random next int
+    code: |
+      class App {
+        fun handle() {
+          Random.nextInt()
+        }
+      }
+  description: "java.util.Random.nextInt — non-cryptographic PRNG output; use SecureRandom for secrets, tokens, nonces, and keys."
+
+- id: kotlin.crypto.java_random_nextlong
+  enabled: true
+  language: kotlin
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute: [Random, nextLong]
+  match_examples:
+  - name: java random next long
+    code: |
+      class App {
+        fun handle() {
+          Random.nextLong()
+        }
+      }
+  description: "java.util.Random.nextLong — non-cryptographic PRNG output; use SecureRandom for security-sensitive randomness."
+
+- id: kotlin.crypto.java_random_nextdouble
+  enabled: true
+  language: kotlin
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute: [Random, nextDouble]
+  match_examples:
+  - name: java random next double
+    code: |
+      class App {
+        fun handle() {
+          Random.nextDouble()
+        }
+      }
+  description: "java.util.Random.nextDouble — non-cryptographic PRNG output; do not use for security tokens or key material."
+
+- id: kotlin.crypto.java_random_nextfloat
+  enabled: true
+  language: kotlin
+  tag: weak-randomness
+  severity: medium
+  cwe:
+  - CWE-330
+  - CWE-338
+  match:
+    kind: call
+    callee:
+      attribute: [Random, nextFloat]
+  match_examples:
+  - name: java random next float
+    code: |
+      class App {
+        fun handle() {
+          Random.nextFloat()
+        }
+      }
+  description: "java.util.Random.nextFloat — non-cryptographic PRNG output; use SecureRandom for security-sensitive randomness."

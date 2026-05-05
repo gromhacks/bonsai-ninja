@@ -98,7 +98,7 @@
       - newHttpResponse
   description: "Disabled — newHttpResponse is a factory; the actual sink is setBody on the returned object."
 - id: cpp.xss.pistache_setbody
-  enabled: false
+  enabled: true
   language: cpp
   tag: xss
   severity: high
@@ -112,12 +112,25 @@
       attribute:
       - ResponseWriter
       - send
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
-    code: "#include <pistache/endpoint.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  ResponseWriter::send(arg);\n}\n"
+  - name: tainted pistache response body
+    code: |
+      #include <pistache/endpoint.h>
+      void example() {
+        const char *arg = "tainted";
+        ResponseWriter::send(200, arg);
+      }
+  - name: literal pistache response body negative
+    code: |
+      #include <pistache/endpoint.h>
+      void example() {
+        ResponseWriter::send(200, "safe");
+      }
+    expect_no_match: true
   description: "pistache ResponseWriter::send(code, tainted) — reflected XSS when body is HTML."
-  disabled_reason:
-    code: over-broad
 - id: cpp.xss.qt_qwebengineview_sethtml
   enabled: true
   language: cpp
@@ -209,7 +222,7 @@
   - QtCore
   - QtCore/Qt
 - id: cpp.xss.crow_response_write
-  enabled: false
+  enabled: true
   language: cpp
   tag: xss
   severity: high
@@ -223,12 +236,25 @@
       attribute:
       - response
       - write
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
-    code: "#include <crow.h> /* crow */\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  response::write(arg);\n}\n"
+  - name: tainted crow response body
+    code: |
+      #include <crow.h>
+      void example() {
+        const char *arg = "tainted";
+        response::write(arg);
+      }
+  - name: literal crow response body negative
+    code: |
+      #include <crow.h>
+      void example() {
+        response::write("safe");
+      }
+    expect_no_match: true
   description: "Crow response.write(tainted) — appends to response body; reflected XSS when content-type is HTML."
-  disabled_reason:
-    code: over-broad
 - id: cpp.xss.drogon_response_appendbody
   enabled: true
   language: cpp
@@ -258,7 +284,7 @@
     expect_no_match: true
   description: "Drogon HttpResponse::appendBody(tainted) — reflected XSS when HTML."
 - id: cpp.xss.drogon_response_redirect
-  enabled: false
+  enabled: true
   language: cpp
   tag: open-redirect
   severity: medium
@@ -272,9 +298,22 @@
       attribute:
       - HttpResponse
       - redirect
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
-    code: "#include <drogon/drogon.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  HttpResponse::redirect(arg);\n}\n"
+  - name: tainted drogon redirect target
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        const char *arg = "tainted";
+        HttpResponse::redirect(arg);
+      }
+  - name: literal drogon redirect target negative
+    code: |
+      #include <drogon/drogon.h>
+      void example() {
+        HttpResponse::redirect("/safe");
+      }
+    expect_no_match: true
   description: "Drogon HttpResponse::redirect(tainted) — open redirect to attacker host."
-  disabled_reason:
-    code: over-broad

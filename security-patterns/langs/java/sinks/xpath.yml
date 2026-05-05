@@ -71,3 +71,38 @@
       }
     expect_no_match: true
   description: "XPath.compile(expr) — compiled XPath expressions built by concatenating attacker input are injectable before later evaluation."
+
+- id: java.xpath.xpath_expression_evaluate
+  enabled: true
+  language: java
+  tag: xpath-injection
+  severity: high
+  packages: ["javax.xml.xpath"]
+  imports: ["javax.xml.xpath"]
+  cwe: [CWE-643]
+  match:
+    kind: call
+    callee:
+      name: evaluate
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: XPathExpression evaluate tainted compiled expression
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        Object handle(XPathExpression expr, Object doc) throws Exception {
+          return expr.evaluate(doc);
+        }
+      }
+    expect_match_text: [expr.evaluate]
+  - name: XPathExpression evaluate clean receiver negative
+    code: |
+      import javax.xml.xpath.*;
+      class App {
+        Object handle(XPathExpression expr, Object doc) throws Exception {
+          return expr.toString();
+        }
+      }
+    expect_no_match: true
+  description: "XPathExpression.evaluate(...) on a tainted compiled XPath expression — executes an attacker-influenced XPath query."

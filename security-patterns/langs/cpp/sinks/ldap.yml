@@ -77,7 +77,7 @@
     expect_no_match: true
   description: "OpenLDAP ldap_search_ext — async variant with tainted filter."
 - id: cpp.ldap.ldapcpp_search
-  enabled: false
+  enabled: true
   language: cpp
   tag: ldap-injection
   severity: high
@@ -91,9 +91,22 @@
       attribute:
       - LDAPAsynConnection
       - search
+  constraints:
+  - arg_tainted:
+      index: 2
   match_examples:
-  - name: generated direct match
-    code: "#include <ldapcpp.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  LDAPAsynConnection::search(\"(uid=user)\");\n}\n"
+  - name: tainted ldap-cpp search filter
+    code: |
+      #include <ldapcpp.h>
+      void example() {
+        const char *arg = "tainted";
+        LDAPAsynConnection::search("ou=People", 2, arg);
+      }
+  - name: literal ldap-cpp search filter negative
+    code: |
+      #include <ldapcpp.h>
+      void example() {
+        LDAPAsynConnection::search("ou=People", 2, "(uid=safe)");
+      }
+    expect_no_match: true
   description: "LDAPAsynConnection::search(base, scope, tainted_filter) — ldap-cpp wrapper."
-  disabled_reason:
-    code: over-broad

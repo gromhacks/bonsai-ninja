@@ -278,9 +278,7 @@
     expect_no_match: true
   description: "govaluate.NewEvaluableExpression — tainted expression is interpreted; access to host funcs if registered."
 - id: go.eval.tengo_newscript_compile
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: go
   tag: code-injection
   severity: high
@@ -291,8 +289,31 @@
   match:
     kind: call
     callee:
-      regex: tengo\.NewScript\([^)]*\)\.Compile$
-  description: "Disabled — the tainted script is an argument to tengo.NewScript(...), while this rule anchors on the chained Compile() call with no arguments."
+      attribute:
+      - tengo
+      - NewScript
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted tengo script source
+    code: |
+      package main
+      import "github.com/d5/tengo/v2"
+
+      func run(src []byte) {
+        tengo.NewScript(src).Compile()
+      }
+  - name: literal tengo script source negative
+    code: |
+      package main
+      import "github.com/d5/tengo/v2"
+
+      func run() {
+        tengo.NewScript([]byte("a := 1")).Compile()
+      }
+    expect_no_match: true
+  description: "tengo.NewScript(tainted_source) — compiles attacker-controlled Tengo script before execution."
 - id: go.eval.anko_execute
   enabled: true
   language: go

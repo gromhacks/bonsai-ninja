@@ -27,7 +27,7 @@
   description: "lualdap conn:search{ filter = tainted } \u2014 filter string concatenation\
     \ enables LDAP injection."
 - id: lua.ldap.lualdap_modify
-  enabled: false
+  enabled: true
   language: lua
   tag: ldap-injection
   severity: high
@@ -41,16 +41,22 @@
       attribute:
       - conn
       - modify
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: lua.ldap.lualdap_modify example
     code: "local _lualdap = require(\"lualdap\")\nfunction example(input, url, id,\
-      \ payload, request, params, user)\n  conn.modify(\"(uid=user)\")\nend\n"
+      \ payload, request, params, user)\n  conn.modify(input)\nend\n"
+  - name: lualdap modify literal negative
+    code: "local _lualdap = require(\"lualdap\")\nfunction example(input, url, id,\
+      \ payload, request, params, user)\n  conn.modify(\"uid=user,ou=people,dc=example,dc=com\"\
+      )\nend\n"
+    expect_no_match: true
   description: "lualdap conn:modify(dn, ...) \u2014 tainted DN/attrs allow unauthorized\
     \ directory modification."
-  disabled_reason:
-    code: over-broad
 - id: lua.ldap.lualdap_add
-  enabled: false
+  enabled: true
   language: lua
   tag: ldap-injection
   severity: high
@@ -64,14 +70,20 @@
       attribute:
       - conn
       - add
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: lua.ldap.lualdap_add example
     code: "local _lualdap = require(\"lualdap\")\nfunction example(input, url, id,\
-      \ payload, request, params, user)\n  conn.add(\"(uid=user)\")\nend\n"
+      \ payload, request, params, user)\n  conn.add(input)\nend\n"
+  - name: lualdap add literal negative
+    code: "local _lualdap = require(\"lualdap\")\nfunction example(input, url, id,\
+      \ payload, request, params, user)\n  conn.add(\"uid=user,ou=people,dc=example,dc=com\"\
+      )\nend\n"
+    expect_no_match: true
   description: "lualdap conn:add(dn, attrs) \u2014 tainted DN/attrs inject arbitrary\
     \ directory entries."
-  disabled_reason:
-    code: over-broad
 - id: lua.ldap.lualdap_delete
   enabled: true
   language: lua
@@ -102,7 +114,7 @@
   description: "lualdap conn:delete(dn) \u2014 tainted DN removes arbitrary directory\
     \ entries."
 - id: lua.ldap.lualdap_compare
-  enabled: false
+  enabled: true
   language: lua
   tag: ldap-injection
   severity: medium
@@ -116,11 +128,17 @@
       attribute:
       - conn
       - compare
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: lua.ldap.lualdap_compare example
     code: "local _lualdap = require(\"lualdap\")\nfunction example(input, url, id,\
-      \ payload, request, params, user)\n  conn.compare(\"(uid=user)\")\nend\n"
+      \ payload, request, params, user)\n  conn.compare(input)\nend\n"
+  - name: lualdap compare literal negative
+    code: "local _lualdap = require(\"lualdap\")\nfunction example(input, url, id,\
+      \ payload, request, params, user)\n  conn.compare(\"uid=user,ou=people,dc=example,dc=com\"\
+      )\nend\n"
+    expect_no_match: true
   description: "lualdap conn:compare(dn, attr, value) \u2014 tainted DN/attr enables\
     \ auth bypass via compare oracle."
-  disabled_reason:
-    code: over-broad

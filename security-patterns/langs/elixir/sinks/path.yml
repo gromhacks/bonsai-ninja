@@ -217,6 +217,36 @@
       end
     expect_no_match: true
   description: "File.cp/2 — tainted src exposes arbitrary file contents via the copy."
+- id: elixir.path.file_cp_dest
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: high
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, cp]
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted file cp destination
+    code: |
+      defmodule App do
+        def test(input) do
+          File.cp("priv/static/index.html", input)
+        end
+      end
+  - name: literal file cp destination negative
+    code: |
+      defmodule App do
+        def test() do
+          File.cp("priv/static/index.html", "tmp/index.html")
+        end
+      end
+    expect_no_match: true
+  description: "File.cp/2 — tainted destination path writes copied content outside the intended root."
 - id: elixir.path.file_mkdir_p
   enabled: true
   language: elixir
@@ -247,6 +277,36 @@
       end
     expect_no_match: true
   description: "File.mkdir_p!/1 — tainted path creates directories outside the intended root."
+- id: elixir.path.file_mkdir
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, mkdir]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file mkdir
+    code: |
+      defmodule App do
+        def test(input) do
+          File.mkdir(input)
+        end
+      end
+  - name: literal file mkdir negative
+    code: |
+      defmodule App do
+        def test() do
+          File.mkdir("tmp/uploads")
+        end
+      end
+    expect_no_match: true
+  description: "File.mkdir/1 — tainted dir name allows directory creation outside intended root."
 - id: elixir.path.file_stream
   enabled: true
   language: elixir
@@ -369,6 +429,36 @@
       end
     expect_no_match: true
   description: "File.rm_rf/1 — recursive delete; tainted path wipes attacker-chosen directories."
+- id: elixir.path.file_rm_rf_bang
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: critical
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, rm_rf!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file rm rf bang
+    code: |
+      defmodule App do
+        def test(input) do
+          File.rm_rf!(input)
+        end
+      end
+  - name: literal file rm rf bang negative
+    code: |
+      defmodule App do
+        def test() do
+          File.rm_rf!("tmp/uploads")
+        end
+      end
+    expect_no_match: true
+  description: "File.rm_rf!/1 — bang recursive delete; tainted path wipes attacker-chosen directories."
 
 - id: elixir.path.file_ls
   enabled: true
@@ -400,6 +490,36 @@
       end
     expect_no_match: true
   description: "File.ls/1 — lists a tainted directory; information disclosure across the filesystem."
+- id: elixir.path.file_ls_bang
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, ls!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file ls bang
+    code: |
+      defmodule App do
+        def test(input) do
+          File.ls!(input)
+        end
+      end
+  - name: literal file ls bang negative
+    code: |
+      defmodule App do
+        def test() do
+          File.ls!("priv/static")
+        end
+      end
+    expect_no_match: true
+  description: "File.ls!/1 — bang directory listing on a tainted path discloses arbitrary filesystem structure."
 
 - id: elixir.path.file_read_bang
   enabled: true
@@ -493,6 +613,36 @@
       end
     expect_no_match: true
   description: "File.open!/2 — bang variant of File.open; tainted path opens arbitrary files for read/write."
+- id: elixir.path.file_mkdir_p_bang
+  enabled: true
+  language: elixir
+  tag: path-traversal
+  severity: medium
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      attribute: [File, mkdir_p!]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted file mkdir p bang
+    code: |
+      defmodule App do
+        def test(input) do
+          File.mkdir_p!(input)
+        end
+      end
+  - name: literal file mkdir p bang negative
+    code: |
+      defmodule App do
+        def test() do
+          File.mkdir_p!("tmp/uploads")
+        end
+      end
+    expect_no_match: true
+  description: "File.mkdir_p!/1 — bang mkdir-p on a tainted path creates directories outside the intended root."
 
 # Archive extraction (Zip Slip class). Erlang's :zip module is
 # accessible from Elixir as :zip.extract/2. Trusts archive entry

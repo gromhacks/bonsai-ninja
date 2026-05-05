@@ -302,9 +302,7 @@
     expect_no_match: true
   description: "Double-free — `free(p)` called when the binding is already `freed` from a preceding `free(p)`. Re-freeing is a heap-corruption primitive (CWE-415); glibc tcache / dlmalloc poisoning attacks pivot off this. The `requires_state` constraint gates on the binding's actual `freed` lifecycle state, so the single-free case stays silent."
 - id: c.memory.realloc_zero
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: c
   tag: memory-safety
   severity: medium
@@ -313,7 +311,24 @@
     kind: call
     callee:
       name: realloc
-  description: "Disabled — realloc with zero size returns NULL on some libc."
+  constraints:
+  - arg_equals:
+      index: 1
+      value: "0"
+  match_examples:
+  - name: realloc zero size
+    code: |
+      void example(void *p) {
+        realloc(p, 0);
+      }
+    expect_match_text: [realloc]
+  - name: realloc nonzero negative
+    code: |
+      void example(void *p, unsigned long n) {
+        realloc(p, 64);
+      }
+    expect_no_match: true
+  description: "realloc(ptr, 0) — implementation-defined/free-like behavior that commonly causes leaks, double-free, or use-after-free mistakes."
 # Allocation-size sinks. malloc/calloc/realloc/aligned_alloc with a
 # tainted size argument is the classic CWE-190 (integer overflow ->
 # smaller-than-expected buffer -> OOB write on subsequent copy).

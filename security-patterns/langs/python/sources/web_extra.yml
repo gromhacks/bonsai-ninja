@@ -424,8 +424,8 @@
   trust: remote
   tag: http-input
   payload_types: [query, form]
-  frameworks: [pyramid, bottle]
-  packages: [pyramid, bottle]
+  frameworks: [django, pyramid, bottle]
+  packages: [django, pyramid, bottle]
   match:
     kind: read
     target:
@@ -527,7 +527,7 @@
           value = request.body
           return value
     expect_match_text: [request.body]
-  description: "Pyramid/Bottle request.body - raw request body bytes. Same adapter fact is canonicalized here to avoid duplicate body-read sources."
+  description: "Django/Pyramid/Bottle request.body - raw request body bytes. Same adapter fact is canonicalized here to avoid duplicate body-read sources."
 
 # ---------------------------------------------------------------------------
 # Falcon

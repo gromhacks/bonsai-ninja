@@ -1,5 +1,5 @@
 - id: go.llm.openai_create_chat_completion
-  enabled: false
+  enabled: true
   language: go
   tag: web-llm
   severity: medium
@@ -23,8 +23,6 @@
     - client.CreateChatCompletion
   description: "client.CreateChatCompletion(ctx, request) \u2014 tainted prompt/tool\
     \ content reaches an LLM instruction surface."
-  disabled_reason:
-    code: over-broad
 - id: go.llm.anthropic_messages_new
   enabled: true
   language: go

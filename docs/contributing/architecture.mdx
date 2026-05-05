@@ -161,9 +161,13 @@ return facts.
 
 **`crates/security`** is the rulepack matcher and findings pipeline. It
 loads YAML rules from `security-patterns/`, compiles them into matcher
-state machines, and walks the engine's results emitting findings. The
-output formats (text / JSON / SARIF) live in `report.rs`. Sanitizer-credit
-calculation has its own module.
+state machines, extracts source-specific seed sets from matched source
+facts, and walks the engine's results emitting findings. `taint-analysis`
+and `source-analysis` build exact source-seeded taint graphs for their
+reported paths; the broader workspace dataflow sidecar remains the fast
+cache for navigation and export surfaces. The output formats (text / JSON
+/ SARIF) live in `report.rs`. Sanitizer-credit calculation has its own
+module.
 
 ## Query / browse / trace
 

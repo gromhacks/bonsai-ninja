@@ -1,3 +1,41 @@
+- id: java.ldapi.dir_context_search
+  enabled: true
+  language: java
+  tag: ldap-injection
+  severity: high
+  packages:
+  - javax.naming.directory
+  - jakarta.naming.directory
+  cwe:
+  - CWE-90
+  match:
+    kind: call
+    callee:
+      name: search
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: JNDI DirContext search tainted filter
+    code: |
+      import javax.naming.directory.*;
+      class App {
+        void handle(DirContext ctx, String input) throws Exception {
+          ctx.search("ou=users", input, null);
+        }
+      }
+    expect_match_text: [ctx.search]
+  - name: JNDI DirContext search literal filter negative
+    code: |
+      import javax.naming.directory.*;
+      class App {
+        void handle(DirContext ctx) throws Exception {
+          ctx.search("ou=users", "(uid=alice)", null);
+        }
+      }
+    expect_no_match: true
+  description: "DirContext/InitialDirContext/LdapContext.search(base, filter, ...) with a tainted LDAP filter string."
+
 - id: java.ldap.search_controls
   enabled: false
   language: java

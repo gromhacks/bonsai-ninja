@@ -1,5 +1,5 @@
 - id: python.path.pathlib_open
-  enabled: false
+  enabled: true
   language: python
   tag: path-traversal
   severity: high
@@ -11,12 +11,16 @@
       attribute:
       - Path
       - open
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: path pathlib open
     code: "def example(user_input):\n    return Path.open(user_input)\n"
+  - name: pathlib open literal negative
+    code: "def example(user_input):\n    return Path.open('safe')\n"
+    expect_no_match: true
   description: pathlib Path.open.
-  disabled_reason:
-    code: over-broad
 - id: python.path.os_makedirs
   enabled: true
   language: python

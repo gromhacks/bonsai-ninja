@@ -32,7 +32,8 @@ Agent defaults:
 | command family | formats |
 |---|---|
 | Browse, inspect, security inventories, source-analysis, pack, dump-callgraph, dump-edges, dump-ast, dump-taint | `--format text`, `--format json` |
-| `security taint-analysis`, `security source-analysis` | `--format text`, `--format json`, `--format sarif` |
+| `security taint-analysis` | `--format text`, `--format json`, `--format sarif` |
+| `security source-analysis` | `--format text`, `--format json` |
 | Trace | `--format text`, `--format json`, `--format dot` |
 | Export | `--format json`, `--format networkx`, `--format graphml`, `--format cypher` |
 | HIR and CFG dumps | JSON-only |
@@ -173,6 +174,12 @@ Security notes:
   and `--context 16k`. Explicit flags override profile defaults.
 - `source-analysis` and `taint-analysis` do not include inferred
   per-function entry sources unless `--inferred-sources` is passed.
+- Text flow labels are semantic: `SOURCE FLOW` is source-seeded forward
+  taint without sink attribution, `TAINT FLOW` is source-to-sink
+  propagation with tainted argument or receiver evidence, and generic
+  `FLOW` belongs to `inspect` navigation output.
+- `source-analysis --format sarif` is rejected intentionally. It is
+  source-flow mapping, not SARIF finding output; use `--format json`.
 - `taint-analysis --exclude-tests` drops findings whose source OR
   sink lives in a `path_is_test_file` path before per-source graph
   and chain build. Surviving findings carry `from_test: true` in

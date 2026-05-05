@@ -18,9 +18,18 @@ use rayon::prelude::*;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
-    let mut p = std::env::current_dir().expect("cwd");
-    p.push("../..");
-    p.canonicalize().expect("repo root")
+    let mut starts = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+    if let Ok(cwd) = std::env::current_dir() {
+        starts.push(cwd);
+    }
+    for start in starts {
+        for dir in start.ancestors() {
+            if dir.join("examples").is_dir() && dir.join("security-patterns").is_dir() {
+                return dir.to_path_buf();
+            }
+        }
+    }
+    panic!("repo root")
 }
 
 fn fixture_root(lang: &str) -> Option<PathBuf> {

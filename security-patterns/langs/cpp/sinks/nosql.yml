@@ -253,16 +253,33 @@
   description: "hiredis redisCommand(\"EVAL %s\", tainted) — Redis Lua injection."
 
 - id: cpp.nosql.hiredis_command_generic
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: cpp
   tag: nosql-injection
-  severity: medium
+  severity: high
   packages: [hiredis]
-  cwe: [CWE-943]
+  cwe: [CWE-943, CWE-134]
   match:
     kind: call
     callee:
       name: redisCommand
-  description: "Disabled — redisCommand is typically safe; enable only when the format string is tainted."
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted redisCommand format
+    code: |
+      #include <hiredis/hiredis.h>
+      void example(redisContext *ctx) {
+        const char *arg = "tainted";
+        redisCommand(ctx, arg);
+      }
+  - name: tainted value with literal format negative
+    code: |
+      #include <hiredis/hiredis.h>
+      void example(redisContext *ctx) {
+        const char *arg = "tainted";
+        redisCommand(ctx, "GET %s", arg);
+      }
+    expect_no_match: true
+  description: "hiredis redisCommand(ctx, fmt, ...) — tainted command format permits attacker-controlled Redis operations."

@@ -12,6 +12,10 @@
     kind: call
     callee:
       attribute: [spdlog, info]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\\n|\\r|\+|fmt::format|format\()'
   match_examples:
   - name: generated direct match
     code: |
@@ -22,4 +26,11 @@
         const char *query = arg;
         spdlog::info("user\\n");
       }
+  - name: spdlog ordinary info negative
+    code: |
+      #include <spdlog/spdlog.h>
+      void example(const char *user) {
+        spdlog::info("user={}", user);
+      }
+    expect_no_match: true
   description: 'spdlog::info("... {} ...\n", user) — newline log forging.'

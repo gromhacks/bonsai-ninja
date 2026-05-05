@@ -9,11 +9,12 @@
     kind: param
     target:
       name: args
+      in_method: [main]
   match_examples:
     - name: generated shape example
       code: |
         object App {
-          def handle(args: String): Unit = {
+          def main(args: Array[String]): Unit = {
           }
         }
   description: "Scala `def main(args: Array[String])` — CLI args."

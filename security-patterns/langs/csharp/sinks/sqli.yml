@@ -390,9 +390,7 @@
     expect_no_match: true
   description: EF6 Database.ExecuteSqlCommand (string overload).
 - id: csharp.sqli.dapper_query
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: csharp
   tag: sql-injection
   severity: high
@@ -404,12 +402,22 @@
     kind: call
     callee:
       name: Query
-  description: "Disabled \u2014 bare Query collides with LINQ/IQueryable.Query; enable\
-    \ only when Dapper import confirmed and first arg is string."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dapper query raw sql
+    code: |
+      using Dapper;
+      class App { void Test(string input) { Query(input); } }
+  - name: dapper query literal negative
+    code: |
+      using Dapper;
+      class App { void Test() { Query("select 1"); } }
+    expect_no_match: true
+  description: "Dapper Query(sql, ...) — raw SQL text remains injectable when built from attacker-controlled input; parameter objects only protect values."
 - id: csharp.sqli.dapper_execute
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: sql-injection
   severity: high
@@ -421,12 +429,22 @@
     kind: call
     callee:
       name: Execute
-  description: "Disabled \u2014 bare Execute is ubiquitous (Command, MediatR, etc.);\
-    \ rely on dedicated ADO.NET ExecuteNonQuery/Reader sinks."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dapper execute raw sql
+    code: |
+      using Dapper;
+      class App { void Test(string input) { Execute(input); } }
+  - name: dapper execute literal negative
+    code: |
+      using Dapper;
+      class App { void Test() { Execute("delete from sessions where expired = 1"); } }
+    expect_no_match: true
+  description: "Dapper Execute(sql, ...) — raw SQL text remains injectable when built from tainted input; Dapper parameters do not sanitize SQL syntax."
 - id: csharp.sqli.dapper_queryasync
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: csharp
   tag: sql-injection
   severity: high
@@ -438,12 +456,22 @@
     kind: call
     callee:
       name: QueryAsync
-  description: "Disabled \u2014 bare QueryAsync too broad; re-enable when Dapper import\
-    \ + string first arg can be constrained."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dapper queryasync raw sql
+    code: |
+      using Dapper;
+      class App { void Test(string input) { QueryAsync(input); } }
+  - name: dapper queryasync literal negative
+    code: |
+      using Dapper;
+      class App { void Test() { QueryAsync("select 1"); } }
+    expect_no_match: true
+  description: "Dapper QueryAsync(sql, ...) — async raw SQL query with tainted command text."
 - id: csharp.sqli.dapper_execute_async
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: csharp
   tag: sql-injection
   severity: high
@@ -455,7 +483,20 @@
     kind: call
     callee:
       name: ExecuteAsync
-  description: "Disabled \u2014 bare ExecuteAsync is ubiquitous outside Dapper."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: dapper executeasync raw sql
+    code: |
+      using Dapper;
+      class App { void Test(string input) { ExecuteAsync(input); } }
+  - name: dapper executeasync literal negative
+    code: |
+      using Dapper;
+      class App { void Test() { ExecuteAsync("delete from sessions where expired = 1"); } }
+    expect_no_match: true
+  description: "Dapper ExecuteAsync(sql, ...) — async raw SQL execution with tainted command text."
 - id: csharp.sqli.nhibernate_createsqlquery
   enabled: true
   language: csharp
@@ -727,7 +768,7 @@
   description: "EF Core DbSet.FromSql (legacy 2.x) \u2014 string-built variant; FromSqlInterpolated\
     \ is the safe form."
 - id: csharp.sqli.dapper_query_attr
-  enabled: false
+  enabled: true
   language: csharp
   tag: sql-injection
   severity: high
@@ -741,20 +782,23 @@
       attribute:
       - SqlMapper
       - Query
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: declared shape
-    code: 'using Dapper;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; SqlMapper.Query(input); } }
-
-      '
+    code: |
+      using Dapper;
+      class App { void Test(object conn, string input) { SqlMapper.Query(conn, input); } }
+  - name: literal sqlmapper query negative
+    code: |
+      using Dapper;
+      class App { void Test(object conn) { SqlMapper.Query(conn, "select 1"); } }
+    expect_no_match: true
   description: "Dapper SqlMapper.Query (extension call form) \u2014 flag when SQL\
     \ string is built from taint; parameter object should be used instead of concat."
-  disabled_reason:
-    code: over-broad
 - id: csharp.sqli.dapper_execute_attr
-  enabled: false
+  enabled: true
   language: csharp
   tag: sql-injection
   severity: high
@@ -768,17 +812,20 @@
       attribute:
       - SqlMapper
       - Execute
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: declared shape
-    code: 'using Dapper;
-
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic
-      amount = 1; SqlMapper.Execute(input); } }
-
-      '
-  description: Dapper SqlMapper.Execute (extension call form).
-  disabled_reason:
-    code: over-broad
+    code: |
+      using Dapper;
+      class App { void Test(object conn, string input) { SqlMapper.Execute(conn, input); } }
+  - name: literal sqlmapper execute negative
+    code: |
+      using Dapper;
+      class App { void Test(object conn) { SqlMapper.Execute(conn, "delete from sessions where expired = 1"); } }
+    expect_no_match: true
+  description: "Dapper SqlMapper.Execute(conn, sql, ...) extension call form — tainted SQL command text."
 - id: csharp.sqli.dapper_queryasync_attr
   enabled: true
   language: csharp

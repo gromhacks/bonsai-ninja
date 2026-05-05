@@ -1,0 +1,30 @@
+- id: erlang.race.gen_server_call_timeout
+  aliases:
+  - erlang.deser.gen_server_call_timeout
+  enabled: true
+  language: erlang
+  tag: timeout-bypass
+  severity: low
+  cwe: [CWE-400]
+  match:
+    kind: call
+    callee:
+      regex: "^gen_server:call$"
+  constraints:
+  - arg_tainted:
+      index: 2
+  match_examples:
+  - name: tainted gen server call timeout
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(Server, Input) ->
+        gen_server:call(Server, ping, Input).
+  - name: tainted gen server message negative
+    code: |
+      -module(example).
+      -export([test/2]).
+      test(Server, Input) ->
+        gen_server:call(Server, Input, 5000).
+    expect_no_match: true
+  description: "gen_server:call/3 with a tainted Timeout (especially infinity) can block the caller indefinitely; message taint alone is not this rule."

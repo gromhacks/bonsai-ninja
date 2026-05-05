@@ -12,6 +12,10 @@
     kind: call
     callee:
       attribute: [ngx, log]
+  constraints:
+  - arg_matches_regex:
+      index: 1
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key|\\n|\\r)'
   match_examples:
   - name: lua ngx log secret-shaped data
     code: |
@@ -20,4 +24,11 @@
         ngx.log(ngx.ERR, "token=", input)
       end
     expect_match_text: [ngx.log]
+  - name: lua ngx log ordinary value negative
+    code: |
+      local _openresty = require("openresty")
+      function example(input)
+        ngx.log(ngx.ERR, "user=", input)
+      end
+    expect_no_match: true
   description: "ngx.log with secret-shaped data — credentials or tokens can leak to nginx / OpenResty logs. Also covers merged aliases: lua.log_injection.ngx_log_newline."

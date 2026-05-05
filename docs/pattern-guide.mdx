@@ -292,6 +292,32 @@ Canonical states: `freed`, `closed`, `unlocked`, `cancelled`,
 findings on actual transition correlation rather than firing on
 the transition site alone.
 
+## Source Output Arguments
+
+Use `taint_semantics.source_output_args` for source APIs that write
+untrusted data into caller-owned output arguments instead of returning
+the untrusted value.
+
+```yaml
+- id: c.input.recv
+  enabled: true
+  language: c
+  trust: remote
+  tag: network-input
+  match:
+    kind: call
+    callee:
+      name: recv
+  taint_semantics:
+    source_output_args: [1]
+  description: "recv(fd, buf, len, flags) — remote bytes taint buf."
+```
+
+This is the right model for `recv`, `recvfrom`, `SSL_read`, FreeRTOS
+receive APIs, serial/SPI reads, and similar C/C++ out-buffer calls. Do
+not model these as ordinary call sources without `source_output_args`;
+that would also taint descriptors, lengths, flags, and handles.
+
 ## `kind: missing` walker
 
 ```yaml

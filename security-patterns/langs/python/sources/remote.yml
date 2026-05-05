@@ -41,7 +41,8 @@
 - id: python.aiohttp.request_cookies
   enabled: false
   disabled_reason:
-    code: requires-constraint
+    code: subsumed
+    subsumed_by: python.pyramid.request_cookies
   language: python
   trust: remote
   tag: http-input
@@ -53,11 +54,12 @@
     kind: read
     target:
       attribute: [request, cookies]
-  description: "Disabled — `request.cookies` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+  description: "Disabled duplicate — same request.cookies adapter fact as python.pyramid.request_cookies, which carries aiohttp/FastAPI/Flask/Starlette package metadata."
 - id: python.aiohttp.request_headers
   enabled: false
   disabled_reason:
-    code: requires-constraint
+    code: subsumed
+    subsumed_by: python.web.request_headers_get
   language: python
   trust: remote
   tag: http-input
@@ -69,7 +71,7 @@
     kind: read
     target:
       attribute: [request, headers]
-  description: "Disabled — `request.headers` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+  description: "Disabled duplicate — bare request.headers is too broad; python.web.request_headers_get covers keyed header reads across major frameworks."
 - id: python.tornado.request_body
   enabled: false
   disabled_reason:
@@ -132,7 +134,8 @@
 - id: python.django.request_body
   enabled: false
   disabled_reason:
-    code: requires-constraint
+    code: subsumed
+    subsumed_by: python.pyramid.request_body
   language: python
   trust: remote
   tag: http-input
@@ -143,7 +146,7 @@
     kind: read
     target:
       attribute: [request, body]
-  description: "Disabled — `request.body` also matches non-web request DTOs; needs framework/type-aware receiver matching."
+  description: "Disabled duplicate — same request.body adapter fact as python.pyramid.request_body, which carries Django/Pyramid/Bottle package metadata."
 - id: python.django.request_cookies
   enabled: true
   language: python

@@ -210,7 +210,7 @@ fn sdk_source_analysis_returns_structured_paths_without_cli_rendering() {
     let rules = write_sdk_rules(&root);
     std::fs::write(
         root.join("app.py"),
-        "import os\n\ndef handle(user):\n    run(user)\n\ndef run(cmd):\n    os.system(cmd)\n",
+        "import os\n\ndef handle(user, safe):\n    run(user)\n    clean(safe)\n\ndef run(cmd):\n    os.system(cmd)\n\ndef clean(cmd):\n    os.system(cmd)\n",
     )
     .expect("fixture");
 
@@ -232,6 +232,18 @@ fn sdk_source_analysis_returns_structured_paths_without_cli_rendering() {
             .iter()
             .any(|candidate| candidate.chain_names.iter().any(|name| name == "run")),
         "SDK source-analysis should expose structured chain paths: {:?}",
+        report
+            .candidates
+            .iter()
+            .map(|c| &c.chain_names)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.chain_names.iter().any(|name| name == "clean")),
+        "SDK source-analysis must not use broad entry seeds that make the unrelated safe branch look source-tainted: {:?}",
         report
             .candidates
             .iter()

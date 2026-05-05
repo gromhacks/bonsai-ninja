@@ -284,7 +284,7 @@
   description: "nunjucks.compile(tainted) \u2014 compiles attacker-controlled template\
     \ source."
 - id: javascript.template.nunjucks_render_template_source
-  enabled: false
+  enabled: true
   language: javascript
   tag: ssti
   severity: high
@@ -298,6 +298,9 @@
       attribute:
       - nunjucks
       - render
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: nunjucks render variable template
     code: "const _u = require(\"nunjucks\");\nfunction render(nunjucks, template)\
@@ -309,11 +312,13 @@
       \  return nunjucks.render(\"Hello {{ \" + body + \" }}\", {});\n}\n"
     expect_match_text:
     - nunjucks.render
+  - name: nunjucks render literal negative
+    code: "const _u = require(\"nunjucks\");\nfunction render(nunjucks) {\n  return\
+      \ nunjucks.render(\"safe.html\", {});\n}\n"
+    expect_no_match: true
   description: "nunjucks.render(templateSource, data) with variable or constructed\
     \ template names/source \u2014 audit for attacker-controlled template selection\
     \ or SSTI."
-  disabled_reason:
-    code: over-broad
 - id: javascript.template.dot_template
   enabled: true
   language: javascript

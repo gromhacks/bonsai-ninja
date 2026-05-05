@@ -189,15 +189,15 @@
     kind: call
     callee:
       name: sp_blocking_read
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
   - name: generated direct match
     code: |
       #include <libserialport.h>
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        sp_blocking_read(arg);
+        char buf[256];
+        sp_blocking_read(port, buf, sizeof(buf), 1000);
       }
   description: "sp_blocking_read — serial bytes from a connected device."
 
@@ -212,15 +212,15 @@
     kind: call
     callee:
       name: wiringPiSPIDataRW
+  taint_semantics:
+    source_output_args: [1]
   match_examples:
   - name: generated direct match
     code: |
       #include <wiringpi.h>
       void example() {
-        const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        wiringPiSPIDataRW(arg);
+        unsigned char data[16];
+        wiringPiSPIDataRW(0, data, sizeof(data));
       }
   description: "wiringPiSPIDataRW — SPI transfer reads peripheral response bytes."
 

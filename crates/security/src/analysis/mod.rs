@@ -23,8 +23,8 @@ use anyhow::Result;
 use bonsai_common::{FuncId, Precision, Span, SymbolId};
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_taint::{
-    CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig, TaintedCall, TaintedCallEdge,
-    TaintedCallKind, TokenSet,
+    CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig, SourceOutputArgs, TaintedCall,
+    TaintedCallEdge, TaintedCallKind, TokenSet,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -634,7 +634,19 @@ where
     filter_by_path(&mut source_hits, &options.files, &options.exclude_files);
     sort_matches(&mut source_hits);
 
+    let global = ws.db().global_index();
     let func_ids = function_ids_by_lang_file_name(ws);
+    let source_graph_config = InterTaintConfig {
+        sanitizers: TokenSet::default(),
+        budget: 256,
+        intra_worklist_cap: None,
+        source_bearing_functions: AHashSet::default(),
+        clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
+        source_output_args: source_output_args_from_rulepack(pack),
+        ..Default::default()
+    };
+    let mut source_graph_caches = InterTaintCaches::default();
+    let mut source_graphs: AHashMap<(FuncId, Vec<String>), EntryTaintGraph> = AHashMap::new();
     let mut candidates = Vec::new();
     let mut seen = AHashSet::new();
     on_progress(AnalysisProgress::PhaseStarted {
@@ -650,7 +662,25 @@ where
             on_progress(AnalysisProgress::PhaseTicked);
             continue;
         };
-        let graph = ws.dataflow().graph_for(start, ws.db());
+        let graph = global
+            .decl_of(SymbolId::new(start.raw()))
+            .map(|decl| {
+                let seeds = source_seed_set(pack, hit, decl);
+                let graph_key = (start, sorted_seed_key(&seeds));
+                source_graphs
+                    .entry(graph_key)
+                    .or_insert_with(|| {
+                        exact_source_seed_graph(
+                            start,
+                            &seeds,
+                            &source_graph_config,
+                            ws.db(),
+                            &mut source_graph_caches,
+                        )
+                    })
+                    .clone()
+            })
+            .unwrap_or_else(|| ws.dataflow().graph_for(start, ws.db()).as_ref().clone());
         let lineages = enumerate_tainted_source_lineages(&graph.call_records, start, 6, 24);
         if lineages.is_empty() && graph.call_records.is_empty() {
             let path = vec![start];
@@ -679,7 +709,7 @@ where
             continue;
         }
         if lineages.is_empty() {
-            for path in enumerate_tainted_source_paths(ws, start, 6, 24) {
+            for path in enumerate_tainted_source_paths(&graph.call_records, start, 6, 24) {
                 let Some(chain_names) = chain_names_for_path(ws, &path) else {
                     continue;
                 };
@@ -2515,13 +2545,12 @@ fn func_id_for_match(
 }
 
 fn enumerate_tainted_source_paths(
-    ws: &Workspace,
+    records: &[TaintedCallEdge],
     start: FuncId,
     max_extra: usize,
     max_paths: usize,
 ) -> Vec<Vec<FuncId>> {
-    let graph = ws.dataflow().graph_for(start, ws.db());
-    let edges = tainted_call_adjacency(&graph.call_records);
+    let edges = tainted_call_adjacency(records);
     let mut out = Vec::new();
     let mut stack = vec![(vec![start], 0usize)];
     while let Some((path, depth)) = stack.pop() {
@@ -3384,6 +3413,7 @@ where
         intra_worklist_cap,
         source_bearing_functions,
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
+        source_output_args: source_output_args_from_rulepack(pack),
         ..Default::default()
     };
     // Global ceiling on total interprocedural work across every
@@ -3735,21 +3765,29 @@ fn match_func_key(hit: &RuleMatch) -> Option<(String, String, String)> {
 fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Decl) -> TokenSet {
     let mut out = TokenSet::default();
     let is_inferred = src.rule_id.starts_with("entry-point.");
-    let is_param_rule = pack
-        .find_rule_by_id(&src.rule_id)
-        .is_some_and(|rule| rule.match_spec.kind == MatchKind::Param);
+    let rule = pack.find_rule_by_id(&src.rule_id);
+    let is_param_rule = rule.is_some_and(|rule| rule.match_spec.kind == MatchKind::Param);
+    let source_output_args = rule
+        .and_then(|rule| rule.taint_semantics.as_ref())
+        .map(|semantics| semantics.source_output_args.as_slice())
+        .unwrap_or(&[]);
     if is_inferred || is_param_rule {
         insert_taint_aliases(&mut out, &src.match_text);
         insert_descendant_taint_aliases(&mut out, &src.match_text);
     }
-    collect_source_seed_targets(&decl.flow_events, src, &mut out);
+    collect_source_seed_targets(&decl.flow_events, src, source_output_args, &mut out);
     if out.is_empty() {
         insert_taint_aliases(&mut out, &src.match_text);
     }
     out
 }
 
-fn collect_source_seed_targets(events: &[bonsai_lang_api::FlowEvent], src: &RuleMatch, out: &mut TokenSet) {
+fn collect_source_seed_targets(
+    events: &[bonsai_lang_api::FlowEvent],
+    src: &RuleMatch,
+    source_output_args: &[usize],
+    out: &mut TokenSet,
+) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
@@ -3774,6 +3812,10 @@ fn collect_source_seed_targets(events: &[bonsai_lang_api::FlowEvent], src: &Rule
                         .iter()
                         .any(|n| security_text_matches_source_strict(n, &src.match_text));
                 if span_contains(*span, src.span) || spans_overlap(*span, src.span) || source_text_matches {
+                    if !source_output_args.is_empty() {
+                        seed_source_output_text_args(out, source_call_args, source_output_args);
+                        continue;
+                    }
                     if !target.is_empty() {
                         insert_taint_aliases(out, target);
                     }
@@ -3848,6 +3890,10 @@ fn collect_source_seed_targets(events: &[bonsai_lang_api::FlowEvent], src: &Rule
                     || security_text_matches_source_strict(name, &src.match_text);
                 let _ = receiver;
                 if call_matches {
+                    if !source_output_args.is_empty() {
+                        seed_source_output_call_args(out, args, source_output_args);
+                        continue;
+                    }
                     for arg in args {
                         if let Some(place) = arg.place.as_deref() {
                             insert_taint_aliases(out, place);
@@ -3863,11 +3909,11 @@ fn collect_source_seed_targets(events: &[bonsai_lang_api::FlowEvent], src: &Rule
                 else_events,
                 ..
             } => {
-                collect_source_seed_targets(then_events, src, out);
-                collect_source_seed_targets(else_events, src, out);
+                collect_source_seed_targets(then_events, src, source_output_args, out);
+                collect_source_seed_targets(else_events, src, source_output_args, out);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_source_seed_targets(body, src, out);
+                collect_source_seed_targets(body, src, source_output_args, out);
             }
             FlowEvent::Try {
                 body,
@@ -3875,13 +3921,58 @@ fn collect_source_seed_targets(events: &[bonsai_lang_api::FlowEvent], src: &Rule
                 finally_events,
                 ..
             } => {
-                collect_source_seed_targets(body, src, out);
-                collect_source_seed_targets(catch_events, src, out);
-                collect_source_seed_targets(finally_events, src, out);
+                collect_source_seed_targets(body, src, source_output_args, out);
+                collect_source_seed_targets(catch_events, src, source_output_args, out);
+                collect_source_seed_targets(finally_events, src, source_output_args, out);
             }
             _ => {}
         }
     }
+}
+
+fn seed_source_output_text_args(out: &mut TokenSet, args: &[String], source_output_args: &[usize]) {
+    for &index in source_output_args {
+        let Some(text) = args.get(index).map(|value| value.trim()) else {
+            continue;
+        };
+        if text.is_empty() || source_seed_text_is_literal(text) {
+            continue;
+        }
+        insert_taint_aliases(out, text);
+        insert_descendant_taint_aliases(out, text);
+    }
+}
+
+fn seed_source_output_call_args(
+    out: &mut TokenSet,
+    args: &[bonsai_lang_api::CallArg],
+    source_output_args: &[usize],
+) {
+    for &index in source_output_args {
+        let Some(arg) = args.get(index) else {
+            continue;
+        };
+        let text = arg.place.as_deref().unwrap_or(arg.value_text.as_str()).trim();
+        if text.is_empty() || source_seed_text_is_literal(text) {
+            continue;
+        }
+        insert_taint_aliases(out, text);
+        insert_descendant_taint_aliases(out, text);
+    }
+}
+
+fn source_seed_text_is_literal(text: &str) -> bool {
+    let text = text.trim();
+    if text.len() < 2 {
+        return false;
+    }
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    let Some(last) = text.chars().last() else {
+        return false;
+    };
+    matches!(first, '"' | '\'' | '`') && first == last
 }
 
 fn seed_descendant_aliases_for_qualified_source_reads(
@@ -4373,6 +4464,29 @@ fn clean_output_overwrites_from_rulepack(pack: &Rulepack) -> Vec<CleanOutputOver
                 callee,
                 output_arg_index: semantics.output_arg_index,
                 value_start_arg_index: semantics.value_start_arg_index,
+            })
+        })
+        .collect()
+}
+
+fn source_output_args_from_rulepack(pack: &Rulepack) -> Vec<SourceOutputArgs> {
+    pack.all_rules()
+        .into_iter()
+        .filter(|rule| rule.enabled && rule.kind == RuleKind::Source)
+        .filter_map(|rule| {
+            let semantics = rule.taint_semantics.as_ref()?;
+            if semantics.source_output_args.is_empty() {
+                return None;
+            }
+            let callee = rule.match_spec.callee.as_ref().and_then(|target| {
+                target
+                    .name
+                    .clone()
+                    .or_else(|| target.attribute.as_ref().map(|parts| parts.join(".")))
+            })?;
+            Some(SourceOutputArgs {
+                callee,
+                output_arg_indices: semantics.source_output_args.clone(),
             })
         })
         .collect()

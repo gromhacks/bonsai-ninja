@@ -1,8 +1,6 @@
 # Java database-origin sources (JDBC / Hibernate).
 - id: java.jdbc.resultset_getstring
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: database
   tag: db-input
@@ -10,13 +8,23 @@
   match:
     kind: call
     callee:
-      attribute: [ResultSet, getString]
-  description: "Disabled — adapters index local receivers like `rs.getString`, not receiver types like `ResultSet.getString`."
+      name: getString
+  constraints:
+  - receiver_name_in: [rs, resultSet, results, row]
+  match_examples:
+  - name: ResultSet getString
+    code: |
+      import java.sql.*;
+      class App {
+        Object handle(ResultSet rs) throws Exception {
+          return rs.getString("name");
+        }
+      }
+    expect_match_text: [rs.getString]
+  description: "ResultSet.getString(...) on a result-set receiver — value read from the database boundary."
 
 - id: java.jdbc.resultset_getbytes
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: database
   tag: db-input
@@ -24,13 +32,23 @@
   match:
     kind: call
     callee:
-      attribute: [ResultSet, getBytes]
-  description: "Disabled — adapters index local receivers like `rs.getBytes`, not receiver types like `ResultSet.getBytes`."
+      name: getBytes
+  constraints:
+  - receiver_name_in: [rs, resultSet, results, row]
+  match_examples:
+  - name: ResultSet getBytes
+    code: |
+      import java.sql.*;
+      class App {
+        Object handle(ResultSet rs) throws Exception {
+          return rs.getBytes("blob");
+        }
+      }
+    expect_match_text: [rs.getBytes]
+  description: "ResultSet.getBytes(...) on a result-set receiver — binary value read from the database boundary."
 
 - id: java.hibernate.session_get
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: java
   trust: database
   tag: db-input
@@ -38,5 +56,18 @@
   match:
     kind: call
     callee:
-      attribute: [Session, get]
-  description: "Disabled — adapters index local receivers like `session.get`, not receiver types like `Session.get`."
+      name: get
+  constraints:
+  - receiver_name_in: [session, hibernateSession]
+  match_examples:
+  - name: Hibernate Session get
+    code: |
+      import org.hibernate.*;
+      class App {
+        Object handle(Session session, Object id) throws Exception {
+          return session.get(User.class, id);
+        }
+      }
+      class User {}
+    expect_match_text: [session.get]
+  description: "Hibernate Session.get(...) on a session receiver — entity data read from the database boundary."

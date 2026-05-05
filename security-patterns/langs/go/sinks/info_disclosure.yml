@@ -13,11 +13,22 @@
       attribute:
       - log
       - Printf
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: log printf secret
     code: "package main\nfunc example(secretToken string) {\n  log.Printf(\"token value\", secretToken)\n}\n"
     expect_match_text:
     - log.Printf
+  - name: log printf ordinary value negative
+    code: |
+      package main
+      func example(username string) {
+        log.Printf("user value", username)
+      }
+    expect_no_match: true
   description: "log.Printf(secret/token/password) — secret-shaped data written to application logs. Merged aliases: go.log_injection.log_printf_format, go.log_injection.log_printf_constant_format_arg."
   aliases:
   - go.log_injection.log_printf_format

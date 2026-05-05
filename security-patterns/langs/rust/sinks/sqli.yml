@@ -330,9 +330,7 @@
   imports:
   - sea_orm
 - id: rust.sqli.sea_orm_statement_from_sql_and_values
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: rust
   tag: sql-injection
   severity: medium
@@ -342,4 +340,22 @@
     kind: call
     callee:
       attribute: [Statement, from_sql_and_values]
-  description: "Disabled — from_sql_and_values takes parameter bindings; only the SQL-string argument (index 1) is dangerous if tainted, and the bound-value form is the documented safe path. Enable for audit when you need to flag dynamic SQL construction."
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: tainted sea-orm sql string
+    code: |
+      use sea_orm;
+      fn example(db: DbBackend) {
+          let target = "tainted";
+          Statement::from_sql_and_values(db, target, vec![]);
+      }
+  - name: literal sea-orm sql string negative
+    code: |
+      use sea_orm;
+      fn example(db: DbBackend, value: Value) {
+          Statement::from_sql_and_values(db, "SELECT * FROM users WHERE id = ?", vec![value]);
+      }
+    expect_no_match: true
+  description: "Statement::from_sql_and_values(db, tainted_sql, values) — bindings are safe, but a tainted SQL string at construction time is still raw dynamic SQL."

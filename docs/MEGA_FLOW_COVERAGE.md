@@ -49,21 +49,21 @@ scripts/validate-mega-cli.py --bin ./target/release/bonsai-ninja
 | dart       | 2        | handle_request → orchestrateAsync → orchestrate → persist → run → execute |
 | elixir     | 1        | main → orchestrate → persist → run → execute                   |
 | erlang     | 1        | handle_request → orchestrate → persist → run → execute         |
-| go         | 2        | handleRequest → Orchestrate → Persist → Run → Execute          |
+| go         | 1        | handleRequest → Orchestrate → Persist → Run → Execute          |
 | java       | 1        | handle → orchestrate → persist → run → execute                 |
-| javascript | 2        | handle_request → orchestrate → persist → run → execute         |
+| javascript | 1        | handle_request → orchestrate → persist → run → execute         |
 | kotlin     | 1        | handle → orchestrate → persist → run → execute                 |
 | lua        | 3        | handle_request → orchestrate → persist → run → execute         |
 | objc       | 2        | handle_request → orchestrate → persist → run → executeCmd      |
 | perl       | 1        | handle_request → orchestrate → StorePersist → persist → run → execute |
 | php        | 1        | handle_request → orchestrate → persist → run → execute         |
-| python     | 5        | handle_request → run_pipeline → orchestrate → persist → perform → execute |
+| python     | 2        | handle_request → run_pipeline → orchestrate → persist → perform → execute |
 | ruby       | 2        | handle_request → orchestrate → persist → run → execute         |
 | rust       | 1        | handle_request → orchestrate → persist → run → execute         |
 | scala      | 1        | handle → orchestrate → persist → run → execute                 |
-| solidity   | 5        | handle → orchestrate → persist                                 |
+| solidity   | 2        | handle → orchestrate → persist                                 |
 | swift      | 1        | handle_request → orchestrate → persist → run → execute         |
-| typescript | 2        | handle_request → orchestrate → persist → run → execute         |
+| typescript | 1        | handle_request → orchestrate → persist → run → execute         |
 
 ## What each fixture exercises
 

@@ -217,9 +217,7 @@
     code: "function demo(input, req, obj) {\n  return Math.random(input);\n}\n"
   description: "Math.random — non-cryptographic; flag in security-sensitive paths. TODO(only_when_packaged): JS Math global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Math', 'random']` match only."
 - id: javascript.crypto.bcrypt_low_rounds
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: javascript
   tag: weak-crypto
   severity: medium
@@ -234,4 +232,23 @@
       attribute:
       - bcrypt
       - hash
-  description: "Disabled — flag only when rounds < 10."
+  constraints:
+  - arg_lt:
+      index: 1
+      value: 10
+  match_examples:
+  - name: bcrypt low rounds
+    code: |
+      const bcrypt = require("bcrypt");
+      function hash(password) {
+        return bcrypt.hash(password, 4);
+      }
+    expect_match_text: [bcrypt.hash]
+  - name: bcrypt acceptable rounds negative
+    code: |
+      const bcrypt = require("bcrypt");
+      function hash(password) {
+        return bcrypt.hash(password, 12);
+      }
+    expect_no_match: true
+  description: "bcrypt.hash(password, rounds) with rounds < 10 — too cheap to compute; use an adequate work factor."

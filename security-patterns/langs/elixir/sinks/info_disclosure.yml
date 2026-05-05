@@ -10,6 +10,10 @@
     kind: call
     callee:
       attribute: [Logger, error]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: elixir logger error secret-shaped data
     code: |
@@ -20,6 +24,15 @@
         end
       end
     expect_match_text: [Logger.error]
+  - name: elixir logger ordinary error negative
+    code: |
+      alias Logger
+      defmodule App do
+        def test(user) do
+          Logger.error("user=#{user}")
+        end
+      end
+    expect_no_match: true
   description: "Logger.error with secret-shaped data — credentials or tokens can leak to application logs."
 
 - id: elixir.info_disclosure.plug_send_resp_error

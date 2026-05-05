@@ -23,7 +23,7 @@
     expect_no_match: true
   description: fopen with tainted path.
 - id: c.path.open
-  enabled: false
+  enabled: true
   language: c
   tag: path-traversal
   severity: high
@@ -33,12 +33,22 @@
     kind: call
     callee:
       name: open
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
-    code: "void example(void) {\n  char *arg = \"tainted\";\n  char *fmt = arg;\n  open(arg);\n}\n"
+  - name: tainted open path
+    code: |
+      void example(char *path) {
+        open(path, 0);
+      }
+  - name: literal open path negative
+    code: |
+      void example(void) {
+        open("/srv/files/readme.txt", 0);
+      }
+    expect_no_match: true
   description: "POSIX open(2) with tainted path — attacker-controlled paths can read or create arbitrary files on disk."
-  disabled_reason:
-    code: over-broad
 - id: c.path.openat
   enabled: true
   language: c

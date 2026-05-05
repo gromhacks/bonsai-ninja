@@ -292,7 +292,7 @@
       }\n"
   description: "resty client.R().Get(tainted URL) \u2014 fluent-client SSRF."
 - id: go.ssrf.req_get
-  enabled: false
+  enabled: true
   language: go
   tag: ssrf
   severity: high
@@ -306,14 +306,24 @@
       attribute:
       - req
       - Get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted imroc req get url
     code: "import \"github.com/imroc/req\"\npackage main\n\nfunc example() {\n  target\
       \ := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  req.Get(target)\n\
       }\n"
+  - name: literal imroc req get url negative
+    code: |
+      import "github.com/imroc/req"
+      package main
+
+      func example() {
+        req.Get("https://example.com/health")
+      }
+    expect_no_match: true
   description: imroc/req.Get(tainted URL).
-  disabled_reason:
-    code: over-broad
 - id: go.ssrf.fasthttp_do
   enabled: false
   language: go

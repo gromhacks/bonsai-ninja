@@ -9,6 +9,10 @@
     kind: call
     callee:
       regex: ^(slog|logger|log|app\.log)\.(info|warn|error|debug)$
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|`|\$\{|\\n|\\r)'
   match_examples:
   - name: app log info concat
     code: "function demo(app, body) {\n  return app.log.info(\"login failed: \" + body);\n}\n"
@@ -18,5 +22,11 @@
     code: "function demo(slog, body) {\n  return slog.info(`user=${body}`);\n}\n"
     expect_match_text:
     - slog.info
+  - name: structured logger ordinary value negative
+    code: |
+      function demo(logger, username) {
+        return logger.info(username);
+      }
+    expect_no_match: true
   description: "app.log.info/logger/slog with concatenated attacker text \u2014 control characters or forged prefixes can\
     \ corrupt audit logs."

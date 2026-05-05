@@ -10,6 +10,10 @@
     kind: call
     callee:
       attribute: [log, error]
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(secret|token|password|passwd|api[_-]?key|credential|private[_-]?key)'
   match_examples:
   - name: rust log error secret-shaped data
     code: |
@@ -19,6 +23,13 @@
           log::error("token={}", token);
       }
     expect_match_text: [log::error]
+  - name: rust log ordinary error negative
+    code: |
+      use log::dummy;
+      fn example(user: &str) {
+          log::error("user={}", user);
+      }
+    expect_no_match: true
   description: "log::error with secret-shaped data — credentials or tokens can leak to centralized logs."
 
 - id: rust.info_disclosure.eprintln_error
@@ -31,6 +42,10 @@
     kind: call
     callee:
       name: eprintln
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)(error|exception|stack|trace|backtrace|panic)'
   match_examples:
   - name: rust eprintln error details
     code: |
@@ -39,6 +54,12 @@
           eprintln("error: {}", err);
       }
     expect_match_text: [eprintln]
+  - name: rust eprintln ordinary negative
+    code: |
+      fn example(user: &str) {
+          eprintln("user: {}", user);
+      }
+    expect_no_match: true
   description: "eprintln!(error/backtrace) — diagnostic internals can leak through stderr logs."
 
 - id: rust.info_disclosure.actix_internal_server_error_body

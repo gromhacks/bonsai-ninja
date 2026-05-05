@@ -502,9 +502,7 @@
       }
   description: "http.FileServer(http.Dir(tainted)) — serves everything under a directory; attacker-chosen root = full traversal of that subtree."
 - id: go.path.filepath_walk
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: go
   tag: path-traversal
   severity: medium
@@ -514,7 +512,28 @@
     kind: call
     callee:
       attribute: [filepath, Walk]
-  description: "Disabled — Walk is safe unless the root is tainted; enable with a tainted-root constraint."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted filepath walk root
+    code: |
+      package main
+      import "path/filepath"
+
+      func list(root string) {
+        _ = filepath.Walk(root, nil)
+      }
+  - name: literal filepath walk root negative
+    code: |
+      package main
+      import "path/filepath"
+
+      func list() {
+        _ = filepath.Walk("/srv/files", nil)
+      }
+    expect_no_match: true
+  description: "filepath.Walk(tainted_root, ...) — recursively enumerates an attacker-chosen directory tree; traversal-sensitive when the root comes from a request or archive entry."
 - id: go.path.filepath_join
   enabled: true
   language: go

@@ -23,7 +23,10 @@
   description: "Disabled until state/return-value tracking exists — cow_multipart:form_data returns a client-supplied filename, but the sink is the later filesystem write using that returned name."
 
 - id: erlang.upload_file_write_client_filename
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: erlang.path.file_write_file
   language: erlang
   tag: file-upload
   severity: medium
@@ -50,7 +53,7 @@
       test() ->
         file:write_file("uploads/avatar.png", <<"upload">>).
     expect_no_match: true
-  description: "file:write_file with upload filename — writing multipart content to a client-controlled path enables traversal / overwrite."
+  description: "Disabled duplicate — covered by erlang.path.file_write_file, which carries this rule id as an alias to preserve upload-finding attribution while avoiding duplicate match shapes."
 
 - id: erlang.upload_file_copy_client_filename
   enabled: true

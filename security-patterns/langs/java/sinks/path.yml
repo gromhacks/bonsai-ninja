@@ -460,32 +460,45 @@
     expect_no_match: true
   description: "java.nio.file.Files.move(source, tainted_dest) \u2014 attacker-controlled destination path."
 - id: java.path.paths_get
-  enabled: false
+  enabled: true
   language: java
   tag: path-traversal
   severity: high
   cwe:
   - CWE-22
-  - CWE-918
+  packages:
+  - java.nio.file
+  imports:
+  - java.nio.file
   match:
     kind: call
     callee:
       attribute:
       - Paths
       - get
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated shape example
-    code: "import com.typesafe.play.*;\nclass App {\n  void handle(String input) throws\
-      \ Exception {\n    Paths.get(input);\n  }\n}\n"
-  description: "java.nio.file.Paths.get(tainted) \u2014 flag path construction. Merged\
-    \ collision aliases: java.ssrf.play_wsrequest_get."
-  aliases:
-  - java.ssrf.play_wsrequest_get
-  packages:
-  - com.typesafe.play
-  - play.libs.ws
-  disabled_reason:
-    code: over-broad
+  - name: java.nio.file Paths get tainted
+    code: |
+      import java.nio.file.*;
+      class App {
+        void handle(String input) throws Exception {
+          Paths.get(input);
+        }
+      }
+    expect_match_text: [Paths.get]
+  - name: java.nio.file Paths get literal negative
+    code: |
+      import java.nio.file.*;
+      class App {
+        void handle() throws Exception {
+          Paths.get("safe");
+        }
+      }
+    expect_no_match: true
+  description: "java.nio.file.Paths.get(tainted) — constructs a filesystem path from attacker-controlled input."
 - id: java.path.filesystem_getpath
   enabled: true
   language: java

@@ -26,8 +26,9 @@ source to sink also answers the questions developers ask every day:
   `dump-edges`, and `dump-taint`. The engine exposes its own facts, so
   you can see why it reached a conclusion.
 - **Run security at scale** with `security taint-analysis`. The same
-  dataflow used for navigation drives SARIF 2.1.0 findings with concrete
-  source-to-sink chains for review or CI gating.
+  analyzer engine that powers navigation builds source-specific taint
+  evidence for SARIF 2.1.0 findings, including concrete source-to-sink
+  chains for review or CI gating.
 
 One engine, one binary, one set of facts. Whatever role you are in, you
 are querying the same model of the codebase.
@@ -156,7 +157,7 @@ did not think of. Let us work together and see where it goes.
 ## Install
 
 ```sh
-git clone <this-repo>
+git clone https://github.com/gromhacks/bonsai-ninja.git
 cd bonsai-ninja
 cargo build --release
 ls target/release/bonsai-ninja
@@ -206,7 +207,12 @@ surface.
 
 `--format text` renders themed terminal output, `--format json` emits a
 stable machine-consumable schema, and `--format sarif` is available for
-security taint and source analysis.
+`security taint-analysis` findings.
+
+Text output names the evidence type directly: `inspect` renders generic
+`FLOW` call paths, `security source-analysis` renders `SOURCE FLOW`, and
+`security taint-analysis` renders `TAINT FLOW` with source, argument
+propagation, and sink annotations.
 
 Most review commands page by default:
 

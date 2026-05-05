@@ -215,6 +215,9 @@ The taint crate is layered:
   helpers.
 - `clean_output_overwrites: Vec<CleanOutputOverwrite>` — declarative
   overwrite shapes from adapters/rules.
+- `source_output_args: Vec<SourceOutputArgs>` — source calls whose
+  listed output arguments receive taint, such as C/C++ `recv` and
+  `SSL_read` buffers.
 - `callback_invocation_methods: AHashSet<String>` — method tails that
   invoke callable receivers.
 - `collection_append_methods: AHashSet<String>` — mutator method tails

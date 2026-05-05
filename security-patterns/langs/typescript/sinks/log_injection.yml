@@ -12,6 +12,9 @@
       regex: "^(slog|logger|log|app\\.log)\\.(info|warn|error|debug)$"
   constraints:
   - arg_tainted: {index: 0}
+  - arg_matches_regex:
+      index: 0
+      regex: '(\+|`|\$\{|\\n|\\r)'
   match_examples:
     - name: app log info concat
       code: |
