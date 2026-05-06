@@ -8,8 +8,8 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, SymbolId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent};
-use bonsai_resolve::{resolve_callable_with_context, resolve_class, ResolveContext};
+use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, TypeAliasBinding};
+use bonsai_resolve::{resolve_callable_with_context, resolve_class, visibility_allows, ResolveContext};
 use serde::{Deserialize, Serialize};
 
 /// What kind of dispatch produced a call edge. The resolver
@@ -180,7 +180,13 @@ impl ResolvedCallGraph {
         F: FnMut(FileId) -> AHashMap<String, String>,
         P: Fn(FileId) -> Option<String>,
     {
-        Self::build_with_file_info(global, aliases_for_file, path_for_file, |_| &[])
+        Self::build_with_file_info(
+            global,
+            aliases_for_file,
+            |_| AHashMap::new(),
+            path_for_file,
+            |_| &[],
+        )
     }
 
     /// Build with path and export-aliases callbacks. The aliases
@@ -189,20 +195,23 @@ impl ResolvedCallGraph {
     /// call graph uses the slice to expand a bare alias-tail into
     /// every fully-qualified shape that resolves to the same callee
     /// (e.g. JS/TS expose `exports.<n>` and `module.exports.<n>`).
-    pub fn build_with_file_info<F, P, L>(
+    pub fn build_with_file_info<F, T, P, L>(
         global: &GlobalIndex,
         mut aliases_for_file: F,
+        mut alias_targets_for_file: T,
         path_for_file: P,
         export_aliases_for_file: L,
     ) -> Self
     where
         F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
         P: Fn(FileId) -> Option<String>,
         L: Fn(FileId) -> &'static [&'static str],
     {
         let mut cg = CallGraph::new();
         for file in global.all_files() {
             let aliases = aliases_for_file(file);
+            let file_alias_targets = alias_targets_for_file(file);
             let export_aliases = export_aliases_for_file(file);
             for decl in global.decls_in(file) {
                 if !matches!(
@@ -212,13 +221,20 @@ impl ResolvedCallGraph {
                     continue;
                 }
                 let from = FuncId::new(decl.symbol.raw());
-                let local_bindings = collect_local_callable_bindings(&decl.flow_events, global, decl);
+                let alias_targets = alias_targets_for_decl(&file_alias_targets, decl);
+                let local_bindings = collect_local_callable_bindings_with_aliases(
+                    &decl.flow_events,
+                    global,
+                    decl,
+                    &alias_targets,
+                );
                 add_resolved_call_edges(
                     &decl.flow_events,
                     from,
                     decl,
                     global,
                     &aliases,
+                    &alias_targets,
                     &local_bindings,
                     &path_for_file,
                     export_aliases,
@@ -258,6 +274,7 @@ fn add_resolved_call_edges(
     caller_decl: &Decl,
     global: &GlobalIndex,
     aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     caller_export_aliases: &[&'static str],
@@ -283,13 +300,19 @@ fn add_resolved_call_edges(
                     candidates = collect_receiver_method_targets(
                         global,
                         caller_decl,
+                        alias_targets,
                         receiver.as_deref(),
                         *call_kind,
                         name,
                     );
                 }
                 if candidates.is_empty() {
-                    candidates = collect_callable_targets_with_context(global, name, caller_decl);
+                    candidates = collect_callable_targets_with_context_and_aliases(
+                        global,
+                        name,
+                        caller_decl,
+                        alias_targets,
+                    );
                 }
                 if candidates.is_empty() {
                     if let Some((alias_target, alias_tail)) = qualified_alias_target_tail(name, aliases) {
@@ -300,6 +323,7 @@ fn add_resolved_call_edges(
                             path_for_file,
                             caller_export_aliases,
                             caller_decl,
+                            alias_targets,
                         );
                     }
                 }
@@ -312,8 +336,12 @@ fn add_resolved_call_edges(
                     // run; only retry when alias rewriting produced
                     // a different name to look up.
                     if resolved_name != name.as_str() {
-                        candidates =
-                            collect_callable_targets_with_context(global, resolved_name, caller_decl);
+                        candidates = collect_callable_targets_with_context_and_aliases(
+                            global,
+                            resolved_name,
+                            caller_decl,
+                            alias_targets,
+                        );
                     }
                 }
                 if !candidates.is_empty() {
@@ -351,6 +379,7 @@ fn add_resolved_call_edges(
                     from,
                     caller_decl,
                     global,
+                    alias_targets,
                     local_bindings,
                     cg,
                 );
@@ -366,6 +395,7 @@ fn add_resolved_call_edges(
                     caller_decl,
                     global,
                     aliases,
+                    alias_targets,
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
@@ -377,6 +407,7 @@ fn add_resolved_call_edges(
                     caller_decl,
                     global,
                     aliases,
+                    alias_targets,
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
@@ -390,6 +421,7 @@ fn add_resolved_call_edges(
                     caller_decl,
                     global,
                     aliases,
+                    alias_targets,
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
@@ -408,6 +440,7 @@ fn add_resolved_call_edges(
                     caller_decl,
                     global,
                     aliases,
+                    alias_targets,
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
@@ -419,6 +452,7 @@ fn add_resolved_call_edges(
                     caller_decl,
                     global,
                     aliases,
+                    alias_targets,
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
@@ -430,6 +464,7 @@ fn add_resolved_call_edges(
                     caller_decl,
                     global,
                     aliases,
+                    alias_targets,
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
@@ -443,6 +478,7 @@ fn add_resolved_call_edges(
                     caller_decl,
                     global,
                     aliases,
+                    alias_targets,
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
@@ -462,6 +498,7 @@ fn add_receiver_callback_edges(
     from: FuncId,
     caller_decl: &Decl,
     global: &GlobalIndex,
+    alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     cg: &mut CallGraph,
 ) {
@@ -470,7 +507,13 @@ fn add_receiver_callback_edges(
     }
     let mut seen = AHashSet::new();
     for arg in args {
-        for to in resolve_callable_arg(global, local_bindings, &arg.value_text, caller_decl) {
+        for to in resolve_callable_arg(
+            global,
+            alias_targets,
+            local_bindings,
+            &arg.value_text,
+            caller_decl,
+        ) {
             if !seen.insert(to) {
                 continue;
             }
@@ -489,6 +532,7 @@ fn add_receiver_callback_edges(
 /// functions it could point at.
 fn resolve_callable_arg(
     global: &GlobalIndex,
+    alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     raw: &str,
     caller_decl: &Decl,
@@ -515,9 +559,11 @@ fn resolve_callable_arg(
         {
             return vec![local];
         }
-        let mut targets = collect_callable_targets_with_context(global, trimmed, caller_decl);
+        let mut targets =
+            collect_callable_targets_with_context_and_aliases(global, trimmed, caller_decl, alias_targets);
         if targets.is_empty() && short != trimmed {
-            targets = collect_callable_targets_with_context(global, short, caller_decl);
+            targets =
+                collect_callable_targets_with_context_and_aliases(global, short, caller_decl, alias_targets);
         }
         if !targets.is_empty() {
             return targets;
@@ -537,8 +583,18 @@ pub fn collect_local_callable_bindings(
     global: &GlobalIndex,
     caller_decl: &Decl,
 ) -> AHashMap<String, FuncId> {
+    let alias_targets = alias_targets_for_decl(&AHashMap::new(), caller_decl);
+    collect_local_callable_bindings_with_aliases(events, global, caller_decl, &alias_targets)
+}
+
+pub fn collect_local_callable_bindings_with_aliases(
+    events: &[FlowEvent],
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> AHashMap<String, FuncId> {
     let mut bindings = AHashMap::new();
-    collect_local_callable_bindings_into(events, global, caller_decl, &mut bindings);
+    collect_local_callable_bindings_into(events, global, caller_decl, alias_targets, &mut bindings);
     bindings
 }
 
@@ -546,6 +602,7 @@ fn collect_local_callable_bindings_into(
     events: &[FlowEvent],
     global: &GlobalIndex,
     caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
     bindings: &mut AHashMap<String, FuncId>,
 ) {
     for event in events {
@@ -564,11 +621,11 @@ fn collect_local_callable_bindings_into(
                 }
                 if let Some(sym) = source_name
                     .as_deref()
-                    .and_then(|name| resolve_callable_symbol(global, name, caller_decl))
+                    .and_then(|name| resolve_callable_symbol(global, name, caller_decl, alias_targets))
                     .or_else(|| {
-                        source_names
-                            .iter()
-                            .find_map(|name| resolve_callable_symbol(global, name, caller_decl))
+                        source_names.iter().find_map(|name| {
+                            resolve_callable_symbol(global, name, caller_decl, alias_targets)
+                        })
                     })
                 {
                     bindings.insert(target.clone(), sym);
@@ -579,11 +636,23 @@ fn collect_local_callable_bindings_into(
                 else_events,
                 ..
             } => {
-                collect_local_callable_bindings_into(then_events, global, caller_decl, bindings);
-                collect_local_callable_bindings_into(else_events, global, caller_decl, bindings);
+                collect_local_callable_bindings_into(
+                    then_events,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    bindings,
+                );
+                collect_local_callable_bindings_into(
+                    else_events,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    bindings,
+                );
             }
             FlowEvent::Loop { body, .. } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, bindings);
+                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, bindings);
             }
             FlowEvent::Try {
                 body,
@@ -591,12 +660,24 @@ fn collect_local_callable_bindings_into(
                 finally_events,
                 ..
             } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, bindings);
-                collect_local_callable_bindings_into(catch_events, global, caller_decl, bindings);
-                collect_local_callable_bindings_into(finally_events, global, caller_decl, bindings);
+                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, bindings);
+                collect_local_callable_bindings_into(
+                    catch_events,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    bindings,
+                );
+                collect_local_callable_bindings_into(
+                    finally_events,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    bindings,
+                );
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, bindings);
+                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, bindings);
             }
             _ => {}
         }
@@ -614,14 +695,19 @@ fn collect_local_callable_bindings_into(
 /// is `Visibility::Private` and the resolver filters by
 /// `decl_file == caller_file`. Returns `None` (sound under-
 /// approximation) when no candidate matches the caller's scope.
-fn resolve_callable_symbol(global: &GlobalIndex, raw: &str, caller_decl: &Decl) -> Option<FuncId> {
+fn resolve_callable_symbol(
+    global: &GlobalIndex,
+    raw: &str,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> Option<FuncId> {
     let variants = callable_reference_variants(raw);
     if variants.is_empty() {
         return None;
     }
     let caller_file = caller_decl_file(global, caller_decl)?;
     let caller_module = caller_decl.module_path.clone();
-    let ctx = ResolveContext::new(caller_file, &caller_module);
+    let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
     for variant in variants {
         let trimmed = variant.trim().trim_start_matches('&').trim_start_matches('*');
         if trimmed.is_empty() {
@@ -648,6 +734,7 @@ fn resolve_callable_symbol(global: &GlobalIndex, raw: &str, caller_decl: &Decl) 
 fn collect_receiver_method_targets(
     global: &GlobalIndex,
     caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
     receiver: Option<&str>,
     call_kind: CallKind,
     call_name: &str,
@@ -658,19 +745,33 @@ fn collect_receiver_method_targets(
     let Some(receiver) = receiver else {
         return Vec::new();
     };
-    let Some(receiver_type_from_type_aliases) = type_alias_for_receiver(caller_decl, receiver) else {
+    let receiver_types = receiver_type_names(caller_decl, alias_targets, receiver);
+    if receiver_types.is_empty() {
         return Vec::new();
-    };
+    }
     let method_name = short_callee(call_name);
     let caller_module = caller_decl.module_path.clone();
     // Without a known caller file we have nothing to narrow on, so
     // return empty rather than fan out to every workspace-wide
     // bare-name match.
-    let class_candidates: Vec<SymbolId> = if let Some(caller_file) = caller_decl_file(global, caller_decl) {
-        let ctx = ResolveContext::new(caller_file, &caller_module);
-        resolve_class(global, receiver_type_from_type_aliases, &ctx)
-    } else {
-        Vec::new()
+    let (class_candidates, ctx): (Vec<SymbolId>, Option<ResolveContext<'_>>) =
+        if let Some(caller_file) = caller_decl_file(global, caller_decl) {
+            let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
+            let mut seen = AHashSet::new();
+            let mut classes = Vec::new();
+            for receiver_type in receiver_types {
+                for class_sym in resolve_class(global, &receiver_type, &ctx) {
+                    if seen.insert(class_sym) {
+                        classes.push(class_sym);
+                    }
+                }
+            }
+            (classes, Some(ctx))
+        } else {
+            (Vec::new(), None)
+        };
+    let Some(ctx) = ctx.as_ref() else {
+        return Vec::new();
     };
     let mut targets = Vec::new();
     for class_sym in class_candidates {
@@ -691,6 +792,12 @@ fn collect_receiver_method_targets(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
             ) {
+                continue;
+            }
+            let Some(decl_file) = global.declaring_file(decl.symbol) else {
+                continue;
+            };
+            if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
                 continue;
             }
             // A method's parent link is the canonical signal; the
@@ -719,6 +826,65 @@ fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str
                 || alias.name == this_tail
         })
         .map(|alias| alias.type_name.as_str())
+}
+
+fn receiver_type_names(
+    decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    receiver: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(type_name) = type_alias_for_receiver(decl, receiver) {
+        push_unique_string(&mut out, type_name.to_string());
+    }
+    let normalized = normalize_receiver_alias_text(receiver);
+    let tail = short_callee(&normalized);
+    let self_tail = format!("self.{tail}");
+    let this_tail = format!("this.{tail}");
+    for key in [
+        receiver,
+        normalized.as_str(),
+        tail,
+        self_tail.as_str(),
+        this_tail.as_str(),
+    ] {
+        if let Some(AliasTarget::Type { type_name }) = alias_targets.get(key) {
+            push_unique_string(&mut out, type_name.clone());
+        }
+    }
+    out
+}
+
+fn alias_targets_for_decl(
+    file_alias_targets: &AHashMap<String, AliasTarget>,
+    decl: &Decl,
+) -> AHashMap<String, AliasTarget> {
+    let mut map = file_alias_targets.clone();
+    extend_alias_targets_with_declared_types(&mut map, &decl.type_aliases);
+    bonsai_lang_api::extend_alias_map_with_flow_events(&mut map, &decl.flow_events);
+    map
+}
+
+fn extend_alias_targets_with_declared_types(
+    alias_targets: &mut AHashMap<String, AliasTarget>,
+    type_aliases: &[TypeAliasBinding],
+) {
+    for alias in type_aliases {
+        if alias.name.is_empty() || alias.type_name.is_empty() {
+            continue;
+        }
+        alias_targets
+            .entry(alias.name.clone())
+            .or_insert_with(|| AliasTarget::Type {
+                type_name: alias.type_name.clone(),
+            });
+    }
+}
+
+fn push_unique_string(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
 }
 
 fn normalize_receiver_alias_text(receiver: &str) -> String {
@@ -773,6 +939,7 @@ fn collect_workspace_module_targets(
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     caller_export_aliases: &[&'static str],
     caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
 ) -> Vec<FuncId> {
     if alias_target.is_empty() || alias_tail.is_empty() {
         return Vec::new();
@@ -781,7 +948,9 @@ fn collect_workspace_module_targets(
     let mut targets = Vec::new();
     for func in export_name_variants(alias_tail, caller_export_aliases)
         .into_iter()
-        .flat_map(|name| collect_callable_targets_with_context(global, &name, caller_decl))
+        .flat_map(|name| {
+            collect_callable_targets_with_context_and_aliases(global, &name, caller_decl, alias_targets)
+        })
     {
         let sym = SymbolId::new(func.raw());
         let Some(file) = global.declaring_file(sym) else {
@@ -909,10 +1078,19 @@ pub fn collect_callable_targets_with_context(
     name: &str,
     caller_decl: &Decl,
 ) -> Vec<FuncId> {
+    collect_callable_targets_with_context_and_aliases(global, name, caller_decl, &AHashMap::new())
+}
+
+pub fn collect_callable_targets_with_context_and_aliases(
+    global: &GlobalIndex,
+    name: &str,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> Vec<FuncId> {
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
         return Vec::new();
     };
-    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path);
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
     let mut targets = resolve_callable_with_context(global, name, &ctx);
     if targets.is_empty() {
         if let Some(no_bang) = name.strip_suffix('!') {

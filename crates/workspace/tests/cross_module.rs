@@ -321,6 +321,70 @@ fn java_receiver_type_dispatch_prefers_caller_package_when_class_names_collide()
 }
 
 #[test]
+fn java_callgraph_receiver_type_from_constructor_prefers_caller_package() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_java::JavaAdapter::new()),
+        &[
+            (
+                "/w/aaa/Service.java",
+                "package aaa;\n\
+                 class Service {\n\
+                   void process(String token) { wrong(token); }\n\
+                   void wrong(String value) {}\n\
+                 }\n",
+            ),
+            (
+                "/w/app/Controller.java",
+                "package app;\n\
+                 class Controller {\n\
+                   void handle(String token) {\n\
+                     Service svc = new Service();\n\
+                     svc.process(token);\n\
+                   }\n\
+                 }\n",
+            ),
+            (
+                "/w/app/Service.java",
+                "package app;\n\
+                 class Service {\n\
+                   void process(String token) { right(token); }\n\
+                   void right(String value) {}\n\
+                 }\n",
+            ),
+        ],
+    );
+    let global = ws.db().global_index();
+    let handle = collect_callable_targets(&global, "handle")[0];
+    let process_in = |suffix: &str| {
+        global
+            .all_files()
+            .into_iter()
+            .flat_map(|file| global.decls_in(file).iter().cloned())
+            .find(|decl| {
+                decl.name == "process"
+                    && global
+                        .declaring_file(decl.symbol)
+                        .and_then(|file| ws.db().vfs().path(file).ok())
+                        .is_some_and(|path| path.to_string_lossy().ends_with(suffix))
+            })
+            .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+            .unwrap_or_else(|| panic!("missing process in {suffix}"))
+    };
+    let right = process_in("app/Service.java");
+    let wrong = process_in("aaa/Service.java");
+    let graph = ws.resolved_call_graph();
+    let callees: Vec<_> = graph.callees_of(handle).map(|edge| edge.to).collect();
+    assert!(
+        callees.contains(&right),
+        "callgraph did not resolve svc.process to app.Service.process; callees={callees:?}"
+    );
+    assert!(
+        !callees.contains(&wrong),
+        "callgraph should not choose lexically-first aaa.Service.process; callees={callees:?}"
+    );
+}
+
+#[test]
 fn c_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_c::CAdapter::new()),

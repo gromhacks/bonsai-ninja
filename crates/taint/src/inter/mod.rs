@@ -105,14 +105,14 @@ pub(super) use summary_impl::compute_function_summary;
 use summary_impl::{access_alias_keys, implicit_receiver_return_is_tainted, receiver_state_names_for_decl};
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_callgraph::{collect_local_callable_bindings, EdgeKind};
+use bonsai_callgraph::EdgeKind;
 use bonsai_common::{callable_reference_variants, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_db::AnalyzerDb;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::ModulePath;
-use bonsai_lang_api::{Decl, DeclKind, FlowEvent};
+use bonsai_lang_api::{AliasTarget, Decl, DeclKind, FlowEvent, TypeAliasBinding};
 use bonsai_resolve::{
-    alias_map_for_file, resolve_callable, resolve_callable_with_context, resolve_class, short_tail,
+    alias_map_for_file, resolve_callable_with_context, resolve_class, short_tail, visibility_allows,
     ResolveContext,
 };
 
@@ -194,6 +194,7 @@ pub struct SourceOutputArgs {
 #[derive(Clone, Debug, Default)]
 pub struct InterTaintCaches {
     aliases_by_file: AHashMap<FileId, AHashMap<String, String>>,
+    alias_targets_by_func: AHashMap<FuncId, AHashMap<String, AliasTarget>>,
     local_bindings_by_func: AHashMap<FuncId, AHashMap<String, FuncId>>,
     summaries_by_func: AHashMap<FuncId, FunctionSummary>,
 }
@@ -594,10 +595,22 @@ fn run_interprocedural_worklist(
             .entry(caller_file)
             .or_insert_with(|| alias_map_for_file(&db.imports_for(caller_file)))
             .clone();
+        let alias_targets = caches
+            .alias_targets_by_func
+            .entry(func)
+            .or_insert_with(|| alias_targets_for_decl(&db.imports_for(caller_file), &decl))
+            .clone();
         let mut local_bindings = caches
             .local_bindings_by_func
             .entry(func)
-            .or_insert_with(|| collect_local_callable_bindings(&decl.flow_events, &global, &decl))
+            .or_insert_with(|| {
+                bonsai_callgraph::collect_local_callable_bindings_with_aliases(
+                    &decl.flow_events,
+                    &global,
+                    &decl,
+                    &alias_targets,
+                )
+            })
             .clone();
         // Layer in dynamic callback-param bindings from the call
         // site that put us on the worklist. These take precedence
@@ -613,6 +626,7 @@ fn run_interprocedural_worklist(
             config,
             db,
             aliases: &aliases,
+            alias_targets: &alias_targets,
             local_bindings: &local_bindings,
             const_bindings: &const_bindings,
             worklist: &mut worklist,
@@ -647,6 +661,7 @@ struct PropagationCtx<'a> {
     config: &'a InterTaintConfig,
     db: &'a AnalyzerDb,
     aliases: &'a AHashMap<String, String>,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
     local_bindings: &'a AHashMap<String, FuncId>,
     const_bindings: &'a AHashMap<String, ConstValue>,
     worklist: &'a mut Vec<InterTaintWorkItem>,
@@ -673,6 +688,7 @@ fn propagate_taint_through_events(
                 ctx.config,
                 ctx.db,
                 ctx.aliases,
+                ctx.alias_targets,
                 ctx.local_bindings,
                 ctx.caller,
                 summary_cache,
@@ -685,6 +701,7 @@ fn propagate_taint_through_events(
                 ctx.config,
                 ctx.db,
                 ctx.aliases,
+                ctx.alias_targets,
                 ctx.local_bindings,
                 ctx.caller,
                 summary_cache,
@@ -853,6 +870,7 @@ fn propagate_taint_through_events(
                 ctx.config,
                 ctx.db,
                 ctx.aliases,
+                ctx.alias_targets,
                 ctx.local_bindings,
                 ctx.caller,
             ) {
@@ -1355,6 +1373,7 @@ fn propagate_call_event(
     let candidates = resolve_call_candidates_with_caller_at(
         name,
         ctx.aliases,
+        ctx.alias_targets,
         ctx.local_bindings,
         ctx.db,
         ctx.caller,
@@ -1489,6 +1508,7 @@ fn propagate_call_event(
                 let candidates = resolve_call_candidates_with_caller(
                     raw,
                     ctx.aliases,
+                    ctx.alias_targets,
                     ctx.local_bindings,
                     ctx.db,
                     ctx.caller,
@@ -1552,6 +1572,7 @@ fn propagate_receiver_taint_to_callback_args(
             callbacks = resolve_call_candidates_with_caller(
                 callback_name,
                 ctx.aliases,
+                ctx.alias_targets,
                 ctx.local_bindings,
                 ctx.db,
                 ctx.caller,
@@ -1833,10 +1854,22 @@ pub fn call_site_receives_taint_with_caches(
         .entry(file)
         .or_insert_with(|| alias_map_for_file(&db.imports_for(file)))
         .clone();
+    let alias_targets = caches
+        .alias_targets_by_func
+        .entry(func)
+        .or_insert_with(|| alias_targets_for_decl(&db.imports_for(file), &decl))
+        .clone();
     let local_bindings = caches
         .local_bindings_by_func
         .entry(func)
-        .or_insert_with(|| collect_local_callable_bindings(&decl.flow_events, &global, &decl))
+        .or_insert_with(|| {
+            bonsai_callgraph::collect_local_callable_bindings_with_aliases(
+                &decl.flow_events,
+                &global,
+                &decl,
+                &alias_targets,
+            )
+        })
         .clone();
     let const_bindings = AHashMap::new();
     let ctx = SinkWalkCtx {
@@ -1844,6 +1877,7 @@ pub fn call_site_receives_taint_with_caches(
         config,
         db,
         aliases: &aliases,
+        alias_targets: &alias_targets,
         local_bindings: &local_bindings,
         const_bindings: &const_bindings,
         caller: func,
@@ -1862,6 +1896,7 @@ struct SinkWalkCtx<'a> {
     config: &'a InterTaintConfig,
     db: &'a AnalyzerDb,
     aliases: &'a AHashMap<String, String>,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
     local_bindings: &'a AHashMap<String, FuncId>,
     const_bindings: &'a AHashMap<String, ConstValue>,
     caller: FuncId,
@@ -1884,6 +1919,7 @@ fn walk_events_for_sink(
                 ctx.config,
                 ctx.db,
                 ctx.aliases,
+                ctx.alias_targets,
                 ctx.local_bindings,
                 ctx.caller,
                 summary_cache,
@@ -1896,6 +1932,7 @@ fn walk_events_for_sink(
                 ctx.config,
                 ctx.db,
                 ctx.aliases,
+                ctx.alias_targets,
                 ctx.local_bindings,
                 ctx.caller,
                 summary_cache,
@@ -1995,6 +2032,7 @@ fn walk_events_for_sink(
                 let candidates = resolve_call_candidates_with_caller(
                     name,
                     ctx.aliases,
+                    ctx.alias_targets,
                     ctx.local_bindings,
                     ctx.db,
                     ctx.caller,
@@ -2015,6 +2053,7 @@ fn walk_events_for_sink(
                 ctx.config,
                 ctx.db,
                 ctx.aliases,
+                ctx.alias_targets,
                 ctx.local_bindings,
                 ctx.caller,
             ) {
@@ -2286,6 +2325,7 @@ fn apply_return_taint(
     config: &InterTaintConfig,
     db: &AnalyzerDb,
     aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     caller: FuncId,
     summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
@@ -2314,6 +2354,7 @@ fn apply_return_taint(
     let candidates = resolve_call_candidates_with_caller_at(
         callee_name,
         aliases,
+        alias_targets,
         local_bindings,
         db,
         caller,
@@ -2324,7 +2365,7 @@ fn apply_return_taint(
         .iter()
         .any(|arg| arg_text_is_tainted(arg, state) || actual_has_descendant_taint(arg, state));
     let has_named_field_args = source_call_args_have_named_fields(effective_source_call_args);
-    let constructs_container = class_like_constructor_call(callee_name, db, caller)
+    let constructs_container = class_like_constructor_call(callee_name, db, caller, alias_targets)
         || (has_named_field_args && call_name_looks_type_constructor(callee_name))
         || candidates.iter().any(|candidate| {
             global
@@ -2768,12 +2809,18 @@ fn split_top_level(text: &str, delimiter: char) -> Vec<String> {
     out
 }
 
-fn class_like_constructor_call(callee_name: &str, db: &AnalyzerDb, caller: FuncId) -> bool {
+fn class_like_constructor_call(
+    callee_name: &str,
+    db: &AnalyzerDb,
+    caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> bool {
     let global = db.global_index();
     let Some(caller_decl) = global.decl_of(SymbolId::new(caller.raw())) else {
         return false;
     };
-    let ctx = ResolveContext::new(caller_decl.span.file, &caller_decl.module_path);
+    let ctx =
+        ResolveContext::new(caller_decl.span.file, &caller_decl.module_path).with_alias_map(alias_targets);
     if !resolve_class(&global, callee_name, &ctx).is_empty() {
         return true;
     }
@@ -2786,6 +2833,7 @@ fn resolved_source_call_assignment(
     config: &InterTaintConfig,
     db: &AnalyzerDb,
     aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     caller: FuncId,
 ) -> bool {
@@ -2800,7 +2848,16 @@ fn resolved_source_call_assignment(
     if target.is_empty() {
         return false;
     }
-    !resolve_call_candidates_with_caller(callee_name, aliases, local_bindings, db, caller, config).is_empty()
+    !resolve_call_candidates_with_caller(
+        callee_name,
+        aliases,
+        alias_targets,
+        local_bindings,
+        db,
+        caller,
+        config,
+    )
+    .is_empty()
 }
 
 /// Apply state changes that follow an unresolved call when one of
@@ -3253,17 +3310,28 @@ struct ResolvedCallee {
 fn resolve_call_candidates_with_caller(
     name: &str,
     aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     db: &AnalyzerDb,
     caller: FuncId,
     config: &InterTaintConfig,
 ) -> Vec<ResolvedCallee> {
-    resolve_call_candidates_with_caller_at(name, aliases, local_bindings, db, caller, None, config)
+    resolve_call_candidates_with_caller_at(
+        name,
+        aliases,
+        alias_targets,
+        local_bindings,
+        db,
+        caller,
+        None,
+        config,
+    )
 }
 
 fn resolve_call_candidates_with_caller_at(
     name: &str,
     aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     db: &AnalyzerDb,
     caller: FuncId,
@@ -3293,7 +3361,7 @@ fn resolve_call_candidates_with_caller_at(
             let targets = if is_super_receiver(&receiver) {
                 resolve_super_method_candidates(db, caller, tail)
             } else {
-                resolve_receiver_method_candidates(db, caller, &receiver, tail, call_span)
+                resolve_receiver_method_candidates(db, caller, alias_targets, &receiver, tail, call_span)
             };
             if !targets.is_empty() {
                 return targets
@@ -3319,7 +3387,7 @@ fn resolve_call_candidates_with_caller_at(
             }
         }
     }
-    resolve_call_candidates(name, aliases, db, Some(caller))
+    resolve_call_candidates(name, aliases, alias_targets, db, Some(caller))
 }
 
 fn local_binding_is_callable_value(db: &AnalyzerDb, func: FuncId) -> bool {
@@ -3332,6 +3400,7 @@ fn local_binding_is_callable_value(db: &AnalyzerDb, func: FuncId) -> bool {
 fn resolve_receiver_method_candidates(
     db: &AnalyzerDb,
     caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
     receiver: &str,
     method_name: &str,
     call_span: Option<Span>,
@@ -3347,7 +3416,11 @@ fn resolve_receiver_method_candidates(
     if let Some(type_name) = type_alias_for_receiver(caller_decl, receiver) {
         push_unique_string(&mut type_names, type_name);
     }
-    for type_name in inferred_receiver_type_names(caller_decl, receiver, call_span, db, caller) {
+    for type_name in type_alias_targets_for_receiver(alias_targets, receiver) {
+        push_unique_string(&mut type_names, type_name);
+    }
+    for type_name in inferred_receiver_type_names(caller_decl, receiver, call_span, db, caller, alias_targets)
+    {
         push_unique_string(&mut type_names, type_name);
     }
     let normalized_receiver = normalise_qualified_text(receiver);
@@ -3371,12 +3444,19 @@ fn resolve_receiver_method_candidates(
     // caller visibility and (when adapters populate it) module_path.
     // Per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
     let caller_module = caller_decl.module_path.clone();
-    let class_ctx = ResolveContext::new(caller_file, &caller_module);
+    let class_ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
     let mut out = Vec::new();
     let mut seen = AHashSet::new();
     for type_name in type_names {
         for class_sym in resolve_class(&global, &type_name, &class_ctx) {
-            collect_method_candidates_for_class(&global, class_sym, method_name, &mut seen, &mut out);
+            collect_method_candidates_for_class(
+                &global,
+                class_sym,
+                method_name,
+                &class_ctx,
+                &mut seen,
+                &mut out,
+            );
         }
     }
     out
@@ -3401,6 +3481,33 @@ fn type_alias_for_receiver(decl: &Decl, receiver: &str) -> Option<String> {
                 || alias.name == this_tail
         })
         .map(|alias| alias.type_name.clone())
+}
+
+fn type_alias_targets_for_receiver(
+    alias_targets: &AHashMap<String, AliasTarget>,
+    receiver: &str,
+) -> Vec<String> {
+    let normalized = normalise_qualified_text(receiver)
+        .trim_start_matches(['&', '*'])
+        .trim()
+        .trim_matches('.')
+        .to_string();
+    let tail = short_tail(&normalized);
+    let self_tail = format!("self.{tail}");
+    let this_tail = format!("this.{tail}");
+    let mut out = Vec::new();
+    for key in [
+        receiver,
+        normalized.as_str(),
+        tail,
+        self_tail.as_str(),
+        this_tail.as_str(),
+    ] {
+        if let Some(AliasTarget::Type { type_name }) = alias_targets.get(key) {
+            push_unique_string(&mut out, type_name.clone());
+        }
+    }
+    out
 }
 
 fn receiver_projects_implicit_receiver(receiver: &str) -> bool {
@@ -3438,7 +3545,7 @@ fn resolve_super_method_candidates(db: &AnalyzerDb, caller: FuncId, method_name:
     let mut seen = AHashSet::new();
     for base in &class_decl.bases {
         for class_sym in resolve_class(&global, base, &ctx) {
-            collect_method_candidates_for_class(&global, class_sym, method_name, &mut seen, &mut out);
+            collect_method_candidates_for_class(&global, class_sym, method_name, &ctx, &mut seen, &mut out);
         }
     }
     out
@@ -3448,6 +3555,7 @@ fn collect_method_candidates_for_class(
     global: &GlobalIndex,
     class_sym: SymbolId,
     method_name: &str,
+    ctx: &ResolveContext<'_>,
     seen: &mut AHashSet<SymbolId>,
     out: &mut Vec<FuncId>,
 ) {
@@ -3471,6 +3579,12 @@ fn collect_method_candidates_for_class(
             decl.kind,
             DeclKind::Function | DeclKind::Method | DeclKind::Constructor
         ) {
+            continue;
+        }
+        let Some(decl_file) = global.declaring_file(decl.symbol) else {
+            continue;
+        };
+        if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
             continue;
         }
         if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
@@ -3510,6 +3624,7 @@ fn inferred_receiver_type_names(
     call_span: Option<Span>,
     db: &AnalyzerDb,
     caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
 ) -> Vec<String> {
     let mut out = Vec::new();
     collect_receiver_type_names_from_events(
@@ -3518,6 +3633,7 @@ fn inferred_receiver_type_names(
         call_span,
         db,
         caller,
+        alias_targets,
         &mut out,
     );
     out
@@ -3529,6 +3645,7 @@ fn collect_receiver_type_names_from_events(
     call_span: Option<Span>,
     db: &AnalyzerDb,
     caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
     out: &mut Vec<String>,
 ) {
     let receiver = normalise_target_text(receiver);
@@ -3557,14 +3674,14 @@ fn collect_receiver_type_names_from_events(
                     if candidate.is_empty() || !call_name_looks_type_constructor(&candidate) {
                         for token in identifier_tokens_outside_strings(&candidate) {
                             if call_name_looks_type_constructor(&token)
-                                && class_like_constructor_call(&token, db, caller)
+                                && class_like_constructor_call(&token, db, caller, alias_targets)
                             {
                                 push_unique_string(out, short_tail(&token).to_string());
                             }
                         }
                         continue;
                     }
-                    if class_like_constructor_call(&candidate, db, caller) {
+                    if class_like_constructor_call(&candidate, db, caller, alias_targets) {
                         push_unique_string(out, short_tail(&candidate).to_string());
                     }
                 }
@@ -3574,11 +3691,35 @@ fn collect_receiver_type_names_from_events(
                 else_events,
                 ..
             } => {
-                collect_receiver_type_names_from_events(then_events, &receiver, call_span, db, caller, out);
-                collect_receiver_type_names_from_events(else_events, &receiver, call_span, db, caller, out);
+                collect_receiver_type_names_from_events(
+                    then_events,
+                    &receiver,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_receiver_type_names_from_events(
+                    else_events,
+                    &receiver,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_receiver_type_names_from_events(body, &receiver, call_span, db, caller, out);
+                collect_receiver_type_names_from_events(
+                    body,
+                    &receiver,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
             }
             FlowEvent::Try {
                 body,
@@ -3586,14 +3727,31 @@ fn collect_receiver_type_names_from_events(
                 finally_events,
                 ..
             } => {
-                collect_receiver_type_names_from_events(body, &receiver, call_span, db, caller, out);
-                collect_receiver_type_names_from_events(catch_events, &receiver, call_span, db, caller, out);
+                collect_receiver_type_names_from_events(
+                    body,
+                    &receiver,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_receiver_type_names_from_events(
+                    catch_events,
+                    &receiver,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
                 collect_receiver_type_names_from_events(
                     finally_events,
                     &receiver,
                     call_span,
                     db,
                     caller,
+                    alias_targets,
                     out,
                 );
             }
@@ -3608,12 +3766,39 @@ pub(super) fn push_unique_string(out: &mut Vec<String>, value: String) {
     }
 }
 
+fn alias_targets_for_decl(
+    imports: &[bonsai_lang_api::ImportSpec],
+    decl: &Decl,
+) -> AHashMap<String, AliasTarget> {
+    let mut map: AHashMap<String, AliasTarget> = bonsai_lang_api::alias_map_from_import_specs(imports)
+        .into_iter()
+        .collect();
+    extend_alias_targets_with_declared_types(&mut map, &decl.type_aliases);
+    bonsai_lang_api::extend_alias_map_with_flow_events(&mut map, &decl.flow_events);
+    map
+}
+
+fn extend_alias_targets_with_declared_types(
+    alias_targets: &mut AHashMap<String, AliasTarget>,
+    type_aliases: &[TypeAliasBinding],
+) {
+    for alias in type_aliases {
+        if alias.name.is_empty() || alias.type_name.is_empty() {
+            continue;
+        }
+        alias_targets
+            .entry(alias.name.clone())
+            .or_insert_with(|| AliasTarget::Type {
+                type_name: alias.type_name.clone(),
+            });
+    }
+}
+
 /// Caller-side resolve context derived from `caller`. Returns the
 /// caller's declaring file and a borrow into its `Decl.module_path`,
 /// which the resolver consults for visibility filtering. When the
-/// caller decl has not been indexed yet, returns `None` and call
-/// sites should fall back to bare-name resolution as a transitional
-/// step (this happens during early indexing only).
+/// caller decl has not been indexed yet, callers must return no edge
+/// rather than falling back to a workspace-wide bare-name lookup.
 fn caller_resolve_context_data(db: &AnalyzerDb, caller: FuncId) -> Option<(FileId, ModulePath)> {
     let global = db.global_index();
     let sym = SymbolId::new(caller.raw());
@@ -3638,6 +3823,7 @@ fn caller_resolve_context_data(db: &AnalyzerDb, caller: FuncId) -> Option<(FileI
 fn resolve_call_candidates(
     name: &str,
     aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
     db: &AnalyzerDb,
     caller: Option<FuncId>,
 ) -> Vec<ResolvedCallee> {
@@ -3646,12 +3832,11 @@ fn resolve_call_candidates(
     let lookup_name = if normalised.is_empty() { name } else { &normalised };
     let caller_ctx = caller.and_then(|c| caller_resolve_context_data(db, c));
     let lookup = |needle: &str| -> Vec<FuncId> {
-        if let Some((caller_file, caller_module)) = &caller_ctx {
-            let ctx = ResolveContext::new(*caller_file, caller_module);
-            resolve_callable_with_context(&global, needle, &ctx)
-        } else {
-            resolve_callable(&global, needle)
-        }
+        let Some((caller_file, caller_module)) = &caller_ctx else {
+            return Vec::new();
+        };
+        let ctx = ResolveContext::new(*caller_file, caller_module).with_alias_map(alias_targets);
+        resolve_callable_with_context(&global, needle, &ctx)
     };
     let mut candidates = lookup(lookup_name);
     if !candidates.is_empty() {
@@ -3720,7 +3905,8 @@ fn resolve_call_candidates(
             // Pass the caller's resolve context so workspace-module
             // export resolution narrows by Visibility / module_path —
             // per docs/contributing/design-patterns.mdx::Semantic Resolution Always.
-            candidates = resolve_workspace_module_targets(db, target, alias_tail, caller_ctx.as_ref());
+            candidates =
+                resolve_workspace_module_targets(db, target, alias_tail, caller_ctx.as_ref(), alias_targets);
         }
         // Self-binding aliases (e.g. Go `import "fmt"` →
         // alias_target `fmt`, alias_head `fmt`) and path-style
@@ -3860,6 +4046,7 @@ fn resolve_workspace_module_targets(
     alias_target: &str,
     alias_tail: &str,
     caller_ctx: Option<&(FileId, ModulePath)>,
+    alias_targets: &AHashMap<String, AliasTarget>,
 ) -> Vec<FuncId> {
     if alias_target.is_empty() || alias_tail.is_empty() {
         return Vec::new();
@@ -3867,18 +4054,15 @@ fn resolve_workspace_module_targets(
     let global = db.global_index();
     let mut seen_spans = AHashSet::new();
     let mut out = Vec::new();
-    // Per docs/contributing/design-patterns.mdx::Semantic Resolution Always: when
-    // we have caller context, narrow by Visibility / module_path.
-    // When the call is being resolved before any caller is known
-    // (worklist seeding) the legacy bare-name path is the documented
-    // fallback per `resolve_callable`'s docstring.
+    // Per docs/contributing/design-patterns.mdx::Semantic Resolution Always:
+    // no caller context means no edge. Falling back to bare-name
+    // lookup can stitch together unrelated workspace functions.
     let resolve = |name: &str| -> Vec<FuncId> {
-        if let Some((caller_file, caller_module)) = caller_ctx {
-            let ctx = ResolveContext::new(*caller_file, caller_module);
-            resolve_callable_with_context(&global, name, &ctx)
-        } else {
-            resolve_callable(&global, name)
-        }
+        let Some((caller_file, caller_module)) = caller_ctx else {
+            return Vec::new();
+        };
+        let ctx = ResolveContext::new(*caller_file, caller_module).with_alias_map(alias_targets);
+        resolve_callable_with_context(&global, name, &ctx)
     };
     for func in export_name_variants(alias_tail)
         .into_iter()

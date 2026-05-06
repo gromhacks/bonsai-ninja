@@ -8,8 +8,14 @@ use bonsai_workspace::Workspace;
 use std::sync::Arc;
 
 fn workspace(path: &str, source: &str) -> Workspace {
+    workspace_multi(&[(path, source)])
+}
+
+fn workspace_multi(files: &[(&str, &str)]) -> Workspace {
     let ws = Workspace::new(bonsai_adapters::all_languages_registry());
-    ws.vfs().write(path.to_string(), Arc::<str>::from(source));
+    for (path, source) in files {
+        ws.vfs().write((*path).to_string(), Arc::<str>::from(*source));
+    }
     for file in ws.vfs().all_files() {
         let _ = ws.db().decl_index(file);
         let _ = ws.db().import_index(file);
@@ -339,6 +345,84 @@ class App {
             .iter()
             .any(|finding| finding.finding.sink.rule_id == "java.test.processbuilder_start"),
         "tainted list element should flow through command(argList) into pb.start(); findings={:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn java_constructor_receiver_dispatch_uses_caller_context_in_taint() {
+    let ws = workspace_multi(&[
+        (
+            "app/Controller.java",
+            r#"
+package app;
+
+class Controller {
+    void handle(String input) throws Exception {
+        Service svc = new Service();
+        svc.process(input);
+    }
+}
+"#,
+        ),
+        (
+            "app/Service.java",
+            r#"
+package app;
+
+class Service {
+    void process(String cmd) throws Exception {
+        Runtime.getRuntime().exec(cmd);
+    }
+}
+"#,
+        ),
+        (
+            "aaa/Service.java",
+            r#"
+package aaa;
+
+class Service {
+    void process(String cmd) throws Exception {
+        safe(cmd);
+    }
+    void safe(String value) {}
+}
+"#,
+        ),
+    ]);
+    let mut sink = call_regex_rule(
+        "java",
+        "java.test.runtime_exec",
+        "command-injection",
+        r"(^|[.])exec$",
+    );
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    let pack = pack_for("java", vec![sink]);
+
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
+    let hits: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.finding.sink.rule_id == "java.test.runtime_exec")
+        .collect();
+    assert_eq!(hits.len(), 1, "{:#?}", report.findings);
+    assert!(
+        hits[0].finding.sink.file.ends_with("app/Service.java"),
+        "taint must dispatch to app.Service.process, not aaa.Service.process: {:#?}",
         report.findings
     );
 }
