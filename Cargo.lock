@@ -586,7 +586,10 @@ name = "bonsai_lang_solidity"
 version = "0.1.0"
 dependencies = [
  "bonsai_common",
+ "bonsai_diagnostics",
  "bonsai_lang_api",
+ "bonsai_vfs",
+ "parking_lot",
  "tree-sitter",
 ]
 

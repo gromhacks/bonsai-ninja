@@ -625,6 +625,65 @@ def a(): sink()
 }
 
 #[test]
+fn precise_suffix_survives_imprecise_incoming_parent() {
+    let ws = ws_with_python(
+        r"
+class Runner:
+    def execute(self, value):
+        sink(value)
+
+class Loader:
+    def load(self, value):
+        runner = Runner()
+        return runner.execute(value)
+
+def load_model(value):
+    loader = Loader()
+    return loader.load(value)
+
+class Other:
+    def load_model(self, value):
+        return value
+
+def predict(obj, value):
+    return obj.load_model(value)
+",
+    );
+    let global = ws.db().global_index();
+    let execute = func_id(&ws, "execute");
+    let entry = collect_callable_targets(&global, "load_model")
+        .into_iter()
+        .find(|func| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                .is_some_and(|decl| decl.parent.is_none())
+        })
+        .expect("top-level load_model");
+    let loader_load = collect_callable_targets(&global, "load")
+        .into_iter()
+        .find(|func| {
+            global
+                .decl_of(bonsai_common::SymbolId::new(func.raw()))
+                .and_then(|decl| decl.parent)
+                .and_then(|parent| global.decl_of(parent))
+                .is_some_and(|parent| parent.name == "Loader")
+        })
+        .expect("Loader.load");
+
+    let (chains, _trunc) = enumerate_chains_resolved(&ws.resolved_call_graph(), execute, 64, 64);
+    assert!(
+        chains.iter().any(|chain| {
+            chain.funcs == vec![entry, loader_load, execute]
+                && matches!(
+                    chain.precision,
+                    bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed
+                )
+        }),
+        "expected precise suffix load_model -> Loader.load -> Runner.execute despite imprecise predict -> load_model parent; chains={chains:#?}"
+    );
+}
+
+#[test]
 fn small_cap_matches_large_cap_for_chains() {
     let ws = ws_with_python(FIXTURE);
     let mut tight = ChainCache::new(&ws);

@@ -432,7 +432,7 @@ fn enumerate_chains(
     // breaking the documented "paste from browse into inspect"
     // contract.
     let mut emitted_chains: ahash::AHashSet<Vec<FuncId>> = ahash::AHashSet::new();
-    while let Some((path_rev, path_set, _prec)) = stack.pop() {
+    while let Some((path_rev, path_set, prec)) = stack.pop() {
         if results.len() >= max_chains {
             truncated = true;
             break;
@@ -447,6 +447,7 @@ fn enumerate_chains(
         };
         let callers: Vec<_> = cg.callers_of(tip).collect();
         let mut pushed_any_parent = false;
+        let mut pushed_precise_parent = false;
         for edge in callers {
             if path_set.contains(&edge.from) {
                 continue; // skip cycle edge; emit only if ALL parents cycle
@@ -455,18 +456,29 @@ fn enumerate_chains(
             extended.push(edge.from);
             let mut next_set = path_set.clone();
             next_set.insert(edge.from);
-            stack.push((extended, next_set, Precision::Exact));
+            let next_prec = prec.meet(edge.precision);
+            if is_precise_chain(next_prec) {
+                pushed_precise_parent = true;
+            }
+            stack.push((extended, next_set, next_prec));
             pushed_any_parent = true;
         }
-        if !pushed_any_parent {
-            // Either an entry point (no callers) or every caller
-            // was cyclic. Emit the path-so-far once.
+        if !pushed_any_parent || (!pushed_precise_parent && is_precise_chain(prec)) {
+            // Either an entry point, every caller was cyclic, or the
+            // only non-cyclic parents would degrade an exact/narrowed
+            // suffix to over-approximate/unknown. This mirrors
+            // `bonsai_inspect::chains::enumerate_chains_resolved` so
+            // browse/export F: ids stay paste-compatible with inspect.
             let mut chain = path_rev;
             chain.reverse();
-            if emitted_chains.insert(chain.clone()) {
+            if emitted_chains.insert(chain.clone()) && results.len() < max_chains {
                 results.push(chain);
             }
         }
     }
     (results, truncated)
+}
+
+fn is_precise_chain(precision: Precision) -> bool {
+    matches!(precision, Precision::Exact | Precision::Narrowed)
 }

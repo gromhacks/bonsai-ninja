@@ -1,11 +1,11 @@
 //! Solidity language adapter.
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
-    collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
+    collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
     ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, Visibility,
+    ModifierVocabulary, TypeAliasVocabulary, Visibility,
 };
 
 const SOLIDITY_VOCAB: ModifierVocabulary = ModifierVocabulary {
@@ -27,6 +27,18 @@ const SOLIDITY_VOCAB: ModifierVocabulary = ModifierVocabulary {
     // keyword is omitted (older versions); newer compilers require
     // it. `Public` is the safest default.
     default_visibility: Visibility::Public,
+};
+
+const SOLIDITY_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
+    fn_kinds: &[
+        "function_definition",
+        "constructor_definition",
+        "modifier_definition",
+        "fallback_receive_definition",
+    ],
+    param_kinds: &["parameter"],
+    name_field: "name",
+    type_field: "type",
 };
 use tree_sitter::{Language, Tree};
 
@@ -146,6 +158,12 @@ impl LanguageAdapter for SolidityAdapter {
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
+                }
+            }
+            let type_aliases_by_span = collect_param_type_aliases(&tree, file, src, &SOLIDITY_TYPE_ALIASES);
+            for decl in &mut idx.defs {
+                if let Some(aliases) = type_aliases_by_span.get(&decl.span) {
+                    decl.type_aliases = aliases.clone();
                 }
             }
             // Per-contract `bases`: `contract A is B, C { … }` →

@@ -745,11 +745,14 @@ fn collect_receiver_method_targets(
     let Some(receiver) = receiver else {
         return Vec::new();
     };
+    let method_name = short_callee(call_name);
+    if is_super_receiver(receiver) {
+        return collect_super_method_targets(global, caller_decl, alias_targets, method_name);
+    }
     let receiver_types = receiver_type_names(caller_decl, alias_targets, receiver);
     if receiver_types.is_empty() {
         return Vec::new();
     }
-    let method_name = short_callee(call_name);
     let caller_module = caller_decl.module_path.clone();
     // Without a known caller file we have nothing to narrow on, so
     // return empty rather than fan out to every workspace-wide
@@ -774,41 +777,117 @@ fn collect_receiver_method_targets(
         return Vec::new();
     };
     let mut targets = Vec::new();
+    let mut seen = AHashSet::new();
     for class_sym in class_candidates {
-        let Some(class_decl) = global.decl_of(class_sym) else {
-            continue;
-        };
-        if !matches!(class_decl.kind, DeclKind::Class | DeclKind::Struct) {
-            continue;
-        }
-        let Some(class_file) = global.declaring_file(class_sym) else {
-            continue;
-        };
-        for decl in global.decls_in(class_file) {
-            if decl.name != method_name {
-                continue;
-            }
-            if !matches!(
-                decl.kind,
-                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-            ) {
-                continue;
-            }
-            let Some(decl_file) = global.declaring_file(decl.symbol) else {
-                continue;
-            };
-            if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
-                continue;
-            }
-            // A method's parent link is the canonical signal; the
-            // span-containment fallback covers adapters that haven't
-            // yet populated `parent`.
-            if decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span) {
-                targets.push(FuncId::new(decl.symbol.raw()));
-            }
+        collect_method_candidates_for_class(global, class_sym, method_name, ctx, &mut seen, &mut targets);
+    }
+    targets
+}
+
+fn collect_super_method_targets(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    method_name: &str,
+) -> Vec<FuncId> {
+    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+        return Vec::new();
+    };
+    let Some(class_decl) = enclosing_class_for_decl(global, caller_decl) else {
+        return Vec::new();
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    let mut targets = Vec::new();
+    let mut seen = AHashSet::new();
+    for base in &class_decl.bases {
+        for class_sym in resolve_class(global, base, &ctx) {
+            collect_method_candidates_for_class(
+                global,
+                class_sym,
+                method_name,
+                &ctx,
+                &mut seen,
+                &mut targets,
+            );
         }
     }
     targets
+}
+
+fn collect_method_candidates_for_class(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+    seen: &mut AHashSet<SymbolId>,
+    out: &mut Vec<FuncId>,
+) {
+    let Some(class_decl) = global.decl_of(class_sym) else {
+        return;
+    };
+    if !matches!(
+        class_decl.kind,
+        DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+    ) {
+        return;
+    }
+    let Some(class_file) = global.declaring_file(class_sym) else {
+        return;
+    };
+    for decl in global.decls_in(class_file) {
+        if decl.name != method_name {
+            continue;
+        }
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let Some(decl_file) = global.declaring_file(decl.symbol) else {
+            continue;
+        };
+        if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
+            continue;
+        }
+        // A method's parent link is the canonical signal; the
+        // span-containment fallback covers adapters that haven't
+        // yet populated `parent`.
+        if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
+            && seen.insert(decl.symbol)
+        {
+            out.push(FuncId::new(decl.symbol.raw()));
+        }
+    }
+}
+
+fn is_super_receiver(receiver: &str) -> bool {
+    let receiver = receiver.trim().trim_start_matches(['&', '*']);
+    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
+    matches!(receiver, "super" | "parent" | "base")
+}
+
+fn enclosing_class_for_decl<'a>(global: &'a GlobalIndex, decl: &Decl) -> Option<&'a Decl> {
+    if let Some(parent) = decl.parent {
+        if let Some(parent_decl) = global.decl_of(parent) {
+            if matches!(
+                parent_decl.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            ) {
+                return Some(parent_decl);
+            }
+        }
+    }
+    global
+        .decls_in(decl.span.file)
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            ) && span_contains(candidate.span, decl.span)
+        })
+        .min_by_key(|candidate| candidate.span.end.saturating_sub(candidate.span.start))
 }
 
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
