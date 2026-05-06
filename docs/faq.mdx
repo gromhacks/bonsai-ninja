@@ -27,7 +27,7 @@ Use `--compact`, reduce `--context`, add `--severity`, `--tag`, `--source`, or `
 
 <Accordion title="How do I get machine-readable output?">
 
-Use `--format json --all` for native JSON or `--format sarif --all` for SARIF from security finding commands.
+Use `--format json --all` for native JSON. SARIF is emitted by `security taint-analysis --format sarif`; `security source-analysis` is source-flow mapping and should use JSON.
 
 </Accordion>
 
@@ -46,6 +46,12 @@ The resolver may have multiple call targets, unknown receiver type, dynamic disp
 <Accordion title="How do I clear stale cache data?">
 
 Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidecar, or `bonsai-ninja cache clear ./src` to remove the workspace `.bonsai/` cache.
+
+</Accordion>
+
+<Accordion title="How do I keep results current while editing?">
+
+Run `bonsai-ninja index ./src --watch`. It polls saved file changes, reparses changed files in place, tombstones deleted files, and rewrites `.bonsai/dataflow.v2.bin` after affected dataflow entries are rebuilt. SDK `Project` facades use the same refresh path before commands run.
 
 </Accordion>
 
