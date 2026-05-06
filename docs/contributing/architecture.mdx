@@ -218,7 +218,10 @@ When the CLI runs `index`:
 6. `callgraph` builds the call graph.
 7. `cfg` builds basic-block CFGs from flow_events.
 8. `taint` runs interprocedural fixpoint over the SCCs.
-9. The result is persisted to `.bonsai/sidecar`.
+9. Dataflow facts are persisted to `.bonsai/dataflow.v2.bin`.
 
-Subsequent runs read the sidecar instead of repeating the work, with a
-content-hash check that invalidates stale facts.
+Subsequent runs read the dataflow sidecar instead of repeating the work,
+with source-content and dependency-hash checks that invalidate stale facts.
+`index --watch` keeps the workspace open, reparses saved file changes in
+place, tombstones deleted files, and rewrites the sidecar after affected
+entries are rebuilt.

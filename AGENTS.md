@@ -14,6 +14,9 @@ Command truth comes from the binary:
 Prefer `./target/release/bonsai-ninja`; use debug only if release is
 missing. For scripts use `--format json --no-color --no-progress`. For
 LLM-readable text use `--no-color --no-progress --context 16k`.
+For save-time workflows, keep `index <workspace> --watch --no-progress`
+running; command and SDK facades refresh saved file changes before they
+render.
 
 Always treat pagination as correctness. If output says more pages exist,
 continue with `--page 2`, `--page next`, or the printed `P:...` cursor
@@ -26,6 +29,8 @@ Start with shape, then follow one concrete behavior.
 
 ```shell
 ./target/release/bonsai-ninja index <workspace> --no-progress
+# Optional during active editing:
+./target/release/bonsai-ninja index <workspace> --watch --no-progress
 ./target/release/bonsai-ninja tree <workspace> --max-depth 3 --compact --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja imports <workspace> --context 16k --no-color --no-progress
 ./target/release/bonsai-ninja defs <workspace> --kind function --context 16k --no-color --no-progress
@@ -83,8 +88,9 @@ If high-level output disagrees with source, use the debug ladder:
 ./target/release/bonsai-ninja dump-taint <workspace> --source <entry> --seed <param> --no-color --no-progress
 ```
 
-Then patch, test, re-index, and rerun the smallest command that proves
-the fix.
+Then patch, test, and rerun the smallest command that proves the fix.
+Long-lived commands and SDK projects refresh saved files automatically;
+use `index --watch` when you want the sidecar kept hot continuously.
 
 ## Security Review
 

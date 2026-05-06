@@ -207,4 +207,97 @@ without requiring a sink rule.
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every source flow. |
 | `--no-compact` | false | Expand every flow body. |
-| `--format <FORMAT>` | text | `text`, `json`, or `sarif`. |
+| `--format <FORMAT>` | text | `text` or `json`. Source-flow mapping is not SARIF finding output; use `security taint-analysis --format sarif` for SARIF. |
+
+## cache
+
+`cache` inspects, clears, or rebuilds on-disk artifacts under
+`<workspace>/.bonsai/`. In-process memo caches are per run and do not need
+manual clearing.
+
+```bash
+bonsai-ninja cache stats ./src
+bonsai-ninja cache clear ./src --dataflow-only
+bonsai-ninja cache rebuild ./src
+```
+
+| Subcommand or flag | Default | Description |
+|---|---:|---|
+| `stats <WORKSPACE>` | None | Print cache configuration, sidecar path, sidecar size, and entry count when present. |
+| `clear <WORKSPACE>` | None | Remove `.bonsai/` artifacts for the workspace. |
+| `rebuild <WORKSPACE>` | None | Delete and rebuild `.bonsai/dataflow.v2.bin`. |
+| `--dataflow-only` | false | For `clear`, remove only the persisted dataflow sidecar. |
+
+## Browse Commands
+
+Browse commands expose indexed facts. They all open the workspace through the
+same hot-refresh path as the SDK, so saved files are refreshed before results
+are rendered.
+
+```bash
+bonsai-ninja defs ./src --kind function
+bonsai-ninja calls ./src --callee os.system
+bonsai-ninja refs ./src verify_token
+bonsai-ninja search ./src "request.args"
+```
+
+| Command | Purpose | Common filters |
+|---|---|---|
+| `defs` | Definitions: functions, methods, classes, structs, traits, interfaces, enums. | `--kind`, `--file`, `--name`, `--has-callee`, `--has-decorator`, `--has-param`, `--regex` |
+| `calls` | Call sites with caller, callee, location, and code. | `--callee`, `--file`, `--caller`, `--call-kind`, `--regex` |
+| `imports` | Imports, uses, includes, aliases, and wildcard imports. | `--file`, `--module`, `--alias`, `--wildcard`, `--regex` |
+| `vars` | Assignment targets and simple RHS source names. | `--name`, `--file`, `--in-fn`, `--source`, `--regex` |
+| `strings` | String literals classified as `sql`, `url`, `shell`, `regex`, `path`, or `generic`. | `--category`, `--contains`, `--file`, `--in-fn`, `--min-len`, `--regex` |
+| `comments` | Comments classified as `todo`, `fixme`, `security`, `doc`, `disabled_code`, or `generic`. | `--kind`, `--contains`, `--file`, `--in-fn`, `--min-len`, `--regex` |
+| `args` | Call-site arguments by callee, position, keyword, and value text. | `--callee`, `--value`, `--position`, `--keyword`, `--file`, `--in-fn`, `--regex` |
+| `classes` | Classes, structs, traits, interfaces, and enums. | `--kind`, `--file`, `--name`, `--regex` |
+| `refs` | References to symbols, including read/call/type facts. | positional symbol, `--symbol`, `--file`, `--kind`, `--regex` |
+| `search` | Prefix-first fuzzy search over all browse facts. | positional query, `--kind`, `--file`, `--regex` |
+
+Common browse output flags:
+
+| Flag | Default | Description |
+|---|---:|---|
+| `--limit <N>` | 200 | Legacy row cap for text output. `0` is uncapped. |
+| `--context <BUDGET>` | 32k text | Token-budget paging, e.g. `4k`, `16k`, `128k`, `all`. |
+| `--page <PAGE>` | 1 | Page number, `next`, or a printed `P:xxxxxxxx` cursor. |
+| `--all` | false | Emit all rows with no paging/context cap. |
+| `--no-flows` | false | Hide flow-id columns on commands that include them. |
+| `--format <FORMAT>` | text | `text` or `json`. |
+
+## Navigation
+
+`tree` and `read-file` combine structural facts with finding and flow marks.
+Pass `--rules-dir` when the rulepack is not auto-discovered.
+
+```bash
+bonsai-ninja tree ./src --max-depth 3 --compact
+bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.args --to os.system
+```
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `tree` | Workspace tree with file-level flow, edge, finding, and security annotations. | `--max-depth`, `--file`, `--severity`, `--tag`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--rules-dir` |
+| `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--rules-dir` |
+
+## Debug Dumps
+
+Dump commands expose the engine's internal facts. Use them when inspect,
+trace, or security output disagrees with the source.
+
+```bash
+bonsai-ninja dump-ast ./src --file gateway.py --function handle_request
+bonsai-ninja dump-hir ./src handle_request
+bonsai-ninja dump-taint ./src --source handle_request --seed cmd
+```
+
+| Command | Purpose | Key flags |
+|---|---|---|
+| `dump-ast` | Tree-sitter parse tree by file, function, or stable `N:` node id. | `--file`, `--function`, `--compact`, `--max-depth`, `--node`, `--context`, `--page`, `--all`, `--format` |
+| `dump-hir` | Flow-event tree for one function as JSON. | positional symbol, `--symbol` |
+| `dump-cfg` | Basic-block CFG for one function as JSON. | positional symbol, `--symbol` |
+| `dump-callgraph` | Per-function caller and outgoing counts. | `--limit`, `--context`, `--page`, `--all`, `--format` |
+| `dump-edges` | Resolved call edges with stable `E:` ids and precision. | `--from`, `--to`, `--precision`, `--compact`, `--edge`, `--context`, `--page`, `--all`, `--format` |
+| `dump-resolve` | Resolver stages and candidates for a name. | positional name, `--name`, `--in-file`, `--compact`, `--candidate`, `--format` |
+| `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sanitizer`, `--sink`, `--budget`, `--intra-worklist-cap`, `--compact`, `--taint`, `--format` |
+| `diagnostics` | Adapter diagnostic pass over the workspace. | `<WORKSPACE>` |
