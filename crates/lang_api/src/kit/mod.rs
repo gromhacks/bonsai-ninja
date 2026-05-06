@@ -5381,8 +5381,15 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
 pub fn alias_map_from_imports(
     imports: &crate::ImportIndex,
 ) -> std::collections::HashMap<String, AliasTarget> {
+    alias_map_from_import_specs(&imports.imports)
+}
+
+#[must_use]
+pub fn alias_map_from_import_specs(
+    imports: &[crate::ImportSpec],
+) -> std::collections::HashMap<String, AliasTarget> {
     let mut map = std::collections::HashMap::new();
-    for spec in &imports.imports {
+    for spec in imports {
         if spec.is_wildcard {
             // `import * as ns from "x"` / Python `from x import *`.
             // Namespace-bound if there's an alias; wildcard imports

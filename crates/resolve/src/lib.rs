@@ -211,23 +211,37 @@ pub fn resolve_class(
     ctx: &ResolveContext<'_>,
 ) -> Vec<bonsai_common::SymbolId> {
     use bonsai_lang_api::DeclKind;
-    global
-        .find_by_name(name)
-        .iter()
-        .filter_map(|symbol| {
-            let decl = global.decl_of(*symbol)?;
-            let decl_file = global.declaring_file(*symbol)?;
-            Some((decl, decl_file))
-        })
-        .filter(|(decl, _)| {
-            matches!(
-                decl.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-            )
-        })
-        .filter(|(decl, decl_file)| visibility_allows(decl, *decl_file, &decl.module_path, ctx))
-        .map(|(decl, _)| decl.symbol)
-        .collect()
+    let collect = |lookup: &str| {
+        global
+            .find_by_name(lookup)
+            .iter()
+            .filter_map(|symbol| {
+                let decl = global.decl_of(*symbol)?;
+                let decl_file = global.declaring_file(*symbol)?;
+                Some((decl, decl_file))
+            })
+            .filter(|(decl, _)| {
+                matches!(
+                    decl.kind,
+                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                )
+            })
+            .filter(|(decl, decl_file)| visibility_allows(decl, *decl_file, &decl.module_path, ctx))
+            .map(|(decl, _)| decl.symbol)
+            .collect::<Vec<_>>()
+    };
+    let mut out = collect(name);
+    if out.is_empty() {
+        if let Some(rewritten) = rewrite_through_alias_map(name, ctx) {
+            out = collect(&rewritten);
+            if out.is_empty() {
+                if let Some((_, tail)) = rewritten.rsplit_once(['.', ':']) {
+                    out = collect(tail);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Legacy bare-name resolver.
@@ -327,8 +341,8 @@ mod tests {
     // lives in the lang_go and per-lang CLI conformance tests.
 
     use super::*;
-    use bonsai_common::{FileId, Span};
-    use bonsai_lang_api::{AliasTarget, ImportScope, ImportSpec, ModulePath};
+    use bonsai_common::{FileId, Span, SymbolId};
+    use bonsai_lang_api::{AliasTarget, DeclIndex, ImportScope, ImportSpec, ModulePath};
 
     fn span() -> Span {
         Span::new(FileId::new(0), 0, 0)
@@ -422,6 +436,53 @@ mod tests {
         // function literally named `Println`.
         let map = alias_map_for_file(&[spec("fmt", Some("fmt"), None)]);
         assert_eq!(map.get("fmt").map(String::as_str), Some("fmt"));
+    }
+
+    #[test]
+    fn class_resolution_rewrites_alias_map() {
+        let mut global = GlobalIndex::new();
+        let file = FileId::new(1);
+        let span = Span::new(file, 0, 20);
+        let class = bonsai_lang_api::Decl {
+            symbol: SymbolId::new(0),
+            kind: bonsai_lang_api::DeclKind::Class,
+            name: "Service".to_string(),
+            qualified_name: Some("pkg.Service".to_string()),
+            module_path: ModulePath::from_segments(["pkg"]),
+            span,
+            name_span: span,
+            visibility: bonsai_lang_api::Visibility::Public,
+            parent: None,
+            body_span: None,
+            flow_events: Vec::new(),
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+        };
+        global.insert(DeclIndex {
+            file,
+            defs: vec![class],
+            refs: Vec::new(),
+            strings: Vec::new(),
+            comments: Vec::new(),
+        });
+
+        let caller_module = ModulePath::from_segments(["pkg"]);
+        let mut aliases = AHashMap::new();
+        aliases.insert(
+            "Svc".to_string(),
+            AliasTarget::Type {
+                type_name: "pkg.Service".to_string(),
+            },
+        );
+        let ctx = ResolveContext::new(file, &caller_module).with_alias_map(&aliases);
+        let hits = resolve_class(&global, "Svc", &ctx);
+        assert_eq!(hits.len(), 1, "aliased type should resolve by rewritten tail");
     }
 
     #[test]

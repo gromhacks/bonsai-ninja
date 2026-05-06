@@ -8,6 +8,7 @@ use super::*;
 use bonsai_common::FileId;
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::LanguageRegistry;
+use bonsai_resolve::resolve_callable;
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
@@ -571,6 +572,7 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
     let db = python_ws_one_file("def placeholder():\n    pass\n");
     let config = config(&[]);
     let aliases = AHashMap::new();
+    let alias_targets = AHashMap::new();
     let local_bindings = AHashMap::new();
     let const_bindings = AHashMap::new();
     let ctx = SinkWalkCtx {
@@ -578,6 +580,7 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
         config: &config,
         db: &db,
         aliases: &aliases,
+        alias_targets: &alias_targets,
         local_bindings: &local_bindings,
         const_bindings: &const_bindings,
         caller: func_id_of(&db, "placeholder"),

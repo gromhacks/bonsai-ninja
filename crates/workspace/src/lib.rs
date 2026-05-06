@@ -247,6 +247,11 @@ impl Workspace {
             global.as_ref(),
             |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
             |file| {
+                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                    .into_iter()
+                    .collect()
+            },
+            |file| {
                 db.vfs()
                     .path(file)
                     .ok()

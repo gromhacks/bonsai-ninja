@@ -1340,17 +1340,11 @@ fn engine_resolves_via_context_not_bare_name() {
             3,
             "display-only trace entry lookup by user-supplied name",
         ),
-        // taint/src/inter.rs — residual sites:
+        // taint/src/inter.rs — residual site:
         //   - `find_by_name` inside the head-is-workspace-symbol
         //     probe (workspace-wide existence check, parallels
         //     callgraph's probe — not an edge constructor).
-        //   - test-fixture func_id_of helper used at runtime by a
-        //     non-test path (kept until the helper migrates).
-        (
-            "taint/src/inter.rs",
-            2,
-            "head-is-workspace-symbol probe + lookup helper",
-        ),
+        ("taint/src/inter.rs", 1, "head-is-workspace-symbol probe"),
         // security/src/matcher.rs — residual site is the
         // workspace-existence probe inside the head-is-workspace-
         // symbol heuristic. The other previous sites
@@ -1803,8 +1797,18 @@ fn receiver_method_dispatch_narrows_by_type() {
     let text = read(&cg_lib);
     let body = function_body(&text, "collect_receiver_method_targets");
     assert!(
-        body.contains("type_aliases"),
-        "collect_receiver_method_targets must consult Decl.type_aliases for receiver narrowing"
+        body.contains("receiver_type_names("),
+        "collect_receiver_method_targets must derive receiver types before resolving methods"
+    );
+    let receiver_type_names = function_body(&text, "receiver_type_names");
+    assert!(
+        receiver_type_names.contains("type_alias_for_receiver("),
+        "receiver_type_names must consult adapter-declared receiver type aliases"
+    );
+    let type_alias_for_receiver = function_body(&text, "type_alias_for_receiver");
+    assert!(
+        type_alias_for_receiver.contains("type_aliases"),
+        "type_alias_for_receiver must consult Decl.type_aliases for receiver narrowing"
     );
     assert!(
         body.contains("resolve_class("),
