@@ -593,11 +593,11 @@ mod java {
         let w = Workspace::new(registry);
         w.vfs().write(
             "/w/Main.java".to_string(),
-            Arc::<str>::from("class Main { static void main() { Helper.worker(); } }"),
+            Arc::<str>::from("public class Main { public static void main() { Helper.worker(); } }"),
         );
         w.vfs().write(
             "/w/Helper.java".to_string(),
-            Arc::<str>::from("class Helper { static void worker() {} }"),
+            Arc::<str>::from("public class Helper { public static void worker() {} }"),
         );
         for f in w.vfs().all_files() {
             let _ = w.db().decl_index(f);
@@ -1559,7 +1559,7 @@ mod erlang {
         );
         w.vfs().write(
             "/w/worker.erl".to_string(),
-            Arc::<str>::from("-module(worker).\nrun() -> ok.\n"),
+            Arc::<str>::from("-module(worker).\n-export([run/0]).\nrun() -> ok.\n"),
         );
         for f in w.vfs().all_files() {
             let _ = w.db().decl_index(f);

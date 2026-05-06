@@ -9,11 +9,14 @@
 //! Higher-order callbacks are resolved by binding call-site arguments to
 //! parameter names in the callee's `Decl::params`.
 
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::{RawStep, RawTrace, StepKind, TraceLimits};
 use bonsai_common::{FuncId, Precision, Span, SymbolId, TraceStepId};
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind};
+use bonsai_lang_api::{
+    AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind, TypeAliasBinding,
+};
+use bonsai_resolve::{resolve_callable_with_context, resolve_class, visibility_allows, ResolveContext};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CrossModuleOptions {
@@ -67,9 +70,13 @@ struct TraceBuilder<'a> {
 #[derive(Default, Clone)]
 struct CallFrame {
     /// parameter name -> callable symbol passed at the call site
-    callback_bindings: ahash::AHashMap<String, SymbolId>,
+    callback_bindings: AHashMap<String, SymbolId>,
     /// whole-local variable bindings (e.g. `x = some_func`)
-    local_bindings: ahash::AHashMap<String, SymbolId>,
+    local_bindings: AHashMap<String, SymbolId>,
+    /// local / parameter / field receiver type bindings visible in
+    /// this frame. Seeded from adapter-emitted `Decl.type_aliases`
+    /// and updated from call-site parameter bindings.
+    type_bindings: AHashMap<String, String>,
 }
 
 struct CallSite<'a> {
@@ -152,7 +159,10 @@ impl<'a> TraceBuilder<'a> {
 
         // Build a new frame; bind parameter names to concrete callables
         // when the argument at that position resolves to one.
-        let mut frame = CallFrame::default();
+        let mut frame = CallFrame {
+            type_bindings: type_bindings_from_decl(&decl),
+            ..Default::default()
+        };
         let zip_params = if param_names.is_empty() {
             &decl.params[..]
         } else {
@@ -164,8 +174,11 @@ impl<'a> TraceBuilder<'a> {
             let positional = args.get(idx);
             let arg = kw.or(positional);
             if let Some(a) = arg {
-                if let Some(sym) = self.resolve_callable_by_name(&a.value_text) {
+                if let Some(sym) = self.resolve_callable_by_name(&a.value_text, &decl) {
                     frame.callback_bindings.insert(param.clone(), sym);
+                }
+                if let Some(type_name) = self.type_name_for_expr(&a.value_text, &decl) {
+                    frame.type_bindings.insert(param.clone(), type_name);
                 }
             }
         }
@@ -319,14 +332,37 @@ impl<'a> TraceBuilder<'a> {
                 span,
                 target,
                 source_name,
+                source_call,
+                source_names,
                 ..
             } => {
                 // Record local binding for callback resolution.
+                let global = self.db.global_index();
+                let caller_decl = global.decl_of(SymbolId::new(func.raw()));
                 if let Some(name) = source_name {
-                    if let Some(sym) = self.resolve_callable_by_name(name) {
-                        if let Some(frame) = self.frames.last_mut() {
-                            frame.local_bindings.insert(target.clone(), sym);
+                    if let Some(caller_decl) = caller_decl {
+                        if let Some(sym) = self.resolve_callable_by_name(name, caller_decl) {
+                            if let Some(frame) = self.frames.last_mut() {
+                                frame.local_bindings.insert(target.clone(), sym);
+                            }
                         }
+                    }
+                }
+                let assigned_type = caller_decl.and_then(|decl| {
+                    self.infer_assigned_type(
+                        decl,
+                        source_name.as_deref(),
+                        source_call.as_deref(),
+                        source_names,
+                    )
+                });
+                if let Some(type_name) = assigned_type {
+                    if let Some(frame) = self.frames.last_mut() {
+                        frame.type_bindings.insert(target.clone(), type_name);
+                    }
+                } else if let Some(frame) = self.frames.last_mut() {
+                    if !declares_type_alias(caller_decl, target) {
+                        frame.type_bindings.remove(target);
                     }
                 }
                 self.emit(
@@ -491,8 +527,11 @@ impl<'a> TraceBuilder<'a> {
                 .copied()
         });
 
+        let global = self.db.global_index();
+        let caller_decl = global.decl_of(SymbolId::new(func.raw()));
+
         let class_sym = if callback_sym.is_none() {
-            self.find_class_by_name(site.name)
+            caller_decl.and_then(|decl| self.resolve_class_by_name(site.name, decl))
         } else {
             None
         };
@@ -505,7 +544,7 @@ impl<'a> TraceBuilder<'a> {
         };
 
         let global_sym = if callback_sym.is_none() && class_ctor.is_none() && receiver_sym.is_none() {
-            self.resolve_callable_by_name(site.name)
+            caller_decl.and_then(|decl| self.resolve_callable_by_name(site.name, decl))
         } else {
             None
         };
@@ -555,7 +594,7 @@ impl<'a> TraceBuilder<'a> {
         }
         if site.receiver.is_some() && display_kind == CallKind::Method {
             for arg in site.args {
-                let Some(callback) = self.resolve_callable_arg(&arg.value_text) else {
+                let Some(callback) = self.resolve_callable_arg(&arg.value_text, func) else {
                     continue;
                 };
                 if !self.expand(callback, &[], &self.get_param_names(callback), depth + 1) {
@@ -582,48 +621,27 @@ impl<'a> TraceBuilder<'a> {
         let receiver = site.receiver?;
         let global = self.db.global_index();
         let caller_decl = global.decl_of(SymbolId::new(caller.raw()))?;
-        let receiver_tail = bonsai_lang_api::kit::short_name_of(receiver);
-        let type_name = caller_decl
-            .type_aliases
-            .iter()
-            .find(|alias| alias.name == receiver || alias.name == receiver_tail)
-            .map(|alias| alias.type_name.as_str())?;
         let method_name = bonsai_lang_api::kit::short_name_of(site.name);
-        self.find_method_in_class(type_name, method_name)
-    }
-
-    fn find_method_in_class(&self, class_name: &str, method_name: &str) -> Option<SymbolId> {
-        let global = self.db.global_index();
-        let class_symbols = global
-            .find_by_name(class_name)
-            .iter()
-            .copied()
-            .filter(|sym| {
-                global
-                    .decl_of(*sym)
-                    .is_some_and(|decl| matches!(decl.kind, DeclKind::Class | DeclKind::Struct))
-            })
-            .collect::<Vec<_>>();
-        for class_sym in class_symbols {
-            let Some(class_file) = global.declaring_file(class_sym) else {
-                continue;
-            };
-            let Some(class_decl) = global.decl_of(class_sym) else {
-                continue;
-            };
-            for decl in global.decls_in(class_file) {
-                if decl.name != method_name || !self.is_callable(decl.symbol) {
-                    continue;
-                }
-                if decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span) {
-                    return Some(decl.symbol);
-                }
+        let class_names = self.receiver_type_names(caller_decl, receiver);
+        if class_names.is_empty() {
+            return None;
+        }
+        let caller_file = global
+            .declaring_file(caller_decl.symbol)
+            .unwrap_or(caller_decl.span.file);
+        let alias_map = self.alias_map_for_decl(caller_decl);
+        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(&alias_map);
+        let mut out = Vec::new();
+        let mut seen = AHashSet::new();
+        for class_name in class_names {
+            for class_sym in resolve_class(&global, &class_name, &ctx) {
+                self.collect_method_candidates_for_class(class_sym, method_name, &ctx, &mut seen, &mut out);
             }
         }
-        None
+        self.best_symbol_candidate(out, caller_decl)
     }
 
-    fn resolve_callable_arg(&self, raw: &str) -> Option<SymbolId> {
+    fn resolve_callable_arg(&self, raw: &str, caller: FuncId) -> Option<SymbolId> {
         let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
         if trimmed.is_empty()
             || trimmed.starts_with('"')
@@ -644,90 +662,235 @@ impl<'a> TraceBuilder<'a> {
                     .or_else(|| f.local_bindings.get(short))
                     .copied()
             })
-            .or_else(|| self.resolve_callable_by_name(trimmed))
+            .or_else(|| {
+                let global = self.db.global_index();
+                let caller_decl = global.decl_of(SymbolId::new(caller.raw()))?;
+                self.resolve_callable_by_name(trimmed, caller_decl)
+            })
     }
 
-    /// Resolve a textual callable name (with optional sigil / module
-    /// prefix) to one workspace symbol, deterministically.
-    fn resolve_callable_by_name(&self, raw: &str) -> Option<SymbolId> {
+    /// Resolve a textual callable name in the caller's file/module
+    /// context. This is intentionally not a bare global-name
+    /// lookup: visibility, module path, import aliases, and local
+    /// type facts must all flow through `ResolveContext`.
+    fn resolve_callable_by_name(&self, raw: &str, caller_decl: &Decl) -> Option<SymbolId> {
         if raw.is_empty() {
             return None;
         }
         let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
-        // Ruby's `!` suffix denotes mutating variants; treat them as
-        // aliases for the bare name.
-        let trimmed_no_bang = trimmed.strip_suffix('!').unwrap_or(trimmed);
-        let short = bonsai_lang_api::kit::short_name_of(trimmed);
-        let short_no_bang = short.strip_suffix('!').unwrap_or(short);
-        for candidate in [trimmed, trimmed_no_bang, short, short_no_bang] {
-            if let Some(sym) = self.deterministic_first_callable_by_name(candidate) {
-                return Some(sym);
-            }
-        }
-        // Fallback: scan every decl when the indexed lookup missed.
         let global = self.db.global_index();
-        for file in global.all_files() {
-            for decl in global.decls_in(file) {
-                if (decl.name == short
-                    || decl.name == short_no_bang
-                    || decl.name == trimmed
-                    || decl.name == trimmed_no_bang)
-                    && self.is_callable(decl.symbol)
-                {
-                    return Some(decl.symbol);
-                }
+        let caller_file = global
+            .declaring_file(caller_decl.symbol)
+            .unwrap_or(caller_decl.span.file);
+        let alias_map = self.alias_map_for_decl(caller_decl);
+        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(&alias_map);
+        for candidate in callable_name_variants(trimmed) {
+            let hits = resolve_callable_with_context(&global, &candidate, &ctx)
+                .into_iter()
+                .map(|func| SymbolId::new(func.raw()))
+                .collect::<Vec<_>>();
+            if let Some(sym) = self.best_symbol_candidate(hits, caller_decl) {
+                return Some(sym);
             }
         }
         None
     }
 
-    /// Pick the first callable symbol matching `name` in a
-    /// deterministic order (file path, name span start, symbol id).
-    /// `find_by_name` returns matches in adapter-emitted insertion
-    /// order, which isn't stable across runs when names collide
-    /// across translation units; pinning a sort here keeps trace
-    /// expansion reproducible. Same contract as
-    /// `Workspace::lookup_function_symbol`.
-    fn deterministic_first_callable_by_name(&self, name: &str) -> Option<SymbolId> {
-        if name.is_empty() {
+    fn resolve_class_by_name(&self, raw: &str, caller_decl: &Decl) -> Option<SymbolId> {
+        let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
+        if trimmed.is_empty() {
+            return None;
+        }
+        let global = self.db.global_index();
+        let caller_file = global
+            .declaring_file(caller_decl.symbol)
+            .unwrap_or(caller_decl.span.file);
+        let alias_map = self.alias_map_for_decl(caller_decl);
+        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(&alias_map);
+        for candidate in callable_name_variants(trimmed) {
+            let hits = resolve_class(&global, &candidate, &ctx);
+            if let Some(sym) = self.best_symbol_candidate(hits, caller_decl) {
+                return Some(sym);
+            }
+        }
+        None
+    }
+
+    fn collect_method_candidates_for_class(
+        &self,
+        class_sym: SymbolId,
+        method_name: &str,
+        ctx: &ResolveContext<'_>,
+        seen: &mut AHashSet<SymbolId>,
+        out: &mut Vec<SymbolId>,
+    ) {
+        let global = self.db.global_index();
+        let Some(class_decl) = global.decl_of(class_sym) else {
+            return;
+        };
+        if !matches!(
+            class_decl.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        ) {
+            return;
+        }
+        let Some(class_file) = global.declaring_file(class_sym) else {
+            return;
+        };
+        for decl in global.decls_in(class_file) {
+            if decl.name != method_name || !self.is_callable(decl.symbol) {
+                continue;
+            }
+            if !visibility_allows(decl, class_file, &decl.module_path, ctx) {
+                continue;
+            }
+            if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
+                && seen.insert(decl.symbol)
+            {
+                out.push(decl.symbol);
+            }
+        }
+    }
+
+    fn receiver_type_names(&self, caller_decl: &Decl, receiver: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(type_name) = self.type_name_for_expr(receiver, caller_decl) {
+            push_unique_string(&mut out, type_name);
+        }
+        let normalized = normalize_receiver_alias_text(receiver);
+        let tail = bonsai_lang_api::kit::short_name_of(&normalized);
+        if tail.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+            push_unique_string(&mut out, tail.to_string());
+        }
+        if matches!(tail, "self" | "this") {
+            let global = self.db.global_index();
+            if let Some(parent) = caller_decl.parent.and_then(|sym| global.decl_of(sym)) {
+                if matches!(
+                    parent.kind,
+                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+                ) {
+                    push_unique_string(&mut out, parent.name.clone());
+                    for base in &parent.bases {
+                        push_unique_string(&mut out, base.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn type_name_for_expr(&self, expr: &str, caller_decl: &Decl) -> Option<String> {
+        let normalized = normalize_receiver_alias_text(expr);
+        let tail = bonsai_lang_api::kit::short_name_of(&normalized);
+        let self_tail = format!("self.{tail}");
+        let this_tail = format!("this.{tail}");
+        self.frames
+            .last()
+            .and_then(|frame| {
+                frame
+                    .type_bindings
+                    .get(expr)
+                    .or_else(|| frame.type_bindings.get(normalized.as_str()))
+                    .or_else(|| frame.type_bindings.get(tail))
+                    .or_else(|| frame.type_bindings.get(self_tail.as_str()))
+                    .or_else(|| frame.type_bindings.get(this_tail.as_str()))
+                    .cloned()
+            })
+            .or_else(|| {
+                caller_decl
+                    .type_aliases
+                    .iter()
+                    .find(|alias| {
+                        alias.name == expr
+                            || alias.name == normalized
+                            || alias.name == tail
+                            || alias.name == self_tail
+                            || alias.name == this_tail
+                    })
+                    .map(|alias| alias.type_name.clone())
+            })
+    }
+
+    fn infer_assigned_type(
+        &self,
+        caller_decl: &Decl,
+        source_name: Option<&str>,
+        source_call: Option<&str>,
+        source_names: &[String],
+    ) -> Option<String> {
+        if let Some(source_name) = source_name {
+            if let Some(type_name) = self.type_name_for_expr(source_name, caller_decl) {
+                return Some(type_name);
+            }
+        }
+        if let Some(call) = source_call {
+            let bare = constructor_type_tail(call)?;
+            return Some(bare.to_string());
+        }
+        if source_names.len() == 2
+            && source_names[0]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return Some(source_names[0].clone());
+        }
+        None
+    }
+
+    fn alias_map_for_decl(&self, decl: &Decl) -> AHashMap<String, AliasTarget> {
+        let mut map = self
+            .db
+            .import_index(decl.span.file)
+            .map(|imports| bonsai_lang_api::alias_map_from_imports(imports.as_ref()))
+            .unwrap_or_default();
+        extend_alias_map_with_declared_types(&mut map, &decl.type_aliases);
+        bonsai_lang_api::extend_alias_map_with_flow_events(&mut map, &decl.flow_events);
+        map.into_iter().collect()
+    }
+
+    fn best_symbol_candidate(&self, mut hits: Vec<SymbolId>, caller_decl: &Decl) -> Option<SymbolId> {
+        if hits.is_empty() {
             return None;
         }
         let global = self.db.global_index();
         let vfs = self.db.vfs();
-        let mut hits: Vec<(SymbolId, &Decl)> = global
-            .find_by_name(name)
-            .iter()
-            .filter_map(|sym| global.decl_of(*sym).map(|d| (*sym, d)))
-            .filter(|(sym, _)| self.is_callable(*sym))
-            .collect();
-        hits.sort_by(|(a_sym, a), (b_sym, b)| {
-            let a_path = vfs
-                .path(a.span.file)
-                .map(|p| p.to_string_lossy().into_owned())
+        let caller_file = global
+            .declaring_file(caller_decl.symbol)
+            .unwrap_or(caller_decl.span.file);
+        hits.sort_by(|a_sym, b_sym| {
+            let a = global.decl_of(*a_sym);
+            let b = global.decl_of(*b_sym);
+            let a_file = global.declaring_file(*a_sym).or_else(|| a.map(|d| d.span.file));
+            let b_file = global.declaring_file(*b_sym).or_else(|| b.map(|d| d.span.file));
+            let a_same_file = a_file == Some(caller_file);
+            let b_same_file = b_file == Some(caller_file);
+            let a_same_module = a.is_some_and(|decl| {
+                !decl.module_path.is_empty() && decl.module_path.matches(&caller_decl.module_path)
+            });
+            let b_same_module = b.is_some_and(|decl| {
+                !decl.module_path.is_empty() && decl.module_path.matches(&caller_decl.module_path)
+            });
+            let a_path = a_file
+                .and_then(|file| vfs.path(file).ok())
+                .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let b_path = vfs
-                .path(b.span.file)
-                .map(|p| p.to_string_lossy().into_owned())
+            let b_path = b_file
+                .and_then(|file| vfs.path(file).ok())
+                .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            a_path
-                .cmp(&b_path)
-                .then_with(|| a.name_span.start.cmp(&b.name_span.start))
+            b_same_file
+                .cmp(&a_same_file)
+                .then_with(|| b_same_module.cmp(&a_same_module))
+                .then_with(|| a_path.cmp(&b_path))
+                .then_with(|| {
+                    a.map(|decl| decl.name_span.start)
+                        .unwrap_or_default()
+                        .cmp(&b.map(|decl| decl.name_span.start).unwrap_or_default())
+                })
                 .then_with(|| a_sym.raw().cmp(&b_sym.raw()))
         });
-        hits.into_iter().next().map(|(sym, _)| sym)
-    }
-
-    /// First class / struct decl in the workspace named `name`.
-    fn find_class_by_name(&self, name: &str) -> Option<SymbolId> {
-        let global = self.db.global_index();
-        for file in global.all_files() {
-            for decl in global.decls_in(file) {
-                if decl.name == name && matches!(decl.kind, DeclKind::Class | DeclKind::Struct) {
-                    return Some(decl.symbol);
-                }
-            }
-        }
-        None
+        hits.into_iter().next()
     }
 
     /// Locate a class's constructor, preferring an explicit
@@ -777,4 +940,76 @@ impl<'a> TraceBuilder<'a> {
 
 fn span_contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn callable_name_variants(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let short = bonsai_lang_api::kit::short_name_of(trimmed);
+    let mut out = Vec::new();
+    push_unique_string(&mut out, trimmed.to_string());
+    if let Some(no_bang) = trimmed.strip_suffix('!') {
+        push_unique_string(&mut out, no_bang.to_string());
+    }
+    push_unique_string(&mut out, short.to_string());
+    if let Some(short_no_bang) = short.strip_suffix('!') {
+        push_unique_string(&mut out, short_no_bang.to_string());
+    }
+    out
+}
+
+fn normalize_receiver_alias_text(text: &str) -> String {
+    text.trim()
+        .trim_start_matches(['&', '*'])
+        .replace("->", ".")
+        .trim_matches('.')
+        .to_string()
+}
+
+fn constructor_type_tail(call: &str) -> Option<&str> {
+    let bare = call
+        .trim()
+        .strip_prefix("new ")
+        .unwrap_or_else(|| call.trim())
+        .rsplit(&['.', ':'][..])
+        .next()
+        .unwrap_or(call)
+        .trim()
+        .trim_end_matches("()");
+    bare.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+        .then_some(bare)
+}
+
+fn type_bindings_from_decl(decl: &Decl) -> AHashMap<String, String> {
+    decl.type_aliases
+        .iter()
+        .map(|alias| (alias.name.clone(), alias.type_name.clone()))
+        .collect()
+}
+
+fn declares_type_alias(decl: Option<&Decl>, target: &str) -> bool {
+    decl.is_some_and(|decl| decl.type_aliases.iter().any(|alias| alias.name == target))
+}
+
+fn extend_alias_map_with_declared_types(
+    alias_map: &mut std::collections::HashMap<String, AliasTarget>,
+    aliases: &[TypeAliasBinding],
+) {
+    for alias in aliases {
+        alias_map
+            .entry(alias.name.clone())
+            .or_insert_with(|| AliasTarget::Type {
+                type_name: alias.type_name.clone(),
+            });
+    }
+}
+
+fn push_unique_string(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|seen| seen == &value) {
+        out.push(value);
+    }
 }
