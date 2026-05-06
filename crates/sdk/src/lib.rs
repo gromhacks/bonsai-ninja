@@ -13,10 +13,11 @@
 //! The facade owns no independent analysis semantics. Each method delegates to
 //! the same SDK/service functions used by the CLI.
 
+use ahash::{AHashMap, AHashSet};
 use anyhow::{anyhow, Context, Result};
 use bonsai_common::FuncId;
 use bonsai_lang_api::{Decl, LanguageRegistry};
-use bonsai_workspace::WorkspaceOpenOptions;
+use bonsai_workspace::{FileRefreshKind, WorkspaceOpenOptions};
 use serde::Serialize;
 use std::{
     ffi::OsString,
@@ -25,7 +26,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -298,6 +299,7 @@ impl Bonsai {
             registry: self.registry.clone(),
             rulepack: self.rulepack.clone(),
             rulepack_root: self.rulepack_root.clone(),
+            fingerprints: Arc::new(Mutex::new(initial_fingerprints(root, &self.registry))),
         }
     }
 
@@ -377,6 +379,22 @@ pub struct Project {
     registry: Arc<LanguageRegistry>,
     rulepack: Option<Arc<Rulepack>>,
     rulepack_root: Option<PathBuf>,
+    fingerprints: Arc<Mutex<AHashMap<PathBuf, u64>>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WorkspaceRefreshReport {
+    pub added: usize,
+    pub modified: usize,
+    pub removed: usize,
+    pub dataflow_entries_built: usize,
+}
+
+impl WorkspaceRefreshReport {
+    #[must_use]
+    pub const fn changed(&self) -> bool {
+        self.added > 0 || self.modified > 0 || self.removed > 0
+    }
 }
 
 impl Project {
@@ -397,9 +415,11 @@ impl Project {
         workspace: Workspace,
         registry: Arc<LanguageRegistry>,
     ) -> Self {
+        let root = root.as_ref();
         Self {
-            root: root.as_ref().to_path_buf(),
+            root: root.to_path_buf(),
             workspace,
+            fingerprints: Arc::new(Mutex::new(initial_fingerprints(root, &registry))),
             registry,
             rulepack: None,
             rulepack_root: None,
@@ -421,6 +441,7 @@ impl Project {
 
     #[must_use]
     pub fn workspace(&self) -> &Workspace {
+        self.refresh_from_disk_best_effort();
         &self.workspace
     }
 
@@ -441,12 +462,76 @@ impl Project {
 
     #[must_use]
     pub fn stats(&self) -> bonsai_workspace::WorkspaceStats {
+        self.refresh_from_disk_best_effort();
         self.workspace.stats()
     }
 
     #[must_use]
     pub fn diagnostics(&self) -> Vec<bonsai_diagnostics::Diagnostic> {
+        self.refresh_from_disk_best_effort();
         self.workspace.diagnostics()
+    }
+
+    /// Refresh this long-lived project from the current on-disk source
+    /// tree. Modified files are reparsed and reindexed in place; deleted
+    /// files are removed from the live VFS/global index; new files are
+    /// added and force a conservative dataflow rebuild because they can
+    /// introduce new call-resolution targets. When anything changed, the
+    /// dataflow sidecar is warmed and written back for the next process.
+    pub fn refresh_from_disk(&self) -> Result<WorkspaceRefreshReport> {
+        let current = self
+            .workspace
+            .source_file_fingerprints(&self.root)
+            .with_context(|| format!("scanning {}", self.root.display()))?;
+        let current_map: AHashMap<PathBuf, u64> =
+            current.into_iter().map(|file| (file.path, file.hash)).collect();
+
+        let mut previous = self.fingerprints.lock().expect("fingerprint lock");
+        let previous_paths: AHashSet<PathBuf> = previous.keys().cloned().collect();
+        let current_paths: AHashSet<PathBuf> = current_map.keys().cloned().collect();
+
+        let mut report = WorkspaceRefreshReport::default();
+        for path in previous_paths.difference(&current_paths) {
+            if self.workspace.remove_file_from_index(path).is_some() {
+                report.removed += 1;
+            }
+        }
+
+        let mut changed_paths: Vec<PathBuf> = current_map
+            .iter()
+            .filter_map(|(path, hash)| {
+                if previous.get(path).copied() == Some(*hash) {
+                    None
+                } else {
+                    Some(path.clone())
+                }
+            })
+            .collect();
+        changed_paths.sort();
+        for path in changed_paths {
+            let refresh = self
+                .workspace
+                .refresh_file_from_disk(&path)
+                .with_context(|| format!("refreshing {}", path.display()))?;
+            match refresh.kind {
+                FileRefreshKind::Added => report.added += 1,
+                FileRefreshKind::Modified => report.modified += 1,
+                FileRefreshKind::Unchanged => {}
+            }
+        }
+
+        if report.changed() {
+            let pending = self.workspace.dataflow().pending_count(self.workspace.db());
+            self.workspace.dataflow().prewarm_all(self.workspace.db());
+            report.dataflow_entries_built = pending;
+            let _ = self.save_dataflow_sidecar();
+            *previous = current_map;
+        }
+        Ok(report)
+    }
+
+    fn refresh_from_disk_best_effort(&self) {
+        let _ = self.refresh_from_disk();
     }
 
     /// Rebuild the live dataflow cache using the semantic propagation
@@ -471,33 +556,49 @@ impl Project {
 
     #[must_use]
     pub fn browse(&self) -> Browse<'_> {
+        self.refresh_from_disk_best_effort();
         Browse { project: self }
     }
 
     #[must_use]
     pub fn dump(&self) -> Dump<'_> {
+        self.refresh_from_disk_best_effort();
         Dump { project: self }
     }
 
     #[must_use]
     pub fn export(&self) -> Export<'_> {
+        self.refresh_from_disk_best_effort();
         Export { project: self }
     }
 
     #[must_use]
     pub fn security(&self) -> Security<'_> {
+        self.refresh_from_disk_best_effort();
         Security { project: self }
     }
 
     #[must_use]
     pub fn trace(&self) -> Trace<'_> {
+        self.refresh_from_disk_best_effort();
         Trace { project: self }
     }
 
     #[must_use]
     pub fn inspect(&self) -> Inspect<'_> {
+        self.refresh_from_disk_best_effort();
         Inspect { project: self }
     }
+}
+
+fn initial_fingerprints(root: &Path, registry: &Arc<LanguageRegistry>) -> AHashMap<PathBuf, u64> {
+    let workspace = Workspace::new(registry.clone());
+    workspace
+        .source_file_fingerprints(root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|file| (file.path, file.hash))
+        .collect()
 }
 
 /// Core cache facade. This manages SDK-owned workspace analysis cache files,
@@ -881,10 +982,12 @@ pub struct Browse<'a> {
 
 impl Browse<'_> {
     pub fn defs(&self, filters: DefsFilters<'_>) -> Result<Vec<bonsai_browse::DefOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::defs(&self.project.workspace, &filters)
     }
 
     pub fn calls(&self, filters: CallsFilters<'_>) -> Result<Vec<bonsai_browse::CallOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::calls(&self.project.workspace, &filters)
     }
 
@@ -892,10 +995,12 @@ impl Browse<'_> {
         &self,
         filters: ImportsFilters<'_>,
     ) -> Result<Vec<bonsai_browse::ImportOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::imports(&self.project.workspace, &filters)
     }
 
     pub fn vars(&self, filters: VarsFilters<'_>) -> Result<Vec<bonsai_browse::VarOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::vars(&self.project.workspace, &filters)
     }
 
@@ -903,6 +1008,7 @@ impl Browse<'_> {
         &self,
         filters: bonsai_browse::StringsFilters<'_>,
     ) -> Result<Vec<bonsai_browse::StringOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::strings(&self.project.workspace, &filters)
     }
 
@@ -910,14 +1016,17 @@ impl Browse<'_> {
         &self,
         filters: CommentsFilters<'_>,
     ) -> Result<Vec<bonsai_browse::CommentOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::comments(&self.project.workspace, &filters)
     }
 
     pub fn args(&self, filters: ArgsFilters<'_>) -> Result<Vec<bonsai_browse::ArgOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::args(&self.project.workspace, &filters)
     }
 
     pub fn classes(&self, filters: ClassesFilters<'_>) -> Result<Vec<bonsai_browse::ClassOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::classes(&self.project.workspace, &filters)
     }
 
@@ -926,6 +1035,7 @@ impl Browse<'_> {
         symbol: &str,
         filters: RefsFilters<'_>,
     ) -> Result<Vec<bonsai_browse::RefOut>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::refs(&self.project.workspace, symbol, &filters)
     }
 
@@ -935,12 +1045,14 @@ impl Browse<'_> {
         filters: SearchFilters<'_>,
         limit: usize,
     ) -> Result<Vec<bonsai_browse::SearchHit>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::search(&self.project.workspace, query, &filters, limit)
     }
 
     /// Workspace navigation: hierarchical view with finding /
     /// flow / cross-file edge annotations per file.
     pub fn tree(&self, filters: TreeFilters<'_>) -> Result<TreeOut> {
+        self.project.refresh_from_disk_best_effort();
         crate::tree::tree(
             &self.project.workspace,
             self.project.rulepack.as_deref(),
@@ -952,6 +1064,7 @@ impl Browse<'_> {
     /// findings/flows on its lines, and cross-file caller/callee
     /// inlined bodies.
     pub fn read_file(&self, filters: ReadFileFilters<'_>) -> Result<ReadFileOut> {
+        self.project.refresh_from_disk_best_effort();
         crate::read_file::read_file(
             &self.project.workspace,
             self.project.rulepack.as_deref(),
@@ -968,31 +1081,37 @@ pub struct Dump<'a> {
 impl Dump<'_> {
     #[must_use]
     pub fn hir(&self, symbol: &str) -> Option<bonsai_browse::HirDump> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_hir(&self.project.workspace, symbol)
     }
 
     #[must_use]
     pub fn cfg(&self, symbol: &str) -> Option<bonsai_cfg::Cfg> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_cfg(&self.project.workspace, symbol)
     }
 
     #[must_use]
     pub fn callgraph(&self) -> Vec<bonsai_browse::CallgraphRow> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_callgraph(&self.project.workspace)
     }
 
     #[must_use]
     pub fn edges(&self, filters: EdgesFilters<'_>) -> Vec<bonsai_browse::EdgeRecord> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_edges(&self.project.workspace, &filters)
     }
 
     #[must_use]
     pub fn ast(&self, filters: AstFilters<'_>) -> AstOutcome {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_ast(&self.project.workspace, &filters)
     }
 
     #[must_use]
     pub fn resolve(&self, query: &str, filters: ResolveFilters<'_>) -> ResolveOutcome {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_resolve(&self.project.workspace, query, &filters, |_, _| Vec::new())
     }
 
@@ -1006,11 +1125,13 @@ impl Dump<'_> {
     where
         F: FnOnce(&Workspace, &str) -> Vec<String>,
     {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_resolve(&self.project.workspace, query, &filters, suggestions_for)
     }
 
     #[must_use]
     pub fn taint(&self, filters: TaintFilters<'_>) -> TaintOutcome {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_taint(&self.project.workspace, &filters)
     }
 }
@@ -1027,6 +1148,7 @@ pub struct NativeExportOptions {
 
 impl Export<'_> {
     pub fn native_json(&self, options: NativeExportOptions) -> serde_json::Result<serde_json::Value> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::native_export_json(
             &self.project.workspace,
             &self.project.root,
@@ -1035,6 +1157,7 @@ impl Export<'_> {
     }
 
     pub fn native_json_string(&self, options: NativeExportOptions) -> serde_json::Result<String> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::render_native_export_json(
             &self.project.workspace,
             &self.project.root,
@@ -1069,6 +1192,7 @@ impl Export<'_> {
     }
 
     pub fn warm_default_json_cache(&self) -> Result<()> {
+        self.project.refresh_from_disk_best_effort();
         if self.default_json_cache_is_fresh()? {
             return Ok(());
         }
@@ -1080,10 +1204,12 @@ impl Export<'_> {
 
     #[must_use]
     pub fn graph_projection(&self) -> GraphProjection {
+        self.project.refresh_from_disk_best_effort();
         bonsai_browse::graph_projection(&self.project.workspace, &self.project.root)
     }
 
     pub fn graph(&self, format: GraphExportFormat) -> Result<String> {
+        self.project.refresh_from_disk_best_effort();
         Ok(bonsai_browse::render_graph_export(
             &self.project.workspace,
             &self.project.root,
@@ -1120,6 +1246,7 @@ impl Security<'_> {
         &self,
         options: TaintAnalysisOptions,
     ) -> Result<bonsai_security::TaintAnalysisReport> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::run_taint_analysis(&self.project.workspace, self.pack()?, options)
     }
 
@@ -1131,6 +1258,7 @@ impl Security<'_> {
     where
         F: FnMut(&'static str),
     {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::run_taint_analysis_with_progress(
             &self.project.workspace,
             self.pack()?,
@@ -1152,6 +1280,7 @@ impl Security<'_> {
     where
         F: FnMut(bonsai_security::AnalysisProgress),
     {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::run_taint_analysis_with_phase_progress(
             &self.project.workspace,
             self.pack()?,
@@ -1164,6 +1293,7 @@ impl Security<'_> {
         &self,
         options: SourceAnalysisOptions,
     ) -> Result<bonsai_security::SourceAnalysisReport> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::run_source_analysis(&self.project.workspace, self.pack()?, options)
     }
 
@@ -1175,6 +1305,7 @@ impl Security<'_> {
     where
         F: FnMut(&'static str),
     {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::run_source_analysis_with_progress(
             &self.project.workspace,
             self.pack()?,
@@ -1192,6 +1323,7 @@ impl Security<'_> {
     where
         F: FnMut(bonsai_security::AnalysisProgress),
     {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::run_source_analysis_with_phase_progress(
             &self.project.workspace,
             self.pack()?,
@@ -1201,14 +1333,17 @@ impl Security<'_> {
     }
 
     pub fn sources(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::source_inventory(&self.project.workspace, self.pack()?, options)
     }
 
     pub fn sinks(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::sink_inventory(&self.project.workspace, self.pack()?, options)
     }
 
     pub fn sanitizers(&self, options: SecurityInventoryOptions) -> Result<Vec<bonsai_security::RuleMatch>> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_security::sanitizer_inventory(&self.project.workspace, self.pack()?, options)
     }
 
@@ -1237,6 +1372,7 @@ impl Security<'_> {
     }
 
     pub fn deps(&self, options: DependencyInventoryOptions) -> Result<bonsai_security::DependencyInventory> {
+        self.project.refresh_from_disk_best_effort();
         Ok(bonsai_security::dependency_inventory(
             &self.project.workspace,
             self.pack()?,
@@ -1336,6 +1472,7 @@ impl Trace<'_> {
         &self,
         entry: &str,
     ) -> std::result::Result<bonsai_trace::TraceResult, bonsai_workspace::WorkspaceError> {
+        self.project.refresh_from_disk_best_effort();
         self.project.workspace.trace_from(entry)
     }
 
@@ -1344,6 +1481,7 @@ impl Trace<'_> {
         entry: &str,
         options: bonsai_workspace::CrossModuleOptions,
     ) -> std::result::Result<bonsai_trace::TraceResult, bonsai_workspace::WorkspaceError> {
+        self.project.refresh_from_disk_best_effort();
         self.project.workspace.trace_from_with_options(entry, options)
     }
 
@@ -1352,6 +1490,7 @@ impl Trace<'_> {
         source: &str,
         sink: &str,
     ) -> std::result::Result<bonsai_trace::TraceResult, bonsai_workspace::WorkspaceError> {
+        self.project.refresh_from_disk_best_effort();
         self.project.workspace.trace_source_to_sink(source, sink)
     }
 
@@ -1361,6 +1500,7 @@ impl Trace<'_> {
         sink: &str,
         options: bonsai_workspace::CrossModuleOptions,
     ) -> std::result::Result<bonsai_trace::TraceResult, bonsai_workspace::WorkspaceError> {
+        self.project.refresh_from_disk_best_effort();
         self.project
             .workspace
             .trace_source_to_sink_with_options(source, sink, options)
@@ -1427,15 +1567,18 @@ impl Inspect<'_> {
         pattern: Option<&str>,
         regex: bool,
     ) -> Result<bonsai_inspect::Matcher, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         bonsai_inspect::Matcher::build(pattern, regex)
     }
 
     pub fn matching_decls(&self, pattern: Option<&str>, regex: bool) -> Result<Vec<Decl>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         let matcher = self.matcher(pattern, regex)?;
         Ok(bonsai_inspect::matching_decls(&self.project.workspace, &matcher))
     }
 
     pub fn matching_func_ids(&self, pattern: Option<&str>, regex: bool) -> Result<Vec<FuncId>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         let matcher = self.matcher(pattern, regex)?;
         Ok(bonsai_inspect::matching_func_ids(
             &self.project.workspace,
@@ -1444,6 +1587,7 @@ impl Inspect<'_> {
     }
 
     pub fn chains(&self, query: InspectQuery<'_>) -> Result<Vec<InspectTargetChains>, regex::Error> {
+        self.project.refresh_from_disk_best_effort();
         let matcher = self.matcher(query.pattern, query.regex)?;
         let targets = bonsai_inspect::matching_func_ids(&self.project.workspace, &matcher);
         let cache = bonsai_inspect::ChainCache::new(&self.project.workspace);

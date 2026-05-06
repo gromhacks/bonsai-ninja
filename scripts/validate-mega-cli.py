@@ -52,7 +52,10 @@ EXPECTED_FINDINGS = {
     # C reports the command sink plus every bounded string-copy/append
     # sink site reached from argv in the construct-coverage fixture.
     "c": 11,
-    "javascript": 2,
+    # JS reports the single real stdin/readline command-injection chain.
+    # Constant clean-twin sinks and duplicate inferred entry rows are not
+    # counted as separate findings.
+    "javascript": 1,
     # Lua bumped from 1 → 3 with the rule-pack expansion (lua.sqli.luasql_execute
     # now matches both `.execute` and `:execute` shapes via the receiver
     # alternation `^(conn|cur|cursor|stmt|db|env|database|connection|sql)[.:]execute$`;
@@ -77,9 +80,10 @@ EXPECTED_FINDINGS = {
     # launch/launchPath rows are sink inventory, but not tainted in the full
     # source-to-sink chain.
     "swift": 1,
-    # Trimmed 3 → 2 with requires_state promotion (one transition-site
-    # finding moved to a use-after-step rule absent from this fixture).
-    "typescript": 2,
+    # TS reports the single real readline command-injection chain.
+    # Constant clean-twin sinks and duplicate inferred entry rows are not
+    # counted as separate findings.
+    "typescript": 1,
     "dart": 2,
     # Go reports the explicit request-header source plus the opt-in
     # inferred request parameter source through the same shell wrapper.

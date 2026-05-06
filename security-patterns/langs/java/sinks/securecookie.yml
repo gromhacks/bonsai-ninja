@@ -1,0 +1,40 @@
+- id: java.securecookie.cookie_setsecure_false
+  enabled: true
+  language: java
+  tag: header-injection
+  severity: medium
+  packages:
+  - javax.servlet
+  - jakarta.servlet
+  cwe:
+  - CWE-614
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Cookie
+      - setSecure
+  constraints:
+  - arg_equals:
+      index: 0
+      value: "false"
+  match_examples:
+  - name: Cookie setSecure false
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(Cookie cookie) throws Exception {
+          cookie.setSecure(false);
+        }
+      }
+    expect_match_text: [cookie.setSecure]
+  - name: Cookie setSecure true negative
+    code: |
+      import javax.servlet.*;
+      class App {
+        void handle(Cookie cookie) throws Exception {
+          cookie.setSecure(true);
+        }
+      }
+    expect_no_match: true
+  description: "Cookie.setSecure(false) — explicitly permits cookie transmission over cleartext HTTP."

@@ -12,7 +12,7 @@
   constraints:
   - arg_matches_regex:
       index: 0
-      regex: "(?i)^(e|ex|err|exception|sqlException|throwable)$|\\.getMessage\\s*\\(|\\.toString\\s*\\(|^\"[^\"]*(exception|stack\\s*trace)"
+      regex: "(?i)^(e|ex|err|exception|sqlException|throwable)$|\\.getMessage\\s*\\(|\\.toString\\s*\\(|^\"[^\"]*(exception|stack\\s*trace|password|passwd|secret|token|api[_-]?key)"
   - arg_tainted:
       index: 0
   match_examples:

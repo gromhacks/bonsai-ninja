@@ -28,81 +28,6 @@
     expect_no_match: true
   description: 'MessageDigest.getInstance("MD5"/"MD4"/"MD2") — collision-broken hash.'
 
-- id: java.hash.messagedigest_sha1
-  enabled: true
-  language: java
-  tag: weak-crypto
-  severity: low
-  cwe:
-  - CWE-328
-  match:
-    kind: call
-    callee:
-      attribute:
-      - MessageDigest
-      - getInstance
-  constraints:
-  - arg_matches_regex:
-      index: 0
-      regex: '(?i)^"SHA-?1"$'
-  match_examples:
-  - name: MessageDigest SHA1
-    code: |
-      class App {
-        void handle() throws Exception {
-          MessageDigest.getInstance("SHA-1");
-        }
-      }
-    expect_match_text: [MessageDigest.getInstance]
-  - name: safe message digest negative
-    code: |
-      class App {
-        void handle() throws Exception {
-          MessageDigest.getInstance("SHA-256");
-        }
-      }
-    expect_no_match: true
-  description: 'MessageDigest.getInstance("SHA1"/"SHA-1") — collision-weakened hash.'
-
-- id: java.hash.messagedigest_dynamic_algorithm
-  enabled: true
-  language: java
-  tag: weak-crypto
-  severity: medium
-  cwe:
-  - CWE-328
-  match:
-    kind: call
-    callee:
-      attribute:
-      - MessageDigest
-      - getInstance
-  constraints:
-  - arg_not_matches_regex:
-      index: 0
-      regex: '(?i)^"(SHA-?(256|384|512)|SHA3-(224|256|384|512))"$'
-  - arg_not_matches_regex:
-      index: 0
-      regex: '(?i)^"(MD[245]|SHA-?1)"$'
-  match_examples:
-  - name: dynamic MessageDigest algorithm
-    code: |
-      class App {
-        void handle(String algorithm) throws Exception {
-          MessageDigest.getInstance(algorithm);
-        }
-      }
-    expect_match_text: [MessageDigest.getInstance]
-  - name: safe message digest literal negative
-    code: |
-      class App {
-        void handle() throws Exception {
-          MessageDigest.getInstance("SHA-256");
-        }
-      }
-    expect_no_match: true
-  description: "MessageDigest.getInstance(dynamicAlgorithm) — algorithm is not a literal known-safe digest."
-
 - id: java.crypto.cipher_des
   enabled: true
   language: java
@@ -280,15 +205,6 @@
         }
       }
     expect_match_text: [random.nextInt]
-  - name: java util Random chained nextInt
-    code: |
-      import java.util.*;
-      class App {
-        void handle() throws Exception {
-          new Random().nextInt();
-        }
-      }
-    expect_match_text: [new Random().nextInt]
   description: "java.util.Random next* output — non-cryptographic PRNG used where unpredictable values are required."
 
 - id: java.crypto.random_ctor

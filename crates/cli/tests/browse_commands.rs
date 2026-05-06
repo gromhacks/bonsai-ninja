@@ -1370,6 +1370,10 @@ fn index_help_does_not_confuse_no_cache_with_sidecar_rebuild() {
         "index help should show how to force a fresh dataflow sidecar: {out}"
     );
     assert!(
+        out.contains("--watch"),
+        "index help should document save-time hot reload workflow: {out}"
+    );
+    assert!(
         !out.contains("--no-cache index"),
         "index help must not imply --no-cache clears persisted sidecars: {out}"
     );

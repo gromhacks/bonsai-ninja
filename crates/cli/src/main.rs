@@ -340,7 +340,11 @@ fn main() -> Result<()> {
         }
     }
     match cli.command {
-        Cmd::Index { workspace } => cmd_index(&workspace),
+        Cmd::Index {
+            workspace,
+            watch,
+            interval_ms,
+        } => cmd_index(&workspace, watch, interval_ms),
         Cmd::Trace {
             workspace,
             symbol,
@@ -955,7 +959,7 @@ fn configured_rayon_stack_bytes() -> usize {
 
 fn command_workspace_for_page_cache(cmd: &Cmd) -> Option<&std::path::Path> {
     match cmd {
-        Cmd::Index { workspace }
+        Cmd::Index { workspace, .. }
         | Cmd::Trace { workspace, .. }
         | Cmd::Diagnostics { workspace }
         | Cmd::DumpHir { workspace, .. }

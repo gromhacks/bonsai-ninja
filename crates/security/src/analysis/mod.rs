@@ -3208,7 +3208,8 @@ fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
 ///    only for old/cache-missing graphs. Precision is met across the
 ///    chosen edges, then `flow_id` / `group_id` include concrete call
 ///    sites. Sanitizer attachment by chain hop with data-flow gate
-///    (`sanitizer_call_overlaps_tainted_call`).
+///    (`sanitizer_call_overlaps_tainted_call` or a sanitizer nested
+///    directly inside a tainted sink argument).
 /// 8. **Trust-aware severity** — `local`/`inferred` source tier
 ///    demotes severity one level (Critical → High, etc.).
 ///
@@ -3681,16 +3682,32 @@ fn sanitizer_call_overlaps_tainted_call(san: &RuleMatch, tainted_call_spans: &AH
         .any(|span| spans_overlap(*span, san.span))
 }
 
+fn sanitizer_is_nested_in_tainted_sink_arg(san: &RuleMatch, sink_tainted_args: &[TaintedArgInfo]) -> bool {
+    let text = san.match_text.trim();
+    !text.is_empty() && sink_tainted_args.iter().any(|arg| arg.value_text.contains(text))
+}
+
 /// True when a sanitizer match could plausibly attach to the
 /// source→sink chain — must come AFTER the source within the
 /// source's enclosing fn, and BEFORE the sink within the sink's
-/// enclosing fn. Cross-fn sanitizers always pass this gate; the
-/// chain-hop check elsewhere handles inter-fn placement.
-fn sanitizer_can_attach(src: &RuleMatch, san: &RuleMatch, snk: &RuleMatch) -> bool {
+/// enclosing fn. A sanitizer nested inside a tainted sink argument is
+/// semantically before the sink execution even though its callee token
+/// appears after the sink callee token. Cross-fn sanitizers always pass
+/// this gate; the chain-hop check elsewhere handles inter-fn placement.
+fn sanitizer_can_attach(
+    src: &RuleMatch,
+    san: &RuleMatch,
+    snk: &RuleMatch,
+    sink_tainted_args: &[TaintedArgInfo],
+) -> bool {
     if san.file == src.file && san.enclosing_fn == src.enclosing_fn && !match_precedes_or_same(src, san) {
         return false;
     }
-    if san.file == snk.file && san.enclosing_fn == snk.enclosing_fn && !match_precedes_or_same(san, snk) {
+    if san.file == snk.file
+        && san.enclosing_fn == snk.enclosing_fn
+        && !match_precedes_or_same(san, snk)
+        && !sanitizer_is_nested_in_tainted_sink_arg(san, sink_tainted_args)
+    {
         return false;
     }
     true
@@ -4172,7 +4189,7 @@ fn make_finding(
             continue;
         };
         for sanitizer_match in sanitizer_hits {
-            if !sanitizer_can_attach(src, sanitizer_match, snk) {
+            if !sanitizer_can_attach(src, sanitizer_match, snk, &context.sink_tainted_args) {
                 continue;
             }
             // Data-flow-aware credit: the sanitizer's call site must
@@ -4180,7 +4197,9 @@ fn make_finding(
             // gate any rule firing somewhere on the chain credits the
             // finding even when its argument has nothing to do with
             // the source's tainted value.
-            if !sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans) {
+            if !sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
+                && !sanitizer_is_nested_in_tainted_sink_arg(sanitizer_match, &context.sink_tainted_args)
+            {
                 continue;
             }
             let dedup_key = (

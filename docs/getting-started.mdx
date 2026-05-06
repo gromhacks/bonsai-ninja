@@ -8,10 +8,11 @@ description: "Install bonsai-ninja, run a first security scan, and read the outp
 <Steps>
 
 1. Install or build the CLI.
-2. Index the workspace so the dataflow sidecar is warm.
-3. Run `security taint-analysis` against a source tree.
-4. Re-run with JSON or SARIF when you need machine-readable output.
-5. Use `inspect --flow F:...` to drill into a specific flow.
+2. Index the workspace so `.bonsai/dataflow.v2.bin` is warm.
+3. Keep `index --watch` running while you edit if you want save-time hot reloads.
+4. Run `security taint-analysis` against a source tree.
+5. Re-run with JSON or SARIF when you need machine-readable output.
+6. Use `inspect --flow F:...` to drill into a specific flow.
 
 </Steps>
 
@@ -28,9 +29,11 @@ bonsai-ninja --version
 
 ### Prebuilt binary
 
-Use a release artifact when you want the same binary in local runs and CI.
+Use a GitHub release artifact when you want the same binary locally and in CI.
 
 ```bash
+tar -xzf bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz
+cd bonsai-ninja-x86_64-unknown-linux-gnu
 chmod +x ./bonsai-ninja
 ./bonsai-ninja --version
 ```
@@ -50,6 +53,19 @@ cargo build --release -p bonsai_cli
 ./target/release/bonsai-ninja index ./examples/python/mega_flow
 ./target/release/bonsai-ninja security ./examples/python/mega_flow taint-analysis --rules-dir ./security-patterns
 ```
+
+`index` is incremental across runs: it loads the existing sidecar,
+validates entries by source-content hashes and dependency hashes, computes
+only missing or stale dataflow facts, and writes the sidecar back.
+
+For development workflows, keep the workspace hot while your editor saves:
+
+```bash
+./target/release/bonsai-ninja index ./src --watch
+```
+
+Long-lived SDK projects use the same refresh path before queries, so
+embedded tools can keep one project open and still see saved changes.
 
 For CI or scripts:
 

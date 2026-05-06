@@ -19,6 +19,19 @@ fn temp_python_micro(name: &str) -> PathBuf {
     dst
 }
 
+fn tempdir(name: &str) -> PathBuf {
+    let dst = std::env::temp_dir().join(format!(
+        "bonsai-sdk-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dst).expect("create tempdir");
+    dst
+}
+
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     std::fs::create_dir_all(dst).expect("create temp fixture dir");
     for entry in std::fs::read_dir(src).expect("read fixture dir") {
@@ -129,6 +142,41 @@ fn facade_index_with_progress_reports_workspace_lifecycle() {
         bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmStarted { .. }
     )));
     assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmFinished));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn facade_hot_reloads_saved_source_changes() {
+    let root = tempdir("hot-reload");
+    let app = root.join("app.py");
+    std::fs::write(&app, "def old_name():\n    pass\n").expect("write initial source");
+    let project = bonsai_sdk::Bonsai::new().index(&root).expect("index");
+
+    let names = |project: &bonsai_sdk::Project| -> Vec<String> {
+        project
+            .browse()
+            .defs(Default::default())
+            .expect("defs")
+            .into_iter()
+            .map(|def| def.name)
+            .collect()
+    };
+    assert!(names(&project).contains(&"old_name".to_string()));
+
+    std::fs::write(&app, "def new_name():\n    pass\n").expect("modify source");
+    let after_modify = names(&project);
+    assert!(after_modify.contains(&"new_name".to_string()));
+    assert!(!after_modify.contains(&"old_name".to_string()));
+
+    let extra = root.join("extra.py");
+    std::fs::write(&extra, "def added_name():\n    pass\n").expect("add source");
+    let after_add = names(&project);
+    assert!(after_add.contains(&"added_name".to_string()));
+
+    std::fs::remove_file(&extra).expect("remove source");
+    let after_remove = names(&project);
+    assert!(!after_remove.contains(&"added_name".to_string()));
+
     let _ = std::fs::remove_dir_all(root);
 }
 
