@@ -103,6 +103,7 @@ impl LanguageAdapter for ObjCAdapter {
         // multi-statement `#define` expansion isn't performed.
         LanguageCapabilities {
             macros: bonsai_lang_api::CapabilityLevel::Partial,
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             ..LanguageCapabilities::partial_baseline()
         }
     }

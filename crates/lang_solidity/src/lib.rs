@@ -119,7 +119,10 @@ impl LanguageAdapter for SolidityAdapter {
         language_from_pack(PACK_NAME)
     }
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::partial_baseline()
+        LanguageCapabilities {
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            ..LanguageCapabilities::partial_baseline()
+        }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
@@ -267,6 +270,7 @@ fn synthesize_yul_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Spa
                     span,
                     name,
                     receiver: None,
+                    receiver_types: Vec::new(),
                     call_kind: CallKind::Function,
                     args,
                 };
@@ -319,6 +323,7 @@ fn synthesize_emit_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Sp
                 span,
                 name: "emit".to_string(),
                 receiver: None,
+                receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 args,
             },

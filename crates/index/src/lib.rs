@@ -51,6 +51,7 @@ impl GlobalIndex {
     /// workspace-unique global ids; `by_file` stores the *remapped* index so
     /// lookups by file return global ids.
     pub fn insert(&mut self, mut index: DeclIndex) {
+        bonsai_lang_api::apply_call_receiver_types(&mut index);
         let file = index.file;
         if self.by_file.contains_key(&file) {
             self.remove_file(file);

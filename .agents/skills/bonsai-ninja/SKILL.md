@@ -3,7 +3,7 @@ name: bonsai-ninja
 description: "Use bonsai-ninja to map a codebase, debug across files, run security analysis, inspect flows, export graph facts, and review source/sink/sanitizer rules."
 ---
 
-# Bonsai Ninja
+# bonsai-ninja
 
 Use `bonsai-ninja` when you need structural code intelligence: map a
 repo, find symbols, trace behavior, debug dataflow, or run SAST.

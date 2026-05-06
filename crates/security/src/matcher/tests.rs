@@ -65,6 +65,7 @@ fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
                     value_text: "{\"attributes\": attributes}".to_string(),
                 },
             ],
+            receiver_types: Vec::new(),
             span: span(),
             call_kind: CallKind::Function,
         },
@@ -82,6 +83,7 @@ fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].callee, "eval");
     assert_eq!(calls[0].origin, CallFactOrigin::RealCall);
+    assert!(calls[0].receiver_types.is_empty());
     assert_eq!(
         calls[0]
             .args
@@ -90,6 +92,35 @@ fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
             .collect::<Vec<_>>(),
         vec!["py_expr", "{\"attributes\": attributes}"]
     );
+}
+
+#[test]
+fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
+    let attr = vec!["Cookie".to_string(), "getValue".to_string()];
+    assert!(callee_matches_with_receiver_types(
+        "c.getValue",
+        &["Cookie".to_string()],
+        None,
+        Some(&attr),
+        None,
+        false,
+    ));
+    assert!(callee_matches_with_receiver_types(
+        "c.getValue",
+        &["jakarta.servlet.http.Cookie".to_string()],
+        None,
+        Some(&attr),
+        None,
+        false,
+    ));
+    assert!(!callee_matches_with_receiver_types(
+        "c.getValue",
+        &["Header".to_string()],
+        None,
+        Some(&attr),
+        None,
+        false,
+    ));
 }
 
 #[test]
@@ -171,6 +202,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         rule_id: "test.same_receiver",
         callee: "balance.lock",
         args: &[],
+        receiver_types: &[],
         span: Span::new(FileId::new(0), 0, 0),
         call_origin: None,
         constraints: &constraint,
@@ -188,6 +220,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         rule_id: "test.same_receiver",
         callee: "stdin.lock",
         args: &[],
+        receiver_types: &[],
         span: Span::new(FileId::new(0), 0, 0),
         call_origin: None,
         constraints: &constraint,
@@ -205,6 +238,7 @@ fn same_receiver_call_count_constraint_requires_repeated_receiver() {
         rule_id: "test.same_receiver",
         callee: "lock",
         args: &[],
+        receiver_types: &[],
         span: Span::new(FileId::new(0), 0, 0),
         call_origin: None,
         constraints: &constraint,
@@ -273,7 +307,7 @@ fn empty_inferred_type_alias_does_not_panic() {
     let attr = vec!["HttpClient".to_string(), "execute".to_string()];
 
     assert_eq!(
-        callee_or_alias_matches("client.execute", None, Some(&attr), None, &aliases, false),
+        callee_or_alias_matches("client.execute", &[], None, Some(&attr), None, &aliases, false),
         None
     );
 }
@@ -323,6 +357,7 @@ fn test_call_fact(callee: &str, origin: CallFactOrigin) -> CallFact {
         callee: callee.to_string(),
         span: span(),
         args: Vec::new(),
+        receiver_types: Vec::new(),
         call_kind: CallKind::Method,
         origin,
     }

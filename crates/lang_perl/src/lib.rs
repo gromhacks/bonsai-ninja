@@ -1146,6 +1146,7 @@ fn synthesize_qx_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Span
             span,
             name: "qx".to_string(),
             receiver: None,
+            receiver_types: Vec::new(),
             call_kind: CallKind::Function,
             args,
         };
@@ -1186,6 +1187,7 @@ fn synthesize_method_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(
                 span,
                 name: format!("{receiver}->{method_name}"),
                 receiver: Some(receiver.to_string()),
+                receiver_types: Vec::new(),
                 // Perl convention: `Class->new` is the constructor.
                 call_kind: if method_name == "new" {
                     CallKind::Constructor
@@ -1331,6 +1333,7 @@ fn synthesize_builtin_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<
                 span: span_of(file, &call_node),
                 name: name.to_string(),
                 receiver: None,
+                receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 args,
             },
@@ -1378,6 +1381,7 @@ fn synthesize_builtin_expression_arg_call_events(
                 span,
                 name: name.to_string(),
                 receiver: None,
+                receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 args: vec![CallArg {
                     span: span_of(file, &arguments),
@@ -1407,6 +1411,7 @@ fn synthesize_match_regex_call_events(tree: &Tree, src: &[u8], file: FileId) -> 
                 span,
                 name: "m".to_string(),
                 receiver: None,
+                receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 args: vec![CallArg {
                     span: span_of(file, &content),
@@ -1461,6 +1466,7 @@ fn synthesize_coderef_invocation_events(src: &[u8], file: FileId) -> Vec<(Span, 
                 span,
                 name,
                 receiver: None,
+                receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 args: perl_text_args(src, arrow_idx + 3, close, file),
             },

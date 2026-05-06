@@ -101,6 +101,7 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
     Some(FlowEvent::Call {
         span: span_of(file, node),
         receiver: None,
+        receiver_types: Vec::new(),
         name,
         call_kind: CallKind::Function,
         args,
@@ -180,6 +181,7 @@ fn jsx_call_from_opening(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<Fl
     Some(FlowEvent::Call {
         span: span_of(file, node),
         receiver: None,
+        receiver_types: Vec::new(),
         name: component,
         call_kind: CallKind::Function,
         args,

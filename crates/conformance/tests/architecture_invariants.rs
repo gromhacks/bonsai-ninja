@@ -1785,11 +1785,9 @@ fn param_in_class_constraint_consults_decl_bases() {
 }
 
 /// Receiver-method dispatch must narrow by receiver type when one
-/// is known. We verify that `crates/callgraph/src/lib.rs`'s
-/// `collect_receiver_method_targets` consults `Decl.parent` /
-/// `Decl.type_aliases` (via `resolve_class`) and does NOT fall
-/// back to bare workspace-wide name matches when caller context is
-/// available.
+/// is known. `FlowEvent::Call::receiver_types` is the canonical
+/// semantic fact; `Decl.type_aliases` is only the legacy derivation
+/// fallback for callers that predate the shared index pass.
 #[test]
 fn receiver_method_dispatch_narrows_by_type() {
     let root = repo_root();
@@ -1797,13 +1795,17 @@ fn receiver_method_dispatch_narrows_by_type() {
     let text = read(&cg_lib);
     let body = function_body(&text, "collect_receiver_method_targets");
     assert!(
-        body.contains("receiver_type_names("),
-        "collect_receiver_method_targets must derive receiver types before resolving methods"
+        body.contains("receiver_types.to_vec()"),
+        "collect_receiver_method_targets must consume FlowEvent::Call::receiver_types before resolving methods"
     );
-    let receiver_type_names = function_body(&text, "receiver_type_names");
+    assert!(
+        body.contains("receiver_type_names_for_expr("),
+        "collect_receiver_method_targets may only fall back to deriving receiver types when call facts are empty"
+    );
+    let receiver_type_names = function_body(&text, "receiver_type_names_for_expr");
     assert!(
         receiver_type_names.contains("type_alias_for_receiver("),
-        "receiver_type_names must consult adapter-declared receiver type aliases"
+        "receiver_type_names_for_expr must consult adapter-declared receiver type aliases"
     );
     let type_alias_for_receiver = function_body(&text, "type_alias_for_receiver");
     assert!(

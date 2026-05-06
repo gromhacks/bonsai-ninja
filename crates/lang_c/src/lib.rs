@@ -65,6 +65,7 @@ impl LanguageAdapter for CAdapter {
         // already works.
         LanguageCapabilities {
             macros: bonsai_lang_api::CapabilityLevel::Partial,
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             ..LanguageCapabilities::partial_baseline()
         }
     }

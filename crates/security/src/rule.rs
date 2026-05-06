@@ -288,6 +288,9 @@ pub enum ConstraintKind {
     ReceiverNameIn {
         receiver_name_in: Vec<String>,
     },
+    ReceiverTypeIn {
+        receiver_type_in: Vec<String>,
+    },
     SecondArgEquals {
         second_arg_equals: String,
     },
@@ -387,6 +390,7 @@ impl ConstraintKind {
     pub fn name(&self) -> &'static str {
         match self {
             Self::ReceiverNameIn { .. } => "receiver_name_in",
+            Self::ReceiverTypeIn { .. } => "receiver_type_in",
             Self::SecondArgEquals { .. } => "second_arg_equals",
             Self::ArgEquals { .. } => "arg_equals",
             Self::KeywordArgEquals { .. } => "keyword_arg_equals",

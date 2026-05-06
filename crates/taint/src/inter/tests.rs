@@ -140,6 +140,7 @@ fn configured_sanitizer_call_does_not_clear_reference_prefixes_in_inter_transfer
         name: "clean".to_string(),
         receiver: None,
         call_kind: bonsai_lang_api::CallKind::Function,
+        receiver_types: Vec::new(),
         args: vec![bonsai_lang_api::CallArg {
             span,
             name: None,
@@ -561,6 +562,7 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
             name: "os_system".to_string(),
             receiver: None,
             call_kind: bonsai_lang_api::CallKind::Function,
+            receiver_types: Vec::new(),
             args: vec![bonsai_lang_api::CallArg {
                 span: sink_span,
                 name: None,

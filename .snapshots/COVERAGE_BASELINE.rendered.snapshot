@@ -1,23 +1,23 @@
-| Language | Modules | Generics | Macros | Dyn dispatch | Exceptions | Async / await | Coroutines | Reflection | FFI | Pattern matching | Module export aliases |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| c | Partial | n/a | Partial | n/a | n/a | n/a | n/a | n/a | Unsupported | n/a | n/a |
-| cpp | Partial | Partial | Partial | Partial | Partial | n/a | Partial | Unsupported | Unsupported | n/a | n/a |
-| csharp | Partial | Partial | n/a | Partial | Exact | Partial | Partial | Unsupported | Unsupported | Partial | n/a |
-| dart | Partial | Partial | n/a | Partial | Partial | Partial | Partial | n/a | n/a | Partial | n/a |
-| elixir | Partial | n/a | Unsupported | Partial | n/a | n/a | Partial | n/a | n/a | Partial | n/a |
-| erlang | Partial | n/a | Unsupported | n/a | n/a | n/a | Partial | n/a | n/a | Partial | n/a |
-| go | Partial | Partial | n/a | Partial | n/a | n/a | Partial | Unsupported | Unsupported | n/a | n/a |
-| java | Partial | Partial | n/a | Partial | Exact | Partial | n/a | Partial | Unsupported | Partial | n/a |
-| javascript | Partial | n/a | n/a | Partial | Partial | Partial | Partial | n/a | n/a | n/a | exports, module.exports |
-| kotlin | Partial | Partial | n/a | Partial | Exact | Partial | Partial | Unsupported | Unsupported | Partial | n/a |
-| lua | Partial | n/a | n/a | Partial | Partial | n/a | Partial | n/a | Unsupported | n/a | n/a |
-| objc | Partial | n/a | Partial | Partial | Partial | n/a | n/a | Unsupported | Unsupported | n/a | n/a |
-| perl | Partial | n/a | n/a | Partial | Partial | n/a | n/a | Unsupported | n/a | n/a | n/a |
-| php | Partial | n/a | n/a | Partial | Partial | n/a | Partial | Unsupported | n/a | n/a | n/a |
-| python | Partial | n/a | n/a | Partial | Partial | Partial | Partial | Partial | Unsupported | Partial | n/a |
-| ruby | Partial | n/a | n/a | Partial | Partial | n/a | Partial | Unsupported | n/a | Partial | n/a |
-| rust | Partial | Partial | Partial | Partial | n/a | Exact | n/a | n/a | Partial | Exact | n/a |
-| scala | Partial | Partial | n/a | Partial | Partial | Partial | Partial | Unsupported | n/a | Exact | n/a |
-| solidity | Partial | n/a | n/a | Partial | Partial | n/a | n/a | n/a | n/a | n/a | n/a |
-| swift | Partial | Partial | n/a | Partial | Partial | Partial | Partial | Unsupported | n/a | Exact | n/a |
-| typescript | Partial | Partial | n/a | Partial | Partial | Partial | Partial | n/a | n/a | n/a | exports, module.exports |
+| Language | Modules | Generics | Macros | Dyn dispatch | Exceptions | Async / await | Coroutines | Reflection | FFI | Pattern matching | Receiver types | Module export aliases |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| c | Partial | n/a | Partial | n/a | n/a | n/a | n/a | n/a | Unsupported | n/a | Partial | n/a |
+| cpp | Partial | Partial | Partial | Partial | Partial | n/a | Partial | Unsupported | Unsupported | n/a | Partial | n/a |
+| csharp | Partial | Partial | n/a | Partial | Exact | Partial | Partial | Unsupported | Unsupported | Partial | Partial | n/a |
+| dart | Partial | Partial | n/a | Partial | Partial | Partial | Partial | n/a | n/a | Partial | Partial | n/a |
+| elixir | Partial | n/a | Unsupported | Partial | n/a | n/a | Partial | n/a | n/a | Partial | Unsupported | n/a |
+| erlang | Partial | n/a | Unsupported | n/a | n/a | n/a | Partial | n/a | n/a | Partial | Unsupported | n/a |
+| go | Partial | Partial | n/a | Partial | n/a | n/a | Partial | Unsupported | Unsupported | n/a | Partial | n/a |
+| java | Partial | Partial | n/a | Partial | Exact | Partial | n/a | Partial | Unsupported | Partial | Partial | n/a |
+| javascript | Partial | n/a | n/a | Partial | Partial | Partial | Partial | n/a | n/a | n/a | Unsupported | exports, module.exports |
+| kotlin | Partial | Partial | n/a | Partial | Exact | Partial | Partial | Unsupported | Unsupported | Partial | Partial | n/a |
+| lua | Partial | n/a | n/a | Partial | Partial | n/a | Partial | n/a | Unsupported | n/a | Unsupported | n/a |
+| objc | Partial | n/a | Partial | Partial | Partial | n/a | n/a | Unsupported | Unsupported | n/a | Partial | n/a |
+| perl | Partial | n/a | n/a | Partial | Partial | n/a | n/a | Unsupported | n/a | n/a | Unsupported | n/a |
+| php | Partial | n/a | n/a | Partial | Partial | n/a | Partial | Unsupported | n/a | n/a | Partial | n/a |
+| python | Partial | n/a | n/a | Partial | Partial | Partial | Partial | Partial | Unsupported | Partial | Partial | n/a |
+| ruby | Partial | n/a | n/a | Partial | Partial | n/a | Partial | Unsupported | n/a | Partial | Unsupported | n/a |
+| rust | Partial | Partial | Partial | Partial | n/a | Exact | n/a | n/a | Partial | Exact | Partial | n/a |
+| scala | Partial | Partial | n/a | Partial | Partial | Partial | Partial | Unsupported | n/a | Exact | Partial | n/a |
+| solidity | Partial | n/a | n/a | Partial | Partial | n/a | n/a | n/a | n/a | n/a | Partial | n/a |
+| swift | Partial | Partial | n/a | Partial | Partial | Partial | Partial | Unsupported | n/a | Exact | Partial | n/a |
+| typescript | Partial | Partial | n/a | Partial | Partial | Partial | Partial | n/a | n/a | n/a | Partial | exports, module.exports |

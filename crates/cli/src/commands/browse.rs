@@ -1634,6 +1634,7 @@ mod tests {
                 name: "sink".to_string(),
                 receiver: None,
                 args: Vec::new(),
+                receiver_types: Vec::new(),
                 call_kind: CallKind::Function,
                 span: span(),
             },

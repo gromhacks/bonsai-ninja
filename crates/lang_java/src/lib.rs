@@ -98,6 +98,7 @@ impl LanguageAdapter for JavaAdapter {
         LanguageCapabilities {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             ..LanguageCapabilities::partial_baseline()
         }
     }

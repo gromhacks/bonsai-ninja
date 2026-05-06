@@ -1422,6 +1422,7 @@ fn walk_into(
             out.push(FlowEvent::Call {
                 span: span_of(file, &node),
                 receiver: call_receiver_from_name(&name),
+                receiver_types: Vec::new(),
                 name,
                 call_kind: crate::CallKind::Method,
                 args: Vec::new(),
@@ -2222,6 +2223,7 @@ fn build_call_event(
     Some(FlowEvent::Call {
         span: span_of(file, &callee_node),
         receiver: call_receiver_from_name(&name),
+        receiver_types: Vec::new(),
         name,
         call_kind,
         args,
@@ -6111,6 +6113,7 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
     Some(FlowEvent::Call {
         span: span_of(file, &node),
         receiver: call_receiver_from_name(&name),
+        receiver_types: Vec::new(),
         name,
         call_kind: if parts.len() > 1 {
             CallKind::Method
@@ -6488,6 +6491,151 @@ pub fn apply_module_path_semantic_identity(idx: &mut crate::DeclIndex, module_se
         if decl.module_path.is_empty() {
             decl.module_path = module_path.clone();
         }
+    }
+}
+
+/// Populate `FlowEvent::Call::receiver_types` from adapter-emitted
+/// semantic declaration facts. Adapters already attach
+/// `Decl.type_aliases` for typed parameters, locals, fields, and
+/// language-specific receiver bindings; this pass copies the relevant
+/// type binding onto each method-call fact so callgraph, taint,
+/// security matching, inspect, and export consume the same receiver
+/// type evidence without receiver-name allowlists.
+pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
+    let class_facts: Vec<(bonsai_common::SymbolId, String, Vec<String>)> = idx
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                crate::DeclKind::Class
+                    | crate::DeclKind::Struct
+                    | crate::DeclKind::Trait
+                    | crate::DeclKind::Interface
+            )
+        })
+        .map(|decl| (decl.symbol, decl.name.clone(), decl.bases.clone()))
+        .collect();
+
+    for decl in &mut idx.defs {
+        let aliases = decl.type_aliases.clone();
+        let implicit_receiver_types = decl.parent.and_then(|parent| {
+            class_facts
+                .iter()
+                .find(|(symbol, _, _)| *symbol == parent)
+                .map(|(_, name, bases)| {
+                    let mut types = Vec::with_capacity(1 + bases.len());
+                    push_unique_receiver_type(&mut types, name.clone());
+                    for base in bases {
+                        push_unique_receiver_type(&mut types, base.clone());
+                    }
+                    types
+                })
+        });
+        apply_call_receiver_types_to_events(
+            &mut decl.flow_events,
+            &aliases,
+            implicit_receiver_types.as_deref(),
+        );
+    }
+}
+
+fn apply_call_receiver_types_to_events(
+    events: &mut [FlowEvent],
+    aliases: &[crate::TypeAliasBinding],
+    implicit_receiver_types: Option<&[String]>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                receiver,
+                receiver_types,
+                ..
+            } => {
+                if let Some(receiver) = receiver.as_deref() {
+                    for ty in receiver_types_for_expr(receiver, aliases, implicit_receiver_types) {
+                        push_unique_receiver_type(receiver_types, ty);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                apply_call_receiver_types_to_events(then_events, aliases, implicit_receiver_types);
+                apply_call_receiver_types_to_events(else_events, aliases, implicit_receiver_types);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types);
+                apply_call_receiver_types_to_events(catch_events, aliases, implicit_receiver_types);
+                apply_call_receiver_types_to_events(finally_events, aliases, implicit_receiver_types);
+            }
+            FlowEvent::Assign { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
+}
+
+fn receiver_types_for_expr(
+    receiver: &str,
+    aliases: &[crate::TypeAliasBinding],
+    implicit_receiver_types: Option<&[String]>,
+) -> Vec<String> {
+    let normalized = normalize_receiver_type_expr(receiver);
+    let tail = short_name_of(&normalized);
+    let mut out = Vec::new();
+    for alias in aliases {
+        if alias.name == normalized || alias.name == tail {
+            push_unique_receiver_type(&mut out, alias.type_name.clone());
+        }
+    }
+    if matches!(tail, "self" | "this") {
+        if let Some(types) = implicit_receiver_types {
+            for ty in types {
+                push_unique_receiver_type(&mut out, ty.clone());
+            }
+        }
+    } else if matches!(tail, "super" | "parent" | "base") {
+        if let Some(types) = implicit_receiver_types {
+            for ty in types.iter().skip(1) {
+                push_unique_receiver_type(&mut out, ty.clone());
+            }
+        }
+    }
+    out
+}
+
+fn normalize_receiver_type_expr(receiver: &str) -> String {
+    normalise_qualified_text(receiver)
+        .trim()
+        .trim_start_matches(['&', '*'])
+        .trim_end_matches("()")
+        .trim_matches('.')
+        .to_string()
+}
+
+fn push_unique_receiver_type(out: &mut Vec<String>, ty: String) {
+    let trimmed = ty.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !out.iter().any(|existing| existing == trimmed) {
+        out.push(trimmed.to_string());
     }
 }
 

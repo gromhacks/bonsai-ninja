@@ -67,6 +67,7 @@ impl LanguageAdapter for ScalaAdapter {
         // "any arm's taint reaches every other arm's body."
         LanguageCapabilities {
             pattern_matching: bonsai_lang_api::CapabilityLevel::Exact,
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             ..LanguageCapabilities::partial_baseline()
         }
     }

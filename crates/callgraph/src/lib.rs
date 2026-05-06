@@ -285,6 +285,7 @@ fn add_resolved_call_edges(
             FlowEvent::Call {
                 name,
                 receiver,
+                receiver_types,
                 call_kind,
                 args,
                 ..
@@ -302,6 +303,7 @@ fn add_resolved_call_edges(
                         caller_decl,
                         alias_targets,
                         receiver.as_deref(),
+                        receiver_types,
                         *call_kind,
                         name,
                     );
@@ -736,6 +738,7 @@ fn collect_receiver_method_targets(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     receiver: Option<&str>,
+    receiver_types: &[String],
     call_kind: CallKind,
     call_name: &str,
 ) -> Vec<FuncId> {
@@ -749,8 +752,11 @@ fn collect_receiver_method_targets(
     if is_super_receiver(receiver) {
         return collect_super_method_targets(global, caller_decl, alias_targets, method_name);
     }
-    let receiver_types = receiver_type_names(caller_decl, alias_targets, receiver);
-    if receiver_types.is_empty() {
+    let mut receiver_type_names = receiver_types.to_vec();
+    if receiver_type_names.is_empty() {
+        receiver_type_names = receiver_type_names_for_expr(caller_decl, alias_targets, receiver);
+    }
+    if receiver_type_names.is_empty() {
         return Vec::new();
     }
     let caller_module = caller_decl.module_path.clone();
@@ -762,7 +768,7 @@ fn collect_receiver_method_targets(
             let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
             let mut seen = AHashSet::new();
             let mut classes = Vec::new();
-            for receiver_type in receiver_types {
+            for receiver_type in receiver_type_names {
                 for class_sym in resolve_class(global, &receiver_type, &ctx) {
                     if seen.insert(class_sym) {
                         classes.push(class_sym);
@@ -907,7 +913,7 @@ fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str
         .map(|alias| alias.type_name.as_str())
 }
 
-fn receiver_type_names(
+fn receiver_type_names_for_expr(
     decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
     receiver: &str,

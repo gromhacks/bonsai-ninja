@@ -921,6 +921,7 @@ mod tests {
             receiver: Some("pkg".to_string()),
             call_kind: bonsai_lang_api::CallKind::Function,
             args: Vec::new(),
+            receiver_types: Vec::new(),
         }];
 
         let mut facts = KindedTokens::default();

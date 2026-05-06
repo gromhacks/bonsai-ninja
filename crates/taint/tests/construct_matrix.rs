@@ -59,6 +59,7 @@ fn call(name: &str, args: &[&str]) -> FlowEvent {
                 value_text: (*text).to_string(),
             })
             .collect(),
+        receiver_types: Vec::new(),
     }
 }
 

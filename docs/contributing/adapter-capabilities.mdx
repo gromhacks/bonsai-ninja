@@ -17,7 +17,7 @@ specific rule shapes.
 
 - Every adapter populates the **required** `Decl` fields (name, kind,
   span, params, flow events). That's what makes taint analysis work.
-- The table below tracks **seven optional** fields. Most adapters
+- The table below tracks **eight optional** fields. Most adapters
   fill some of them and leave the rest unpopulated.
 - A `—` cell means *the language has the construct, but the adapter
   doesn't yet populate the field*. That's a precision-improvement
@@ -47,6 +47,7 @@ in `COVERAGE_BASELINE.md`.
 |---|---|---|
 | `Visibility` | Resolver filters out private callees from foreign modules. | All decls treated as `Public` — wider candidate set, more `OverApproximate` edges. |
 | `type_aliases` | Resolver matches `MyTypedef` to the underlying class for receiver dispatch. | Calls through typedefs degrade to `Narrowed` precision. |
+| `receiver_types` | Shared index pass copies semantic receiver type facts onto `FlowEvent::Call` so callgraph, taint, and rules consume the same evidence. | `[Type, method]` rules fall back to alias derivation or broader matching. |
 | `bases` | Cross-class virtual dispatch narrows when the receiver type is known. | Dispatch falls back to name-only resolution → wider candidate set. |
 | `receiver_field_writes` | G3 cross-method field-taint inheritance: `def m1(x): self.f = x` → `def m2(): use(self.f)` propagates taint. | Field-aliased flows aren't crossed; intra-method propagation still works. |
 | `param_annotations` | Synthetic-source inference: `@route("/api")` on a Flask handler treats the params as remote sources without an explicit YAML rule. | Inferred sources need explicit rules instead. |
@@ -62,29 +63,29 @@ findings, not whether the engine can analyse the language.
 adapter doesn't populate it (backlog candidate). `n/a` = language has
 no equivalent construct.
 
-| Adapter | Visibility | type_aliases | bases | receiver_field_writes | param_annotations | export_aliases | super_dispatch |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| lang_c | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a |
-| lang_cpp | ✓ | ✓ | ✓ | ✓ | n/a | n/a | partial |
-| lang_csharp | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_dart | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_elixir | ✓ | n/a | n/a | n/a | n/a | n/a | n/a |
-| lang_erlang | ✓ | n/a | n/a | n/a | n/a | n/a | n/a |
-| lang_go | ✓ | ✓ | n/a | — | — | n/a | n/a |
-| lang_java | ✓ | n/a | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_javascript | ✓ | n/a | ✓ | ✓ | n/a | ✓ | — |
-| lang_kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_lua | ✓ | n/a | n/a | — | n/a | n/a | n/a |
-| lang_objc | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_perl | ✓ | n/a | ✓ | — | n/a | n/a | — |
-| lang_php | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_python | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_ruby | ✓ | ✓ | ✓ | ✓ | partial | n/a | ✓ |
-| lang_rust | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_scala | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_solidity | ✓ | n/a | ✓ | ✓ | — | n/a | n/a |
-| lang_swift | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| Adapter | Visibility | type_aliases | receiver_types | bases | receiver_field_writes | param_annotations | export_aliases | super_dispatch |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| lang_c | ✓ | ✓ | ✓ | n/a | n/a | n/a | n/a | n/a |
+| lang_cpp | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | n/a | partial |
+| lang_csharp | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_dart | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_elixir | ✓ | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| lang_erlang | ✓ | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| lang_go | ✓ | ✓ | ✓ | n/a | — | — | n/a | n/a |
+| lang_java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_javascript | ✓ | n/a | — | ✓ | ✓ | n/a | ✓ | — |
+| lang_kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_lua | ✓ | n/a | n/a | n/a | — | n/a | n/a | n/a |
+| lang_objc | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
+| lang_perl | ✓ | n/a | n/a | ✓ | — | n/a | n/a | — |
+| lang_php | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_python | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_ruby | ✓ | — | — | ✓ | ✓ | partial | n/a | ✓ |
+| lang_rust | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
+| lang_scala | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
+| lang_solidity | ✓ | ✓ | ✓ | ✓ | ✓ | — | n/a | n/a |
+| lang_swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
+| lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 
 ## What the cells mean for users
 

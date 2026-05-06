@@ -11,11 +11,11 @@ pub mod types;
 
 pub use capabilities::{CapabilityLevel, LanguageCapabilities};
 pub use kit::{
-    alias_map_from_import_specs, alias_map_from_imports, apply_file_stem_semantic_identity,
-    apply_module_path_semantic_identity, collect_modifier_visibility, collect_param_type_aliases,
-    decl_index_with_handler, extend_alias_map_with_flow_events, extract_imports_via, inject_lifecycle_events,
-    with_fn_kinds, AliasTarget, GrammarHandler, LifecycleTransition, ModifierVocabulary, TypeAliasVocabulary,
-    GENERIC_HANDLER,
+    alias_map_from_import_specs, alias_map_from_imports, apply_call_receiver_types,
+    apply_file_stem_semantic_identity, apply_module_path_semantic_identity, collect_modifier_visibility,
+    collect_param_type_aliases, decl_index_with_handler, extend_alias_map_with_flow_events,
+    extract_imports_via, inject_lifecycle_events, with_fn_kinds, AliasTarget, GrammarHandler,
+    LifecycleTransition, ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use types::{

@@ -89,29 +89,29 @@ Every supported language declares `Partial` here, meaning the engine
 can analyse the language end-to-end with the standard precision-flag
 caveats.
 
-| Language | Modules | Dyn dispatch | Exceptions | Module export aliases |
-|---|---|---|---|---|
-| c | Partial | n/a | n/a | n/a |
-| cpp | Partial | Partial | Partial | n/a |
-| csharp | Partial | Partial | Exact | n/a |
-| dart | Partial | Partial | Partial | n/a |
-| elixir | Partial | Partial | n/a | n/a |
-| erlang | Partial | n/a | n/a | n/a |
-| go | Partial | Partial | n/a | n/a |
-| java | Partial | Partial | Exact | n/a |
-| javascript | Partial | Partial | Partial | exports, module.exports |
-| kotlin | Partial | Partial | Exact | n/a |
-| lua | Partial | Partial | Partial | n/a |
-| objc | Partial | Partial | Partial | n/a |
-| perl | Partial | Partial | Partial | n/a |
-| php | Partial | Partial | Partial | n/a |
-| python | Partial | Partial | Partial | n/a |
-| ruby | Partial | Partial | Partial | n/a |
-| rust | Partial | Partial | n/a | n/a |
-| scala | Partial | Partial | Partial | n/a |
-| solidity | Partial | Partial | Partial | n/a |
-| swift | Partial | Partial | Partial | n/a |
-| typescript | Partial | Partial | Partial | exports, module.exports |
+| Language | Modules | Dyn dispatch | Exceptions | Receiver types | Module export aliases |
+|---|---|---|---|---|---|
+| c | Partial | n/a | n/a | Partial | n/a |
+| cpp | Partial | Partial | Partial | Partial | n/a |
+| csharp | Partial | Partial | Exact | Partial | n/a |
+| dart | Partial | Partial | Partial | Partial | n/a |
+| elixir | Partial | Partial | n/a | Unsupported | n/a |
+| erlang | Partial | n/a | n/a | Unsupported | n/a |
+| go | Partial | Partial | n/a | Partial | n/a |
+| java | Partial | Partial | Exact | Partial | n/a |
+| javascript | Partial | Partial | Partial | Unsupported | exports, module.exports |
+| kotlin | Partial | Partial | Exact | Partial | n/a |
+| lua | Partial | Partial | Partial | Unsupported | n/a |
+| objc | Partial | Partial | Partial | Partial | n/a |
+| perl | Partial | Partial | Partial | Unsupported | n/a |
+| php | Partial | Partial | Partial | Partial | n/a |
+| python | Partial | Partial | Partial | Partial | n/a |
+| ruby | Partial | Partial | Partial | Unsupported | n/a |
+| rust | Partial | Partial | n/a | Partial | n/a |
+| scala | Partial | Partial | Partial | Partial | n/a |
+| solidity | Partial | Partial | Partial | Partial | n/a |
+| swift | Partial | Partial | Partial | Partial | n/a |
+| typescript | Partial | Partial | Partial | Partial | exports, module.exports |
 
 `n/a` = construct doesn't exist in that language (C has no virtual
 dispatch; Rust uses `Result` instead of exceptions; Erlang has no
