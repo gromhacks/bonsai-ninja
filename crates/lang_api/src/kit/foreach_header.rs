@@ -20,6 +20,7 @@
 //! - `for (await y of ys)` (JS/TS async iteration)
 //! - `foreach (var x in xs)` (C#/Dart)
 //! - `for x := range xs { ... }` (Go — note the trailing `:`)
+//! - `for (Type x : xs)` / `for (auto x : xs)` (Java / C++ range-for)
 //! - `for my $part (split /\s+/, $cmd) { ... }` (Perl)
 //! - `for my $t (@tokens) { ... }` (Perl)
 //!
@@ -73,7 +74,9 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
 /// Split on the iteration keyword (`in` or `of`) — the two surface forms
 /// every supported language reduces to.
 fn split_foreach_lhs_rhs(text: &str) -> Option<(&str, &str)> {
-    text.split_once(" in ").or_else(|| text.split_once(" of "))
+    text.split_once(" in ")
+        .or_else(|| text.split_once(" of "))
+        .or_else(|| text.split_once(" : "))
 }
 
 /// Strip a leading binding keyword (`const`/`let`/`var`/`final`) so the
@@ -138,6 +141,22 @@ mod tests {
         // `for await (x of xs)` — outer form recognized by the
         // outer-await strip path. Result has clean lhs.
         assert_eq!(split_foreach_header("for await (x of xs)"), Some(("x", "xs")));
+    }
+
+    #[test]
+    fn java_enhanced_for_colon_form() {
+        assert_eq!(
+            split_foreach_header("for (Cookie theCookie : theCookies)"),
+            Some(("Cookie theCookie", "theCookies"))
+        );
+    }
+
+    #[test]
+    fn cpp_range_for_colon_form() {
+        assert_eq!(
+            split_foreach_header("for (auto item : items)"),
+            Some(("auto item", "items"))
+        );
     }
 
     #[test]

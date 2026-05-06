@@ -2998,6 +2998,7 @@ fn push_pattern_binding(
             | "let"
             | "var"
             | "const"
+            | "auto"
             | "in"
             | "do"
             | "true"

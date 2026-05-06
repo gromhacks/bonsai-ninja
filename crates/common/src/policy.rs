@@ -13,5 +13,5 @@
 /// when the resolver narrows in ways that can change which callees are
 /// reachable from a call site (e.g. visibility / module_path filtering
 /// per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`).
-pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0018_u128;
+pub const MATCHER_POLICY_FINGERPRINT: u128 = 0x4d41_5443_4845_525f_504f_4c49_4359_0019_u128;
 const _: () = assert!(MATCHER_POLICY_FINGERPRINT != 0);

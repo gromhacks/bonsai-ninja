@@ -195,6 +195,7 @@
     - rng
     - r
     - new Random()
+    - new java.util.Random()
   match_examples:
   - name: java util Random nextInt
     code: |
@@ -222,6 +223,14 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    new Random();\n  }\n}\nclass Random {\n  Random(Object... args) {}\n}\n"
+  - name: qualified java util random
+    code: |
+      class App {
+        void handle() throws Exception {
+          new java.util.Random();
+        }
+      }
+    expect_match_text: [java.util.Random]
   description: "new java.util.Random — non-cryptographic."
 
 - id: java.crypto.math_random
