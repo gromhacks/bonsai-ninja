@@ -4206,6 +4206,7 @@ fn make_pattern_finding(snk: &RuleMatch, pack: &Rulepack, _chain_funcs: &[FuncId
         snk.column.to_string(),
     ];
     let group_id = format!("G:{:016x}", bonsai_hash::fnv1a_names64(&group_tokens));
+    let flow_id = bonsai_inspect::compute_flow_id(&group_tokens);
     let source_rule_id = format!("pattern:{}", sink_rule.id);
     let finding_id = compute_finding_id(&source_rule_id, &sink_rule.id, &group_id, &snk.language);
     let source = FindingMatch {
@@ -4236,7 +4237,7 @@ fn make_pattern_finding(snk: &RuleMatch, pack: &Rulepack, _chain_funcs: &[FuncId
         sink,
         sanitizers_seen: Vec::new(),
         group_id: Some(group_id.clone()),
-        representative_flow_id: Some(group_id),
+        representative_flow_id: Some(flow_id),
         chain_display,
         taint_path: Vec::new(),
         tag: sink_rule.tag.clone(),

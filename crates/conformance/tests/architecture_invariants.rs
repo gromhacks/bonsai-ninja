@@ -1280,7 +1280,7 @@ fn arg_tainted_uses_kw(rule: &serde_yaml::Value) -> bool {
 
 /// Drift guard for `docs/contributing/design-patterns.mdx::Semantic Resolution Always`
 /// and `docs/contributing/taint-engine-spec.mdx::Non-Negotiables` — the resolver,
-/// callgraph, taint engine, and security matcher must NOT call
+/// callgraph, workspace tracer, taint engine, and security matcher must NOT call
 /// `find_by_name` outside an explicit display-only allowlist. Every
 /// non-allowlisted call site is required to be on a path that supplies
 /// a `ResolveContext` (caller_file + caller_module) so visibility /
@@ -1302,6 +1302,7 @@ fn engine_resolves_via_context_not_bare_name() {
     let scan_dirs = [
         root.join("crates").join("resolve").join("src"),
         root.join("crates").join("callgraph").join("src"),
+        root.join("crates").join("workspace").join("src"),
         root.join("crates").join("taint").join("src"),
         root.join("crates").join("security").join("src"),
     ];
@@ -1329,6 +1330,16 @@ fn engine_resolves_via_context_not_bare_name() {
         //     context-aware resolver, killing the cross-TU
         //     `static error()` regression observed against Redis.
         ("callgraph/src/lib.rs", 1, "display-only entry point only"),
+        // workspace/src/lib.rs — display / CLI entry lookup by user-
+        // supplied function name. The cross-module tracer itself
+        // (`workspace/src/cross_module.rs`) must remain at zero bare
+        // index lookups; it receives a concrete entry symbol and must
+        // route every edge through context-aware resolution.
+        (
+            "workspace/src/lib.rs",
+            3,
+            "display-only trace entry lookup by user-supplied name",
+        ),
         // taint/src/inter.rs — residual sites:
         //   - `find_by_name` inside the head-is-workspace-symbol
         //     probe (workspace-wide existence check, parallels

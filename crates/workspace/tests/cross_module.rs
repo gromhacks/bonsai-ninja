@@ -212,9 +212,12 @@ fn java_cross_file_trace() {
         &[
             (
                 "/w/Main.java",
-                "class Main { static void main() { Helper.worker(); } }",
+                "public class Main { public static void main() { Helper.worker(); } }",
             ),
-            ("/w/Helper.java", "class Helper { static void worker() {} }"),
+            (
+                "/w/Helper.java",
+                "public class Helper { public static void worker() {} }",
+            ),
         ],
     );
     assert_cross_file_trace(&ws, "main", "worker", "Helper.java");
@@ -227,23 +230,23 @@ fn java_receiver_type_dispatch_prefers_service_bean_method() {
         &[
             (
                 "/w/Controller.java",
-                "class Controller {\n\
+                "public class Controller {\n\
                    private UserService svc;\n\
-                   void handle(String token) { svc.process(token); }\n\
+                   public void handle(String token) { svc.process(token); }\n\
                  }\n",
             ),
             (
                 "/w/UserService.java",
-                "class UserService {\n\
-                   void process(String token) { sink(token); }\n\
-                   void sink(String value) {}\n\
+                "public class UserService {\n\
+                   public void process(String token) { sink(token); }\n\
+                   public void sink(String value) {}\n\
                  }\n",
             ),
             (
                 "/w/AuditService.java",
-                "class AuditService {\n\
-                   void process(String token) { audit(token); }\n\
-                   void audit(String value) {}\n\
+                "public class AuditService {\n\
+                   public void process(String token) { audit(token); }\n\
+                   public void audit(String value) {}\n\
                  }\n",
             ),
         ],
@@ -261,6 +264,58 @@ fn java_receiver_type_dispatch_prefers_service_bean_method() {
             && s.message.contains("process")
             && s.file.ends_with("AuditService.java")),
         "receiver-typed service call should not dispatch to AuditService.process; steps={:#?}",
+        trace.steps
+    );
+}
+
+#[test]
+fn java_receiver_type_dispatch_prefers_caller_package_when_class_names_collide() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_java::JavaAdapter::new()),
+        &[
+            (
+                "/w/aaa/Service.java",
+                "package aaa;\n\
+                 class Service {\n\
+                   void process(String token) { wrong(token); }\n\
+                   void wrong(String value) {}\n\
+                 }\n",
+            ),
+            (
+                "/w/app/Controller.java",
+                "package app;\n\
+                 class Controller {\n\
+                   private Service svc;\n\
+                   void handle(String token) { svc.process(token); }\n\
+                 }\n",
+            ),
+            (
+                "/w/app/Service.java",
+                "package app;\n\
+                 class Service {\n\
+                   void process(String token) { right(token); }\n\
+                   void right(String value) {}\n\
+                 }\n",
+            ),
+        ],
+    );
+    let trace = ws.trace_from("handle").expect("trace_from handle");
+    assert!(
+        trace.steps.iter().any(|s| {
+            s.kind == TraceStepKind::EnterFunction
+                && s.message.contains("process")
+                && s.file.ends_with("app/Service.java")
+        }),
+        "receiver dispatch did not enter app.Service.process; steps={:#?}",
+        trace.steps
+    );
+    assert!(
+        !trace.steps.iter().any(|s| {
+            s.kind == TraceStepKind::EnterFunction
+                && s.message.contains("process")
+                && s.file.ends_with("aaa/Service.java")
+        }),
+        "receiver dispatch should not choose lexically-first aaa.Service.process; steps={:#?}",
         trace.steps
     );
 }
@@ -377,4 +432,94 @@ fn perl_cross_file_trace() {
         ],
     );
     assert_cross_file_trace(&ws, "main", "worker", "w.pl");
+}
+
+#[test]
+fn dart_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_dart::DartAdapter::new()),
+        &[
+            ("/w/main.dart", "void main() { worker(); }"),
+            ("/w/w.dart", "void worker() {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.dart");
+}
+
+#[test]
+fn objc_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_objc::ObjCAdapter::new()),
+        &[
+            (
+                "/w/main.m",
+                "extern void worker(void);\nint main(void) { worker(); return 0; }",
+            ),
+            ("/w/w.m", "void worker(void) {}"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.m");
+}
+
+#[test]
+fn lua_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_lua::LuaAdapter::new()),
+        &[
+            ("/w/main.lua", "function main() worker() end"),
+            ("/w/w.lua", "function worker() end"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.lua");
+}
+
+#[test]
+fn elixir_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
+        &[
+            (
+                "/w/main.ex",
+                "defmodule M do\ndef main do\n  W.worker()\nend\nend\n",
+            ),
+            ("/w/w.ex", "defmodule W do\ndef worker do\n  :ok\nend\nend\n"),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.ex");
+}
+
+#[test]
+fn erlang_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_erlang::ErlangAdapter::new()),
+        &[
+            (
+                "/w/main.erl",
+                "-module(main).\n-export([main/0]).\nmain() -> worker:run().\n",
+            ),
+            (
+                "/w/worker.erl",
+                "-module(worker).\n-export([run/0]).\nrun() -> ok.\n",
+            ),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "run", "worker.erl");
+}
+
+#[test]
+fn solidity_cross_file_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
+        &[
+            (
+                "/w/main.sol",
+                "pragma solidity ^0.8.0;\nimport \"./w.sol\";\ncontract M { function main() public { W.worker(); } }",
+            ),
+            (
+                "/w/w.sol",
+                "pragma solidity ^0.8.0;\ncontract W { function worker() public pure {} }",
+            ),
+        ],
+    );
+    assert_cross_file_trace(&ws, "main", "worker", "w.sol");
 }

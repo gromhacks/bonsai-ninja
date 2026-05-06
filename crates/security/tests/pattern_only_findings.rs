@@ -153,13 +153,25 @@ class App {
     );
 
     let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("analysis");
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "java.test.math_random")
+        .unwrap_or_else(|| {
+            panic!(
+                "pattern-only weak randomness should report without a source flow: {:#?}",
+                report.findings
+            )
+        });
+    let group_id = finding.finding.group_id.as_deref().unwrap_or("");
+    let flow_id = finding.finding.representative_flow_id.as_deref().unwrap_or("");
     assert!(
-        report
-            .findings
-            .iter()
-            .any(|finding| finding.finding.sink.rule_id == "java.test.math_random"),
-        "pattern-only weak randomness should report without a source flow: {:#?}",
-        report.findings
+        group_id.starts_with("G:") && group_id.len() == 18,
+        "pattern-only group_id malformed: {group_id}"
+    );
+    assert!(
+        flow_id.starts_with("F:") && flow_id.len() == 18,
+        "pattern-only representative_flow_id malformed: {flow_id}"
     );
 }
 
