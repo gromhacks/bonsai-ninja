@@ -474,6 +474,7 @@ mod tests {
             receiver: None,
             call_kind: CallKind::Function,
             args: Vec::new(),
+            receiver_types: Vec::new(),
         }
     }
 

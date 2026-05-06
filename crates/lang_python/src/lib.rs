@@ -120,6 +120,7 @@ impl LanguageAdapter for PythonAdapter {
         // reflective shape are still rejected at rulepack load time.
         LanguageCapabilities {
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             ..LanguageCapabilities::partial_baseline()
         }
     }

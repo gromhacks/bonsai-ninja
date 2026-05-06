@@ -82,6 +82,7 @@ impl LanguageAdapter for SwiftAdapter {
         // the Scala adapter.
         LanguageCapabilities {
             pattern_matching: bonsai_lang_api::CapabilityLevel::Exact,
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             ..LanguageCapabilities::partial_baseline()
         }
     }

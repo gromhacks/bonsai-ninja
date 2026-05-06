@@ -712,12 +712,22 @@ fn propagate_taint_through_events(
             FlowEvent::Call {
                 name,
                 receiver,
+                receiver_types,
                 args,
                 span,
                 ..
             } => {
                 apply_clean_output_call_overwrite(name, args, state, ctx.config);
-                propagate_call_event(name, receiver.as_deref(), args, *span, state, ctx, summary_cache);
+                propagate_call_event(
+                    name,
+                    receiver.as_deref(),
+                    receiver_types,
+                    args,
+                    *span,
+                    state,
+                    ctx,
+                    summary_cache,
+                );
             }
             FlowEvent::Assign {
                 target,
@@ -1297,6 +1307,7 @@ fn record_tainted_return_event(
 fn propagate_call_event(
     name: &str,
     receiver: Option<&str>,
+    receiver_types: &[String],
     args: &[bonsai_lang_api::CallArg],
     span: Span,
     state: &mut TokenSet,
@@ -1377,6 +1388,7 @@ fn propagate_call_event(
         ctx.local_bindings,
         ctx.db,
         ctx.caller,
+        receiver_types,
         Some(span),
         ctx.config,
     );
@@ -2359,6 +2371,7 @@ fn apply_return_taint(
         local_bindings,
         db,
         caller,
+        &[],
         Some(*span),
         config,
     );
@@ -3324,6 +3337,7 @@ fn resolve_call_candidates_with_caller(
         local_bindings,
         db,
         caller,
+        &[],
         None,
         config,
     )
@@ -3336,6 +3350,7 @@ fn resolve_call_candidates_with_caller_at(
     local_bindings: &AHashMap<String, FuncId>,
     db: &AnalyzerDb,
     caller: FuncId,
+    receiver_types: &[String],
     call_span: Option<Span>,
     config: &InterTaintConfig,
 ) -> Vec<ResolvedCallee> {
@@ -3362,7 +3377,15 @@ fn resolve_call_candidates_with_caller_at(
             let targets = if is_super_receiver(&receiver) {
                 resolve_super_method_candidates(db, caller, alias_targets, tail)
             } else {
-                resolve_receiver_method_candidates(db, caller, alias_targets, &receiver, tail, call_span)
+                resolve_receiver_method_candidates(
+                    db,
+                    caller,
+                    alias_targets,
+                    &receiver,
+                    receiver_types,
+                    tail,
+                    call_span,
+                )
             };
             if !targets.is_empty() {
                 return targets
@@ -3403,6 +3426,7 @@ fn resolve_receiver_method_candidates(
     caller: FuncId,
     alias_targets: &AHashMap<String, AliasTarget>,
     receiver: &str,
+    receiver_types: &[String],
     method_name: &str,
     call_span: Option<Span>,
 ) -> Vec<FuncId> {
@@ -3413,16 +3437,19 @@ fn resolve_receiver_method_candidates(
     let Some(caller_file) = global.declaring_file(SymbolId::new(caller.raw())) else {
         return Vec::new();
     };
-    let mut type_names = Vec::new();
-    if let Some(type_name) = type_alias_for_receiver(caller_decl, receiver) {
-        push_unique_string(&mut type_names, type_name);
-    }
-    for type_name in type_alias_targets_for_receiver(alias_targets, receiver) {
-        push_unique_string(&mut type_names, type_name);
-    }
-    for type_name in inferred_receiver_type_names(caller_decl, receiver, call_span, db, caller, alias_targets)
-    {
-        push_unique_string(&mut type_names, type_name);
+    let mut type_names = receiver_types.to_vec();
+    if type_names.is_empty() {
+        if let Some(type_name) = type_alias_for_receiver(caller_decl, receiver) {
+            push_unique_string(&mut type_names, type_name);
+        }
+        for type_name in type_alias_targets_for_receiver(alias_targets, receiver) {
+            push_unique_string(&mut type_names, type_name);
+        }
+        for type_name in
+            inferred_receiver_type_names(caller_decl, receiver, call_span, db, caller, alias_targets)
+        {
+            push_unique_string(&mut type_names, type_name);
+        }
     }
     let normalized_receiver = normalise_qualified_text(receiver);
     let receiver_tail = short_tail(&normalized_receiver);

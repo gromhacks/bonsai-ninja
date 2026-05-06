@@ -21,7 +21,7 @@ use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recog
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use bonsai_common::{FuncId, Precision, Span, SymbolId};
-use bonsai_lang_api::LanguageRegistry;
+use bonsai_lang_api::{CapabilityLevel, LanguageRegistry};
 use bonsai_taint::{
     CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig, SourceOutputArgs, TaintedCall,
     TaintedCallEdge, TaintedCallKind, TokenSet,
@@ -1331,7 +1331,7 @@ pub fn validate_pack(
             // report `example_count` accurately, but skip the rest.
             example_count += rule.match_examples.len();
             validate_constraint_coverage(rule, &mut issues);
-            validate_type_method_callee_has_adapter_type_aliases(rule, &mut issues);
+            validate_type_method_callee_has_adapter_type_aliases(rule, registry.as_ref(), &mut issues);
             continue;
         }
         for example in &rule.match_examples {
@@ -1480,7 +1480,7 @@ pub fn validate_pack(
         }
         validate_constraint_coverage(rule, &mut issues);
         validate_package_signals_match_example_imports(rule, &example_imports, &mut issues);
-        validate_type_method_callee_has_adapter_type_aliases(rule, &mut issues);
+        validate_type_method_callee_has_adapter_type_aliases(rule, registry.as_ref(), &mut issues);
     }
 
     let enabled_rules: Vec<_> = rules.iter().copied().filter(|rule| rule.enabled).collect();
@@ -1658,16 +1658,20 @@ fn validate_constraint_coverage(rule: &Rule, issues: &mut Vec<PackValidationIssu
 ///
 /// Per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`, the
 /// resolver / matcher narrow `[Type, method]` calls by the receiver
-/// type bound in `Decl.type_aliases`. Adapters that don't yet
-/// populate that field (most languages other than Java today) will
-/// match such rules only via the LaxTail fallback when the file
-/// imports a recognised package signal.
+/// facts derived from adapter-emitted type bindings and class ancestry.
+/// Adapters that don't yet populate those facts will match such rules
+/// only via the LaxTail fallback when the file imports a recognised
+/// package signal.
 ///
 /// We don't fail the validator — that would disable a lot of useful
 /// rules. We emit an `info`-level diagnostic so rule authors can see
 /// which rules depend on per-adapter receiver-type bindings being
 /// completed (T-7 in docs/contributing/review-checklist.mdx::§4).
-fn validate_type_method_callee_has_adapter_type_aliases(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
+fn validate_type_method_callee_has_adapter_type_aliases(
+    rule: &Rule,
+    registry: &LanguageRegistry,
+    issues: &mut Vec<PackValidationIssue>,
+) {
     if !rule.enabled {
         return;
     }
@@ -1687,20 +1691,12 @@ fn validate_type_method_callee_has_adapter_type_aliases(rule: &Rule, issues: &mu
     if !matches!(first, Some(c) if c.is_ascii_uppercase()) {
         return;
     }
-    // Languages whose adapters are documented to populate
-    // Decl.type_aliases today (Phase B). Other languages get the
-    // info diagnostic so the rule author sees the gap.
-    let typed_adapters_with_type_aliases = [
-        "java",
-        "kotlin",
-        "swift",
-        "csharp",
-        "typescript",
-        "php",
-        "scala",
-        "rust",
-    ];
-    if typed_adapters_with_type_aliases.contains(&rule.language.as_str()) {
+    let adapter_supports_receiver_types = registry
+        .all()
+        .into_iter()
+        .find(|adapter| adapter.language_id().as_str() == rule.language)
+        .is_some_and(|adapter| adapter.capabilities().receiver_types != CapabilityLevel::Unsupported);
+    if adapter_supports_receiver_types {
         return;
     }
     push_validation_issue(
@@ -1709,8 +1705,8 @@ fn validate_type_method_callee_has_adapter_type_aliases(rule: &Rule, issues: &mu
         "type-method-needs-adapter-type-aliases",
         Some(rule),
         &format!(
-            "rule callee `[{}, {}]` depends on adapter-emitted Decl.type_aliases for \
-             precise receiver narrowing; the {} adapter does not yet populate this field. \
+            "rule callee `[{}, {}]` depends on semantic receiver-type facts for \
+             precise receiver narrowing; the {} adapter does not yet populate them. \
              The rule still fires via LaxTail when the file imports a recognised package \
              signal, but cross-class disambiguation per docs/contributing/design-patterns.mdx::Semantic \
              Resolution Always isn't available until adapter coverage lands (docs/contributing/review-checklist.mdx \
@@ -1945,6 +1941,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                 any_arg_matches_regex.as_str(),
             )),
             crate::rule::ConstraintKind::ReceiverNameIn { .. }
+            | crate::rule::ConstraintKind::ReceiverTypeIn { .. }
             | crate::rule::ConstraintKind::SecondArgEquals { .. }
             | crate::rule::ConstraintKind::ArgEquals { .. }
             | crate::rule::ConstraintKind::KeywordArgEquals { .. }

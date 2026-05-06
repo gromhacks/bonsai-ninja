@@ -191,7 +191,15 @@ size)` index 1, `calloc(nmemb, size)` needs a rule for each.
 - receiver_name_in: [client, http]
 ```
 
-The receiver text must be one of the listed values.
+The receiver text must be one of the listed values. Prefer semantic
+receiver typing for typed APIs:
+
+```yaml
+- receiver_type_in: [HttpClient]
+```
+
+`receiver_type_in` is derived from adapter-emitted type facts and is not
+tied to local variable names.
 
 ### `format_arg_index`
 

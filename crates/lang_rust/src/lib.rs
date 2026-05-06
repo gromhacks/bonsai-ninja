@@ -176,6 +176,7 @@ impl LanguageAdapter for RustAdapter {
             reflection: CapabilityLevel::Unsupported,
             ffi: CapabilityLevel::Partial,
             pattern_matching: CapabilityLevel::Exact,
+            receiver_types: CapabilityLevel::Partial,
             module_export_aliases: &[],
         }
     }

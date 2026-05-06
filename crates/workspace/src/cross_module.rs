@@ -83,6 +83,7 @@ struct CallSite<'a> {
     span: Span,
     name: &'a str,
     receiver: Option<&'a str>,
+    receiver_types: &'a [String],
     call_kind: CallKind,
     args: &'a [CallArg],
 }
@@ -226,6 +227,7 @@ impl<'a> TraceBuilder<'a> {
                 span,
                 name,
                 receiver,
+                receiver_types,
                 call_kind,
                 args,
                 ..
@@ -234,6 +236,7 @@ impl<'a> TraceBuilder<'a> {
                     span: *span,
                     name,
                     receiver: receiver.as_deref(),
+                    receiver_types,
                     call_kind: *call_kind,
                     args,
                 },
@@ -627,7 +630,11 @@ impl<'a> TraceBuilder<'a> {
             let hits = self.collect_super_method_candidates(caller_decl, &alias_map, method_name);
             return self.best_symbol_candidate(hits, caller_decl);
         }
-        let class_names = self.receiver_type_names(caller_decl, receiver);
+        let class_names = if site.receiver_types.is_empty() {
+            self.receiver_type_names(caller_decl, receiver)
+        } else {
+            site.receiver_types.to_vec()
+        };
         if class_names.is_empty() {
             return None;
         }

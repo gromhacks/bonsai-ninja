@@ -89,7 +89,10 @@ impl LanguageAdapter for GoAdapter {
         language_from_pack(PACK_NAME)
     }
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::partial_baseline()
+        LanguageCapabilities {
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            ..LanguageCapabilities::partial_baseline()
+        }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);

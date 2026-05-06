@@ -483,6 +483,7 @@ struct CallFact {
     callee: String,
     span: Span,
     args: Vec<CallArg>,
+    receiver_types: Vec<String>,
     call_kind: CallKind,
     origin: CallFactOrigin,
 }
@@ -857,6 +858,7 @@ fn scan_calls_batch(
             for prepared in rules {
                 let Some(matched_callee) = callee_or_alias_matches(
                     &call.callee,
+                    &call.receiver_types,
                     prepared.name,
                     prepared.attribute,
                     prepared.regex.as_ref(),
@@ -871,6 +873,7 @@ fn scan_calls_batch(
                     rule_id: &prepared.rule.id,
                     callee: &matched_callee,
                     args: &call.args,
+                    receiver_types: &call.receiver_types,
                     span: call.span,
                     call_origin: Some(call.origin),
                     constraints: &prepared.rule.constraints.0,
@@ -927,6 +930,7 @@ fn scan_calls_batch(
             }
             let Some(matched_callee) = callee_or_alias_matches(
                 &r.name,
+                &[],
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
@@ -939,6 +943,7 @@ fn scan_calls_batch(
                 rule_id: &prepared.rule.id,
                 callee: &matched_callee,
                 args: &[],
+                receiver_types: &[],
                 span: r.span,
                 call_origin: None,
                 constraints: &prepared.rule.constraints.0,
@@ -1019,6 +1024,7 @@ fn scan_missing_batch(
                 rule_id: &prepared.rule.id,
                 callee: "",
                 args: &[],
+                receiver_types: &[],
                 span: target_span,
                 call_origin: None,
                 constraints: &prepared.rule.constraints.0,
@@ -1045,6 +1051,7 @@ fn scan_missing_batch(
                 calls.iter().any(|call| {
                     callee_or_alias_matches(
                         &call.callee,
+                        &call.receiver_types,
                         prepared.name,
                         prepared.attribute,
                         prepared.regex.as_ref(),
@@ -1125,6 +1132,7 @@ fn missing_target_in_reachable_callees(
             for call in collect_calls(&callee_decl.flow_events) {
                 if callee_or_alias_matches(
                     &call.callee,
+                    &call.receiver_types,
                     prepared.name,
                     prepared.attribute,
                     prepared.regex.as_ref(),
@@ -1169,6 +1177,7 @@ fn matching_call_has_arg_index(
             }
             if callee_or_alias_matches(
                 &call.callee,
+                &call.receiver_types,
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
@@ -1408,20 +1417,27 @@ fn resolve_lax_tail_for_call(
 
 fn callee_or_alias_matches(
     callee: &str,
+    receiver_types: &[String],
     name: Option<&str>,
     attribute: Option<&Vec<String>>,
     regex: Option<&Regex>,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
     lax_tail: bool,
 ) -> Option<String> {
-    if callee_matches(callee, name, attribute, regex, lax_tail) {
+    if callee_matches_with_receiver_types(callee, receiver_types, name, attribute, regex, lax_tail) {
         return Some(callee.to_string());
     }
     for receiver in ["this.", "self.", "super."] {
         if let Some(unqualified) = callee.strip_prefix(receiver) {
-            if let Some(matched) =
-                callee_or_alias_matches(unqualified, name, attribute, regex, alias_map, lax_tail)
-            {
+            if let Some(matched) = callee_or_alias_matches(
+                unqualified,
+                receiver_types,
+                name,
+                attribute,
+                regex,
+                alias_map,
+                lax_tail,
+            ) {
                 return Some(matched);
             }
         }
@@ -1454,7 +1470,7 @@ fn callee_or_alias_matches(
             format!("{type_name}{tail}")
         }
     };
-    if callee_matches(&expanded, name, attribute, regex, lax_tail) {
+    if callee_matches_with_receiver_types(&expanded, receiver_types, name, attribute, regex, lax_tail) {
         return Some(expanded);
     }
     // Type-binding case is the only path where receiver case can
@@ -1482,7 +1498,7 @@ fn callee_or_alias_matches(
         } else {
             format!("{}{}{}", first.to_ascii_uppercase(), chars.as_str(), tail)
         };
-        if callee_matches(&alt, name, attribute, regex, lax_tail) {
+        if callee_matches_with_receiver_types(&alt, receiver_types, name, attribute, regex, lax_tail) {
             return Some(alt);
         }
     }
@@ -2010,6 +2026,7 @@ fn scan_writes_batch(
                     rule_id: &prepared.rule.id,
                     callee: &target,
                     args: &args,
+                    receiver_types: &[],
                     span,
                     call_origin: None,
                     constraints: &prepared.rule.constraints.0,
@@ -2086,6 +2103,7 @@ fn scan_ref_writes_batch(
                 rule_id: &prepared.rule.id,
                 callee: &r.name,
                 args: &args,
+                receiver_types: &[],
                 span: r.span,
                 call_origin: None,
                 constraints: &prepared.rule.constraints.0,
@@ -2624,6 +2642,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                 span,
                 receiver,
                 args,
+                receiver_types,
                 call_kind,
                 ..
             } => {
@@ -2631,6 +2650,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                     callee: name.clone(),
                     span: *span,
                     args: args.clone(),
+                    receiver_types: receiver_types.clone(),
                     call_kind: *call_kind,
                     origin: CallFactOrigin::RealCall,
                 });
@@ -2640,6 +2660,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                             callee,
                             span: *span,
                             args: nested_args,
+                            receiver_types: Vec::new(),
                             call_kind: CallKind::Function,
                             origin: CallFactOrigin::NestedReceiverCall,
                         });
@@ -2664,6 +2685,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                             place: None,
                         })
                         .collect(),
+                    receiver_types: Vec::new(),
                     call_kind: CallKind::Function,
                     origin: CallFactOrigin::AssignmentSourceCall,
                 });
@@ -2752,6 +2774,116 @@ fn receiver_call_with_args(receiver: &str, span: Span) -> Option<(String, Vec<Ca
         return Some((callee.to_string(), args));
     }
     None
+}
+
+fn callee_matches_with_receiver_types(
+    callee: &str,
+    receiver_types: &[String],
+    name: Option<&str>,
+    attribute: Option<&Vec<String>>,
+    regex: Option<&Regex>,
+    lax_tail: bool,
+) -> bool {
+    if callee_matches(callee, name, attribute, regex, lax_tail) {
+        return true;
+    }
+    if regex.is_some() {
+        return false;
+    }
+    attribute.is_some_and(|attr| receiver_type_attribute_matches(callee, receiver_types, attr))
+}
+
+fn receiver_type_attribute_matches(callee: &str, receiver_types: &[String], attr: &[String]) -> bool {
+    if receiver_types.is_empty() || attr.len() < 2 {
+        return false;
+    }
+    let normalized = normalize_callee_for_matching(callee);
+    let Some(method) = attr.last() else {
+        return false;
+    };
+    if !callee_tail_matches(&normalized, method) {
+        return false;
+    }
+    receiver_types.iter().any(|actual| {
+        (0..attr.len() - 1)
+            .any(|start| type_name_matches_attribute_prefix(actual, &attr[start..attr.len() - 1]))
+    })
+}
+
+fn type_name_matches_attribute_prefix(actual: &str, expected: &[String]) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    let actual = normalize_type_name_for_match(actual);
+    let expected_dot = expected.join(".");
+    let expected_colon = expected.join("::");
+    let expected_backslash = expected.join("\\");
+    [expected_dot, expected_colon, expected_backslash]
+        .into_iter()
+        .any(|expected| {
+            let expected = normalize_type_name_for_match(&expected);
+            actual == expected
+                || actual.ends_with(&format!(".{expected}"))
+                || actual.ends_with(&format!("::{expected}"))
+                || actual.ends_with(&format!("\\{expected}"))
+                || receiver_path_tail(&actual) == receiver_path_tail(&expected)
+        })
+}
+
+fn receiver_type_matches_any(actual: &[String], expected: &[String]) -> bool {
+    actual.iter().any(|actual| {
+        expected
+            .iter()
+            .any(|expected| type_name_matches_attribute_prefix(actual, std::slice::from_ref(expected)))
+    })
+}
+
+fn normalize_type_name_for_match(value: &str) -> String {
+    let mut out = value.trim().trim_start_matches(['$', '@', '%']).to_string();
+    while let Some(stripped) = out.strip_prefix('&').or_else(|| out.strip_prefix('*')) {
+        out = stripped.trim().to_string();
+    }
+    if let Some(stripped) = out.strip_suffix("()") {
+        out = stripped.trim().to_string();
+    }
+    out
+}
+
+fn normalize_callee_for_matching(callee: &str) -> String {
+    let mut normalized = callee.trim_start_matches(['$', '@', '%']).replace("()", "");
+    if let Some(stripped) = normalized.strip_prefix("new ") {
+        normalized = stripped.to_string();
+    }
+    if normalized.contains('{') {
+        let mut out = String::with_capacity(normalized.len());
+        let mut depth: i32 = 0;
+        for ch in normalized.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                _ => {
+                    if depth == 0 {
+                        out.push(ch);
+                    }
+                }
+            }
+        }
+        normalized = out;
+    }
+    normalized
+}
+
+fn callee_tail_matches(normalized: &str, method: &str) -> bool {
+    normalized == method
+        || normalized.ends_with(&format!(".{method}"))
+        || normalized.ends_with(&format!("::{method}"))
+        || normalized.ends_with(&format!("->{method}"))
+        || normalized.ends_with(&format!("\\{method}"))
+        || normalized.ends_with(&format!(":{method}"))
 }
 
 /// Find the byte offset of the `(` that opens the call ending at
@@ -2917,30 +3049,7 @@ fn callee_matches(
     //      `new T(args)` source text — stripping at fact-emission
     //      time breaks Java mega_flow's chained constructor → method
     //      resolution.
-    let mut normalized = callee.trim_start_matches(['$', '@', '%']).replace("()", "");
-    if let Some(stripped) = normalized.strip_prefix("new ") {
-        normalized = stripped.to_string();
-    }
-    if normalized.contains('{') {
-        let mut out = String::with_capacity(normalized.len());
-        let mut depth: i32 = 0;
-        for ch in normalized.chars() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
-                }
-                _ => {
-                    if depth == 0 {
-                        out.push(ch);
-                    }
-                }
-            }
-        }
-        normalized = out;
-    }
+    let normalized = normalize_callee_for_matching(callee);
     if let Some(attr) = attribute {
         let joined_dot = attr.join(".");
         let joined_colon = attr.join("::");
@@ -3127,6 +3236,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
                 any_arg_matches_regex,
             )?),
             ConstraintKind::ReceiverNameIn { .. }
+            | ConstraintKind::ReceiverTypeIn { .. }
             | ConstraintKind::SecondArgEquals { .. }
             | ConstraintKind::ArgEquals { .. }
             | ConstraintKind::KeywordArgEquals { .. }
@@ -3178,6 +3288,7 @@ struct ConstraintEval<'a, 't> {
     rule_id: &'a str,
     callee: &'a str,
     args: &'a [CallArg],
+    receiver_types: &'a [String],
     span: Span,
     call_origin: Option<CallFactOrigin>,
     constraints: &'a [ConstraintKind],
@@ -3246,6 +3357,11 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
         match c {
             ConstraintKind::ReceiverNameIn { receiver_name_in } => {
                 if !receiver_matches(ctx.callee, receiver_name_in) {
+                    return false;
+                }
+            }
+            ConstraintKind::ReceiverTypeIn { receiver_type_in } => {
+                if !receiver_type_matches_any(ctx.receiver_types, receiver_type_in) {
                     return false;
                 }
             }

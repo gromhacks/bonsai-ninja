@@ -118,6 +118,7 @@ impl LanguageAdapter for CppAdapter {
         // `#define` expansion is not performed.
         LanguageCapabilities {
             macros: bonsai_lang_api::CapabilityLevel::Partial,
+            receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             ..LanguageCapabilities::partial_baseline()
         }
     }

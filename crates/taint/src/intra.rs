@@ -670,6 +670,7 @@ mod tests {
                     value_text: (*text).to_string(),
                 })
                 .collect(),
+            receiver_types: Vec::new(),
         }
     }
 

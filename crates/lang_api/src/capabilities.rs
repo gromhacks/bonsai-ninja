@@ -25,6 +25,10 @@ pub struct LanguageCapabilities {
     pub reflection: CapabilityLevel,
     pub ffi: CapabilityLevel,
     pub pattern_matching: CapabilityLevel,
+    /// Adapter/index pipeline emits static receiver type facts for
+    /// method-call receivers. This lets downstream resolution use
+    /// semantic class/type identity instead of receiver-name lists.
+    pub receiver_types: CapabilityLevel,
     /// Receiver names that the language treats as aliases for an
     /// export. Used by the call graph to expand an alias-tail to the
     /// set of fully-qualified callee shapes when resolving cross-file
@@ -51,6 +55,7 @@ impl LanguageCapabilities {
             reflection: CapabilityLevel::Unsupported,
             ffi: CapabilityLevel::Unsupported,
             pattern_matching: CapabilityLevel::Unsupported,
+            receiver_types: CapabilityLevel::Unsupported,
             module_export_aliases: &[],
         }
     }
@@ -77,6 +82,7 @@ impl LanguageCapabilities {
             reflection: CapabilityLevel::Unsupported,
             ffi: CapabilityLevel::Unsupported,
             pattern_matching: CapabilityLevel::Partial,
+            receiver_types: CapabilityLevel::Unsupported,
             module_export_aliases: &[],
         }
     }

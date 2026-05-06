@@ -1,4 +1,4 @@
-# Bonsai Ninja
+# bonsai-ninja
 
 Use `bonsai-ninja` when you need structural code intelligence: map a
 repo, find symbols, trace behavior, debug dataflow, or run SAST.

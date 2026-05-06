@@ -253,8 +253,8 @@ fn render_runtime_only() -> String {
     adapters.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut out = String::new();
-    out.push_str("| Language | Modules | Generics | Macros | Dynamic dispatch | Exceptions | Async / await | Coroutines | Reflection | FFI | Pattern matching | Module export aliases |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| Language | Modules | Generics | Macros | Dynamic dispatch | Exceptions | Async / await | Coroutines | Reflection | FFI | Pattern matching | Receiver types | Module export aliases |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for (id, caps) in &adapters {
         let LanguageCapabilities {
             modules,
@@ -267,6 +267,7 @@ fn render_runtime_only() -> String {
             reflection,
             ffi,
             pattern_matching,
+            receiver_types,
             module_export_aliases,
         } = caps;
         let aliases = if module_export_aliases.is_empty() {
@@ -275,7 +276,7 @@ fn render_runtime_only() -> String {
             module_export_aliases.join(", ")
         };
         out.push_str(&format!(
-            "| {id} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {aliases} |\n",
+            "| {id} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {aliases} |\n",
             level_cell(*modules),
             level_cell(*generics),
             level_cell(*macros),
@@ -286,6 +287,7 @@ fn render_runtime_only() -> String {
             level_cell(*reflection),
             level_cell(*ffi),
             level_cell(*pattern_matching),
+            level_cell(*receiver_types),
         ));
     }
     out
@@ -301,8 +303,8 @@ fn render_with_applicability() -> String {
     adapters.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut out = String::new();
-    out.push_str("| Language | Modules | Generics | Macros | Dyn dispatch | Exceptions | Async / await | Coroutines | Reflection | FFI | Pattern matching | Module export aliases |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| Language | Modules | Generics | Macros | Dyn dispatch | Exceptions | Async / await | Coroutines | Reflection | FFI | Pattern matching | Receiver types | Module export aliases |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for (id, caps) in &adapters {
         let app = applicability_for(id);
         let aliases = if !app.export_aliases {
@@ -313,7 +315,7 @@ fn render_with_applicability() -> String {
             caps.module_export_aliases.join(", ")
         };
         out.push_str(&format!(
-            "| {id} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {aliases} |\n",
+            "| {id} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {aliases} |\n",
             cell(app.modules, caps.modules),
             cell(app.generics, caps.generics),
             cell(app.macros, caps.macros),
@@ -324,6 +326,7 @@ fn render_with_applicability() -> String {
             cell(app.reflection, caps.reflection),
             cell(app.ffi, caps.ffi),
             cell(app.pattern_matching, caps.pattern_matching),
+            cell(true, caps.receiver_types),
         ));
     }
     out

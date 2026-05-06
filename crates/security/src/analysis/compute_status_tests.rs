@@ -70,6 +70,64 @@ fn single_rule_pack(rule: Rule) -> Rulepack {
     pack
 }
 
+fn type_method_rule(language: &str) -> Rule {
+    validation_rule_from_yaml(&format!(
+        r"
+id: {language}.test.type_method
+enabled: true
+language: {language}
+tag: test
+severity: high
+cwe: [CWE-20]
+match:
+  kind: call
+  callee:
+    attribute: [Client, request]
+description: Test type-method rule.
+"
+    ))
+}
+
+#[test]
+fn validator_uses_adapter_receiver_type_capabilities() {
+    let registry = bonsai_adapters::all_languages_registry();
+    for adapter in registry.all() {
+        let language = adapter.language_id().as_str();
+        if adapter.capabilities().receiver_types == CapabilityLevel::Unsupported {
+            continue;
+        }
+        let rule = type_method_rule(language);
+        let mut issues = Vec::new();
+        validate_type_method_callee_has_adapter_type_aliases(&rule, registry.as_ref(), &mut issues);
+        assert!(
+            !issues
+                .iter()
+                .any(|issue| issue.code == "type-method-needs-adapter-type-aliases"),
+            "{language} should be recognized as receiver-type-capable: {issues:#?}",
+        );
+    }
+}
+
+#[test]
+fn validator_flags_type_method_rules_for_untyped_receiver_adapters() {
+    let registry = bonsai_adapters::all_languages_registry();
+    let language = registry
+        .all()
+        .into_iter()
+        .find(|adapter| adapter.capabilities().receiver_types == CapabilityLevel::Unsupported)
+        .map(|adapter| adapter.language_id().as_str())
+        .expect("at least one adapter without receiver-type facts");
+    let rule = type_method_rule(language);
+    let mut issues = Vec::new();
+    validate_type_method_callee_has_adapter_type_aliases(&rule, registry.as_ref(), &mut issues);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == "type-method-needs-adapter-type-aliases"),
+        "{language} adapter does not populate receiver-type facts; validator should preserve the info diagnostic",
+    );
+}
+
 #[test]
 fn validator_warns_when_package_signal_is_not_adapter_visible() {
     // Use a dotted-but-fictitious package so the maven-artifact

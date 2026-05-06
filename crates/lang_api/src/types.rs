@@ -244,6 +244,13 @@ pub enum FlowEvent {
         /// must use this field instead of splitting `name`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         receiver: Option<String>,
+        /// Adapter/index-derived static receiver types for the receiver
+        /// expression. This is a semantic fact derived from
+        /// `Decl.type_aliases` and class ancestry, not a receiver-name
+        /// heuristic. Consumers should prefer it before falling back to
+        /// textual receiver inference.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        receiver_types: Vec<String>,
         call_kind: CallKind,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         args: Vec<CallArg>,

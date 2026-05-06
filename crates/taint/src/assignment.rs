@@ -515,6 +515,7 @@ mod tests {
             receiver: None,
             call_kind: bonsai_lang_api::CallKind::Function,
             args: Vec::new(),
+            receiver_types: Vec::new(),
         }
     }
 
