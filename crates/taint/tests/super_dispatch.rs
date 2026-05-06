@@ -107,6 +107,55 @@ fn func_in_class(db: &AnalyzerDb, name: &str, class_name: &str) -> FuncId {
     matches[0]
 }
 
+fn func_in_file(db: &AnalyzerDb, name: &str, file_suffix: &str) -> FuncId {
+    let g = db.global_index();
+    let matches = bonsai_resolve::resolve_callable(&g, name);
+    for func_id in &matches {
+        if let Some(decl) = g.decl_of(SymbolId::new(func_id.raw())) {
+            if g.declaring_file(decl.symbol)
+                .and_then(|file| db.vfs().path(file).ok())
+                .is_some_and(|path| path.to_string_lossy().ends_with(file_suffix))
+            {
+                return *func_id;
+            }
+        }
+    }
+    panic!("expected `{name}` in file ending {file_suffix}; matches={matches:?}");
+}
+
+#[test]
+fn python_super_resolves_aliased_parent_method() {
+    let db = ws(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[
+            (
+                "parent.py",
+                "class Parent:\n    def handle(self, data):\n        sink(data)\n",
+            ),
+            (
+                "child.py",
+                "from parent import Parent as P\n\nclass Child(P):\n    def handle(self, data):\n        super().handle(data)\n",
+            ),
+        ],
+    );
+    let entry = func_in_file(&db, "handle", "child.py");
+    let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
+    let g = db.global_index();
+    let reached_parent = result.call_records.iter().any(|record| {
+        g.decl_of(SymbolId::new(record.callee.raw())).is_some_and(|decl| {
+            decl.name == "handle"
+                && g.declaring_file(decl.symbol)
+                    .and_then(|file| db.vfs().path(file).ok())
+                    .is_some_and(|path| path.to_string_lossy().ends_with("parent.py"))
+        })
+    });
+    assert!(
+        reached_parent,
+        "super().handle() must resolve through aliased base class P -> parent.Parent; records={:#?}",
+        result.call_records
+    );
+}
+
 #[test]
 fn csharp_base_resolves_to_parent_method() {
     let src = "

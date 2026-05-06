@@ -622,6 +622,11 @@ impl<'a> TraceBuilder<'a> {
         let global = self.db.global_index();
         let caller_decl = global.decl_of(SymbolId::new(caller.raw()))?;
         let method_name = bonsai_lang_api::kit::short_name_of(site.name);
+        let alias_map = self.alias_map_for_decl(caller_decl);
+        if is_super_receiver(receiver) {
+            let hits = self.collect_super_method_candidates(caller_decl, &alias_map, method_name);
+            return self.best_symbol_candidate(hits, caller_decl);
+        }
         let class_names = self.receiver_type_names(caller_decl, receiver);
         if class_names.is_empty() {
             return None;
@@ -629,7 +634,6 @@ impl<'a> TraceBuilder<'a> {
         let caller_file = global
             .declaring_file(caller_decl.symbol)
             .unwrap_or(caller_decl.span.file);
-        let alias_map = self.alias_map_for_decl(caller_decl);
         let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(&alias_map);
         let mut out = Vec::new();
         let mut seen = AHashSet::new();
@@ -750,6 +754,30 @@ impl<'a> TraceBuilder<'a> {
                 out.push(decl.symbol);
             }
         }
+    }
+
+    fn collect_super_method_candidates(
+        &self,
+        caller_decl: &Decl,
+        alias_map: &AHashMap<String, AliasTarget>,
+        method_name: &str,
+    ) -> Vec<SymbolId> {
+        let global = self.db.global_index();
+        let Some(caller_file) = global.declaring_file(caller_decl.symbol) else {
+            return Vec::new();
+        };
+        let Some(class_decl) = enclosing_class_for_decl(&global, caller_decl) else {
+            return Vec::new();
+        };
+        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_map);
+        let mut out = Vec::new();
+        let mut seen = AHashSet::new();
+        for base in &class_decl.bases {
+            for class_sym in resolve_class(&global, base, &ctx) {
+                self.collect_method_candidates_for_class(class_sym, method_name, &ctx, &mut seen, &mut out);
+            }
+        }
+        out
     }
 
     fn receiver_type_names(&self, caller_decl: &Decl, receiver: &str) -> Vec<String> {
@@ -940,6 +968,35 @@ impl<'a> TraceBuilder<'a> {
 
 fn span_contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn is_super_receiver(receiver: &str) -> bool {
+    let receiver = receiver.trim().trim_start_matches(['&', '*']);
+    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
+    matches!(receiver, "super" | "parent" | "base")
+}
+
+fn enclosing_class_for_decl<'a>(global: &'a bonsai_index::GlobalIndex, decl: &Decl) -> Option<&'a Decl> {
+    if let Some(parent) = decl.parent {
+        if let Some(parent_decl) = global.decl_of(parent) {
+            if matches!(
+                parent_decl.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            ) {
+                return Some(parent_decl);
+            }
+        }
+    }
+    global
+        .decls_in(decl.span.file)
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            ) && span_contains(candidate.span, decl.span)
+        })
+        .min_by_key(|candidate| candidate.span.end.saturating_sub(candidate.span.start))
 }
 
 fn callable_name_variants(raw: &str) -> Vec<String> {

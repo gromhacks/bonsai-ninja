@@ -1645,7 +1645,8 @@ fn propagate_super_return_event(
     let Some(caller_decl) = global.decl_of(SymbolId::new(ctx.caller.raw())) else {
         return;
     };
-    let candidates = resolve_super_method_candidates(ctx.db, ctx.caller, &caller_decl.name);
+    let candidates =
+        resolve_super_method_candidates(ctx.db, ctx.caller, ctx.alias_targets, &caller_decl.name);
     if candidates.is_empty() {
         return;
     }
@@ -3359,7 +3360,7 @@ fn resolve_call_candidates_with_caller_at(
         }
         if let Some(receiver) = call_receiver_from_name(lookup_name) {
             let targets = if is_super_receiver(&receiver) {
-                resolve_super_method_candidates(db, caller, tail)
+                resolve_super_method_candidates(db, caller, alias_targets, tail)
             } else {
                 resolve_receiver_method_candidates(db, caller, alias_targets, &receiver, tail, call_span)
             };
@@ -3526,10 +3527,17 @@ fn is_super_receiver(receiver: &str) -> bool {
     // `resolve_super_method_candidates` so the parent class's
     // method resolves precisely instead of falling back to
     // name-only candidate enumeration.
-    matches!(receiver.trim(), "super" | "parent" | "base")
+    let receiver = receiver.trim().trim_start_matches(['&', '*']);
+    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
+    matches!(receiver, "super" | "parent" | "base")
 }
 
-fn resolve_super_method_candidates(db: &AnalyzerDb, caller: FuncId, method_name: &str) -> Vec<FuncId> {
+fn resolve_super_method_candidates(
+    db: &AnalyzerDb,
+    caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    method_name: &str,
+) -> Vec<FuncId> {
     let global = db.global_index();
     let Some(caller_decl) = global.decl_of(SymbolId::new(caller.raw())) else {
         return Vec::new();
@@ -3540,7 +3548,7 @@ fn resolve_super_method_candidates(db: &AnalyzerDb, caller: FuncId, method_name:
     let Some(class_decl) = enclosing_class_for_decl(&global, caller_decl) else {
         return Vec::new();
     };
-    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path);
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
     let mut out = Vec::new();
     let mut seen = AHashSet::new();
     for base in &class_decl.bases {
@@ -3818,8 +3826,9 @@ fn caller_resolve_context_data(db: &AnalyzerDb, caller: FuncId) -> Option<(FileI
 /// When `caller` is `Some`, resolution narrows by the caller's
 /// `Visibility` / `module_path` context per
 /// `docs/contributing/design-patterns.mdx::Semantic Resolution Always`. When
-/// `None` (worklist seeding before any caller is known), falls back
-/// to the legacy bare-name path.
+/// `None` (worklist seeding before any caller is known), returns no
+/// candidates instead of falling back to a workspace-wide bare-name
+/// lookup.
 fn resolve_call_candidates(
     name: &str,
     aliases: &AHashMap<String, String>,

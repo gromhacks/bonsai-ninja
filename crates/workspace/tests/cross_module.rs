@@ -385,6 +385,133 @@ fn java_callgraph_receiver_type_from_constructor_prefers_caller_package() {
 }
 
 #[test]
+fn java_super_dispatch_is_shared_by_trace_and_callgraph() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_java::JavaAdapter::new()),
+        &[
+            (
+                "/w/app/Base.java",
+                "package app;\n\
+                 class Base {\n\
+                   void process(String token) { sink(token); }\n\
+                   void sink(String value) {}\n\
+                 }\n",
+            ),
+            (
+                "/w/app/Child.java",
+                "package app;\n\
+                 class Child extends Base {\n\
+                   void handle(String token) { super.process(token); }\n\
+                 }\n",
+            ),
+        ],
+    );
+    let trace = ws.trace_from("handle").expect("trace_from handle");
+    assert!(
+        trace.steps.iter().any(|step| {
+            step.kind == TraceStepKind::EnterFunction
+                && step.message.contains("process")
+                && step.file.ends_with("Base.java")
+        }),
+        "trace must dispatch super.process to Base.process; steps={:#?}",
+        trace.steps
+    );
+
+    let global = ws.db().global_index();
+    let handle = collect_callable_targets(&global, "handle")[0];
+    let base_process = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file).iter())
+        .find(|decl| {
+            decl.name == "process"
+                && global
+                    .declaring_file(decl.symbol)
+                    .and_then(|file| ws.db().vfs().path(file).ok())
+                    .is_some_and(|path| path.to_string_lossy().ends_with("Base.java"))
+        })
+        .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+        .expect("Base.process");
+    let graph = ws.resolved_call_graph();
+    assert!(
+        graph.callees_of(handle).any(|edge| edge.to == base_process),
+        "resolved callgraph must include handle -> Base.process"
+    );
+}
+
+#[test]
+fn python_constructor_receiver_dispatch_is_shared_by_trace_and_callgraph() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/app.py",
+            concat!(
+                "class Runner:\n",
+                "    def execute(self, value):\n",
+                "        sink(value)\n",
+                "    def sink(self, value):\n",
+                "        pass\n",
+                "\n",
+                "class Loader:\n",
+                "    def load(self, value):\n",
+                "        runner = Runner()\n",
+                "        return runner.execute(value)\n",
+                "\n",
+                "def load_model(value):\n",
+                "    loader = Loader()\n",
+                "    return loader.load(value)\n",
+            ),
+        )],
+    );
+    let trace = ws.trace_from("load_model").expect("trace_from load_model");
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|step| { step.kind == TraceStepKind::EnterFunction && step.message.contains("execute") }),
+        "trace must dispatch loader.load()/runner.execute() through constructor-bound receivers; steps={:#?}",
+        trace.steps
+    );
+
+    let global = ws.db().global_index();
+    let load_model = collect_callable_targets(&global, "load_model")[0];
+    let load = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file).iter())
+        .find(|decl| {
+            decl.name == "load"
+                && decl.parent.is_some_and(|parent| {
+                    global
+                        .decl_of(parent)
+                        .is_some_and(|parent_decl| parent_decl.name == "Loader")
+                })
+        })
+        .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+        .expect("Loader.load");
+    let execute = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file).iter())
+        .find(|decl| {
+            decl.name == "execute"
+                && decl.parent.is_some_and(|parent| {
+                    global
+                        .decl_of(parent)
+                        .is_some_and(|parent_decl| parent_decl.name == "Runner")
+                })
+        })
+        .map(|decl| bonsai_common::FuncId::new(decl.symbol.raw()))
+        .expect("Runner.execute");
+    let graph = ws.resolved_call_graph();
+    assert!(
+        graph.callees_of(load_model).any(|edge| edge.to == load),
+        "resolved callgraph must include load_model -> Loader.load"
+    );
+    assert!(
+        graph.callees_of(load).any(|edge| edge.to == execute),
+        "resolved callgraph must include Loader.load -> Runner.execute"
+    );
+}
+
+#[test]
 fn c_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_c::CAdapter::new()),

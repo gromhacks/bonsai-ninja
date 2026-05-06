@@ -85,6 +85,7 @@ pub fn enumerate_chains_resolved(
         vec![(vec![target], initial_set, Precision::Exact)];
     let mut visited_budget = 0usize;
     let mut truncation = ChainTruncation::None;
+    let mut emitted_chains: ahash::AHashSet<Vec<FuncId>> = ahash::AHashSet::new();
     while let Some((path_rev, path_set, path_prec)) = stack.pop() {
         if results.len() >= max_chains {
             truncation = ChainTruncation::MaxChains;
@@ -97,6 +98,7 @@ pub fn enumerate_chains_resolved(
         }
         let head = *path_rev.last().expect("non-empty path");
         let mut pushed_any_parent = false;
+        let mut pushed_precise_parent = false;
         for edge in cg.callers_of(head) {
             let parent = edge.from;
             if path_set.contains(&parent) {
@@ -107,22 +109,25 @@ pub fn enumerate_chains_resolved(
             let mut next_set = path_set.clone();
             next_set.insert(parent);
             let next_prec = path_prec.meet(edge.precision);
+            if is_precise_chain(next_prec) {
+                pushed_precise_parent = true;
+            }
             stack.push((next, next_set, next_prec));
             pushed_any_parent = true;
         }
-        if !pushed_any_parent {
+        if !pushed_any_parent || (!pushed_precise_parent && is_precise_chain(path_prec)) {
             // No more callers (entry point reached) OR all callers
-            // already on the path (recursion). Emit the path so far.
-            if path_rev.len() > 1 {
-                let mut chain = path_rev.clone();
-                chain.reverse();
+            // already on the path (recursion). Also emit the precise
+            // suffix when every non-cyclic incoming edge would degrade
+            // it to over-approximate/unknown. Without this cut, a
+            // virtual framework/dispatcher caller can hide an otherwise
+            // exact entry-to-sink path from inspect's default
+            // exact/narrowed view.
+            let mut chain = path_rev.clone();
+            chain.reverse();
+            if emitted_chains.insert(chain.clone()) && results.len() < max_chains {
                 results.push(ResolvedChain {
                     funcs: chain,
-                    precision: path_prec,
-                });
-            } else {
-                results.push(ResolvedChain {
-                    funcs: vec![target],
                     precision: path_prec,
                 });
             }
@@ -136,6 +141,10 @@ pub fn enumerate_chains_resolved(
         results.truncate(max_chains);
     }
     (results, truncation)
+}
+
+fn is_precise_chain(precision: Precision) -> bool {
+    matches!(precision, Precision::Exact | Precision::Narrowed)
 }
 
 /// FuncId-keyed transitive callee closure. Walks `cg.callees(...)`
