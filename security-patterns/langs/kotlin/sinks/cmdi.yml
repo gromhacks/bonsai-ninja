@@ -68,9 +68,7 @@
     expect_no_match: true
   description: "ProcessBuilder(tainted) — untrusted command elements control child process execution."
 - id: kotlin.cmdi.processbuilder_start
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: kotlin
   tag: command-injection
   severity: critical
@@ -79,15 +77,30 @@
     kind: call
     callee:
       attribute: [ProcessBuilder, start]
+  constraints:
+  - receiver_tainted: true
   match_examples:
-  - name: generated shape example
+  - name: processbuilder command then start
     code: |
       class App {
         fun handle(input: String) {
-          ProcessBuilder.start(input)
+          val pb = ProcessBuilder()
+          pb.command(input)
+          pb.start()
         }
       }
-  description: "Disabled — ProcessBuilder.start() has no command argument; it needs receiver state linking to a tainted constructor or command(...) call."
+    expect_match_text: [pb.start]
+  - name: clean processbuilder start negative
+    code: |
+      class App {
+        fun handle() {
+          val pb = ProcessBuilder()
+          pb.command("/bin/echo")
+          pb.start()
+        }
+      }
+    expect_no_match: true
+  description: "ProcessBuilder.start() after a tainted command list reaches process execution."
 - id: kotlin.cmdi.runtime_exec_string
   enabled: true
   language: kotlin

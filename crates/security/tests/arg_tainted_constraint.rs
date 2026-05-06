@@ -401,9 +401,12 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // Bumped 0x0017 → 0x0018 when `any_arg_tainted` landed so
     // rulepack sink policies can depend on taint in any syntactic
     // call argument without duplicating per-position rules.
+    // Bumped 0x0018 → 0x0019 when receiver/constructor matching
+    // started normalizing inline qualified constructors and carrier
+    // args with tainted descendants became sink arg evidence.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0018_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_0019_u128
     );
 }
 

@@ -1306,6 +1306,7 @@ fn propagate_call_event(
         .map(|(idx, arg)| (idx, arg.value_text.clone()))
         .collect();
     let mut args_to_propagate_into_callee = tainted_at_call.clone();
+    let mut diagnostic_tainted_at_call = tainted_at_call.clone();
     for (idx, arg) in args.iter().enumerate() {
         if args_to_propagate_into_callee
             .iter()
@@ -1315,6 +1316,7 @@ fn propagate_call_event(
         }
         if arg_text_has_mapped_descendant_taint(&arg.value_text, state) {
             args_to_propagate_into_callee.push((idx, arg.value_text.clone()));
+            diagnostic_tainted_at_call.push((idx, arg.value_text.clone()));
         }
     }
     let tainted_receiver = receiver.filter(|receiver| receiver_expr_is_tainted(receiver, state));
@@ -1323,7 +1325,9 @@ fn propagate_call_event(
     }
 
     if let Some(receiver_value) = receiver {
-        if !tainted_at_call.is_empty() && configured_tail_match(&ctx.config.collection_append_methods, name) {
+        if !diagnostic_tainted_at_call.is_empty()
+            && configured_tail_match(&ctx.config.collection_append_methods, name)
+        {
             insert_descendant_target_taint(state, receiver_value);
         }
     }
@@ -1337,7 +1341,7 @@ fn propagate_call_event(
         caller: ctx.caller,
         name: name.to_string(),
         call_span: span,
-        tainted_args: tainted_at_call
+        tainted_args: diagnostic_tainted_at_call
             .iter()
             .map(|(idx, value)| TaintedArgAtCall {
                 index: *idx,

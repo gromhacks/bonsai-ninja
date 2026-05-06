@@ -100,6 +100,43 @@
       )\n}\n}\n"
     expect_no_match: true
   description: JDBC Statement.addBatch accumulates raw SQL.
+- id: kotlin.sqli.statement_execute_batch_after_addbatch
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: high
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      attribute:
+      - Statement
+      - executeBatch
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: tainted addBatch then executeBatch
+    code: |
+      import java.sql.*
+      class App {
+        fun handle(stmt: Statement, input: String) {
+          stmt.addBatch(input)
+          stmt.executeBatch()
+        }
+      }
+    expect_match_text: [stmt.executeBatch]
+  - name: addBatch without executeBatch negative
+    code: |
+      import java.sql.*
+      class App {
+        fun handle(stmt: Statement) {
+          stmt.addBatch("insert into audit values (1)")
+          stmt.clearBatch()
+        }
+      }
+    expect_no_match: true
+  description: "Statement.executeBatch() after tainted SQL was added with addBatch."
 - id: kotlin.sqli.jdbc_create_statement
   enabled: false
   language: kotlin

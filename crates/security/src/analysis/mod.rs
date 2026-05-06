@@ -435,6 +435,7 @@ where
     filter_rules_to_workspace_languages(ws, &mut sources);
     filter_rules_to_workspace_languages(ws, &mut sinks);
     filter_rules_to_workspace_languages(ws, &mut sanitizers);
+    let selected_sink_rule_count = sinks.len();
 
     let total_files = ws.db().global_index().all_files().count() as u64;
     let mut source_hits = gather_matches_phased(
@@ -462,6 +463,11 @@ where
     );
     filter_by_path(&mut source_hits, &options.files, &options.exclude_files);
 
+    let pattern_sinks: Vec<&Rule> = sinks
+        .iter()
+        .copied()
+        .filter(|rule| rule_is_pattern_only_finding(rule))
+        .collect();
     let source_languages: AHashSet<&str> = source_hits.iter().map(|hit| hit.language.as_str()).collect();
     sinks.retain(|rule| source_languages.contains(rule.language.as_str()));
     sanitizers.retain(|rule| source_languages.contains(rule.language.as_str()));
@@ -484,6 +490,19 @@ where
     filter_by_path(&mut sink_hits, &options.files, &options.exclude_files);
     filter_by_path(&mut sanitizer_hits, &options.files, &options.exclude_files);
 
+    let mut pattern_sink_hits = if pattern_sinks.is_empty() {
+        Vec::new()
+    } else {
+        gather_matches_phased(
+            ws,
+            &pattern_sinks,
+            "matching pattern sink rules",
+            total_files,
+            &mut on_progress,
+        )
+    };
+    filter_by_path(&mut pattern_sink_hits, &options.files, &options.exclude_files);
+
     // Pre-filter test-path matches when --exclude-tests is set so the
     // expensive per-source-graph + chain-build phase never even sees
     // them. Without this prune, lodash spends ~60s of interprocedural
@@ -494,6 +513,7 @@ where
     if options.exclude_tests {
         source_hits.retain(|m| !crate::finding::path_is_test_file(&m.file));
         sink_hits.retain(|m| !crate::finding::path_is_test_file(&m.file));
+        pattern_sink_hits.retain(|m| !crate::finding::path_is_test_file(&m.file));
     }
 
     // Sort matches so the chain-aware engine sees a deterministic
@@ -505,8 +525,9 @@ where
     sort_matches(&mut source_hits);
     sort_matches(&mut sink_hits);
     sort_matches(&mut sanitizer_hits);
+    sort_matches(&mut pattern_sink_hits);
 
-    let findings_raw = build_findings_chain_aware(
+    let mut findings_raw = build_findings_chain_aware(
         ws,
         &source_hits,
         &sink_hits,
@@ -516,6 +537,23 @@ where
         options.intra_worklist_cap,
         &mut on_progress,
     );
+    let taint_sink_sites: AHashSet<(String, String, u32, u32)> = findings_raw
+        .iter()
+        .map(|finding| {
+            (
+                finding.finding.sink.rule_id.clone(),
+                finding.finding.sink.file.clone(),
+                finding.finding.sink.line,
+                finding.finding.sink.column,
+            )
+        })
+        .collect();
+    findings_raw.extend(build_pattern_only_findings(
+        ws,
+        &pattern_sink_hits,
+        pack,
+        &taint_sink_sites,
+    ));
     let mut findings = combine_findings_by_source_flow(findings_raw);
     if let Some(max_precision) = options.max_precision {
         findings.retain(|combined| finding_precision_within(&combined.finding.precision, max_precision));
@@ -537,7 +575,7 @@ where
     Ok(TaintAnalysisReport {
         findings,
         source_rule_count: sources.len(),
-        sink_rule_count: sinks.len(),
+        sink_rule_count: selected_sink_rule_count,
         sanitizer_rule_count: sanitizers.len(),
     })
 }
@@ -643,6 +681,7 @@ where
         source_bearing_functions: AHashSet::default(),
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
         source_output_args: source_output_args_from_rulepack(pack),
+        collection_append_methods: collection_append_methods_from_rulepack(pack),
         ..Default::default()
     };
     let mut source_graph_caches = InterTaintCaches::default();
@@ -3415,6 +3454,7 @@ where
         source_bearing_functions,
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
         source_output_args: source_output_args_from_rulepack(pack),
+        collection_append_methods: collection_append_methods_from_rulepack(pack),
         ..Default::default()
     };
     // Global ceiling on total interprocedural work across every
@@ -4132,6 +4172,122 @@ fn spans_overlap(a: Span, b: Span) -> bool {
     a.file == b.file && a.start < b.end && b.start < a.end
 }
 
+fn build_pattern_only_findings(
+    ws: &Workspace,
+    sinks: &[RuleMatch],
+    pack: &Rulepack,
+    taint_sink_sites: &AHashSet<(String, String, u32, u32)>,
+) -> Vec<FindingWithChain> {
+    let func_ids = function_ids_by_lang_file_name(ws);
+    let mut emitted: AHashSet<(String, String, u32, u32)> = AHashSet::new();
+    let mut out = Vec::new();
+    for snk in sinks {
+        let site_key = (snk.rule_id.clone(), snk.file.clone(), snk.line, snk.column);
+        if taint_sink_sites.contains(&site_key) || !emitted.insert(site_key) {
+            continue;
+        }
+        let chain_funcs: Vec<FuncId> = match_func_key(snk)
+            .and_then(|key| func_ids.get(&key).copied())
+            .into_iter()
+            .collect();
+        if let Some(finding) = make_pattern_finding(snk, pack, &chain_funcs) {
+            out.push(FindingWithChain { finding, chain_funcs });
+        }
+    }
+    out
+}
+
+fn make_pattern_finding(snk: &RuleMatch, pack: &Rulepack, _chain_funcs: &[FuncId]) -> Option<Finding> {
+    let sink_rule = pack.find_rule_by_id(&snk.rule_id)?;
+    let group_tokens = [
+        snk.rule_id.clone(),
+        snk.file.clone(),
+        snk.line.to_string(),
+        snk.column.to_string(),
+    ];
+    let group_id = format!("G:{:016x}", bonsai_hash::fnv1a_names64(&group_tokens));
+    let source_rule_id = format!("pattern:{}", sink_rule.id);
+    let finding_id = compute_finding_id(&source_rule_id, &sink_rule.id, &group_id, &snk.language);
+    let source = FindingMatch {
+        rule_id: source_rule_id,
+        file: snk.file.clone(),
+        line: snk.line,
+        column: snk.column,
+        text: snk.match_text.clone(),
+        enclosing_fn: snk.enclosing_fn.clone(),
+        tag: Some("pattern".to_string()),
+        severity: None,
+        category: Some("pattern".to_string()),
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: Vec::new(),
+        sanitised_arg_indices: Vec::new(),
+    };
+    let sink = FindingMatch::from_rule_match(snk, sink_rule);
+    let chain_display = snk
+        .enclosing_fn
+        .as_ref()
+        .map(|name| vec![name.clone()])
+        .unwrap_or_default();
+    Some(Finding {
+        finding_id,
+        language: snk.language.clone(),
+        source,
+        sink,
+        sanitizers_seen: Vec::new(),
+        group_id: Some(group_id.clone()),
+        representative_flow_id: Some(group_id),
+        chain_display,
+        taint_path: Vec::new(),
+        tag: sink_rule.tag.clone(),
+        severity: sink_rule.severity,
+        precision: precision_label(Precision::Exact).to_string(),
+        cwe: sink_rule.cwe.clone(),
+        owasp: sink_rule.owasp.clone(),
+        status: FindingStatus::Unsanitized,
+        from_test: crate::finding::path_is_test_file(&snk.file),
+    })
+}
+
+fn rule_is_pattern_only_finding(rule: &Rule) -> bool {
+    if rule.kind != RuleKind::Sink || !rule.enabled || rule_has_taint_predicate(rule) {
+        return false;
+    }
+    if rule.match_spec.kind == MatchKind::Missing {
+        return true;
+    }
+    let tag = rule.tag.as_deref().unwrap_or_default();
+    matches!(
+        tag,
+        "weak-crypto"
+            | "weak-randomness"
+            | "weak-tls"
+            | "cors"
+            | "csrf"
+            | "auth-bypass"
+            | "insecure-temp-file"
+            | "memory-safety"
+            | "race"
+            | "secure-cookie"
+    ) || rule.cwe.iter().any(|cwe| {
+        matches!(
+            cwe.as_str(),
+            "CWE-327" | "CWE-328" | "CWE-330" | "CWE-338" | "CWE-614"
+        )
+    })
+}
+
+fn rule_has_taint_predicate(rule: &Rule) -> bool {
+    rule.constraints.0.iter().any(|constraint| {
+        matches!(
+            constraint,
+            ConstraintKind::ArgTainted { .. }
+                | ConstraintKind::AnyArgTainted { .. }
+                | ConstraintKind::ReceiverTainted { .. }
+        )
+    })
+}
+
 struct FindingBuildContext<'a> {
     group_id: Option<String>,
     flow_id: Option<String>,
@@ -4509,6 +4665,46 @@ fn source_output_args_from_rulepack(pack: &Rulepack) -> Vec<SourceOutputArgs> {
             })
         })
         .collect()
+}
+
+fn collection_append_methods_from_rulepack(pack: &Rulepack) -> AHashSet<String> {
+    const STATEFUL_MUTATOR_TAILS: &[&str] = &[
+        "add",
+        "addBatch",
+        "addAll",
+        "append",
+        "body",
+        "command",
+        "put",
+        "push",
+        "push_back",
+        "set",
+        "setBody",
+        "write",
+    ];
+    let allowed: AHashSet<&str> = STATEFUL_MUTATOR_TAILS.iter().copied().collect();
+    pack.all_rules()
+        .into_iter()
+        .filter(|rule| rule.enabled && rule.kind == RuleKind::Sink && rule_has_taint_predicate(rule))
+        .filter_map(rule_callee_tail)
+        .filter(|tail| allowed.contains(tail.as_str()))
+        .collect()
+}
+
+fn rule_callee_tail(rule: &Rule) -> Option<String> {
+    let target = rule.match_spec.callee.as_ref()?;
+    let text = target
+        .name
+        .clone()
+        .or_else(|| target.attribute.as_ref().and_then(|parts| parts.last().cloned()))
+        .or_else(|| target.regex.clone())?;
+    let tail = text
+        .rsplit(['.', ':', '\\'])
+        .next()
+        .unwrap_or(text.as_str())
+        .trim()
+        .trim_matches(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()));
+    (!tail.is_empty()).then(|| tail.to_string())
 }
 
 /// Map common per-language family abbreviations to their canonical

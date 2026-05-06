@@ -38,6 +38,7 @@
   - receiver_name_in:
     - runtime
     - rt
+    - r
     - runTime
     - javaRuntime
   - arg_tainted:
@@ -134,9 +135,7 @@
     expect_no_match: true
   description: "new ProcessBuilder(\"sh\", \"-c\", tainted) — shell command string is interpreted by /bin/sh."
 - id: java.cmdi.processbuilder_start
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
+  enabled: true
   language: java
   tag: command-injection
   severity: critical
@@ -148,7 +147,28 @@
       attribute:
       - ProcessBuilder
       - start
-  description: "Disabled — ProcessBuilder.start() has no command argument; needs receiver state linking to a tainted constructor or command(...) call."
+  constraints:
+  - receiver_tainted: true
+  match_examples:
+  - name: processbuilder command then start
+    code: |
+      class App {
+        void handle(ProcessBuilder pb, String input) throws Exception {
+          pb.command(input);
+          pb.start();
+        }
+      }
+    expect_match_text: [pb.start]
+  - name: processbuilder no start negative
+    code: |
+      class App {
+        void handle(ProcessBuilder pb) throws Exception {
+          pb.command("/bin/echo");
+          pb.redirectErrorStream(true);
+        }
+      }
+    expect_no_match: true
+  description: "ProcessBuilder.start() after a tainted command list reaches process execution."
 - id: java.cmdi.processbuilder_command
   enabled: true
   language: java

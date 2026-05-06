@@ -475,6 +475,55 @@ def handler(response, request, user_input):
 }
 
 #[test]
+fn receiver_name_in_matches_inline_qualified_constructor_receiver() {
+    let ws = java_ws(
+        r"
+class App {
+    void handle() {
+        new java.util.Random().nextFloat();
+    }
+}
+",
+    );
+    let mut rule = call_name_rule("java.test.random_next", "nextFloat");
+    rule.language = "java".to_string();
+    rule.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
+        receiver_name_in: vec!["new Random()".to_string()],
+    }]);
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text.contains("nextFloat")),
+        "inline qualified constructor receiver should satisfy new Random() receiver constraint, got {matches:?}"
+    );
+}
+
+#[test]
+fn new_rule_name_matches_qualified_constructor_tail() {
+    let ws = java_ws(
+        r"
+class App {
+    void handle() {
+        new java.util.Random();
+    }
+}
+",
+    );
+    let mut rule = base_rule("java.test.random_ctor", RuleKind::Sink, MatchKind::New);
+    rule.language = "java".to_string();
+    rule.match_spec.callee = Some(RuleTarget {
+        name: Some("Random".to_string()),
+        ..Default::default()
+    });
+
+    let matches = match_rule_against_facts(&ws, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text.contains("Random")),
+        "qualified constructor should match bare constructor rule name, got {matches:?}"
+    );
+}
+
+#[test]
 fn write_rules_match_attribute_write_refs_with_constraints() {
     let ws = ruby_ws(
         r"

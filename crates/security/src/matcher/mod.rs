@@ -3723,9 +3723,14 @@ fn receiver_chain_contains(receiver: &str, allowed: &str) -> bool {
     if allowed.is_empty() {
         return false;
     }
-    receiver_segments(receiver)
-        .iter()
-        .any(|segment| segment == allowed)
+    let receiver_parts = receiver_segments(receiver);
+    if receiver_parts.iter().any(|segment| segment == allowed) {
+        return true;
+    }
+    let allowed_segments = receiver_segments(allowed);
+    allowed_segments
+        .last()
+        .is_some_and(|tail| receiver_parts.iter().any(|segment| segment == tail))
 }
 
 /// Split a receiver expression into its identifier segments. Splits
@@ -3741,6 +3746,7 @@ fn receiver_segments(receiver: &str) -> Vec<String> {
                 || ch == ']'
                 || ch == '('
                 || ch == ')'
+                || ch.is_whitespace()
         })
         .filter_map(|segment| {
             let segment = segment
@@ -3803,7 +3809,12 @@ fn collect_constructor_names(global: &bonsai_index::GlobalIndex) -> AHashSet<Str
 /// `MyClass(x)` form even though the AST didn't tag it as a
 /// constructor call.
 fn constructor_name_matches(callee: &str, constructor_names: &AHashSet<String>) -> bool {
-    let tail = callee.rsplit('.').next().unwrap_or(callee);
+    let normalized = callee
+        .trim()
+        .strip_prefix("new ")
+        .unwrap_or_else(|| callee.trim())
+        .replace("()", "");
+    let tail = normalized.rsplit('.').next().unwrap_or(&normalized);
     let tail = tail.rsplit("::").next().unwrap_or(tail);
     constructor_names.contains(tail)
 }
