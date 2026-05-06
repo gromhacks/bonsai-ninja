@@ -14,10 +14,10 @@
 # annotation shapes that are not surfaced yet. The current Kotlin adapter:
 #
 #   1. Emits common `read` facts and parameter annotations.
-#   2. Does NOT carry static receiver-type information for local variables
-#      (`val record: ConsumerRecord`, `val msg: TextMessage`,
-#      `val intent: Intent`), so attribute-style `[ConsumerRecord, value]`
-#      matches miss real call sites.
+#   2. Does NOT consistently carry static receiver-type information for local
+#      variables (`val record: ConsumerRecord`, `val msg: TextMessage`,
+#      `val intent: Intent`), so local receiver fallbacks must be package/import
+#      gated and method/arity constrained.
 #
 # Per docs/pattern-guide.mdx the fix is in the Kotlin adapter, not here:
 #
@@ -28,9 +28,8 @@
 # any missing framework-specific annotation shapes. Once shipped, flip the
 # remaining `enabled: false` typed rules below to true and re-run the audit.
 #
-# Below this header: enabled annotation/read sources and callable-shape
-# sources that work today, plus tail-matched receivers that are stable enough
-# to enable.
+# Below this header: enabled annotation/read sources and package/import-scoped
+# callable-shape sources that work today.
 
 - id: kotlin.source.spring_request_param
   enabled: true
@@ -235,7 +234,7 @@
     kind: call
     callee:
       attribute: [MultipartFile, getName]
-  description: "Disabled — `getName` is too broad to tail-match safely, and typed receiver matching does not work for local multipart-file variables."
+  description: "Disabled — `getName` is too broad as a receiver-agnostic callable; enable a typed MultipartFile receiver rule once adapters surface receiver-type facts."
 
 - id: kotlin.source.jaxrs_query_param
   enabled: true
@@ -383,27 +382,19 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [query]
   match:
     kind: call
     callee:
-      name: getParameter
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameter]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
+        fun handle(request: HttpServletRequest, input: String) {
           request.getParameter(input)
         }
       }
@@ -415,26 +406,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getParameterValues
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterValues]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
+        fun handle(request: HttpServletRequest, input: String) {
           request.getParameterValues(input)
         }
       }
@@ -446,27 +429,19 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getParameterMap
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterMap]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getParameterMap(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getParameterMap()
         }
       }
   description: "HttpServletRequest.getParameterMap."
@@ -477,27 +452,19 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [query]
   match:
     kind: call
     callee:
-      name: getParameterNames
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterNames]
   match_examples:
   - name: servlet parameter names
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle() {
+        fun handle(request: HttpServletRequest) {
           request.getParameterNames()
         }
       }
@@ -510,27 +477,19 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [header]
   match:
     kind: call
     callee:
-      name: getHeader
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeader]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
+        fun handle(request: HttpServletRequest, input: String) {
           request.getHeader(input)
         }
       }
@@ -542,26 +501,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getHeaders
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeaders]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
+        fun handle(request: HttpServletRequest, input: String) {
           request.getHeaders(input)
         }
       }
@@ -573,27 +524,19 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getHeaderNames
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeaderNames]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getHeaderNames(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getHeaderNames()
         }
       }
   description: "HttpServletRequest.getHeaderNames."
@@ -604,28 +547,20 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [cookie]
   match:
     kind: call
     callee:
-      name: getCookies
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getCookies]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getCookies(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getCookies()
         }
       }
   description: "HttpServletRequest.getCookies."
@@ -640,15 +575,7 @@
   match:
     kind: call
     callee:
-      name: getValue
-  constraints:
-  - receiver_name_in:
-    - cookie
-    - theCookie
-    - httpCookie
-    - requestCookie
-    - servletCookie
-    - c
+      attribute: [Cookie, getValue]
   match_examples:
   - name: servlet cookie value
     code: |
@@ -673,15 +600,7 @@
   match:
     kind: call
     callee:
-      name: getName
-  constraints:
-  - receiver_name_in:
-    - cookie
-    - theCookie
-    - httpCookie
-    - requestCookie
-    - servletCookie
-    - c
+      attribute: [Cookie, getName]
   match_examples:
   - name: servlet cookie name
     code: |
@@ -702,27 +621,19 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getInputStream
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getInputStream]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getInputStream(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getInputStream()
         }
       }
   description: "HttpServletRequest.getInputStream — raw body."
@@ -733,27 +644,19 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getReader
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getReader]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getReader(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getReader()
         }
       }
   description: "HttpServletRequest.getReader."
@@ -764,28 +667,20 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [query]
   match:
     kind: call
     callee:
-      name: getQueryString
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getQueryString]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getQueryString(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getQueryString()
         }
       }
   description: "HttpServletRequest.getQueryString."
@@ -796,28 +691,20 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [path]
   match:
     kind: call
     callee:
-      name: getRequestURI
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getRequestURI]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getRequestURI(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getRequestURI()
         }
       }
   description: "HttpServletRequest.getRequestURI."
@@ -828,28 +715,20 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [path]
   match:
     kind: call
     callee:
-      name: getRequestURL
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getRequestURL]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getRequestURL(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getRequestURL()
         }
       }
   description: "HttpServletRequest.getRequestURL."
@@ -860,28 +739,20 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   payload_types: [path]
   match:
     kind: call
     callee:
-      name: getPathInfo
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getPathInfo]
   match_examples:
   - name: generated shape example
     code: |
+      import javax.servlet.http.*
       class App {
-        fun handle(input: String) {
-          request.getPathInfo(input)
+        fun handle(request: HttpServletRequest, input: String) {
+          request.getPathInfo()
         }
       }
   description: "HttpServletRequest.getPathInfo."
@@ -896,13 +767,8 @@
   match:
     kind: call
     callee:
-      name: getAttribute
+      attribute: [HttpSession, getAttribute]
   constraints:
-  - receiver_name_in:
-    - session
-    - httpSession
-    - userSession
-    - servletSession
   - min_args: 1
   match_examples:
   - name: servlet session attribute
@@ -925,24 +791,28 @@
   tag: http-input
   category: http-input
   payload_types: [file]
-  packages: [org.springframework.web]
+  packages: ["jakarta.servlet", "javax.servlet"]
   match:
     kind: call
     callee:
-      name: getSubmittedFileName
+      regex: "\\.getSubmittedFileName$"
   match_examples:
   - name: generated shape example
     code: |
-      import org.springframework.web.*
+      import jakarta.servlet.http.*
       class App {
-        fun handle(input: String) {
-          getSubmittedFileName(input)
+        fun handle(part: Part) {
+          part.getSubmittedFileName()
         }
       }
-  description: "Servlet getSubmittedFileName() — tail-match across local upload-part variable names."
+      interface Part {
+        fun getSubmittedFileName(): String
+      }
+    expect_match_text: [part.getSubmittedFileName]
+  description: "Servlet Part.getSubmittedFileName() — client-supplied multipart filename from a package-scoped local receiver call."
 
   imports:
-  - org.springframework.web
+  - jakarta.servlet.http
 - id: kotlin.source.ktor_call_receive
   enabled: true
   language: kotlin
@@ -1154,24 +1024,28 @@
   tag: http-input
   category: http-input
   payload_types: [multipart]
-  packages: [org.springframework.web]
+  packages: [org.springframework.web.multipart]
   match:
     kind: call
     callee:
-      name: getOriginalFilename
+      regex: "\\.getOriginalFilename$"
   match_examples:
   - name: generated shape example
     code: |
-      import org.springframework.web.*
+      import org.springframework.web.multipart.*
       class App {
-        fun handle(input: String) {
-          getOriginalFilename(input)
+        fun handle(file: MultipartFile) {
+          file.getOriginalFilename()
         }
       }
-  description: "Spring getOriginalFilename() — tail-match across local multipart-file variable names."
+      interface MultipartFile {
+        fun getOriginalFilename(): String
+      }
+    expect_match_text: [file.getOriginalFilename]
+  description: "Spring MultipartFile.getOriginalFilename() — client-supplied upload filename from a package-scoped local receiver call."
 
   imports:
-  - org.springframework.web
+  - org.springframework.web.multipart
 - id: kotlin.source.ktor_partdata_original_filename
   enabled: true
   language: kotlin
@@ -1207,83 +1081,115 @@
     kind: call
     callee:
       attribute: [Intent, getData]
-  description: "Disabled — `getData` is too broad to tail-match safely, and typed receiver matching does not work for local intent variables."
+  description: "Disabled — `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
 
 - id: kotlin.source.android_getintent_getparcelableextra
   enabled: true
   language: kotlin
   trust: ipc
   tag: ipc-input
+  packages: [android]
   match:
     kind: call
     callee:
-      name: getParcelableExtra
+      regex: "\\.getParcelableExtra$"
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated shape example
     code: |
+      import android.*
       class App {
-        fun handle(input: String) {
-          getParcelableExtra(input)
+        fun handle(intent: Intent, key: String) {
+          intent.getParcelableExtra(key)
         }
       }
-  description: "Android Intent.getParcelableExtra(...) — tail-match across local intent variables; carries cross-app Parcelable payloads."
+      class Intent {
+        fun getParcelableExtra(vararg args: Any?): Any? = null
+      }
+    expect_match_text: [intent.getParcelableExtra]
+  description: "Android Intent.getParcelableExtra(...) — package-scoped IPC extra read from a local intent receiver."
 
 - id: kotlin.source.android_getintent_getserializableextra
   enabled: true
   language: kotlin
   trust: ipc
   tag: ipc-input
+  packages: [android]
   match:
     kind: call
     callee:
-      name: getSerializableExtra
+      regex: "\\.getSerializableExtra$"
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated shape example
     code: |
+      import android.*
       class App {
-        fun handle(input: String) {
-          getSerializableExtra(input)
+        fun handle(intent: Intent, key: String) {
+          intent.getSerializableExtra(key)
         }
       }
-  description: "Android Intent.getSerializableExtra(...) — tail-match; cross-app Serializable payload."
+      class Intent {
+        fun getSerializableExtra(vararg args: Any?): Any? = null
+      }
+    expect_match_text: [intent.getSerializableExtra]
+  description: "Android Intent.getSerializableExtra(...) — package-scoped cross-app Serializable extra read."
 
 - id: kotlin.source.android_getintent_getbooleanextra
   enabled: true
   language: kotlin
   trust: ipc
   tag: ipc-input
+  packages: [android]
   match:
     kind: call
     callee:
-      name: getBooleanExtra
+      regex: "\\.getBooleanExtra$"
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated shape example
     code: |
+      import android.*
       class App {
-        fun handle(input: String) {
-          getBooleanExtra(input)
+        fun handle(intent: Intent, key: String) {
+          intent.getBooleanExtra(key, false)
         }
       }
-  description: "Android Intent.getBooleanExtra(...) — cross-app boolean extra."
+      class Intent {
+        fun getBooleanExtra(vararg args: Any?): Boolean = false
+      }
+    expect_match_text: [intent.getBooleanExtra]
+  description: "Android Intent.getBooleanExtra(...) — package-scoped cross-app boolean extra read."
 
 - id: kotlin.source.android_getintent_getintextra
   enabled: true
   language: kotlin
   trust: ipc
   tag: ipc-input
+  packages: [android]
   match:
     kind: call
     callee:
-      name: getIntExtra
+      regex: "\\.getIntExtra$"
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated shape example
     code: |
+      import android.*
       class App {
-        fun handle(input: String) {
-          getIntExtra(input)
+        fun handle(intent: Intent, key: String) {
+          intent.getIntExtra(key, 0)
         }
       }
-  description: "Android Intent.getIntExtra(...) — cross-app int extra."
+      class Intent {
+        fun getIntExtra(vararg args: Any?): Int = 0
+      }
+    expect_match_text: [intent.getIntExtra]
+  description: "Android Intent.getIntExtra(...) — package-scoped cross-app integer extra read."
 
 - id: kotlin.source.android_getintent_getdatastring
   enabled: true
@@ -1291,19 +1197,27 @@
   trust: ipc
   tag: ipc-input
   payload_types: [url]
+  packages: [android]
   match:
     kind: call
     callee:
-      name: getDataString
+      regex: "\\.getDataString$"
+  constraints:
+  - max_args: 0
   match_examples:
   - name: generated shape example
     code: |
+      import android.*
       class App {
-        fun handle(input: String) {
-          getDataString(input)
+        fun handle(intent: Intent) {
+          intent.getDataString()
         }
       }
-  description: "Android Intent.getDataString() — tail-match; cross-app URI string."
+      class Intent {
+        fun getDataString(): String = ""
+      }
+    expect_match_text: [intent.getDataString]
+  description: "Android Intent.getDataString() — package-scoped cross-app URI string read."
 
 - id: kotlin.source.android_uri_getqueryparameter
   enabled: true
@@ -1410,9 +1324,8 @@
   match:
     kind: call
     callee:
-      name: getArgument
+      attribute: [DataFetchingEnvironment, getArgument]
   constraints:
-  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
   - min_args: 1
   match_examples:
   - name: graphql data fetching argument
@@ -1442,9 +1355,8 @@
   match:
     kind: call
     callee:
-      name: getArguments
+      attribute: [DataFetchingEnvironment, getArguments]
   constraints:
-  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
   - max_args: 0
   match_examples:
   - name: graphql all resolver arguments
@@ -1540,9 +1452,8 @@
   match:
     kind: call
     callee:
-      name: getPayloadAsText
+      attribute: [WebSocketMessage, getPayloadAsText]
   constraints:
-  - receiver_name_in: [message, msg, webSocketMessage, wsMessage]
   - max_args: 0
   match_examples:
   - name: spring websocket text payload

@@ -146,6 +146,38 @@ fn javascript_receiver_callback_trace() {
 }
 
 #[test]
+fn java_inherited_receiver_method_trace() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_java::JavaAdapter::new()),
+        &[(
+            "/w/App.java",
+            "class Base { void sink(String value) { audit(value); } }\n\
+             class Child extends Base {}\n\
+             class App { void entry(String input) { Child child = new Child(); child.sink(input); } }\n",
+        )],
+    );
+    let trace = ws.trace_from("entry").expect("trace_from entry");
+    let global = ws.db().global_index();
+    let entry = collect_callable_targets(&global, "entry")[0];
+    let sink = collect_callable_targets(&global, "sink")[0];
+    let graph = ws.resolved_call_graph();
+    assert!(
+        graph
+            .callees_of(entry)
+            .any(|edge| edge.to == sink && edge.kind == EdgeKind::Direct),
+        "resolved call graph did not include inherited receiver edge entry -> Base.sink"
+    );
+    assert!(
+        trace
+            .steps
+            .iter()
+            .any(|s| s.kind == TraceStepKind::EnterFunction && s.message.contains("sink")),
+        "inherited Base.sink was not expanded from Child receiver; steps={:#?}",
+        trace.steps
+    );
+}
+
+#[test]
 fn javascript_imported_export_const_lambda_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),

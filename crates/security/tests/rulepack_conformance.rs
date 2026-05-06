@@ -484,13 +484,12 @@ fn non_solidity_languages_keep_canonical_source_files() {
 #[test]
 fn audited_languages_only_enable_param_rules_for_real_identifiers() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    let audited: BTreeSet<&str> = BTreeSet::from(["java", "kotlin", "csharp", "javascript", "typescript"]);
     let invalid_handler_names: BTreeSet<&str> =
         BTreeSet::from(["handleDelivery", "handleRequest", "service"]);
     let mut violations = Vec::new();
 
     for rule in pack.all_rules() {
-        if rule.kind != RuleKind::Source || !rule.enabled || !audited.contains(rule.language.as_str()) {
+        if rule.kind != RuleKind::Source || !rule.enabled {
             continue;
         }
         if rule.match_spec.kind != MatchKind::Param {
@@ -504,14 +503,9 @@ fn audited_languages_only_enable_param_rules_for_real_identifiers() {
         else {
             continue;
         };
-        let starts_upper = name
-            .chars()
-            .next()
-            .map(|c| c.is_ascii_uppercase())
-            .unwrap_or(false);
-        if starts_upper || invalid_handler_names.contains(name) {
+        if invalid_handler_names.contains(name) {
             violations.push(format!(
-                "{} uses enabled `kind: param` target `{}` in {}, but these adapters only index parameter identifiers",
+                "{} uses enabled `kind: param` target `{}` in {}, but that name is a handler method, not a parameter identifier",
                 rule.id, name, rule.language
             ));
         }
@@ -1177,6 +1171,39 @@ fn every_rule_yaml_declares_matching_language() {
 }
 
 #[test]
+fn shipped_rules_do_not_use_receiver_name_constraints() {
+    fn visit(path: &Path, offenders: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, offenders);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yml") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if text.contains("receiver_name_in") {
+                offenders.push(path.display().to_string());
+            }
+        }
+    }
+    let mut offenders = Vec::new();
+    visit(&rules_dir(), &mut offenders);
+
+    assert!(
+        offenders.is_empty(),
+        "shipped rules must use semantic receiver facts; receiver_name_in is not a supported schema field:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn declared_rule_match_examples_fire() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
     // Flatten the (rule, example) work upfront so rayon can balance
@@ -1286,8 +1313,8 @@ fn enabled_rules_must_have_match_examples() {
     // Every enabled rule (source, sink, sanitizer) must ship at
     // least one `match_examples` entry. Without an example we
     // can't assert the rule fires on its canonical shape, can't
-    // catch adapter drift, and can't validate the
-    // OnlyWhenPackaged per-file gate. Hard-fails the rule pack.
+    // catch adapter drift, and can't validate package/import/module
+    // context gates. Hard-fails the rule pack.
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
     let mut missing = Vec::new();
     for rule in pack.all_rules() {
@@ -1316,12 +1343,12 @@ fn enabled_rules_must_have_match_examples() {
 #[test]
 fn packaged_rule_examples_include_real_imports() {
     // Any rule that declares `packages:` / `imports:` / `modules:`
-    // — the signals the matcher's per-file `OnlyWhenPackaged`
-    // gate consults — must embed at least one signal string in
-    // every positive `match_examples[*].code` body. Otherwise the rule's
-    // own firing example fails its own per-file gate and the rule won't
-    // fire on its canonical shape. Negative examples may omit the package
-    // signal when they are only demonstrating a literal/clean operand.
+    // must embed at least one signal string in every positive
+    // `match_examples[*].code` body. These signals are the
+    // adapter-visible context used by receiver-agnostic regex gates and
+    // by validation checks for import/package drift. Negative examples
+    // may omit the package signal when they are only demonstrating a
+    // literal/clean operand.
     //
     // The check is a substring-match on the rule's signal text.
     // `import asyncpg`, `from asyncpg import X`,
@@ -1353,7 +1380,7 @@ fn packaged_rule_examples_include_real_imports() {
             if !mentions_signal {
                 missing.push(format!(
                     "{} [{}] match_examples[{}] `{}` does not mention any of {:?} — \
-                     OnlyWhenPackaged gate will never fire on this example",
+                     adapter-visible package/import context is absent from this example",
                     rule.id,
                     rule.source_path,
                     i,

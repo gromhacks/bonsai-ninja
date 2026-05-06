@@ -87,7 +87,7 @@
     kind: read
     target:
       attribute: [request, body]
-  description: "Disabled duplicate — bare `request.body` is too broad; python.tornado.self_request_body covers Tornado's `self.request.body` precisely via suffix regex."
+  description: "Disabled duplicate — bare `request.body` is too broad; python.tornado.self_request_body covers Tornado's `self.request.body` with an explicit receiver regex."
 - id: python.django.request_get
   enabled: true
   language: python
@@ -456,7 +456,7 @@
   disabled_reason:
     code: subsumed
     subsumed_by: python.flask.request_args_get
-    reenable_when: "The receiver-agnostic `^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$` regex on python.flask.request_args_get already covers any local variable name (req, request, r, etc.); this rule's match shape is now identical and would collide."
+    reenable_when: "The explicit receiver regex `^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$` on python.flask.request_args_get already covers any local variable name (req, request, r, etc.); this rule's match shape is identical and would collide."
   language: python
   trust: remote
   tag: http-input
@@ -478,7 +478,7 @@
       def example(req):
           return req.args.get("name")
     expect_match_text: [req.args.get]
-  description: "Flask-style short handler variable `req.args.get(...)` — common in internal helpers and tests where the request object is passed as `req`. Subsumed by python.flask.request_args_get after the receiver-agnostic regex transform."
+  description: "Flask-style short handler variable `req.args.get(...)` — common in internal helpers and tests where the request object is passed as `req`. Subsumed by python.flask.request_args_get through the shared explicit receiver regex."
 - id: python.flask.request_json
   enabled: false
   disabled_reason:
@@ -628,9 +628,7 @@
   description: "tornado self.get_body_argument(...). Signature `get_body_argument(name, default=_ARG_DEFAULT, strip=True)`; `min_args/max_args 1..3` matches canonical signature."
 
 - id: python.tornado.request_headers_get
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: python
   trust: remote
   tag: http-input
@@ -645,7 +643,14 @@
   constraints:
   - min_args: 1
   - max_args: 2
-  description: "Disabled duplicate — suffix matching makes `self.request.headers.get` the same adapter fact as python.web.request_headers_get; package metadata is merged there."
+  match_examples:
+  - name: tornado self request headers get
+    code: |
+      import tornado
+      def example(name):
+          return self.request.headers.get(name)
+    expect_match_text: [self.request.headers.get]
+  description: "Tornado self.request.headers.get(name) — explicit receiver regex for RequestHandler header reads."
 
 - id: python.tornado.self_request_body
   enabled: true

@@ -618,9 +618,8 @@
     code: "function demo(input, req, obj) {\n  return Bun.spawn([\"echo\", \"safe\"]);\n}\n"
     expect_no_match: true
   description: "Bun.spawn \u2014 tainted executable path or argv launches arbitrary\
-    \ process. TODO(only_when_packaged): Bun runtime global has no canonical ecosystem\
-    \ package, so OnlyWhenPackaged lax-tail can never fire \u2014 strict `['Bun',\
-    \ 'spawn']` match only."
+    \ process. Bun is a runtime global, so this rule uses the exact strict `['Bun',\
+    \ 'spawn']` receiver match."
 - id: typescript.cmdi.nodepty_spawn
   enabled: true
   language: typescript

@@ -19,8 +19,7 @@
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
       object App {
-        def handle(name: String, doc: Object): Object = {
-          val xpath: XPath = XPathFactory.newInstance().newXPath()
+        def handle(name: String, xpath: XPath, doc: Object): Object = {
           val expr = "//user[name=\"" + name + "\"]"
           xpath.evaluate(expr, doc)
         }
@@ -31,8 +30,7 @@
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
       object App {
-        def handle(): Object = {
-          val xpath: XPath = XPathFactory.newInstance().newXPath()
+        def handle(xpath: XPath): Object = {
           xpath.evaluate("//safe", "")
         }
       }
@@ -60,8 +58,7 @@
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
       object App {
-        def handle(name: String): Unit = {
-          val xpath: XPath = XPathFactory.newInstance().newXPath()
+        def handle(name: String, xpath: XPath): Unit = {
           xpath.compile("//user[name=\"" + name + "\"]")
         }
       }
@@ -71,8 +68,7 @@
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
       object App {
-        def handle(): Unit = {
-          val xpath: XPath = XPathFactory.newInstance().newXPath()
+        def handle(xpath: XPath): Unit = {
           xpath.compile("//safe")
         }
       }

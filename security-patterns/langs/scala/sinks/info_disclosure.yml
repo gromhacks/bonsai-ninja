@@ -29,7 +29,7 @@
         }
       }
     expect_no_match: true
-  description: "TODO(only-when-packaged): scala.Console / java.lang.System is auto-imported in Scala — Console.out.println of secret-shaped values can disclose credentials through stdout logs."
+  description: "scala.Console.out.println / java.lang.System.out.println of secret-shaped values can disclose credentials through stdout logs."
 
 - id: scala.info_disclosure.console_err_secret
   enabled: true
@@ -61,7 +61,7 @@
         }
       }
     expect_no_match: true
-  description: "TODO(only-when-packaged): scala.Console is auto-imported in Scala — Console.err.println of secret-shaped values leaks sensitive data into error logs."
+  description: "scala.Console.err.println of secret-shaped values leaks sensitive data into error logs."
 
 - id: scala.info_disclosure.logger_error_secret
   enabled: true

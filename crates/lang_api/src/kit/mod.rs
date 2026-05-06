@@ -5300,7 +5300,7 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
     }
     // First pass: bind constructor- and same-receiver factory-style assignments
     // to AliasTarget::Type so the matcher can rewrite
-    // `<recv>.<method>` to `<Type>.<method>`. Two structural heuristics:
+    // `<recv>.<method>` to `<Type>.<method>`. Three structural heuristics:
     //
     //  1. Constructor-style RHS (`val f = File(path)`, `new
     //     HttpClient()`): `source_call` starts with an ASCII
@@ -5315,6 +5315,10 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
     //     segment. This keeps the type fact anchored to an explicit
     //     class-like receiver in the source text.
     //
+    //  3. Constructor assignment facts where the adapter emits only
+    //     the constructor identifier in `source_names`
+    //     (`const client = new GraphQLClient(...)`).
+    //
     // Both heuristics are based on class-name code shape, not framework
     // or request-domain vocabulary. Lowercase method names are not mapped
     // through semantic tables here; rulepack/API coverage owns those cases.
@@ -5324,24 +5328,18 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
             continue;
         }
         let bound_type = if let Some(call) = source_call.as_deref() {
-            let bare = call.rsplit(&['.', ':'][..]).next().unwrap_or(call);
-            if bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                // PascalCase bare callable → constructor: `new HttpClient(...)`,
-                // `File("/data")`, `Path("/x")`. Bound type IS the bare name.
-                Some(bare.to_string())
-            } else if source_names.len() == 2
-                && source_names[0]
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase())
-            {
-                // Same-name-as-receiver factory: `Path.of(...)` →
-                // source_names = ["Path", "of"]. The receiver class
-                // itself is the only inferred type fact.
-                Some(source_names[0].clone())
-            } else {
-                None
-            }
+            constructor_type_from_call_name(call).or_else(|| factory_type_from_source_names(source_names))
+        } else if source_names.len() == 1
+            && source_names[0]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+        {
+            // Some grammars emit `const x = new Type(...)` as an
+            // assignment with only the constructor identifier in
+            // `source_names`; keep the same PascalCase type inference
+            // the `source_call` path uses.
+            Some(source_names[0].clone())
         } else {
             None
         };
@@ -5376,6 +5374,44 @@ pub fn extend_alias_map_with_flow_events<S: std::hash::BuildHasher>(
         if !changed {
             break;
         }
+    }
+}
+
+fn constructor_type_from_call_name(call: &str) -> Option<String> {
+    let normalized = call.trim().trim_start_matches("new ").trim();
+    let constructor_receiver = [".new", "::new", "->new", "\\new", "::__construct"]
+        .iter()
+        .find_map(|suffix| normalized.strip_suffix(suffix))
+        .map(str::trim)
+        .filter(|receiver| !receiver.is_empty());
+    if let Some(receiver) = constructor_receiver {
+        return Some(receiver.to_string());
+    }
+
+    let bare = normalized
+        .rsplit(&['.', ':', '\\'][..])
+        .next()
+        .unwrap_or(normalized);
+    if bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        Some(bare.to_string())
+    } else {
+        None
+    }
+}
+
+fn factory_type_from_source_names(source_names: &[String]) -> Option<String> {
+    if source_names.len() == 2
+        && source_names[0]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+    {
+        // Same-name-as-receiver factory: `Path.of(...)` →
+        // source_names = ["Path", "of"]. The receiver class itself
+        // is the only inferred type fact.
+        Some(source_names[0].clone())
+    } else {
+        None
     }
 }
 
@@ -6536,6 +6572,7 @@ pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
             &mut decl.flow_events,
             &aliases,
             implicit_receiver_types.as_deref(),
+            &class_facts,
         );
     }
 }
@@ -6544,6 +6581,7 @@ fn apply_call_receiver_types_to_events(
     events: &mut [FlowEvent],
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
+    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
 ) {
     for event in events {
         match event {
@@ -6553,7 +6591,8 @@ fn apply_call_receiver_types_to_events(
                 ..
             } => {
                 if let Some(receiver) = receiver.as_deref() {
-                    for ty in receiver_types_for_expr(receiver, aliases, implicit_receiver_types) {
+                    for ty in receiver_types_for_expr(receiver, aliases, implicit_receiver_types, class_facts)
+                    {
                         push_unique_receiver_type(receiver_types, ty);
                     }
                 }
@@ -6563,11 +6602,21 @@ fn apply_call_receiver_types_to_events(
                 else_events,
                 ..
             } => {
-                apply_call_receiver_types_to_events(then_events, aliases, implicit_receiver_types);
-                apply_call_receiver_types_to_events(else_events, aliases, implicit_receiver_types);
+                apply_call_receiver_types_to_events(
+                    then_events,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                );
+                apply_call_receiver_types_to_events(
+                    else_events,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types);
+                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types, class_facts);
             }
             FlowEvent::Try {
                 body,
@@ -6575,9 +6624,19 @@ fn apply_call_receiver_types_to_events(
                 finally_events,
                 ..
             } => {
-                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types);
-                apply_call_receiver_types_to_events(catch_events, aliases, implicit_receiver_types);
-                apply_call_receiver_types_to_events(finally_events, aliases, implicit_receiver_types);
+                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types, class_facts);
+                apply_call_receiver_types_to_events(
+                    catch_events,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                );
+                apply_call_receiver_types_to_events(
+                    finally_events,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                );
             }
             FlowEvent::Assign { .. }
             | FlowEvent::Return { .. }
@@ -6595,35 +6654,100 @@ fn receiver_types_for_expr(
     receiver: &str,
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
+    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
 ) -> Vec<String> {
     let normalized = normalize_receiver_type_expr(receiver);
     let tail = short_name_of(&normalized);
+    let root = receiver_root_name(&normalized);
     let mut out = Vec::new();
+    if let Some(type_name) = receiver_type_from_constructor_expr(&normalized) {
+        push_receiver_type_and_bases(&mut out, type_name, class_facts);
+    }
     for alias in aliases {
-        if alias.name == normalized || alias.name == tail {
-            push_unique_receiver_type(&mut out, alias.type_name.clone());
+        if alias.name == normalized || alias.name == tail || root.as_deref() == Some(alias.name.as_str()) {
+            push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
         }
     }
     if matches!(tail, "self" | "this") {
         if let Some(types) = implicit_receiver_types {
             for ty in types {
-                push_unique_receiver_type(&mut out, ty.clone());
+                push_receiver_type_and_bases(&mut out, ty.clone(), class_facts);
             }
         }
     } else if matches!(tail, "super" | "parent" | "base") {
         if let Some(types) = implicit_receiver_types {
             for ty in types.iter().skip(1) {
-                push_unique_receiver_type(&mut out, ty.clone());
+                push_receiver_type_and_bases(&mut out, ty.clone(), class_facts);
             }
         }
     }
     out
 }
 
+fn push_receiver_type_and_bases(
+    out: &mut Vec<String>,
+    ty: String,
+    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+) {
+    let mut seen = std::collections::BTreeSet::new();
+    push_receiver_type_and_bases_inner(out, ty, class_facts, &mut seen);
+}
+
+fn push_receiver_type_and_bases_inner(
+    out: &mut Vec<String>,
+    ty: String,
+    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+    seen: &mut std::collections::BTreeSet<String>,
+) {
+    let canonical = canonical_simple_type_name(&ty);
+    if canonical.is_empty() || !seen.insert(canonical.clone()) {
+        return;
+    }
+    push_unique_receiver_type(out, canonical.clone());
+    let Some((_, _, bases)) = class_facts
+        .iter()
+        .find(|(_, name, _)| canonical_simple_type_name(name) == canonical)
+    else {
+        return;
+    };
+    for base in bases {
+        push_receiver_type_and_bases_inner(out, base.clone(), class_facts, seen);
+    }
+}
+
+fn receiver_root_name(receiver: &str) -> Option<String> {
+    let receiver = receiver.trim().trim_start_matches(['&', '*', '$', '@', '%']);
+    let root = receiver
+        .split(['.', ':', '\\', '[', '('])
+        .next()
+        .unwrap_or(receiver)
+        .trim();
+    if root.is_empty() || root == receiver {
+        return None;
+    }
+    Some(root.to_string())
+}
+
+fn receiver_type_from_constructor_expr(receiver: &str) -> Option<String> {
+    let expr = receiver.trim();
+    let rest = expr.strip_prefix("new ")?;
+    let without_args = rest.split('(').next().unwrap_or(rest);
+    let without_generics = without_args.split('<').next().unwrap_or(without_args);
+    let bare = without_generics
+        .rsplit('.')
+        .next()
+        .unwrap_or(without_generics)
+        .trim();
+    if bare.is_empty() || !bare.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    Some(bare.to_string())
+}
+
 fn normalize_receiver_type_expr(receiver: &str) -> String {
     normalise_qualified_text(receiver)
         .trim()
-        .trim_start_matches(['&', '*'])
+        .trim_start_matches(['&', '*', '$', '@', '%'])
         .trim_end_matches("()")
         .trim_matches('.')
         .to_string()

@@ -828,6 +828,30 @@ fn collect_method_candidates_for_class(
     seen: &mut AHashSet<SymbolId>,
     out: &mut Vec<FuncId>,
 ) {
+    let mut seen_classes = AHashSet::new();
+    collect_method_candidates_for_class_inner(
+        global,
+        class_sym,
+        method_name,
+        ctx,
+        seen,
+        &mut seen_classes,
+        out,
+    );
+}
+
+fn collect_method_candidates_for_class_inner(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+    seen_methods: &mut AHashSet<SymbolId>,
+    seen_classes: &mut AHashSet<SymbolId>,
+    out: &mut Vec<FuncId>,
+) {
+    if !seen_classes.insert(class_sym) {
+        return;
+    }
     let Some(class_decl) = global.decl_of(class_sym) else {
         return;
     };
@@ -840,6 +864,7 @@ fn collect_method_candidates_for_class(
     let Some(class_file) = global.declaring_file(class_sym) else {
         return;
     };
+    let mut matched_local_method = false;
     for decl in global.decls_in(class_file) {
         if decl.name != method_name {
             continue;
@@ -860,9 +885,26 @@ fn collect_method_candidates_for_class(
         // span-containment fallback covers adapters that haven't
         // yet populated `parent`.
         if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
-            && seen.insert(decl.symbol)
+            && seen_methods.insert(decl.symbol)
         {
+            matched_local_method = true;
             out.push(FuncId::new(decl.symbol.raw()));
+        }
+    }
+    if matched_local_method {
+        return;
+    }
+    for base in &class_decl.bases {
+        for base_sym in resolve_class(global, base, ctx) {
+            collect_method_candidates_for_class_inner(
+                global,
+                base_sym,
+                method_name,
+                ctx,
+                seen_methods,
+                seen_classes,
+                out,
+            );
         }
     }
 }
@@ -1187,6 +1229,9 @@ pub fn collect_callable_targets_with_context_and_aliases(
 
 fn collect_callable_targets_exact(global: &GlobalIndex, name: &str) -> Vec<FuncId> {
     global
+        // CONTEXTLESS_LOOKUP_JUSTIFICATION: display-only helper for
+        // callers that intentionally enumerate every matching name;
+        // callgraph construction uses collect_callable_targets_with_context.
         .find_by_name(name)
         .iter()
         .filter_map(|symbol| {

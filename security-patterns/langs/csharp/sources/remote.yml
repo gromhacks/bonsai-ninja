@@ -388,7 +388,7 @@
     kind: read
     target:
       attribute: [file, FileName]
-  description: "Disabled — subsumed by csharp.source.aspnet_iformfile_filename whose camelCase verb FileName lax-tail-matches every `*.FileName` read (including `file.FileName`). Re-enable as the dedicated rule only if the IFormFile rule is later tightened."
+  description: "Disabled — hardcoded local receiver `file.FileName` is not semantic. The enabled IFormFile rule covers exact and typed IFormFile.FileName reads."
 
 - id: csharp.source.websocket_receiveasync
   enabled: true

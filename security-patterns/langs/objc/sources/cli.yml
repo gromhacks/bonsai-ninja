@@ -135,9 +135,7 @@
   match:
     kind: call
     callee:
-      name: objectForKey
-  constraints:
-    - receiver_name_in: [NSUserDefaults, standardUserDefaults, defaults, userDefaults, sharedDefaults, groupDefaults]
+      attribute: [NSUserDefaults, objectForKey]
   match_examples:
     - name: declared shape
       code: |
@@ -155,11 +153,11 @@
     callee:
       regex: "^(?:.*\\.)?(stringForKey|arrayForKey|dictionaryForKey|dataForKey|stringArrayForKey|URLForKey)$"
   constraints:
-    - receiver_name_in: [NSUserDefaults, standardUserDefaults, defaults, userDefaults, sharedDefaults, groupDefaults]
+    - receiver_type_in: [NSUserDefaults]
   match_examples:
     - name: declared shape
       code: |
-        void test(id input) { id target = input; int amount = 1; [NSUserDefaults stringForKey:input]; }
+        void test(NSUserDefaults *defaults, id input) { id target = input; int amount = 1; [defaults stringForKey:input]; }
   description: "NSUserDefaults -stringForKey: / -dictionaryForKey: / -URLForKey: — typed accessors over the same shared-prefs store; same untrusted-when-shared risk as objectForKey:."
 
 - id: objc.source.uipasteboard_string
@@ -173,11 +171,11 @@
     callee:
       regex: "^(?:.*\\.)?(stringForType|valueForPasteboardType|dataForPasteboardType)$"
   constraints:
-    - receiver_name_in: [UIPasteboard, NSPasteboard, pasteboard, generalPasteboard, pb]
+    - receiver_type_in: [UIPasteboard, NSPasteboard]
   match_examples:
     - name: declared shape
       code: |
-        void test(id input) { id target = input; int amount = 1; [UIPasteboard stringForType:input]; }
+        void test(UIPasteboard *pasteboard, id input) { id target = input; int amount = 1; [pasteboard stringForType:input]; }
   description: "UIPasteboard/NSPasteboard typed accessors — clipboard contents originate from any other app or user paste action; treat as untrusted IPC input."
 
 - id: objc.source.nspasteboard_string

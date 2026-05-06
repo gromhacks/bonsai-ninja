@@ -254,7 +254,10 @@
     kind: call
     callee:
       attribute: [fs, canonicalize]
-  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component). Marking these as sanitizers produced false negatives on attacker-controlled paths."
+  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
+    traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
+    must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
+    Marking these as sanitizers produced false negatives on attacker-controlled paths."
 - id: rust.sanitizer.strip_prefix
   enabled: true
   language: rust
@@ -346,7 +349,9 @@
     kind: call
     callee:
       attribute: [jsonwebtoken, decode]
-  description: "Disabled — same `[jsonwebtoken, decode]` attribute chain as rust.jwt.jsonwebtoken_decode sink. Without structural inspection of the Validation struct we cannot tell strict from permissive configs; defaulting to the sink (flag everywhere and let the analyst verify Validation) is safer."
+  description: "Disabled — same `[jsonwebtoken, decode]` attribute chain as rust.jwt.jsonwebtoken_decode sink. Without structural
+    inspection of the Validation struct we cannot tell strict from permissive configs; defaulting to the sink (flag everywhere
+    and let the analyst verify Validation) is safer."
 - id: rust.sanitizer.v_htmlescape_escape
   enabled: true
   language: rust
@@ -406,7 +411,8 @@
           sqlx::query!(target);
       }
     expect_match_text: ["sqlx::query!"]
-  description: "sqlx::query!() macro — compile-time-checked SQL with bound parameters; the macro form is structurally safe (cannot accept a runtime string), so values flowing through it are sanitized for SQLi."
+  description: "sqlx::query!() macro — compile-time-checked SQL with bound parameters; the macro form is structurally safe
+    (cannot accept a runtime string), so values flowing through it are sanitized for SQLi."
 - id: rust.sanitizer.sqlx_query_as_macro
   enabled: true
   language: rust
@@ -426,7 +432,8 @@
           sqlx::query_as!(target);
       }
     expect_match_text: ["sqlx::query_as!"]
-  description: "sqlx::query_as!() macro — compile-time-checked typed query with bound parameters; safe counterpart to the sqlx::query_as function form."
+  description: "sqlx::query_as!() macro — compile-time-checked typed query with bound parameters; safe counterpart to the
+    sqlx::query_as function form."
 - id: rust.sanitizer.ring_constant_time_verify
   enabled: true
   language: rust
@@ -446,7 +453,8 @@
           constant_time::verify_slices_are_equal(target);
       }
     expect_match_text: ["constant_time::verify_slices_are_equal"]
-  description: "ring::constant_time::verify_slices_are_equal — timing-safe slice compare; defuses timing oracles on MAC / token compares."
+  description: "ring::constant_time::verify_slices_are_equal — timing-safe slice compare; defuses timing oracles on MAC /
+    token compares."
 
 - id: rust.sanitizer.str_starts_with_same_origin
   enabled: true
@@ -475,14 +483,14 @@
   description: "str::starts_with(\"/...\") — same-origin redirect/path guard for slash-rooted local paths."
 
 - id: rust.sanitizer.allowlist_contains
-  enabled: true
+  enabled: false
   language: rust
   tag: allowlist-validate
   packages: [std]
   match:
     kind: call
     callee:
-      regex: "^(allowed|allowlist|whitelist|safe_values|safe_paths)\\.(contains|contains_key)$"
+      regex: "\\.(contains|contains_key)$"
   match_examples:
   - name: set contains allowlist
     code: |
@@ -491,8 +499,11 @@
           allowed.contains(input);
       }
     expect_match_text: [allowed.contains]
-  description: "Allowlist-named HashSet/BTreeSet/HashMap membership check — validates a value against a finite set or map of accepted keys."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Allowlist-named
+    HashSet/BTreeSet/HashMap membership check — validates a value against a finite set or map of accepted keys."
 
+  disabled_reason:
+    code: over-broad
 - id: rust.sanitizer.sqlx_query_as_bind
   enabled: true
   language: rust
@@ -510,7 +521,8 @@
           query_as.bind(input);
       }
     expect_match_text: [query_as.bind]
-  description: "sqlx query/query_as builder `.bind(value)` — binds a value to a placeholder instead of concatenating it into SQL."
+  description: "sqlx query/query_as builder `.bind(value)` — binds a value to a placeholder instead of concatenating it into
+    SQL."
 - id: rust.sanitizer.secrecy_secret_new
   enabled: false
   disabled_reason:
@@ -522,7 +534,9 @@
     kind: new
     callee:
       attribute: [secrecy, Secret]
-  description: "Disabled — `Secret::new` wraps a value in a zeroising container that blocks accidental Debug / serialise leaks, but the underlying bytes still flow to sinks via expose_secret(). Treating the wrap as a sanitizer would hide real flows; enable only for leak-surface (logging/serialisation) audits."
+  description: "Disabled — `Secret::new` wraps a value in a zeroising container that blocks accidental Debug / serialise leaks,
+    but the underlying bytes still flow to sinks via expose_secret(). Treating the wrap as a sanitizer would hide real flows;
+    enable only for leak-surface (logging/serialisation) audits."
 - id: rust.sanitizer.regex_escape
   enabled: true
   language: rust
@@ -542,7 +556,8 @@
           regex::escape(target);
       }
     expect_match_text: ["regex::escape"]
-  description: "regex::escape — escapes regex metacharacters so a tainted literal cannot inject alternation / quantifier patterns into a compiled Regex (defuses ReDoS-by-injection)."
+  description: "regex::escape — escapes regex metacharacters so a tainted literal cannot inject alternation / quantifier patterns
+    into a compiled Regex (defuses ReDoS-by-injection)."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an

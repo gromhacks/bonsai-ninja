@@ -43,7 +43,8 @@
         }
       }
     expect_match_text: [StringEscapeUtils.escapeHtml4]
-  description: "Apache commons-text escapeHtml4 replaces &, <, >, \", ' with HTML entities, neutralizing XSS in HTML text context."
+  description: "Apache commons-text escapeHtml4 replaces &, <, >, \", ' with HTML entities, neutralizing XSS in HTML text
+    context."
 
 - id: scala.sanitizer.owasp_encoder_html
   enabled: true
@@ -106,7 +107,8 @@
         }
       }
     expect_match_text: [HtmlFormat.escape]
-  description: "Play Twirl HtmlFormat.escape replaces &, <, >, \", ' with HTML entities — canonical XSS sanitiser used by @-expressions."
+  description: "Play Twirl HtmlFormat.escape replaces &, <, >, \", ' with HTML entities — canonical XSS sanitiser used by
+    @-expressions."
 
 - id: scala.sanitizer.jsoup_clean
   enabled: true
@@ -127,7 +129,8 @@
         }
       }
     expect_match_text: [Jsoup.clean]
-  description: "Jsoup.clean(html, whitelist) strips tags/attributes outside the whitelist — HTML sanitization for rich-text output."
+  description: "Jsoup.clean(html, whitelist) strips tags/attributes outside the whitelist — HTML sanitization for rich-text
+    output."
 
 # --- Constant-time comparison ----------------------------------------
 - id: scala.sanitizer.message_digest_isequal
@@ -147,7 +150,8 @@
         }
       }
     expect_match_text: [MessageDigest.isEqual]
-  description: "MessageDigest.isEqual performs constant-time byte[] comparison, preventing timing side-channels on MAC/hash verification."
+  description: "MessageDigest.isEqual performs constant-time byte[] comparison, preventing timing side-channels on MAC/hash
+    verification."
 
 - id: scala.sanitizer.bcrypt_checkpw
   enabled: true
@@ -168,7 +172,8 @@
         }
       }
     expect_match_text: [BCrypt.checkpw]
-  description: "BCrypt.checkpw(plaintext, hash) — constant-time password verification; treats the plaintext as bounded-comparison-only, neutralising injection-style misuse."
+  description: "BCrypt.checkpw(plaintext, hash) — constant-time password verification; treats the plaintext as bounded-comparison-only,
+    neutralising injection-style misuse."
 
 - id: scala.sanitizer.argon2_verify
   enabled: true
@@ -189,7 +194,8 @@
         }
       }
     expect_match_text: [Argon2.verify]
-  description: "Argon2.verify(hash, plaintext) — constant-time password verification; bounded comparison sanitises plaintext side."
+  description: "Argon2.verify(hash, plaintext) — constant-time password verification; bounded comparison sanitises plaintext
+    side."
 
 # --- SQL parameter binding -------------------------------------------
 - id: scala.sanitizer.prepared_statement
@@ -345,7 +351,8 @@
         }
       }
     expect_match_text: [UUID.fromString]
-  description: "java.util.UUID.fromString rejects anything outside the canonical 36-char UUID grammar, neutralising injection payloads."
+  description: "java.util.UUID.fromString rejects anything outside the canonical 36-char UUID grammar, neutralising injection
+    payloads."
 
 # --- Path containment ------------------------------------------------
 - id: scala.sanitizer.path_normalize
@@ -358,7 +365,8 @@
     kind: call
     callee:
       attribute: [Path, normalize]
-  description: "Disabled — java.nio.file.Path.normalize collapses .. segments but still requires a trusted-root containment check."
+  description: "Disabled — java.nio.file.Path.normalize collapses .. segments but still requires a trusted-root containment
+    check."
 
 - id: scala.sanitizer.path_startswith
   enabled: false
@@ -370,7 +378,8 @@
     kind: call
     callee:
       attribute: [Path, startsWith]
-  description: "Disabled — startsWith is only a sanitizer on normalized Path values with a trusted-root argument; v1 matching cannot prove receiver type."
+  description: "Disabled — startsWith is only a sanitizer on normalized Path values with a trusted-root argument; v1 matching
+    cannot prove receiver type."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
@@ -495,9 +504,11 @@
       }
     expect_match_text: [next.startsWith]
   - name: paired same-origin path guard negative constraint boundary
-    code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith() && !next.startsWith(\"//\")\n  }\n}\n"
+    code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith() && !next.startsWith(\"//\")\n  }\n\
+      }\n"
     expect_no_match: true
-  description: "Same-origin redirect path guard paired with a second startsWith call on the same receiver for the `!path.startsWith(\"//\")` scheme-relative rejection shape."
+  description: "Same-origin redirect path guard paired with a second startsWith call on the same receiver for the `!path.startsWith(\"\
+    //\")` scheme-relative rejection shape."
 
 - id: scala.sanitizer.same_origin_path_reject_scheme_relative
   enabled: false
@@ -523,12 +534,14 @@
       }
     expect_match_text: [next.startsWith]
   - name: reject scheme-relative redirect target negative constraint boundary
-    code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith(\"/\") && !next.startsWith(\"http://\")\n  }\n}\n"
+    code: "object App {\n  def allow(next: String): Boolean = {\n    next.startsWith(\"/\") && !next.startsWith(\"http://\"\
+      )\n  }\n}\n"
     expect_no_match: true
-  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"//\") shape in scala.sanitizer.same_origin_path_startswith_slash."
+  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"\
+    //\") shape in scala.sanitizer.same_origin_path_startswith_slash."
 
 - id: scala.sanitizer.allowlist_contains
-  enabled: true
+  enabled: false
   language: scala
   tag: allowlist-validate
   match:
@@ -536,7 +549,6 @@
     callee:
       name: contains
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 1
   match_examples:
   - name: set allowlist contains
@@ -548,10 +560,13 @@
         }
       }
     expect_match_text: [allowed.contains]
-  description: "Set/List allowlist membership check on explicitly allowlist-named receivers."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
+    allowlist membership check on explicitly allowlist-named receivers."
 
+  disabled_reason:
+    code: over-broad
 - id: scala.sanitizer.map_get_or_else_allowlist
-  enabled: true
+  enabled: false
   language: scala
   tag: allowlist-validate
   match:
@@ -559,7 +574,6 @@
     callee:
       name: getOrElse
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 2
   match_examples:
   - name: map default allowlist
@@ -571,10 +585,13 @@
         }
       }
     expect_match_text: [allowed.getOrElse]
-  description: "Map.getOrElse on an allowlist-named mapping bounds attacker input to known values or a safe default."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrElse
+    on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
+  disabled_reason:
+    code: over-broad
 - id: scala.sanitizer.enum_withname_allowlist
-  enabled: true
+  enabled: false
   language: scala
   tag: allowlist-validate
   match:
@@ -582,7 +599,6 @@
     callee:
       name: withName
   constraints:
-  - receiver_name_in: [AllowedRole, SafeRoute, RouteName, SortField, Status]
   - arg_count: 1
   match_examples:
   - name: enum parse allowlist
@@ -594,8 +610,11 @@
         }
       }
     expect_match_text: [AllowedRole.withName]
-  description: "Scala Enumeration.withName on narrowly named allowlist enums rejects values outside the enum domain."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Scala Enumeration.withName
+    on narrowly named allowlist enums rejects values outside the enum domain."
 
+  disabled_reason:
+    code: over-broad
 - id: scala.sanitizer.string_matches_safe_shape
   enabled: true
   language: scala
@@ -620,7 +639,8 @@
   - name: slug shape validator negative constraint boundary
     code: "object App {\n  def allow(slug: String): Boolean = {\n    slug.matches()\n  }\n}\n"
     expect_no_match: true
-  description: "String.matches with a tight slug/UUID-style allowlist regex validates input shape before redirect, path, SQL, or XPath use."
+  description: "String.matches with a tight slug/UUID-style allowlist regex validates input shape before redirect, path, SQL,
+    or XPath use."
 
 - id: scala.sanitizer.replaceall_char_allowlist_strip
   enabled: true
@@ -684,7 +704,6 @@
     callee:
       attribute: [JdbcTemplate, query]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 3
   match_examples:
   - name: jdbc template rowmapper varargs
@@ -708,7 +727,6 @@
     callee:
       attribute: [JdbcTemplate, update]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 2
   match_examples:
   - name: jdbc template update varargs
@@ -743,7 +761,8 @@
         }
       }
     expect_match_text: [xpath.setXPathVariableResolver]
-  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath text."
+  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath
+    text."
 
 - id: scala.sanitizer.xpath_evaluate_variable_placeholder
   enabled: true
@@ -770,6 +789,7 @@
       }
     expect_match_text: [xpath.evaluate]
   - name: xpath evaluate placeholder negative constraint boundary
-    code: "import javax.xml.xpath._\nobject App {\n  def find(xpath: XPath, doc: Any): Any = {\n    xpath.evaluate()\n  }\n}\n"
+    code: "import javax.xml.xpath._\nobject App {\n  def find(xpath: XPath, doc: Any): Any = {\n    xpath.evaluate()\n  }\n\
+      }\n"
     expect_no_match: true
   description: "XPath.evaluate with `$name` placeholders is the parameterized side of XPath variable binding."

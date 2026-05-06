@@ -143,9 +143,7 @@
       name: req
   description: "Disabled duplicate — merged into cpp.input.crow_request_param."
 - id: cpp.input.qt_tcpsocket_readall
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: cpp
   trust: remote
   tag: network-input
@@ -154,11 +152,23 @@
     kind: call
     callee:
       attribute: [QTcpSocket, readAll]
-  description: "Disabled — adapters index local receivers like `socket.readAll`, not receiver types like `QTcpSocket.readAll`."
+  match_examples:
+  - name: qt tcp socket read all
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      #include <QtNetwork/QTcpSocket>
+      void example() {
+        QTcpSocket.readAll();
+      }
+    expect_match_text: [QTcpSocket.readAll]
+  description: "QTcpSocket::readAll — remote socket bytes; local receiver calls require semantic QTcpSocket receiver-type facts."
+  imports:
+  - QtCore
+  - QtCore/Qt
 - id: cpp.input.qt_networkreply_readall
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: cpp
   trust: remote
   tag: network-input
@@ -167,7 +177,21 @@
     kind: call
     callee:
       attribute: [QNetworkReply, readAll]
-  description: "Disabled — adapters index local receivers like `reply.readAll`, not receiver types like `QNetworkReply.readAll`."
+  match_examples:
+  - name: qt network reply read all
+    code: |
+      #include <QtCore/Qt>
+      #include <QtCore/Qt>
+      #include <QtCore/Qt> /* Qt */
+      #include <QtNetwork/QNetworkReply>
+      void example() {
+        QNetworkReply.readAll();
+      }
+    expect_match_text: [QNetworkReply.readAll]
+  description: "QNetworkReply::readAll — HTTP response bytes; local receiver calls require semantic QNetworkReply receiver-type facts."
+  imports:
+  - QtCore
+  - QtCore/Qt
 - id: cpp.input.boost_beast_read
   enabled: true
   language: cpp
@@ -243,9 +267,7 @@
   - boost
   - boost/asio.hpp
 - id: cpp.input.poco_streamsocket_receivebytes
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: cpp
   trust: remote
   tag: network-input
@@ -255,7 +277,16 @@
     kind: call
     callee:
       attribute: [StreamSocket, receiveBytes]
-  description: "Disabled — adapters index local receivers like `stream.receiveBytes`, not receiver types like `StreamSocket.receiveBytes`."
+  match_examples:
+  - name: poco stream socket receive bytes
+    code: |
+      #include <Poco/Net/StreamSocket.h>
+      void example() {
+        char buffer[1024];
+        StreamSocket.receiveBytes(buffer, sizeof(buffer));
+      }
+    expect_match_text: [StreamSocket.receiveBytes]
+  description: "Poco StreamSocket::receiveBytes — remote socket bytes; local receiver calls require semantic StreamSocket receiver-type facts."
 
 - id: cpp.input.grpc_request_param
   enabled: true

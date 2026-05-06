@@ -537,7 +537,7 @@
   match:
     kind: call
     callee:
-      name: query
+      attribute: [Mysql2::Client, query]
   constraints:
   - arg_tainted:
       index: 0
@@ -546,16 +546,18 @@
     code: |
       require "mysql2"
       def example(input, url, id, payload, request, params)
+        client = Mysql2::Client.new
         client.query(input)
       end
   - name: ruby.sqli.mysql2_query literal negative
     code: |
       require "mysql2"
       def example(input, url, id, payload, request, params)
+        client = Mysql2::Client.new
         client.query("SELECT * FROM users")
       end
     expect_no_match: true
-  description: "Mysql2::Client#query — raw SQL on common database receiver names."
+  description: "Mysql2::Client#query — raw SQL sent through a semantic Mysql2 client receiver."
 
 - id: ruby.sqli.pg_exec
   enabled: false

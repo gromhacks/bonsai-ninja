@@ -82,7 +82,7 @@
   match:
     kind: call
     callee:
-      regex: "^int\\.parse$"
+      attribute: [int, parse]
   match_examples:
   - name: declared shape
     code: |
@@ -98,8 +98,6 @@
     kind: call
     callee:
       attribute: [int, tryParse]
-  constraints:
-  - receiver_name_in: [int]
   match_examples:
   - name: declared shape
     code: |
@@ -115,8 +113,6 @@
     kind: call
     callee:
       attribute: [double, tryParse]
-  constraints:
-  - receiver_name_in: [double]
   match_examples:
   - name: declared shape
     code: |
@@ -131,7 +127,7 @@
   match:
     kind: call
     callee:
-      regex: "^num\\.parse$"
+      attribute: [num, parse]
   match_examples:
   - name: declared shape
     code: |
@@ -211,8 +207,6 @@
     kind: call
     callee:
       attribute: [num, tryParse]
-  constraints:
-  - receiver_name_in: [num]
   match_examples:
   - name: declared shape
     code: |
@@ -251,7 +245,8 @@
       class HtmlEscape { HtmlEscape([dynamic input, {dynamic htmlEscapeValues}]); }
       void test() { var input = "x"; var result = HtmlEscape(input); }
     expect_match_text: [HtmlEscape]
-  description: "Disabled duplicate — construction only creates a converter; dart.sanitizer.htmlescape_convert and dart.sanitizer.htmlescape_sanitize are the actual sanitization calls."
+  description: "Disabled duplicate — construction only creates a converter; dart.sanitizer.htmlescape_convert and dart.sanitizer.htmlescape_sanitize
+    are the actual sanitization calls."
 
 - id: dart.sanitizer.process_run_argv
   enabled: false
@@ -267,7 +262,9 @@
   - keyword_arg_equals:
       name: runInShell
       value: "false"
-  description: "Disabled audit-only — Process.run(argv, runInShell: false) is the SAFE positional/argv form. v1 matching cannot detect the implicit-default `runInShell: false` case (the default), so this rule only fires when the keyword is set explicitly. Treat as evidence, not a hard sanitizer."
+  description: "Disabled audit-only — Process.run(argv, runInShell: false) is the SAFE positional/argv form. Call-shape matching
+    cannot infer the omitted default `runInShell: false`, so this rule only fires when the keyword is set explicitly. Treat
+    as evidence, not a hard sanitizer."
 
 - id: dart.sanitizer.process_start_argv
   enabled: false
@@ -283,7 +280,8 @@
   - keyword_arg_equals:
       name: runInShell
       value: "false"
-  description: "Disabled audit-only — Process.start(argv, runInShell: false) is the SAFE argv form. Same v1 limitation as dart.sanitizer.process_run_argv."
+  description: "Disabled audit-only — Process.start(argv, runInShell: false) is the SAFE argv form. Same v1 limitation as
+    dart.sanitizer.process_run_argv."
 
 - id: dart.sanitizer.validators_is_email
   enabled: true
@@ -304,7 +302,8 @@
       import 'package:validators/validators.dart'; // validators
       void test() { var input = "x"; var amount = 1; isEmail(input); }
     expect_match_text: [isEmail]
-  description: "package:validators isEmail — schema-level validation of email shape; rejects payloads with control chars or non-email syntax."
+  description: "package:validators isEmail — schema-level validation of email shape; rejects payloads with control chars or
+    non-email syntax."
 
   imports:
   - validators/validators.dart
@@ -327,7 +326,8 @@
       import 'package:validators/validators.dart'; // validators
       void test() { var input = "x"; var amount = 1; isURL(input); }
     expect_match_text: [isURL]
-  description: "package:validators isURL — validates URL shape (scheme/host); rejects malformed and non-URL payloads. Pair with allowlist for SSRF."
+  description: "package:validators isURL — validates URL shape (scheme/host); rejects malformed and non-URL payloads. Pair
+    with allowlist for SSRF."
 
   imports:
   - validators/validators.dart
@@ -377,20 +377,23 @@
   description: "String.startsWith('/...') — same-origin redirect/path guard for slash-rooted local paths."
 
 - id: dart.sanitizer.set_map_contains_allowlist
-  enabled: true
+  enabled: false
   language: dart
   tag: allowlist-validate
   match:
     kind: call
     callee:
-      regex: "^(allowed|allowlist|whitelist|safeValues|safePaths)\\.(contains|containsKey)$"
+      regex: "\\.(contains|containsKey)$"
   match_examples:
   - name: set contains allowlist
     code: |
       void test(String input) { allowed.contains(input); }
     expect_match_text: [allowed.contains]
-  description: "Allowlist-named Set/List/Map contains/containsKey membership check — validates a value against a finite set or map of accepted values."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Allowlist-named
+    Set/List/Map contains/containsKey membership check — validates a value against a finite set or map of accepted values."
 
+  disabled_reason:
+    code: over-broad
 - id: dart.sanitizer.validators_matches_full
   enabled: true
   language: dart
@@ -413,7 +416,9 @@
       void test(String input) { matches(input, r'^[a-z0-9_-]+$'); }
     expect_match_text: [matches]
   - name: anchored validators matches negative constraint boundary
-    code: "import 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\nimport 'package:validators/validators.dart'; // validators\nvoid test(String input) { matches(); }\n"
+    code: "import 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\nimport 'package:validators/validators.dart';\n\
+      import 'package:validators/validators.dart';\nimport 'package:validators/validators.dart'; // validators\nvoid test(String
+      input) { matches(); }\n"
     expect_no_match: true
   description: "package:validators matches(input, anchoredPattern) — full-string UUID/slug-style regex validation."
 
@@ -440,7 +445,8 @@
       import 'package:sqflite/sqflite.dart';
       void test(db, String input) { db.rawQuery("select * from users where name = ?", [input]); }
     expect_match_text: [db.rawQuery]
-  description: "sqflite rawQuery/rawInsert/rawUpdate/rawDelete with a second positional arguments list — binds placeholder values instead of SQL concatenation."
+  description: "sqflite rawQuery/rawInsert/rawUpdate/rawDelete with a second positional arguments list — binds placeholder
+    values instead of SQL concatenation."
 
   imports:
   - sqflite/sqflite.dart

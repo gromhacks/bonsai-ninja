@@ -415,9 +415,7 @@
       }
   description: "hyper Request::uri().path() — raw request path; tainted value if used in fs operations = traversal."
 - id: rust.tonic.request_into_inner
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: rust
   trust: remote
   tag: rpc-input
@@ -428,7 +426,15 @@
     kind: call
     callee:
       attribute: [Request, into_inner]
-  description: "Disabled — adapters index local receivers like `request.into_inner()`, and bare `into_inner` is too broad to tail-match safely."
+  match_examples:
+  - name: tonic request into inner
+    code: |
+      use tonic::Request;
+      fn example() {
+          Request::into_inner();
+      }
+    expect_match_text: ["Request::into_inner"]
+  description: "tonic Request::into_inner — takes the client-supplied protobuf message out of the request; local receiver calls require semantic Request receiver-type facts."
 - id: rust.axum.typed_header
   enabled: true
   language: rust

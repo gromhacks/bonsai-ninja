@@ -135,6 +135,8 @@
   constraints:
   - arg_tainted:
       index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
   match_examples:
   - name: generated shape example
     code: |
@@ -151,7 +153,7 @@
         }
       }
     expect_no_match: true
-  description: "TODO(only-when-packaged): java.lang.ProcessBuilder is auto-imported in Scala/JVM — ProcessBuilder.command(cmd) — tainted command tokens execute directly; no shell escaping performed."
+  description: "java.lang.ProcessBuilder.command(cmd) — tainted command tokens execute directly; no shell escaping performed."
 - id: scala.cmdi.processbuilder_new
   enabled: true
   language: scala

@@ -28,7 +28,7 @@
         }
       }
     expect_no_match: true
-  description: 'TODO(only-when-packaged): java.lang.System is auto-imported in Kotlin/JVM — System.out.println of secret-shaped values can disclose credentials through stdout logs. Merged collision aliases: kotlin.info_disclosure.system_err_secret.'
+  description: 'java.lang.System.out.println of secret-shaped values can disclose credentials through stdout logs. Merged collision aliases: kotlin.info_disclosure.system_err_secret.'
   aliases:
   - kotlin.info_disclosure.system_err_secret
 - id: kotlin.info_disclosure.logger_error_secret

@@ -33,7 +33,8 @@
         }
       }
     expect_no_match: true
-  description: "Connection.prepareStatement(static SQL with placeholders) — bound args via setX neutralise SQL value injection. Dynamic SQL text is handled by java.sqli.connection_preparestatement_tainted_sql."
+  description: "Connection.prepareStatement(static SQL with placeholders) — bound args via setX neutralise SQL value injection.
+    Dynamic SQL text is handled by java.sqli.connection_preparestatement_tainted_sql."
 
 - id: java.sanitizer.prepared_statement_setstring
   enabled: true
@@ -491,8 +492,6 @@
     kind: call
     callee:
       attribute: [PasswordEncoder, matches]
-  constraints:
-  - receiver_name_in: [PasswordEncoder, passwordEncoder, encoder]
   match_examples:
   - name: generated shape example
     code: |
@@ -547,7 +546,8 @@
     kind: call
     callee:
       attribute: [Path, startsWith]
-  description: "Disabled — startsWith is only a sanitizer when the receiver is a normalized Path and the argument is the trusted root; receiver type is not available in v1 matching."
+  description: "Disabled — startsWith is only a sanitizer when the receiver is a normalized Path and the argument is the trusted
+    root; receiver type is not available in v1 matching."
 
 - id: java.sanitizer.filename_get_name
   enabled: true
@@ -770,8 +770,6 @@
     kind: call
     callee:
       attribute: [BCryptPasswordEncoder, matches]
-  constraints:
-  - receiver_name_in: [BCryptPasswordEncoder, bcryptPasswordEncoder]
   match_examples:
   - name: generated shape example
     code: |
@@ -793,8 +791,6 @@
     kind: call
     callee:
       attribute: [Argon2PasswordEncoder, matches]
-  constraints:
-  - receiver_name_in: [Argon2PasswordEncoder, argon2PasswordEncoder]
   match_examples:
   - name: generated shape example
     code: |
@@ -826,7 +822,8 @@
         }
       }
     expect_match_text: [Jsoup.parse]
-  description: "Jsoup.parse(html) — HTML parsing typically chained with .clean(...) / .text(); stripping returns sanitized markup."
+  description: "Jsoup.parse(html) — HTML parsing typically chained with .clean(...) / .text(); stripping returns sanitized
+    markup."
 
 - id: java.sanitizer.hibernate_validator_validate
   enabled: true
@@ -847,7 +844,8 @@
         }
       }
     expect_match_text: [Validator.validate]
-  description: "Bean Validation (Hibernate Validator) Validator.validate — runs JSR-380 constraints; rejects values that fail schema."
+  description: "Bean Validation (Hibernate Validator) Validator.validate — runs JSR-380 constraints; rejects values that fail
+    schema."
 
 - id: java.sanitizer.pattern_matcher_matches
   enabled: false
@@ -859,7 +857,8 @@
     kind: call
     callee:
       attribute: [Matcher, matches]
-  description: "Disabled — Matcher.matches is a sanitizer only when the pattern is a strict allowlist; pattern intent is not visible to the matcher."
+  description: "Disabled — Matcher.matches is a sanitizer only when the pattern is a strict allowlist; pattern intent is not
+    visible to the matcher."
 
 - id: java.sanitizer.path_normalize_resolved
   enabled: false
@@ -871,7 +870,8 @@
     kind: call
     callee:
       attribute: [Paths, get]
-  description: "Disabled - Paths.get is a constructor-style helper, not a sanitizer; only meaningful when followed by normalize + startsWith(allowedRoot)."
+  description: "Disabled - Paths.get is a constructor-style helper, not a sanitizer; only meaningful when followed by normalize
+    + startsWith(allowedRoot)."
 
 # -- Open-redirect mitigations -------------------------------------------------
 - id: java.sanitizer.owasp_url_validator
@@ -967,8 +967,6 @@
     kind: call
     callee:
       attribute: [Lock, lock]
-  constraints:
-  - receiver_name_in: [Lock, lock]
   match_examples:
   - name: generated shape example
     code: |
@@ -987,8 +985,6 @@
     kind: call
     callee:
       attribute: [ReentrantLock, lock]
-  constraints:
-  - receiver_name_in: [ReentrantLock, reentrantLock]
   match_examples:
   - name: generated shape example
     code: |
@@ -1101,7 +1097,8 @@
   - name: paired same-origin path guard negative constraint boundary
     code: "class App {\n  boolean allow(String next) {\n    return next.startsWith() && !next.startsWith(\"//\");\n  }\n}\n"
     expect_no_match: true
-  description: "Same-origin redirect path guard — the leading slash check is only credited when another startsWith call is present on the same receiver, allowing the paired `!path.startsWith(\"//\")` scheme-relative guard shape."
+  description: "Same-origin redirect path guard — the leading slash check is only credited when another startsWith call is
+    present on the same receiver, allowing the paired `!path.startsWith(\"//\")` scheme-relative guard shape."
 
 - id: java.sanitizer.same_origin_path_reject_scheme_relative
   enabled: false
@@ -1127,12 +1124,13 @@
       }
     expect_match_text: [next.startsWith]
   - name: reject scheme-relative redirect target negative constraint boundary
-    code: "class App {\n  boolean allow(String next) {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\");\n  }\n}\n"
+    code: "class App {\n  boolean allow(String next) {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\"\
+      );\n  }\n}\n"
     expect_no_match: true
   description: "Disabled — same-receiver startsWith(\"/\") + startsWith(\"//\") is modeled by java.sanitizer.same_origin_path_startswith_slash."
 
 - id: java.sanitizer.allowlist_contains
-  enabled: true
+  enabled: false
   language: java
   tag: allowlist-validate
   match:
@@ -1140,7 +1138,6 @@
     callee:
       name: contains
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 1
   match_examples:
   - name: set allowlist contains
@@ -1153,10 +1150,13 @@
         }
       }
     expect_match_text: [allowed.contains]
-  description: "Set/List allowlist membership check on explicitly allowlist-named receivers."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
+    allowlist membership check on explicitly allowlist-named receivers."
 
+  disabled_reason:
+    code: over-broad
 - id: java.sanitizer.map_get_or_default_allowlist
-  enabled: true
+  enabled: false
   language: java
   tag: allowlist-validate
   match:
@@ -1164,7 +1164,6 @@
     callee:
       name: getOrDefault
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 2
   match_examples:
   - name: map default allowlist
@@ -1177,10 +1176,13 @@
         }
       }
     expect_match_text: [allowed.getOrDefault]
-  description: "Map.getOrDefault on an allowlist-named mapping bounds attacker input to known values or a safe default."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrDefault
+    on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
+  disabled_reason:
+    code: over-broad
 - id: java.sanitizer.enum_valueof_allowlist
-  enabled: true
+  enabled: false
   language: java
   tag: allowlist-validate
   match:
@@ -1188,7 +1190,6 @@
     callee:
       name: valueOf
   constraints:
-  - receiver_name_in: [AllowedRole, SafeRoute, RouteName, SortField, Status]
   - arg_count: 1
   match_examples:
   - name: enum parse allowlist
@@ -1200,8 +1201,11 @@
         }
       }
     expect_match_text: [AllowedRole.valueOf]
-  description: "Enum.valueOf on narrowly named allowlist enums rejects values outside the enum domain."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Enum.valueOf
+    on narrowly named allowlist enums rejects values outside the enum domain."
 
+  disabled_reason:
+    code: over-broad
 - id: java.sanitizer.string_matches_safe_shape
   enabled: true
   language: java
@@ -1211,7 +1215,7 @@
     callee:
       name: matches
   constraints:
-  - receiver_name_in: [input, value, slug, id, name, token, path, safeValue]
+  - receiver_type_in: [String]
   - arg_matches_regex:
       index: 0
       regex: '^\^?["'']\^?\[?(\[A-Za-z0-9_|[A-Fa-f0-9_])'
@@ -1227,7 +1231,8 @@
   - name: slug shape validator negative constraint boundary
     code: "class App {\n  boolean allow(String slug) {\n    return slug.matches();\n  }\n}\n"
     expect_no_match: true
-  description: "String.matches with a tight slug/UUID-style allowlist regex validates input shape before redirect, path, SQL, or XPath use."
+  description: "String.matches with a tight slug/UUID-style allowlist regex validates input shape before redirect, path, SQL,
+    or XPath use."
 
 - id: java.sanitizer.pattern_matches_safe_shape
   enabled: true
@@ -1238,7 +1243,6 @@
     callee:
       attribute: [Pattern, matches]
   constraints:
-  - receiver_name_in: [Pattern]
   - arg_matches_regex:
       index: 0
       regex: '^["'']\^?(\[A-Za-z0-9_|\[A-Fa-f0-9)'
@@ -1254,7 +1258,8 @@
       }
     expect_match_text: [Pattern.matches]
   - name: uuid shape validator negative constraint boundary
-    code: "import java.util.regex.Pattern;\nclass App {\n  boolean allow(String id) {\n    return Pattern.matches();\n  }\n}\n"
+    code: "import java.util.regex.Pattern;\nclass App {\n  boolean allow(String id) {\n    return Pattern.matches();\n  }\n\
+      }\n"
     expect_no_match: true
   description: "Pattern.matches with a bounded UUID/slug-style allowlist regex validates string shape."
 
@@ -1343,7 +1348,6 @@
     callee:
       attribute: [JdbcTemplate, query]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 3
   match_examples:
   - name: jdbc template rowmapper varargs
@@ -1367,7 +1371,6 @@
     callee:
       attribute: [JdbcTemplate, update]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 2
   match_examples:
   - name: jdbc template update varargs
@@ -1402,7 +1405,8 @@
         }
       }
     expect_match_text: [xpath.setXPathVariableResolver]
-  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath text."
+  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath
+    text."
 
 - id: java.sanitizer.xpath_evaluate_variable_placeholder
   enabled: true
@@ -1429,7 +1433,8 @@
       }
     expect_match_text: [xpath.evaluate]
   - name: xpath evaluate placeholder negative constraint boundary
-    code: "import javax.xml.xpath.*;\nclass App {\n  Object find(XPath xpath, Object doc) throws Exception {\n    return xpath.evaluate();\n  }\n}\n"
+    code: "import javax.xml.xpath.*;\nclass App {\n  Object find(XPath xpath, Object doc) throws Exception {\n    return xpath.evaluate();\n\
+      \  }\n}\n"
     expect_no_match: true
   description: "XPath.evaluate with `$name` placeholders is the parameterized side of XPath variable binding."
 
@@ -1445,7 +1450,6 @@
     callee:
       attribute: [JdbcTemplate, query]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 3
   match_examples:
   - name: jdbc template object array args before mapper
@@ -1457,7 +1461,8 @@
         }
       }
     expect_match_text: [jdbcTemplate.query]
-  description: "Disabled duplicate — same matcher as canonical java.sanitizer.jdbctemplate_query_rowmapper_params; JdbcTemplate.query parameter binding is represented once until argument-order constraints exist."
+  description: "Disabled duplicate — same matcher as canonical java.sanitizer.jdbctemplate_query_rowmapper_params; JdbcTemplate.query
+    parameter binding is represented once until argument-order constraints exist."
 
   imports:
   - org
@@ -1471,7 +1476,6 @@
     callee:
       attribute: [JdbcTemplate, queryForObject]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 3
   match_examples:
   - name: jdbc template query for object varargs
@@ -1495,7 +1499,9 @@
     callee:
       name: addValue
   constraints:
-  - receiver_name_in: [params, parameters, sqlParams, paramSource]
+  - receiver_type_in:
+    - MapSqlParameterSource
+    - SqlParameterSource
   - min_args: 2
   match_examples:
   - name: named parameter source add value
@@ -1510,7 +1516,8 @@
         void addValue(Object... args) {}
       }
     expect_match_text: [params.addValue]
-  description: "MapSqlParameterSource.addValue(name, value) binds a named JDBC parameter rather than interpolating the value into SQL."
+  description: "MapSqlParameterSource.addValue(name, value) binds a named JDBC parameter rather than interpolating the value
+    into SQL."
 
 - id: java.sanitizer.bean_validation_pattern_param
   enabled: true
@@ -1614,7 +1621,7 @@
   description: "javax.naming.ldap.Rdn.escapeValue — escapes attacker input for an LDAP RDN value."
 
 - id: java.sanitizer.path_normalize_startswith_root
-  enabled: true
+  enabled: false
   language: java
   tag: path-sanitize
   match:
@@ -1622,7 +1629,6 @@
     callee:
       name: startsWith
   constraints:
-  - receiver_name_in: [normalized, normalizedPath, resolved, resolvedPath, safePath]
   - arg_matches_regex:
       index: 0
       regex: 'root|base|allowed|uploadDir|safeDir'
@@ -1642,12 +1648,17 @@
       }
     expect_match_text: [normalized.startsWith]
   - name: normalized path containment negative constraint boundary
-    code: "class App {\n  boolean allow(Path root, Path input) {\n    Path normalized = root.resolve(input).normalize();\n    return normalized.startsWith();\n  }\n}\nclass Path {\n  Path resolve(Object o) { return this; }\n  Path normalize() { return this; }\n  boolean startsWith(Object o) { return true; }\n}\n"
+    code: "class App {\n  boolean allow(Path root, Path input) {\n    Path normalized = root.resolve(input).normalize();\n\
+      \    return normalized.startsWith();\n  }\n}\nclass Path {\n  Path resolve(Object o) { return this; }\n  Path normalize()
+      { return this; }\n  boolean startsWith(Object o) { return true; }\n}\n"
     expect_no_match: true
-  description: "Normalized path containment check — a normalized/resolved path is accepted only if it remains under a trusted root."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Normalized
+    path containment check — a normalized/resolved path is accepted only if it remains under a trusted root."
 
+  disabled_reason:
+    code: over-broad
 - id: java.sanitizer.uri_scheme_allowlist
-  enabled: true
+  enabled: false
   language: java
   tag: allowlist-validate
   match:
@@ -1655,7 +1666,6 @@
     callee:
       name: contains
   constraints:
-  - receiver_name_in: [allowedSchemes, safeSchemes, permittedSchemes]
   - arg_matches_regex:
       index: 0
       regex: 'getScheme'
@@ -1669,12 +1679,16 @@
       }
     expect_match_text: [allowedSchemes.contains]
   - name: uri scheme allowlist negative constraint boundary
-    code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedSchemes) {\n    return allowedSchemes.contains();\n  }\n}\n"
+    code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedSchemes) {\n    return allowedSchemes.contains();\n\
+      \  }\n}\n"
     expect_no_match: true
-  description: "URI scheme allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI scheme
+    allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
 
+  disabled_reason:
+    code: over-broad
 - id: java.sanitizer.uri_host_allowlist
-  enabled: true
+  enabled: false
   language: java
   tag: allowlist-validate
   match:
@@ -1682,7 +1696,6 @@
     callee:
       name: contains
   constraints:
-  - receiver_name_in: [allowedHosts, safeHosts, permittedHosts]
   - arg_matches_regex:
       index: 0
       regex: 'getHost'
@@ -1696,10 +1709,14 @@
       }
     expect_match_text: [allowedHosts.contains]
   - name: uri host allowlist negative constraint boundary
-    code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedHosts) {\n    return allowedHosts.contains();\n  }\n}\n"
+    code: "class App {\n  boolean allow(java.net.URI uri, java.util.Set<String> allowedHosts) {\n    return allowedHosts.contains();\n\
+      \  }\n}\n"
     expect_no_match: true
-  description: "URI host allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
+    allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
 
+  disabled_reason:
+    code: over-broad
 - id: java.sanitizer.xml_factory_disallow_doctype
   enabled: true
   language: java
@@ -1710,7 +1727,9 @@
     callee:
       name: setFeature
   constraints:
-  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
   - arg_matches_regex:
       index: 0
       regex: 'external-general-entities|external-parameter-entities|load-external-dtd'
@@ -1731,7 +1750,8 @@
       }
     expect_match_text: [factory.setFeature]
   - name: document builder disable external entity feature negative constraint boundary
-    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
+    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n\
+      \    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
     expect_no_match: true
   description: "XML parser feature hardening — disables external entity or external DTD loading features."
 
@@ -1745,7 +1765,9 @@
     callee:
       name: setFeature
   constraints:
-  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
   - arg_matches_regex:
       index: 0
       regex: 'disallow-doctype-decl'
@@ -1766,7 +1788,8 @@
       }
     expect_match_text: [factory.setFeature]
   - name: document builder disallow doctype negative constraint boundary
-    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
+    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n\
+      \    factory.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\n"
     expect_no_match: true
   description: "XML parser feature hardening — disallows DOCTYPE declarations to block XXE payloads."
 
@@ -1780,7 +1803,11 @@
     callee:
       name: setFeature
   constraints:
-  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
+    - SchemaFactory
+    - TransformerFactory
   - arg_matches_regex:
       index: 0
       regex: 'FEATURE_SECURE_PROCESSING'
@@ -1804,7 +1831,9 @@
       }
     expect_match_text: [dbf.setFeature]
   - name: document builder secure processing negative constraint boundary
-    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory dbf) throws Exception {\n    dbf.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\nclass XMLConstants {\n  static String FEATURE_SECURE_PROCESSING = \"\";\n}\n"
+    code: "import javax.xml.parsers.*;\nclass App {\n  void configure(DocumentBuilderFactory dbf) throws Exception {\n   \
+      \ dbf.setFeature();\n  }\n}\nclass DocumentBuilderFactory {\n  void setFeature(Object... args) {}\n}\nclass XMLConstants
+      {\n  static String FEATURE_SECURE_PROCESSING = \"\";\n}\n"
     expect_no_match: true
   description: "XMLConstants.FEATURE_SECURE_PROCESSING enabled on XML parser factories."
 
@@ -1818,7 +1847,11 @@
     callee:
       name: setAttribute
   constraints:
-  - receiver_name_in: [factory, dbf, schemaFactory, transformerFactory]
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
+    - SchemaFactory
+    - TransformerFactory
   - arg_matches_regex:
       index: 0
       regex: 'ACCESS_EXTERNAL_DTD|ACCESS_EXTERNAL_SCHEMA|ACCESS_EXTERNAL_STYLESHEET'
@@ -1842,6 +1875,8 @@
       }
     expect_match_text: [factory.setAttribute]
   - name: restrict external dtd access negative constraint boundary
-    code: "import javax.xml.XMLConstants.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception {\n    factory.setAttribute();\n  }\n}\nclass DocumentBuilderFactory {\n  void setAttribute(Object... args) {}\n}\nclass XMLConstants {\n  static String ACCESS_EXTERNAL_DTD = \"\";\n}\n"
+    code: "import javax.xml.XMLConstants.*;\nclass App {\n  void configure(DocumentBuilderFactory factory) throws Exception
+      {\n    factory.setAttribute();\n  }\n}\nclass DocumentBuilderFactory {\n  void setAttribute(Object... args) {}\n}\n\
+      class XMLConstants {\n  static String ACCESS_EXTERNAL_DTD = \"\";\n}\n"
     expect_no_match: true
   description: "XMLConstants ACCESS_EXTERNAL_* set to empty string — blocks external DTD/schema/stylesheet resolution."

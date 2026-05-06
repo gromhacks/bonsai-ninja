@@ -157,11 +157,12 @@ pub struct InterTaintConfig {
     /// outside the engine so `call`, `apply`, framework-specific names,
     /// etc. are not baked into the common taint transfer logic.
     pub callback_invocation_methods: AHashSet<String>,
-    /// Configured mutator method tails that move tainted arguments into
-    /// receiver descendants, such as collection append APIs. Empty by
-    /// default; adapters/rules supply names when a language/library
-    /// contract is known.
-    pub collection_append_methods: AHashSet<String>,
+    /// Configured receiver-state mutators that move tainted arguments
+    /// into the call receiver, such as `Statement.addBatch(sql)` before
+    /// `executeBatch()` or `ProcessBuilder.command(cmd)` before
+    /// `start()`. Empty by default; security rulepacks supply exact
+    /// semantic shapes from `taint_semantics.taint_receiver_from_args`.
+    pub receiver_state_propagations: Vec<ReceiverStatePropagation>,
     /// Which lattice the run should track. `TokenSet` (default) keeps
     /// today's behavior. `Provenance` additionally records value-flow
     /// edges for consumer query (forward / backward closure, paths).
@@ -181,6 +182,12 @@ pub struct CleanOutputOverwrite {
 pub struct SourceOutputArgs {
     pub callee: String,
     pub output_arg_indices: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiverStatePropagation {
+    pub method: String,
+    pub receiver_type: Option<String>,
 }
 
 /// Reusable resolver-side caches for batches of interprocedural taint
@@ -209,7 +216,7 @@ impl Default for InterTaintConfig {
             clean_output_overwrites: Vec::new(),
             source_output_args: Vec::new(),
             callback_invocation_methods: AHashSet::default(),
-            collection_append_methods: AHashSet::default(),
+            receiver_state_propagations: Vec::new(),
             lattice_mode: crate::value_flow::LatticeMode::default(),
         }
     }
@@ -1355,7 +1362,11 @@ fn propagate_call_event(
 
     if let Some(receiver_value) = receiver {
         if !diagnostic_tainted_at_call.is_empty()
-            && configured_tail_match(&ctx.config.collection_append_methods, name)
+            && configured_receiver_state_propagation_matches(
+                &ctx.config.receiver_state_propagations,
+                name,
+                receiver_types,
+            )
         {
             insert_descendant_target_taint(state, receiver_value);
         }
@@ -1814,6 +1825,39 @@ fn configured_tail_match(configured_tails: &AHashSet<String>, observed: &str) ->
         let configured = normalise_qualified_text(configured.trim());
         !configured.is_empty() && (configured == observed || configured == observed_tail)
     })
+}
+
+fn configured_receiver_state_propagation_matches(
+    configured: &[ReceiverStatePropagation],
+    observed: &str,
+    receiver_types: &[String],
+) -> bool {
+    let observed = normalise_qualified_text(observed.trim());
+    if observed.is_empty() {
+        return false;
+    }
+    let observed_tail = short_tail(&observed);
+    configured.iter().any(|shape| {
+        let method = normalise_qualified_text(shape.method.trim());
+        if method.is_empty() || (method != observed && method != observed_tail) {
+            return false;
+        }
+        let Some(expected_type) = shape.receiver_type.as_deref() else {
+            return true;
+        };
+        receiver_types
+            .iter()
+            .any(|actual| type_name_matches_expected(actual, expected_type))
+    })
+}
+
+fn type_name_matches_expected(actual: &str, expected: &str) -> bool {
+    let actual = normalise_qualified_text(actual.trim().trim_start_matches(['&', '*', '$', '@', '%']));
+    let expected = normalise_qualified_text(expected.trim().trim_start_matches(['&', '*', '$', '@', '%']));
+    if actual.is_empty() || expected.is_empty() {
+        return false;
+    }
+    actual == expected || short_tail(&actual) == short_tail(&expected)
 }
 
 fn first_non_receiver_param(decl: &Decl) -> Option<(usize, String)> {
@@ -3594,6 +3638,30 @@ fn collect_method_candidates_for_class(
     seen: &mut AHashSet<SymbolId>,
     out: &mut Vec<FuncId>,
 ) {
+    let mut seen_classes = AHashSet::new();
+    collect_method_candidates_for_class_inner(
+        global,
+        class_sym,
+        method_name,
+        ctx,
+        seen,
+        &mut seen_classes,
+        out,
+    );
+}
+
+fn collect_method_candidates_for_class_inner(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+    seen_methods: &mut AHashSet<SymbolId>,
+    seen_classes: &mut AHashSet<SymbolId>,
+    out: &mut Vec<FuncId>,
+) {
+    if !seen_classes.insert(class_sym) {
+        return;
+    }
     let Some(class_decl) = global.decl_of(class_sym) else {
         return;
     };
@@ -3606,6 +3674,7 @@ fn collect_method_candidates_for_class(
     let Some(class_file) = global.declaring_file(class_sym) else {
         return;
     };
+    let mut matched_local_method = false;
     for decl in global.decls_in(class_file) {
         if decl.name != method_name {
             continue;
@@ -3623,9 +3692,26 @@ fn collect_method_candidates_for_class(
             continue;
         }
         if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
-            && seen.insert(decl.symbol)
+            && seen_methods.insert(decl.symbol)
         {
+            matched_local_method = true;
             out.push(FuncId::new(decl.symbol.raw()));
+        }
+    }
+    if matched_local_method {
+        return;
+    }
+    for base in &class_decl.bases {
+        for base_sym in resolve_class(global, base, ctx) {
+            collect_method_candidates_for_class_inner(
+                global,
+                base_sym,
+                method_name,
+                ctx,
+                seen_methods,
+                seen_classes,
+                out,
+            );
         }
     }
 }
@@ -3977,11 +4063,11 @@ fn resolve_call_candidates(
         // that `import "fmt"` + `struct fmt` collides on `fmt`.
         let head_is_workspace_symbol = alias_head
             .map(|h| {
-                global.find_by_name(h).iter().any(|sym| {
-                    global
-                        .decl_of(*sym)
-                        .is_some_and(|decl| matches!(decl.kind, bonsai_lang_api::DeclKind::Class))
-                })
+                let Some((caller_file, caller_module)) = caller_ctx.as_ref() else {
+                    return false;
+                };
+                let ctx = ResolveContext::new(*caller_file, caller_module).with_alias_map(alias_targets);
+                !resolve_class(&global, h, &ctx).is_empty()
             })
             .unwrap_or(false);
         let alias_marks_external =

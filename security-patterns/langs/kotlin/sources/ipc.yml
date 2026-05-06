@@ -4,19 +4,27 @@
   language: kotlin
   trust: ipc
   tag: ipc-input
+  packages: [android]
   match:
     kind: call
     callee:
-      name: getStringExtra
+      regex: "\\.getStringExtra$"
+  constraints:
+  - min_args: 1
   match_examples:
     - name: generated shape example
       code: |
+        import android.*
         class App {
-          fun handle(input: String) {
-            getStringExtra(input)
+          fun handle(intent: Intent, key: String) {
+            intent.getStringExtra(key)
           }
         }
-  description: "Android getStringExtra(...) — tail-match across local intent variable names."
+        class Intent {
+          fun getStringExtra(vararg args: Any?): String = ""
+        }
+      expect_match_text: [intent.getStringExtra]
+  description: "Android Intent.getStringExtra(...) — package-scoped IPC extra read from a local intent receiver."
 
 - id: kotlin.source.android_getintent_getextras
   enabled: false
@@ -29,4 +37,4 @@
     kind: call
     callee:
       attribute: [Intent, getExtras]
-  description: "Disabled — typed receiver matching does not work for local intent variables, and `getExtras` is too broad to tail-match safely."
+  description: "Disabled — `getExtras` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."

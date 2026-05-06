@@ -159,7 +159,7 @@
   match:
     kind: call
     callee:
-      attribute: [self, render]
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:](render|render_html)$
   constraints:
   - arg_tainted:
       index: 0

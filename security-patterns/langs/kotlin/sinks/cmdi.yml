@@ -144,6 +144,8 @@
   constraints:
   - arg_tainted:
       index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
   match_examples:
   - name: generated shape example
     code: |
@@ -160,7 +162,7 @@
       }
       }
     expect_no_match: true
-  description: 'TODO(only-when-packaged): java.lang.ProcessBuilder is auto-imported in Kotlin/JVM — ProcessBuilder.command(varargs).'
+  description: "java.lang.ProcessBuilder.command(varargs) — tainted command tokens control child process execution."
 - id: kotlin.cmdi.commons_exec_executor
   enabled: true
   language: kotlin

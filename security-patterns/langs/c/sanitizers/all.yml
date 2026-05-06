@@ -94,7 +94,10 @@
     kind: call
     callee:
       name: realpath
-  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component). Marking these as sanitizers produced false negatives on attacker-controlled paths."
+  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
+    traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
+    must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
+    Marking these as sanitizers produced false negatives on attacker-controlled paths."
 - id: c.sanitizer.strlcat
   enabled: true
   language: c
@@ -357,7 +360,8 @@
         consttime_memequal(arg);
       }
     expect_match_text: [consttime_memequal]
-  description: "NetBSD/portable consttime_memequal — constant-time buffer equality; protects HMAC/token comparison from timing oracles."
+  description: "NetBSD/portable consttime_memequal — constant-time buffer equality; protects HMAC/token comparison from timing
+    oracles."
 - id: c.sanitizer.timingsafe_bcmp
   enabled: true
   language: c
@@ -458,7 +462,8 @@
     kind: call
     callee:
       name: getauxval
-  description: "Disabled — getauxval(AT_SECURE) is a privilege-state probe, not a value sanitizer; still useful evidence for elevated-trust logic when paired with AT_SECURE constraint matching."
+  description: "Disabled — getauxval(AT_SECURE) is a privilege-state probe, not a value sanitizer; still useful evidence for
+    elevated-trust logic when paired with AT_SECURE constraint matching."
 - id: c.sanitizer.html_escape
   enabled: true
   language: c
@@ -534,7 +539,8 @@
         sqlite3_bind_text16(arg);
       }
     expect_match_text: [sqlite3_bind_text16]
-  description: "sqlite3_bind_text16 / int64 / double / null / value / zeroblob / pointer — prepared-statement parameter binding; bound values are not parsed as SQL."
+  description: "sqlite3_bind_text16 / int64 / double / null / value / zeroblob / pointer — prepared-statement parameter binding;
+    bound values are not parsed as SQL."
 
 - id: c.sanitizer.path_prefix_strncmp
   enabled: true
@@ -559,10 +565,11 @@
   - name: relative redirect prefix check negative constraint boundary
     code: "void example(char *target) {\n  strncmp();\n}\n"
     expect_no_match: true
-  description: "strncmp/memcmp against a literal slash-prefixed path prefix — common C guard for same-origin redirects or chrooted path routing. Scoped to prefix literals and three-arg compare calls."
+  description: "strncmp/memcmp against a literal slash-prefixed path prefix — common C guard for same-origin redirects or
+    chrooted path routing. Scoped to prefix literals and three-arg compare calls."
 
 - id: c.sanitizer.g_hash_table_contains_allowlist
-  enabled: true
+  enabled: false
   language: c
   tag: allowlist-validate
   packages: [glib]
@@ -585,8 +592,12 @@
   - name: glib hash allowlist negative constraint boundary
     code: "#include <glib.h>\nvoid example(void *input) {\n  g_hash_table_contains();\n}\n"
     expect_no_match: true
-  description: "GLib g_hash_table_contains on an allowlist-named table — finite-set membership validation before routing, redirects, or dispatch."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    GLib g_hash_table_contains on an allowlist-named table — finite-set membership validation before routing, redirects, or
+    dispatch."
 
+  disabled_reason:
+    code: over-broad
 - id: c.sanitizer.g_regex_match_simple_full
   enabled: true
   language: c
@@ -610,7 +621,8 @@
   - name: anchored glib regex validator negative constraint boundary
     code: "#include <glib.h>\nvoid example(char *input) {\n  g_regex_match_simple();\n}\n"
     expect_no_match: true
-  description: "g_regex_match_simple with an anchored full-string allowlist pattern — validates UUID/slug/token shape instead of substring matching."
+  description: "g_regex_match_simple with an anchored full-string allowlist pattern — validates UUID/slug/token shape instead
+    of substring matching."
 
 - id: c.sanitizer.g_regex_replace_char_allowlist
   enabled: true

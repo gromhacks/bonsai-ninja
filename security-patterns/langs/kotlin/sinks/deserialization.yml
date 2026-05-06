@@ -428,6 +428,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: kotlin.xxe.apache_poi_xssfworkbook_inputstream
   language: kotlin
   tag: insecure-deserialization
   severity: high

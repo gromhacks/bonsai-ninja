@@ -10,16 +10,20 @@
   match:
     kind: call
     callee:
-      name: getParameter
+      attribute: [HttpServletRequest, getParameter]
   match_examples:
   - name: generated shape example
     code: |
       import jakarta.servlet._
       object App {
-        def handle(value: String): Unit = {
-          getParameter(value)
+        def handle(servletRequest: HttpServletRequest, value: String): Unit = {
+          servletRequest.getParameter(value)
         }
       }
+      trait HttpServletRequest {
+        def getParameter(args: Any*): Any = null
+      }
+    expect_match_text: [servletRequest.getParameter]
   description: "HttpServletRequest.getParameter — Scala servlet / Spring handler parameter."
 
 - id: scala.servlet.get_parameter_values
@@ -33,18 +37,7 @@
   match:
     kind: call
     callee:
-      name: getParameterValues
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterValues]
   match_examples:
   - name: servlet parameter values
     code: |
@@ -71,18 +64,7 @@
   match:
     kind: call
     callee:
-      name: getParameterMap
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterMap]
   match_examples:
   - name: servlet parameter map
     code: |
@@ -109,18 +91,7 @@
   match:
     kind: call
     callee:
-      name: getParameterNames
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterNames]
   match_examples:
   - name: servlet parameter names
     code: |
@@ -147,18 +118,7 @@
   match:
     kind: call
     callee:
-      name: getHeader
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeader]
   match_examples:
   - name: servlet header
     code: |
@@ -185,18 +145,7 @@
   match:
     kind: call
     callee:
-      name: getHeaders
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeaders]
   match_examples:
   - name: servlet headers enumeration
     code: |
@@ -223,18 +172,7 @@
   match:
     kind: call
     callee:
-      name: getHeaderNames
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeaderNames]
   match_examples:
   - name: servlet header names
     code: |
@@ -261,18 +199,7 @@
   match:
     kind: call
     callee:
-      name: getCookies
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getCookies]
   match_examples:
   - name: servlet cookies
     code: |
@@ -300,15 +227,7 @@
   match:
     kind: call
     callee:
-      name: getValue
-  constraints:
-  - receiver_name_in:
-    - cookie
-    - theCookie
-    - httpCookie
-    - requestCookie
-    - servletCookie
-    - c
+      attribute: [Cookie, getValue]
   match_examples:
   - name: servlet cookie value
     code: |
@@ -335,15 +254,7 @@
   match:
     kind: call
     callee:
-      name: getName
-  constraints:
-  - receiver_name_in:
-    - cookie
-    - theCookie
-    - httpCookie
-    - requestCookie
-    - servletCookie
-    - c
+      attribute: [Cookie, getName]
   match_examples:
   - name: servlet cookie name
     code: |
@@ -370,18 +281,7 @@
   match:
     kind: call
     callee:
-      name: getInputStream
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getInputStream]
   match_examples:
   - name: servlet input stream
     code: |
@@ -408,18 +308,7 @@
   match:
     kind: call
     callee:
-      name: getReader
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getReader]
   match_examples:
   - name: servlet reader
     code: |
@@ -446,18 +335,7 @@
   match:
     kind: call
     callee:
-      name: getQueryString
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getQueryString]
   match_examples:
   - name: servlet query string
     code: |
@@ -484,18 +362,7 @@
   match:
     kind: call
     callee:
-      name: getRequestURI
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getRequestURI]
   match_examples:
   - name: servlet request uri
     code: |
@@ -522,18 +389,7 @@
   match:
     kind: call
     callee:
-      name: getRequestURL
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getRequestURL]
   match_examples:
   - name: servlet request url
     code: |
@@ -560,18 +416,7 @@
   match:
     kind: call
     callee:
-      name: getPathInfo
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getPathInfo]
   match_examples:
   - name: servlet path info
     code: |
@@ -599,13 +444,8 @@
   match:
     kind: call
     callee:
-      name: getAttribute
+      attribute: [HttpSession, getAttribute]
   constraints:
-  - receiver_name_in:
-    - session
-    - httpSession
-    - userSession
-    - servletSession
   - min_args: 1
   match_examples:
   - name: servlet session attribute
@@ -670,12 +510,7 @@
   match:
     kind: call
     callee:
-      name: getQueryString
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - playRequest
+      attribute: [Request, getQueryString]
   match_examples:
   - name: generated shape example
     code: |
@@ -1138,9 +973,8 @@
   match:
     kind: call
     callee:
-      name: getArgument
+      attribute: [DataFetchingEnvironment, getArgument]
   constraints:
-  - receiver_name_in: [env, environment, dataFetchingEnvironment]
   - min_args: 1
   match_examples:
   - name: graphql data fetching get argument
@@ -1169,9 +1003,8 @@
   match:
     kind: call
     callee:
-      name: getArguments
+      attribute: [DataFetchingEnvironment, getArguments]
   constraints:
-  - receiver_name_in: [env, environment, dataFetchingEnvironment]
   - max_args: 0
   match_examples:
   - name: graphql data fetching get arguments

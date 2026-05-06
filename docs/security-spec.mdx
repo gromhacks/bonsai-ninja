@@ -99,8 +99,7 @@ Constraints are post-filters applied after the basic match. All must pass.
 
 | Constraint | Effect |
 |---|---|
-| `receiver_type_in: [HttpClient, Request]` | Receiver type fact must match one of the listed types. Prefer this over receiver-name filters when the adapter emits receiver types. |
-| `receiver_name_in: [a, b]` | Legacy receiver-text fallback for dynamic languages or rules where no type fact exists. |
+| `receiver_type_in: [HttpClient, Request]` | Receiver type fact must match one of the listed types. Preferred for typed receiver APIs. |
 | `arg_equals: { index, value }` | Arg N must equal `value`. |
 | `arg_tainted: { index \| kw }` | Engine must prove the named arg flows from a source. |
 | `receiver_tainted: true` | Engine must prove the call receiver flows from a source. |
@@ -145,23 +144,23 @@ is not simply "return value is tainted" or "arg N is tainted."
 |---|---|---|
 | `taint_semantics.source_output_args: [N, ...]` | source | Treat only the listed call arguments as tainted outputs. Use for C/C++ out-buffer APIs such as `recv(fd, buf, len, flags)` and `SSL_read(ssl, buf, len)`. |
 | `taint_semantics.clean_output_overwrite` | sanitizer | Treat an output argument as clean when the configured value inputs are clean. |
+| `taint_semantics.taint_receiver_from_args: true` | sink | Treat tainted arguments as mutating the receiver state for later `receiver_tainted` sinks, using the rule's structured callee target. |
 
 `source_output_args` is intentionally narrow. It prevents source calls
 from tainting unrelated operands such as file descriptors, size
 arguments, flags, or handles while still introducing taint at the source
 call site for the real output buffer.
 
-## OnlyWhenPackaged lax-tail
+## Receiver Context
 
-For attribute rules where the receiver is type-like (uppercase first
-character) and the verb is pure-lowercase ≥ 5 chars, the matcher applies
-an `OnlyWhenPackaged` lax-tail: the rule may match any
-`<receiver>.<verb>(...)` call, but only when the file imports one of the
-rule's `packages:` signals.
+Structured attribute rules match exact API paths or semantic receiver
+types. `[Eta, render]` matches `Eta.render(...)`; `engine.render(...)`
+matches only when adapter facts prove `engine` has receiver type `Eta`.
 
-This prevents `[Eta, render]` from firing on `pug.render(...)` in a file
-that imports `pug` but not `eta`. The package gate uses the
-adapter-emitted `ImportIndex`, not substring matching on file text.
+Rules that intentionally use receiver-agnostic regexes for dynamic APIs
+must declare adapter-visible `packages:`, `imports:`, or `modules:`. The
+matcher gates those regexes with the adapter-emitted `ImportIndex`, not
+substring matching on file text.
 
 ## Finding lifecycle
 

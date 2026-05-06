@@ -14,10 +14,10 @@
 # yet. The current Java adapter:
 #
 #   1. Surfaces parameter identifiers plus common parameter annotations.
-#   2. Indexes call receivers by *local identifier* rather than by
-#      *receiver type*, so `attribute: [HttpServletRequest, getParameter]`
-#      style rules under-fire compared to the `name: getParameter` +
-#      `receiver_name_in: [request, req, ...]` shape used below.
+#   2. Does not consistently surface receiver-type facts for local variables,
+#      so rules that need local receivers must either use adapter-visible
+#      semantic facts or stay tightly scoped with package/import-gated callable
+#      regexes.
 #
 # Per docs/pattern-guide.mdx:
 #
@@ -29,8 +29,8 @@
 # the remaining `enabled: false` typed rules below to true and re-run the
 # audit.
 #
-# Below this header: enabled annotation sources and callable-shape sources
-# that work today.
+# Below this header: enabled annotation sources and package/import-scoped
+# callable-shape sources that work today.
 
 - id: java.source.spring_request_param
   enabled: true
@@ -243,17 +243,21 @@
   match:
     kind: call
     callee:
-      name: getOriginalFilename
+      regex: "\\.getOriginalFilename$"
   match_examples:
   - name: generated shape example
     code: |
       import org.springframework.web.multipart.*;
       class App {
-        void handle(String input) throws Exception {
-          getOriginalFilename(input);
+        void handle(MultipartFile file) throws Exception {
+          file.getOriginalFilename();
         }
       }
-  description: "Spring getOriginalFilename() — tail-match across local multipart-file variable names."
+      interface MultipartFile {
+        String getOriginalFilename();
+      }
+    expect_match_text: [file.getOriginalFilename]
+  description: "Spring MultipartFile.getOriginalFilename() — client-supplied upload filename from a package-scoped local receiver call."
 
   imports:
   - org.springframework.web.multipart
@@ -270,7 +274,7 @@
     kind: call
     callee:
       attribute: [MultipartFile, getName]
-  description: "Disabled — `getName` is too broad to tail-match safely, and typed receiver matching does not work for local multipart-file variables."
+  description: "Disabled — `getName` is too broad as a receiver-agnostic callable; enable a typed MultipartFile receiver rule once adapters surface receiver-type facts."
 
 - id: java.source.servlet_getparameter
   enabled: true
@@ -279,26 +283,18 @@
   tag: http-input
   category: http-input
   payload_types: [query]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getParameter
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameter]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get parameter
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle(String input) throws Exception {
+        void handle(HttpServletRequest request, String input) throws Exception {
           request.getParameter(input);
         }
       }
@@ -310,26 +306,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getParameterValues
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterValues]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get parameter values
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle(String input) throws Exception {
+        void handle(HttpServletRequest request, String input) throws Exception {
           request.getParameterValues(input);
         }
       }
@@ -342,26 +330,18 @@
   tag: http-input
   category: http-input
   payload_types: [query]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getParameterNames
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterNames]
   match_examples:
   - name: servlet request parameter names
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getParameterNames();
         }
       }
@@ -373,26 +353,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getParameterMap
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getParameterMap]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get parameter map
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getParameterMap();
         }
       }
@@ -410,23 +382,13 @@
   match:
     kind: call
     callee:
-      name: getHeader
-  constraints:
-  - receiver_name_in:
-    - request
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeader]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get header
     code: |
-      import javax.servlet.*;
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getHeader("X-User");
         }
       }
@@ -438,26 +400,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getHeaders
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeaders]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get headers
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle(String input) throws Exception {
+        void handle(HttpServletRequest request, String input) throws Exception {
           request.getHeaders(input);
         }
       }
@@ -469,26 +423,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getHeaderNames
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getHeaderNames]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get header names
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getHeaderNames();
         }
       }
@@ -501,26 +447,18 @@
   tag: http-input
   category: http-input
   payload_types: [cookie]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getCookies
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getCookies]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get cookies
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getCookies();
         }
       }
@@ -537,16 +475,7 @@
   match:
     kind: call
     callee:
-      name: getValue
-  constraints:
-  - receiver_name_in:
-    - cookie
-    - c
-    - theCookie
-    - requestCookie
-    - httpCookie
-    - servletCookie
-    - currentCookie
+      attribute: [Cookie, getValue]
   match_examples:
   - name: servlet cookie value
     code: |
@@ -569,16 +498,7 @@
   match:
     kind: call
     callee:
-      name: getName
-  constraints:
-  - receiver_name_in:
-    - cookie
-    - c
-    - theCookie
-    - requestCookie
-    - httpCookie
-    - servletCookie
-    - currentCookie
+      attribute: [Cookie, getName]
   match_examples:
   - name: servlet cookie name
     code: |
@@ -596,26 +516,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getInputStream
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getInputStream]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get input stream
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getInputStream();
         }
       }
@@ -627,26 +539,18 @@
   trust: remote
   tag: http-input
   category: http-input
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getReader
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getReader]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get reader
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getReader();
         }
       }
@@ -659,26 +563,18 @@
   tag: http-input
   category: http-input
   payload_types: [query]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getQueryString
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getQueryString]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get query string
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getQueryString();
         }
       }
@@ -691,26 +587,18 @@
   tag: http-input
   category: http-input
   payload_types: [path]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getRequestURI
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getRequestURI]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get request uri
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getRequestURI();
         }
       }
@@ -723,26 +611,18 @@
   tag: http-input
   category: http-input
   payload_types: [path]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getRequestURL
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getRequestURL]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get request url
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getRequestURL();
         }
       }
@@ -755,26 +635,18 @@
   tag: http-input
   category: http-input
   payload_types: [path]
+  packages: [javax.servlet.http, jakarta.servlet.http]
+  imports: [javax.servlet.http, jakarta.servlet.http]
   match:
     kind: call
     callee:
-      name: getPathInfo
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - servletRequest
-    - httpRequest
-    - hsr
-    - httpReq
-    - theRequest
-    - currentRequest
-    - originalRequest
+      attribute: [HttpServletRequest, getPathInfo]
   match_examples:
-  - name: generated shape example
+  - name: servlet request get path info
     code: |
+      import javax.servlet.http.*;
       class App {
-        void handle() throws Exception {
+        void handle(HttpServletRequest request) throws Exception {
           request.getPathInfo();
         }
       }
@@ -808,19 +680,28 @@
   tag: http-input
   category: http-input
   payload_types: [file]
+  packages: ["jakarta.servlet", "javax.servlet"]
   match:
     kind: call
     callee:
-      name: getSubmittedFileName
+      regex: "\\.getSubmittedFileName$"
   match_examples:
   - name: generated shape example
     code: |
+      import jakarta.servlet.http.*;
       class App {
-        void handle(String input) throws Exception {
-          getSubmittedFileName(input);
+        void handle(Part part) throws Exception {
+          part.getSubmittedFileName();
         }
       }
-  description: "Servlet getSubmittedFileName() — tail-match across local upload-part variable names."
+      interface Part {
+        String getSubmittedFileName();
+      }
+    expect_match_text: [part.getSubmittedFileName]
+  description: "Servlet Part.getSubmittedFileName() — client-supplied multipart filename from a package-scoped local receiver call."
+
+  imports:
+  - jakarta.servlet.http
 
 - id: java.source.jaxrs_queryparam
   enabled: true
@@ -1062,10 +943,7 @@
     kind: call
     callee:
       attribute: [Intent, getData]
-  description: "Disabled — `getData` is too broad to tail-match safely, and typed receiver matching does not work for local intent variables."
-
-# Callable-shape rules — work without the annotation/receiver-type adapter
-# fix above. Use receiver-name constraints to keep matches scoped.
+  description: "Disabled — `getData` is too broad as a receiver-agnostic callable; enable a typed Intent receiver rule once adapters surface receiver-type facts."
 
 - id: java.source.spring_httpentity_getbody
   enabled: true
@@ -1078,21 +956,14 @@
   match:
     kind: call
     callee:
-      name: getBody
-  constraints:
-  - receiver_name_in:
-    - entity
-    - httpEntity
-    - requestEntity
-    - request
-    - req
+      attribute: [HttpEntity, getBody]
   match_examples:
-  - name: generated shape example
+  - name: spring http entity body
     code: |
       import org.springframework.http.*;
       class App {
-        void handle(String input) throws Exception {
-          entity.getBody(input);
+        Object handle(HttpEntity httpEntity) throws Exception {
+          return httpEntity.getBody();
         }
       }
   description: "Spring HttpEntity / RequestEntity getBody() — request body via Spring's typed entity wrapper."
@@ -1110,19 +981,14 @@
   match:
     kind: call
     callee:
-      name: getQueryParameters
-  constraints:
-  - receiver_name_in:
-    - uriInfo
-    - info
-    - ui
+      attribute: [UriInfo, getQueryParameters]
   match_examples:
-  - name: generated shape example
+  - name: jaxrs uri query parameters
     code: |
       import jakarta.ws.rs.*;
       class App {
-        void handle(String input) throws Exception {
-          uriInfo.getQueryParameters(input);
+        Object handle(UriInfo uriInfo) throws Exception {
+          return uriInfo.getQueryParameters();
         }
       }
   description: "JAX-RS UriInfo.getQueryParameters — returns multivalued query params from the request URI."
@@ -1138,19 +1004,14 @@
   match:
     kind: call
     callee:
-      name: getPathParameters
-  constraints:
-  - receiver_name_in:
-    - uriInfo
-    - info
-    - ui
+      attribute: [UriInfo, getPathParameters]
   match_examples:
-  - name: generated shape example
+  - name: jaxrs uri path parameters
     code: |
       import jakarta.ws.rs.*;
       class App {
-        void handle(String input) throws Exception {
-          uriInfo.getPathParameters(input);
+        Object handle(UriInfo uriInfo) throws Exception {
+          return uriInfo.getPathParameters();
         }
       }
   description: "JAX-RS UriInfo.getPathParameters — returns matched @Path template variables."
@@ -1166,19 +1027,14 @@
   match:
     kind: call
     callee:
-      name: getRequestHeader
-  constraints:
-  - receiver_name_in:
-    - headers
-    - httpHeaders
-    - hdrs
+      attribute: [HttpHeaders, getRequestHeader]
   match_examples:
-  - name: generated shape example
+  - name: jaxrs request header
     code: |
       import jakarta.ws.rs.*;
       class App {
-        void handle(String input) throws Exception {
-          headers.getRequestHeader(input);
+        Object handle(HttpHeaders headers, String input) throws Exception {
+          return headers.getRequestHeader(input);
         }
       }
   description: "JAX-RS HttpHeaders.getRequestHeader — single-valued header lookup."
@@ -1194,19 +1050,14 @@
   match:
     kind: call
     callee:
-      name: getCookies
-  constraints:
-  - receiver_name_in:
-    - headers
-    - httpHeaders
-    - hdrs
+      attribute: [HttpHeaders, getCookies]
   match_examples:
-  - name: generated shape example
+  - name: jaxrs http headers cookies
     code: |
       import jakarta.ws.rs.*;
       class App {
-        void handle(String input) throws Exception {
-          headers.getCookies(input);
+        Object handle(HttpHeaders headers) throws Exception {
+          return headers.getCookies();
         }
       }
   description: "JAX-RS HttpHeaders.getCookies — request cookie map."
@@ -1222,13 +1073,8 @@
   match:
     kind: call
     callee:
-      name: getEntityStream
+      attribute: [ContainerRequestContext, getEntityStream]
   constraints:
-  - receiver_name_in:
-    - context
-    - ctx
-    - requestContext
-    - containerRequestContext
   - max_args: 0
   match_examples:
   - name: jaxrs context entity stream
@@ -1256,11 +1102,7 @@
   match:
     kind: call
     callee:
-      name: getRequest
-  constraints:
-  - receiver_name_in:
-    - call
-    - serverCall
+      attribute: [ServerCall, getRequest]
   description: "Disabled — gRPC ServerCall.getRequest pattern is rare; most generated stubs surface the request as a method parameter (see grpc_service_request)."
 
 - id: java.source.grpc_service_request_param
@@ -1286,18 +1128,13 @@
   match:
     kind: call
     callee:
-      name: onNext
-  constraints:
-  - receiver_name_in:
-    - responseObserver
-    - observer
-    - streamObserver
+      attribute: [StreamObserver, onNext]
   match_examples:
-  - name: generated shape example
+  - name: grpc stream observer on next
     code: |
       import io.grpc.*;
       class App {
-        void handle(String input) throws Exception {
+        void handle(StreamObserver responseObserver, String input) throws Exception {
           responseObserver.onNext(input);
         }
       }
@@ -1314,20 +1151,14 @@
   match:
     kind: call
     callee:
-      name: content
-  constraints:
-  - receiver_name_in:
-    - request
-    - req
-    - httpRequest
-    - fullRequest
+      attribute: [FullHttpRequest, content]
   match_examples:
-  - name: generated shape example
+  - name: netty full http request content
     code: |
       import io.netty.*;
       class App {
-        void handle(String input) throws Exception {
-          request.content(input);
+        Object handle(FullHttpRequest request) throws Exception {
+          return request.content();
         }
       }
   description: "Netty FullHttpRequest.content() — raw request body buffer."
@@ -1367,9 +1198,8 @@
   match:
     kind: call
     callee:
-      name: getArgument
+      attribute: [DataFetchingEnvironment, getArgument]
   constraints:
-  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
   - min_args: 1
   match_examples:
   - name: graphql data fetching argument
@@ -1399,9 +1229,8 @@
   match:
     kind: call
     callee:
-      name: getArguments
+      attribute: [DataFetchingEnvironment, getArguments]
   constraints:
-  - receiver_name_in: [env, environment, dataFetchingEnvironment, dfe]
   - max_args: 0
   match_examples:
   - name: graphql all resolver arguments
@@ -1529,9 +1358,8 @@
   match:
     kind: call
     callee:
-      name: queryParam
+      attribute: [ServerRequest, queryParam]
   constraints:
-  - receiver_name_in: [request, req, serverRequest]
   - min_args: 1
   match_examples:
   - name: spring webflux functional query param
@@ -1559,9 +1387,8 @@
   match:
     kind: call
     callee:
-      name: pathVariable
+      attribute: [ServerRequest, pathVariable]
   constraints:
-  - receiver_name_in: [request, req, serverRequest]
   - min_args: 1
   match_examples:
   - name: spring webflux functional path variable
@@ -1589,9 +1416,8 @@
   match:
     kind: call
     callee:
-      name: bodyToMono
+      attribute: [ServerRequest, bodyToMono]
   constraints:
-  - receiver_name_in: [request, req, serverRequest]
   - min_args: 1
   match_examples:
   - name: spring webflux functional body mono
@@ -1619,9 +1445,8 @@
   match:
     kind: call
     callee:
-      name: getParam
+      attribute: [HttpServerRequest, getParam]
   constraints:
-  - receiver_name_in: [request, req, httpRequest, httpServerRequest]
   - min_args: 1
   match_examples:
   - name: vertx request get param
@@ -1649,9 +1474,8 @@
   match:
     kind: call
     callee:
-      name: getHeader
+      attribute: [HttpServerRequest, getHeader]
   constraints:
-  - receiver_name_in: [req, httpRequest, httpServerRequest]
   - min_args: 1
   match_examples:
   - name: vertx request get header
@@ -1679,9 +1503,8 @@
   match:
     kind: call
     callee:
-      name: getString
+      attribute: [JsonObject, getString]
   constraints:
-  - receiver_name_in: [body, json, jsonBody, payload]
   - min_args: 1
   match_examples:
   - name: vertx json body get string
@@ -1709,9 +1532,8 @@
   match:
     kind: call
     callee:
-      name: getValue
+      attribute: [JsonObject, getValue]
   constraints:
-  - receiver_name_in: [body, json, jsonBody, payload]
   - min_args: 1
   match_examples:
   - name: vertx json body get value
@@ -1739,9 +1561,8 @@
   match:
     kind: call
     callee:
-      name: get
+      attribute: [PageParameters, get]
   constraints:
-  - receiver_name_in: [parameters, params, pageParameters]
   - min_args: 1
   match_examples:
   - name: wicket page parameters get
@@ -1769,9 +1590,8 @@
   match:
     kind: call
     callee:
-      name: toOptionalString
+      attribute: [StringValue, toOptionalString]
   constraints:
-  - receiver_name_in: [value, stringValue, parameter, param]
   - max_args: 0
   match_examples:
   - name: wicket page parameter optional string
@@ -1799,9 +1619,8 @@
   match:
     kind: call
     callee:
-      name: first
+      attribute: [Parameters, first]
   constraints:
-  - receiver_name_in: [queryParams, params, parameters]
   - min_args: 1
   match_examples:
   - name: helidon query params first
@@ -1829,9 +1648,8 @@
   match:
     kind: call
     callee:
-      name: asJson
+      attribute: [RequestBody, asJson]
   constraints:
-  - receiver_name_in: [body, requestBody]
   - max_args: 0
   match_examples:
   - name: play body as json
@@ -1859,9 +1677,8 @@
   match:
     kind: call
     callee:
-      name: asText
+      attribute: [JsonNode, asText]
   constraints:
-  - receiver_name_in: [node, json, jsonNode, path]
   - max_args: 0
   match_examples:
   - name: play json path as text
@@ -1888,9 +1705,8 @@
   match:
     kind: call
     callee:
-      name: getPayloadAsText
+      attribute: [WebSocketMessage, getPayloadAsText]
   constraints:
-  - receiver_name_in: [message, msg, webSocketMessage, wsMessage]
   - max_args: 0
   match_examples:
   - name: spring websocket text payload
@@ -1917,9 +1733,8 @@
   match:
     kind: call
     callee:
-      name: getPayload
+      attribute: [WebSocketMessage, getPayload]
   constraints:
-  - receiver_name_in: [message, msg, webSocketMessage, wsMessage]
   - max_args: 0
   match_examples:
   - name: spring websocket payload
@@ -1987,9 +1802,9 @@
   match:
     kind: call
     callee:
-      name: getNativeHeader
+      regex: "\\.getNativeHeader$"
   constraints:
-  - receiver_name_in: [headers, accessor, headerAccessor, simpMessageHeaderAccessor, stompHeaderAccessor]
+  - min_args: 1
   match_examples:
   - name: stomp simp header accessor getNativeHeader
     code: |
@@ -2003,7 +1818,7 @@
         Object getNativeHeader(Object... args) { return null; }
       }
     expect_match_text: [headers.getNativeHeader]
-  description: "Spring Messaging StompHeaderAccessor.getNativeHeader(name) — STOMP/WebSocket headers supplied by the remote peer; receiver-name pin avoids generic header maps."
+  description: "Spring Messaging StompHeaderAccessor.getNativeHeader(name) — STOMP/WebSocket headers supplied by the remote peer, gated by Spring messaging imports."
 
 - id: java.source.sse_event_data
   enabled: true
@@ -2015,9 +1830,8 @@
   match:
     kind: call
     callee:
-      name: getData
+      attribute: [InboundSseEvent, getData]
   constraints:
-  - receiver_name_in: [event, sseEvent, inboundEvent, msg, message]
   - max_args: 0
   match_examples:
   - name: jakarta SSE inbound event getData

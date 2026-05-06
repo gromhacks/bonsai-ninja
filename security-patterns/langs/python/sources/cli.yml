@@ -86,14 +86,18 @@
   match:
     kind: call
     callee:
-      name: parse_args
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.parse_args$"
+  constraints:
+  - max_args: 2
   match_examples:
   - name: cli argparse parse args
     code: |
       import argparse
       def example(user_input):
-          return parse_args(user_input)
-  description: "argparse parse_args() — tail-match across local parser variable names."
+          parser = argparse.ArgumentParser()
+          return parser.parse_args(user_input)
+    expect_match_text: [parser.parse_args]
+  description: "argparse parser.parse_args(...) — receiver-regex match across local parser variable names, gated by argparse imports."
 
 # click/typer source rule removed — needs decorator-scoped parameter
 # matching in the adapter to fire only on @click.command-decorated

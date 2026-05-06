@@ -47,7 +47,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.search$
-  description: "Subsumed by dart.ldap.dartdap_search — same shape; canonical rule should add ldap_dart to its packages list."
+  description: "Subsumed by dart.ldap.dartdap_search — same receiver-agnostic search shape and canonical package gate cover dartdap and ldap_dart."
 - id: dart.ldap.dartdap_query
   enabled: false
   disabled_reason:
@@ -61,4 +61,4 @@
     kind: call
     callee:
       attribute: [connection, query]
-  description: "Disabled — connection.query is indistinguishable from postgres Connection.query in v1 matching; use dart.ldap.dartdap_search until receiver typing is available."
+  description: "Disabled — `query` overlaps SQL driver query shapes; enable as a semantic LdapConnection receiver rule once Dart receiver-type facts distinguish it from database Connection.query."

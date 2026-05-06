@@ -11,15 +11,8 @@
   match:
     kind: call
     callee:
-      name: setAttribute
+      attribute: [HttpSession, setAttribute]
   constraints:
-  - receiver_name_in:
-    - session
-    - httpSession
-    - requestSession
-    - userSession
-    - servletSession
-    - sess
   - arg_tainted:
       index: 0
   match_examples:

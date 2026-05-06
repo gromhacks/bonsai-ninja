@@ -1,7 +1,7 @@
 - id: kotlin.xss.response_writer_write
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: over-broad
   language: kotlin
   tag: xss
   severity: high
@@ -13,7 +13,7 @@
       attribute:
       - response
       - getWriter
-  description: "Disabled — getWriter() only returns the writer; the sink is PrintWriter.write/println/print (covered by kotlin.xss.printwriter_*)."
+  description: "Disabled — getWriter() only returns a writer object; flag concrete PrintWriter.write/println/print sinks instead."
 - id: kotlin.xss.printwriter_write
   enabled: true
   language: kotlin

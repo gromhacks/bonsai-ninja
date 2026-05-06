@@ -164,7 +164,7 @@ fn rule_evidence(
         // Both `imports:` / `modules:` and `packages:` go through the
         // shared `import_matches_package` predicate (see `pkg.rs`).
         // The runtime matcher uses the same helper, so dependency
-        // inventory and per-file lax-tail gate cannot drift on what
+        // inventory and per-file package context gate cannot drift on what
         // counts as "this file imports package X" — including PHP
         // namespaces (`Cake\\Datasource`), Perl scope (`DBI::db`),
         // C/C++ header forms (`sqlite3.h`), and dotted prefixes.

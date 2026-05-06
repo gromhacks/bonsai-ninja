@@ -131,7 +131,7 @@
       attribute:
       - Request
       - get
-  description: Disabled — typed receiver matching does not work for local `$request->get(...)` calls, and bare `get` is too broad to tail-match safely.
+  description: Disabled — adapters index local `$request->get(...)` calls by receiver name, not Symfony Request type facts; a bare `get` fallback would match unrelated APIs.
 - id: php.source.symfony_request_query_get
   enabled: true
   language: php
@@ -288,7 +288,7 @@
   match:
     kind: call
     callee:
-      name: getClientOriginalName
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getClientOriginalName$"
   constraints:
   - max_args: 0
   match_examples:
@@ -301,6 +301,8 @@
       function example($file) {
         return $file->getClientOriginalName();
       }
+    expect_match_text:
+    - "$file->getClientOriginalName"
   description: Symfony/Laravel UploadedFile::getClientOriginalName() — browser-supplied multipart filename; preserve taint into path/file-upload sinks.
   imports:
   - symfony
@@ -321,7 +323,7 @@
   match:
     kind: call
     callee:
-      name: getClientFilename
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getClientFilename$"
   constraints:
   - max_args: 0
   match_examples:
@@ -334,6 +336,8 @@
       function example($uploadedFile) {
         return $uploadedFile->getClientFilename();
       }
+    expect_match_text:
+    - "$uploadedFile->getClientFilename"
   description: PSR-7 UploadedFileInterface::getClientFilename() — untrusted Content-Disposition filename from multipart upload.
   imports:
   - psr/httpmessage
@@ -405,7 +409,9 @@
   match:
     kind: call
     callee:
-      name: getContent
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getContent$"
+  constraints:
+  - max_args: 1
   match_examples:
   - name: php.source.symfony_request_get_content example
     code: |
@@ -414,9 +420,11 @@
       use symfony\httpfoundation;
       use symfony\http-foundation;
       function example($input, $url, $id, $payload, $request) {
-        getContent($input);
+        return $request->getContent();
       }
-  description: Symfony getContent() — tail-match across local request variable names.
+    expect_match_text:
+    - "$request->getContent"
+  description: Symfony Request::getContent() on local request receivers; receiver-regex match is package/import gated and does not match a free `getContent()` helper.
   imports:
   - symfony
   - symfony/httpfoundation
@@ -436,7 +444,7 @@
       attribute:
       - Request
       - input
-  description: Disabled — typed receiver matching does not work for local `$request->input(...)` calls, and bare `input` is too broad to tail-match safely.
+  description: Disabled — adapters index local `$request->input(...)` calls by receiver name, not Illuminate Request type facts; a bare `input` fallback would match unrelated APIs.
 - id: php.source.laravel_request_all
   enabled: false
   disabled_reason:
@@ -607,7 +615,9 @@
   match:
     kind: call
     callee:
-      name: getQueryParams
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getQueryParams$"
+  constraints:
+  - max_args: 0
   match_examples:
   - name: php.source.slim_request_get_params example
     code: |
@@ -615,9 +625,11 @@
       use slim\slim;
       use slim\slim;
       function example($input, $url, $id, $payload, $request) {
-        getQueryParams($input);
+        return $request->getQueryParams();
       }
-  description: Slim PSR-7 getQueryParams() — tail-match across local request variable names.
+    expect_match_text:
+    - "$request->getQueryParams"
+  description: Slim PSR-7 ServerRequestInterface::getQueryParams() on local request receivers; receiver-regex match is package/import gated.
   imports:
   - slim\slim
   - slim
@@ -647,7 +659,9 @@
   match:
     kind: call
     callee:
-      name: getParsedBody
+      regex: "^\\$?[A-Za-z_][A-Za-z0-9_]*->getParsedBody$"
+  constraints:
+  - max_args: 0
   match_examples:
   - name: php.source.slim_request_parsed example
     code: |
@@ -655,9 +669,11 @@
       use slim\slim;
       use slim\slim;
       function example($input, $url, $id, $payload, $request) {
-        getParsedBody($input);
+        return $request->getParsedBody();
       }
-  description: Slim PSR-7 getParsedBody() — tail-match across local request variable names.
+    expect_match_text:
+    - "$request->getParsedBody"
+  description: Slim PSR-7 ServerRequestInterface::getParsedBody() on local request receivers; receiver-regex match is package/import gated.
   imports:
   - slim\slim
   - slim
@@ -1013,7 +1029,7 @@
     kind: call
     callee:
       name: auth
-  description: Disabled — auth()->user() returns the authenticated identity; values are session-bound but identity fields (name, email) are user-editable. Enable in projects that treat identity as untrusted; currently off because bare `auth` would also tail-match unrelated helpers and the chain `auth()->user()->name` resolves through the typed-receiver path that the v1 adapter does not model.
+  description: Disabled — auth()->user() returns the authenticated identity; values are session-bound but identity fields (name, email) are user-editable. Enable in projects that treat identity as untrusted; currently off because bare `auth` would match unrelated helpers and the chain `auth()->user()->name` resolves through the typed-receiver path that the v1 adapter does not model.
 - id: php.source.lumen_request_input
   enabled: false
   disabled_reason:

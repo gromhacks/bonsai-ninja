@@ -31,6 +31,19 @@ fn java_ws(source: &str) -> Workspace {
     ws
 }
 
+fn java_ws_files(files: &[(&str, &str)]) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    for (path, source) in files {
+        ws.vfs().write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
 fn csharp_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
@@ -109,11 +122,6 @@ def handler(user_input):
     let mut top_level_open = call_name_rule("python.test.top_level_open", "open");
     top_level_open.constraints = RuleConstraint(vec![ConstraintKind::TopLevel { top_level: true }]);
 
-    let mut location_replace = call_name_rule("python.test.location_replace", "replace");
-    location_replace.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
-        receiver_name_in: vec!["location".to_string()],
-    }]);
-
     let mut pipe_open = call_name_rule("python.test.pipe_open", "open");
     pipe_open.constraints = RuleConstraint(vec![ConstraintKind::ArgMatchesRegex {
         arg_matches_regex: ArgRegexSpec {
@@ -122,7 +130,7 @@ def handler(user_input):
         },
     }]);
 
-    let rules = [fmt, top_level_open, location_replace, pipe_open];
+    let rules = [fmt, top_level_open, pipe_open];
     let refs: Vec<&Rule> = rules.iter().collect();
     let hits = match_rules_against_facts(&ws, &refs);
 
@@ -139,13 +147,6 @@ def handler(user_input):
             .count(),
         1,
         "top_level must skip receiver calls like obj.open(...)"
-    );
-    assert_eq!(
-        hits.iter()
-            .filter(|m| m.rule_id == "python.test.location_replace")
-            .count(),
-        1,
-        "receiver_name_in must only keep the location receiver"
     );
     assert_eq!(
         hits.iter()
@@ -216,6 +217,42 @@ fn call_name_rule(id: &str, name: &str) -> Rule {
     rule
 }
 
+#[test]
+fn receiver_agnostic_regex_rules_are_gated_by_import_context() {
+    let mut rule = base_rule("python.test.gql_execute", RuleKind::Sink, MatchKind::Call);
+    rule.packages = vec!["gql".to_string()];
+    rule.imports = vec!["gql".to_string()];
+    rule.match_spec.callee = Some(RuleTarget {
+        regex: Some(r"^[A-Za-z_$][A-Za-z0-9_$]*\.execute$".to_string()),
+        ..Default::default()
+    });
+
+    let without_import = python_ws(
+        r#"
+def handler(client, payload):
+    return client.execute(payload)
+"#,
+    );
+    assert!(
+        match_rule_against_facts(&without_import, &rule).is_empty(),
+        "receiver-agnostic regex must not fire without adapter-surfaced package context"
+    );
+
+    let with_import = python_ws(
+        r#"
+import gql
+
+def handler(client, payload):
+    return client.execute(payload)
+"#,
+    );
+    let matches = match_rule_against_facts(&with_import, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "client.execute"),
+        "receiver-agnostic regex should fire when import context supplies the package signal: {matches:?}"
+    );
+}
+
 fn target_name_rule(id: &str, kind: MatchKind, name: &str) -> Rule {
     let mut rule = base_rule(id, RuleKind::Source, kind);
     rule.match_spec.target = Some(RuleTarget {
@@ -249,7 +286,7 @@ fn signature(rows: &[bonsai_security::RuleMatch]) -> BTreeSet<(String, String, u
 }
 
 #[test]
-fn java_declared_receiver_types_match_instance_and_factory_chains() {
+fn java_declared_receiver_types_match_instance_receivers_without_factory_tail_fallback() {
     let ws = java_ws(
         r"
 import org.apache.logging.log4j.core.net.JndiManager;
@@ -280,17 +317,72 @@ class App {
         "paramManager.lookup",
         "localManager.lookup",
         "this.fieldManager.lookup",
-        "JndiManager.getDefaultManager().lookup",
     ] {
         assert!(
             matched.contains(expected),
             "expected Java receiver-type match for {expected}; got {matched:?}"
         );
     }
+    assert!(
+        !matched.contains("JndiManager.getDefaultManager().lookup"),
+        "typed receiver rule must not skip over the factory call; got {matched:?}"
+    );
+
+    let factory_rule = call_attr_rule_for_language(
+        "java.test.jndi_manager_factory_lookup",
+        "java",
+        &["JndiManager", "getDefaultManager", "lookup"],
+    );
+    let factory_hits = match_rule_against_facts(&ws, &factory_rule);
+    let factory_matched: BTreeSet<String> = factory_hits.iter().map(|hit| hit.match_text.clone()).collect();
+    assert!(
+        factory_matched.contains("JndiManager.getDefaultManager().lookup"),
+        "explicit factory-chain rule should match factory lookup; got {factory_matched:?}"
+    );
 }
 
 #[test]
-fn lax_tail_does_not_cross_explicit_type_receivers() {
+fn java_cross_file_inherited_receiver_types_match_base_rules() {
+    let ws = java_ws_files(&[
+        (
+            "Base.java",
+            r"
+class Base {
+    void sink(String value) {}
+}
+",
+        ),
+        (
+            "Child.java",
+            r"
+class Child extends Base {}
+",
+        ),
+        (
+            "App.java",
+            r"
+class App {
+    void handle(String input) {
+        Child child = new Child();
+        child.sink(input);
+    }
+}
+",
+        ),
+    ]);
+    let rule = call_attr_rule_for_language("java.test.base_sink", "java", &["Base", "sink"]);
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    let matched: BTreeSet<String> = hits.iter().map(|hit| hit.match_text.clone()).collect();
+
+    assert!(
+        matched.contains("child.sink"),
+        "base-type rule should match inherited method call through cross-file Child receiver; got {matched:?}"
+    );
+}
+
+#[test]
+fn source_sink_type_rules_do_not_match_unknown_receivers() {
     let ws = csharp_ws(
         r"
 using System.Security.Cryptography;
@@ -314,12 +406,12 @@ class App {
         "exact type receiver should match; got {matched:?}"
     );
     assert!(
-        matched.contains("encoder.HashData"),
-        "unknown instance receiver should keep lax-tail behavior; got {matched:?}"
+        !matched.contains("encoder.HashData"),
+        "unknown instance receiver must not match without receiver-type evidence; got {matched:?}"
     );
     assert!(
         !matched.contains("SHA1.HashData"),
-        "explicit different type receiver must not match lax-tail rule; got {matched:?}"
+        "explicit different type receiver must not match strict receiver matching rule; got {matched:?}"
     );
 }
 
@@ -348,15 +440,8 @@ def handler(request, user_input):
         },
     }]);
 
-    let mut alias_system_constrained =
-        call_attr_rule("python.test.alias_system_constrained", &["os", "system"]);
-    alias_system_constrained.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
-        receiver_name_in: vec!["os".to_string()],
-    }]);
-
     let rules = [
         call_attr_rule("python.test.alias_system", &["os", "system"]),
-        alias_system_constrained,
         keyword,
         target_attr_rule("python.test.request_args", MatchKind::Read, &["request", "args"]),
         target_name_rule("python.test.verify_mode", MatchKind::Write, "verify_mode"),
@@ -377,7 +462,6 @@ def handler(request, user_input):
     );
     for id in [
         "python.test.alias_system",
-        "python.test.alias_system_constrained",
         "python.test.keyword_dangerous",
         "python.test.request_args",
         "python.test.verify_mode",
@@ -442,40 +526,7 @@ def handler(user_input):
 }
 
 #[test]
-fn receiver_name_in_matches_receiver_chain_segments() {
-    let ws = python_ws(
-        r#"
-class Headers:
-    def set(self, name, value):
-        pass
-
-def handler(response, request, user_input):
-    response.headers.set("Location", user_input)
-    request.headers.set("Location", user_input)
-"#,
-    );
-    let mut rule = call_name_rule("python.test.response_headers_set", "set");
-    rule.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
-        receiver_name_in: vec!["response".to_string()],
-    }]);
-
-    let matches = match_rule_against_facts(&ws, &rule);
-    assert_eq!(
-        matches
-            .iter()
-            .filter(|m| m.rule_id == "python.test.response_headers_set")
-            .count(),
-        1,
-        "receiver_name_in should match response.headers.set but not request.headers.set: {matches:?}"
-    );
-    assert!(
-        matches.iter().any(|m| m.match_text == "response.headers.set"),
-        "expected response.headers.set match, got {matches:?}"
-    );
-}
-
-#[test]
-fn receiver_name_in_matches_inline_qualified_constructor_receiver() {
+fn typed_attribute_matches_inline_qualified_constructor_receiver() {
     let ws = java_ws(
         r"
 class App {
@@ -485,16 +536,13 @@ class App {
 }
 ",
     );
-    let mut rule = call_name_rule("java.test.random_next", "nextFloat");
+    let mut rule = call_attr_rule_for_language("java.test.random_next", "java", &["Random", "nextFloat"]);
     rule.language = "java".to_string();
-    rule.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
-        receiver_name_in: vec!["new Random()".to_string()],
-    }]);
 
     let matches = match_rule_against_facts(&ws, &rule);
     assert!(
         matches.iter().any(|m| m.match_text.contains("nextFloat")),
-        "inline qualified constructor receiver should satisfy new Random() receiver constraint, got {matches:?}"
+        "inline qualified constructor receiver should expose semantic Random receiver type, got {matches:?}"
     );
 }
 

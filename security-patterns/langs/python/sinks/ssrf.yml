@@ -235,7 +235,7 @@
   match:
     kind: call
     callee:
-      regex: ^urllib\.request\.urlopen$
+      attribute: [urllib, request, urlopen]
   constraints:
   - arg_tainted:
       index: 0
@@ -256,7 +256,7 @@
   match:
     kind: call
     callee:
-      regex: ^request\.urlopen$
+      attribute: [request, urlopen]
   constraints:
   - arg_tainted:
       index: 0
@@ -277,7 +277,7 @@
   match:
     kind: call
     callee:
-      regex: ^urllib2\.urlopen$
+      attribute: [urllib2, urlopen]
   constraints:
   - arg_tainted:
       index: 0
@@ -517,7 +517,10 @@
     expect_no_match: true
   description: httpx.AsyncClient.get.
 - id: python.ssrf.httpx_async_client_get_variable
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.ssrf.httpx_async_client_get
   language: python
   tag: ssrf
   severity: high
@@ -530,11 +533,6 @@
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.get$
   constraints:
-  - receiver_name_in:
-    - client
-    - http_client
-    - async_client
-    - httpx_client
   - arg_tainted:
       index: 0
   match_examples:
@@ -548,7 +546,7 @@
   - name: dict get is not httpx client negative
     code: "import httpx\n\nasync def example(envelope, user_input):\n    return envelope.get(user_input)\n"
     expect_no_match: true
-  description: httpx AsyncClient instance get(url) through conventional client variable names - tainted URL allows SSRF.
+  description: "Disabled duplicate — typed AsyncClient receivers are covered by python.ssrf.httpx_async_client_get without relying on local receiver names."
 - id: python.ssrf.httpx_async_client_post
   enabled: true
   language: python
@@ -581,6 +579,8 @@
   severity: high
   packages:
   - httpx
+  imports:
+  - httpx
   cwe:
   - CWE-918
   match:
@@ -594,13 +594,13 @@
       index: 1
   match_examples:
   - name: ssrf httpx async client request
-    code: "import httpx\ndef example(client, user_input):\n    return client.request(\"GET\", user_input)\n"
+    code: "import httpx\ndef example(client: httpx.AsyncClient, user_input):\n    return client.request(\"GET\", user_input)\n"
     expect_match_text:
     - client.request
   - name: httpx async client request literal negative
-    code: "import httpx\n\ndef example(client, user_input):\n    return client.request('GET', 'safe')\n"
+    code: "import httpx\n\ndef example(client: httpx.AsyncClient, user_input):\n    return client.request('GET', 'safe')\n"
     expect_no_match: true
-  description: "httpx.AsyncClient.request(method, url) — tainted URL sink for arbitrary async HTTP verbs."
+  description: "httpx.AsyncClient.request(method, url) on a typed receiver - tainted URL sink for arbitrary async HTTP verbs."
 - id: python.ssrf.httpx_async_client_put
   enabled: true
   language: python
@@ -633,6 +633,8 @@
   severity: high
   packages:
   - httpx
+  imports:
+  - httpx
   cwe:
   - CWE-918
   match:
@@ -646,19 +648,21 @@
       index: 0
   match_examples:
   - name: ssrf httpx async client delete
-    code: "import httpx\ndef example(client, user_input):\n    return client.delete(user_input)\n"
+    code: "import httpx\ndef example(client: httpx.AsyncClient, user_input):\n    return client.delete(user_input)\n"
     expect_match_text:
     - client.delete
   - name: httpx async client delete literal negative
-    code: "import httpx\n\ndef example(client, user_input):\n    return client.delete('safe')\n"
+    code: "import httpx\n\ndef example(client: httpx.AsyncClient, user_input):\n    return client.delete('safe')\n"
     expect_no_match: true
-  description: "httpx.AsyncClient.delete(url) — tainted URL can reach internal HTTP services with a destructive verb."
+  description: "httpx.AsyncClient.delete(url) on a typed receiver - tainted URL can reach internal HTTP services with a destructive verb."
 - id: python.ssrf.httpx_async_client_patch
   enabled: true
   language: python
   tag: ssrf
   severity: high
   packages:
+  - httpx
+  imports:
   - httpx
   cwe:
   - CWE-918
@@ -673,13 +677,13 @@
       index: 0
   match_examples:
   - name: ssrf httpx async client patch
-    code: "import httpx\ndef example(client, user_input):\n    return client.patch(user_input)\n"
+    code: "import httpx\ndef example(client: httpx.AsyncClient, user_input):\n    return client.patch(user_input)\n"
     expect_match_text:
     - client.patch
   - name: httpx async client patch literal negative
-    code: "import httpx\n\ndef example(client, user_input):\n    return client.patch('safe')\n"
+    code: "import httpx\n\ndef example(client: httpx.AsyncClient, user_input):\n    return client.patch('safe')\n"
     expect_no_match: true
-  description: "httpx.AsyncClient.patch(url) — async write-capable HTTP request to a tainted URL."
+  description: "httpx.AsyncClient.patch(url) on a typed receiver - async write-capable HTTP request to a tainted URL."
 - id: python.ssrf.httpx_async_client_head
   enabled: true
   language: python

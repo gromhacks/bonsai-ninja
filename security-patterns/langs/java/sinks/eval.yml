@@ -462,7 +462,7 @@
       }
     expect_match_text:
     - parser.parseExpression
-  description: "Disabled broad duplicate — canonical java.template.spel_parseexpression classifies parser.parseExpression(template) as SSTI CWE-1336 with receiver-name constraints."
+  description: "Disabled broad duplicate — canonical java.template.spel_parseexpression classifies parser.parseExpression(template) as SSTI CWE-1336."
   imports:
   - org
 - id: java.eval.ognl_getvalue

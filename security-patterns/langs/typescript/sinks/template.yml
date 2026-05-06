@@ -128,9 +128,7 @@
   aliases:
   - typescript.template.handlebars_compile_template_variable
 - id: typescript.template.handlebars_lower_compile
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: typescript
   tag: ssti
   severity: high
@@ -144,7 +142,26 @@
       attribute:
       - handlebars
       - compile
-  description: "Disabled - subsumed by typescript.template.handlebars_compile under OnlyWhenPackaged lax-tail policy."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lowercase handlebars compile
+    code: |
+      import handlebars from "handlebars";
+      function render(input: string) {
+        return handlebars.compile(input);
+      }
+    expect_match_text:
+    - handlebars.compile
+  - name: lowercase handlebars compile literal negative
+    code: |
+      import handlebars from "handlebars";
+      function render() {
+        return handlebars.compile("Hello user");
+      }
+    expect_no_match: true
+  description: "handlebars.compile(tainted) — lowercase module binding for Handlebars template compilation."
 - id: typescript.template.hbs_compile
   enabled: true
   language: typescript

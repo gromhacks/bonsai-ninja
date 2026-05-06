@@ -387,7 +387,8 @@ instead of inventing an argument index:
 
 ## Receiver-agnostic regex with package gate
 
-When the receiver name varies but the verb identifies the API:
+When an imported API can be bound to arbitrary local aliases but the method
+verb identifies the API:
 
 ```yaml
 - id: javascript.proto_pollution.lodash_namespace_merge_variants
@@ -411,5 +412,5 @@ When the receiver name varies but the verb identifies the API:
       expect_match_text: [lodash.merge]
 ```
 
-The OnlyWhenPackaged lax-tail keeps this from firing on
-`recursiveDeepMerge.merge` in files that don't import lodash.
+The package/import context gate keeps this receiver-agnostic regex from
+firing on `recursiveDeepMerge.merge` in files that don't import lodash.

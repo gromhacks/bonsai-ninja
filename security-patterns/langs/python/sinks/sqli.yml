@@ -93,7 +93,7 @@
   match:
     kind: call
     callee:
-      attribute: [conn, execute]
+      attribute: [Connection, execute]
   constraints:
   - arg_tainted:
       index: 0
@@ -101,29 +101,28 @@
   - name: sqli connection execute
     code: |
       import sqlite3
-      def example(user_input):
+      def example(conn: sqlite3.Connection, user_input):
           return conn.execute(user_input)
   - name: sqli graphene resolver args to connection execute
     code: |
       import sqlite3
-      def resolve_user(parent, info, **args):
+      def resolve_user(conn: sqlite3.Connection, parent, info, **args):
           sql = args["query"]
           return conn.execute(sql)
     expect_match_text: [conn.execute]
-  - name: sqli asyncpg conn execute sql variable
+  - name: sqli asyncpg connection execute
     code: |
       import asyncpg
-      async def example(conn, user_input):
-          sql_var = "select * from users where name = '" + user_input + "'"
-          return await conn.execute(sql_var)
+      async def example(conn: asyncpg.Connection, user_input):
+          return await conn.execute(user_input)
     expect_match_text: [conn.execute]
   - name: connection execute literal negative
     code: |
       import sqlite3
-      def example(user_input):
+      def example(conn: sqlite3.Connection, user_input):
           return conn.execute('safe')
     expect_no_match: true
-  description: "Connection.execute — sqlite3/asyncpg/aiosqlite. DB-API exempt from SQL-keyword arg shape (per PATTERN_GUIDE: `cursor.execute(query_var)` is canonical); `min_args: 1` rejects 0-arg `conn.execute()` decoys. Gated on those three driver imports."
+  description: "Connection.execute — sqlite3/asyncpg/aiosqlite typed connection receivers. DB-API exempt from SQL-keyword arg shape (per PATTERN_GUIDE: `cursor.execute(query_var)` is canonical)."
 
 - id: python.sqli.psycopg2_cursor_execute
   enabled: true
@@ -165,7 +164,10 @@
   description: "psycopg2/psycopg/aiopg Cursor.execute — placeholders parameterise; string-built SQL does not."
 
 - id: python.sqli.asyncpg_connection_execute
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: python.sqli.connection_execute
   language: python
   tag: sql-injection
   severity: critical
@@ -182,14 +184,15 @@
   - name: sqli asyncpg connection execute
     code: |
       import asyncpg
-      def example(user_input):
-          return Connection.execute(user_input)
+      async def example(conn: asyncpg.Connection, user_input):
+          return await conn.execute(user_input)
+    expect_match_text: [conn.execute]
   - name: asyncpg connection execute literal negative
     code: |
       import asyncpg
 
-      def example(user_input):
-          return Connection.execute('safe')
+      async def example(conn: asyncpg.Connection):
+          return await conn.execute('safe')
     expect_no_match: true
   description: "asyncpg Connection.execute(string) — the `$1` placeholders are the sanitizer, not the executor. DB-API exempt from SQL-keyword arg shape; `min_args: 1` rejects 0-arg decoys."
 
@@ -283,64 +286,126 @@
   description: "asyncpg Connection.fetchval(string) - scalar query execution with string-built SQL injection risk."
 
 - id: python.sqli.asyncpg_conn_fetch
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: python
   tag: sql-injection
   severity: critical
   packages: [asyncpg]
+  imports: [asyncpg]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
       regex: "^[a-z_][A-Za-z0-9_]*\\.fetch$"
-  description: "Disabled — subsumed by python.sqli.asyncpg_connection_fetch under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, fetch]` rule lax-matches `conn.fetch(...)` directly."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: asyncpg variable connection fetch
+    code: |
+      import asyncpg
+      async def example(conn, user_input):
+          return await conn.fetch(user_input)
+    expect_match_text: [conn.fetch]
+  - name: asyncpg variable connection fetch literal negative
+    code: |
+      import asyncpg
+      async def example(conn):
+          return await conn.fetch('select 1')
+    expect_no_match: true
+  description: "asyncpg variable receiver .fetch(sql) — package-gated receiver-agnostic rule for dynamically typed connection variables."
 
 - id: python.sqli.asyncpg_conn_fetchrow
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: python
   tag: sql-injection
   severity: critical
   packages: [asyncpg]
+  imports: [asyncpg]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
       regex: "^[a-z_][A-Za-z0-9_]*\\.fetchrow$"
-  description: "Disabled — subsumed by python.sqli.asyncpg_connection_fetchrow under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, fetchrow]` rule lax-matches `conn.fetchrow(...)` directly."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: asyncpg variable connection fetchrow
+    code: |
+      import asyncpg
+      async def example(conn, user_input):
+          return await conn.fetchrow(user_input)
+    expect_match_text: [conn.fetchrow]
+  - name: asyncpg variable connection fetchrow literal negative
+    code: |
+      import asyncpg
+      async def example(conn):
+          return await conn.fetchrow('select 1')
+    expect_no_match: true
+  description: "asyncpg variable receiver .fetchrow(sql) — package-gated receiver-agnostic rule for dynamically typed connection variables."
 
 - id: python.sqli.asyncpg_conn_fetchval
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: python
   tag: sql-injection
   severity: critical
   packages: [asyncpg]
+  imports: [asyncpg]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
       regex: "^[a-z_][A-Za-z0-9_]*\\.fetchval$"
-  description: "Disabled — subsumed by python.sqli.asyncpg_connection_fetchval under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, fetchval]` rule lax-matches `conn.fetchval(...)` directly."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: asyncpg variable connection fetchval
+    code: |
+      import asyncpg
+      async def example(conn, user_input):
+          return await conn.fetchval(user_input)
+    expect_match_text: [conn.fetchval]
+  - name: asyncpg variable connection fetchval literal negative
+    code: |
+      import asyncpg
+      async def example(conn):
+          return await conn.fetchval('select 1')
+    expect_no_match: true
+  description: "asyncpg variable receiver .fetchval(sql) — package-gated receiver-agnostic rule for dynamically typed connection variables."
 
-- id: python.sqli.asyncpg_pool_fetch
+- id: python.sqli.asyncpg_conn_execute
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: pending-adapter-fact
   language: python
   tag: sql-injection
   severity: critical
   packages: [asyncpg]
+  imports: [asyncpg]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
-      regex: "^[a-z_][A-Za-z0-9_]*\\.(execute|fetch|fetchrow|fetchval)$"
-  description: "Disabled — subsumed by python.sqli.asyncpg_connection_{execute,fetch,fetchrow,fetchval} under OnlyWhenPackaged lax-tail policy. When a file imports `asyncpg`, the canonical `[Connection, verb]` rules lax-match `pool.<verb>(...)` directly."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: asyncpg variable connection execute
+    code: |
+      import asyncpg
+      async def example(conn, user_input):
+          return await conn.execute(user_input)
+    expect_match_text: [conn.execute]
+  - name: asyncpg variable connection execute literal negative
+    code: |
+      import asyncpg
+      async def example(conn):
+          return await conn.execute('select 1')
+    expect_no_match: true
+  description: "Disabled until Python can prove this variable receiver came from asyncpg.Connection without relying on local receiver names. Typed receivers are covered by python.sqli.asyncpg_connection_execute."
 
 - id: python.sqli.aiopg_sa_connection_execute
   enabled: true
@@ -375,17 +440,34 @@
 - id: python.sqli.aiopg_cursor_execute_variable
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: pending-adapter-fact
   language: python
   tag: sql-injection
   severity: critical
   packages: [aiopg]
+  imports: [aiopg]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
-      regex: "^[a-z_][A-Za-z0-9_]*\\.execute$"
-  description: "Disabled — subsumed by python.sqli.psycopg2_cursor_execute (`[Cursor, execute]`, packages include aiopg) under OnlyWhenPackaged lax-tail policy. When a file imports `aiopg`, the canonical PascalCase rule lax-matches `cur.execute(...)` directly."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: aiopg cursor execute variable receiver
+    code: |
+      import aiopg
+      async def example(cur, user_input):
+          return await cur.execute(user_input)
+    expect_match_text: [cur.execute]
+  - name: aiopg cursor execute literal negative
+    code: |
+      import aiopg
+      async def example(cur):
+          return await cur.execute('select 1')
+    expect_no_match: true
+  description: "Disabled until Python can prove this variable receiver came from an aiopg cursor without relying on local receiver names. Typed Cursor receivers are covered by python.sqli.psycopg2_cursor_execute."
 
 - id: python.sqli.sqlalchemy_text
   enabled: true
@@ -449,17 +531,34 @@
 - id: python.sqli.sqlalchemy_engine_execute_variable
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: pending-adapter-fact
   language: python
   tag: sql-injection
   severity: high
   packages: [sqlalchemy]
+  imports: [sqlalchemy]
   cwe: [CWE-89]
   match:
     kind: call
     callee:
-      regex: "^[a-z_][A-Za-z0-9_]*\\.execute$"
-  description: "Disabled — subsumed by python.sqli.sqlalchemy_engine_execute (`[Engine, execute]`) under OnlyWhenPackaged lax-tail policy. When a file imports `sqlalchemy`, the canonical PascalCase rule lax-matches `engine.execute(...)` directly."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.execute$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqlalchemy engine variable execute
+    code: |
+      import sqlalchemy
+      def example(engine, user_input):
+          return engine.execute(user_input)
+    expect_match_text: [engine.execute]
+  - name: sqlalchemy engine variable execute literal negative
+    code: |
+      import sqlalchemy
+      def example(engine):
+          return engine.execute('select 1')
+    expect_no_match: true
+  description: "Disabled until Python can prove this variable receiver came from sqlalchemy.Engine without relying on local receiver names. Typed Engine receivers are covered by python.sqli.sqlalchemy_engine_execute."
 
 - id: python.sqli.sqlalchemy_session_execute
   enabled: true

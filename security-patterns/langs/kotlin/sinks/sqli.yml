@@ -75,6 +75,44 @@
       \ {\n  Statement.execute(\"safe\")\n}\n}\n"
     expect_no_match: true
   description: JDBC Statement.execute with string-built SQL.
+- id: kotlin.sqli.connection_createstatement_execute
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  packages:
+  - java.sql
+  imports:
+  - java.sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.createStatement\\(\\)\\.(execute|executeQuery|executeUpdate)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: chained create statement execute query
+    code: |
+      import java.sql.Connection
+      class App(private val conn: Connection) {
+        fun handle(input: String) {
+          conn.createStatement().executeQuery("SELECT * FROM users WHERE id = '$input'")
+        }
+      }
+    expect_match_text: [conn.createStatement().executeQuery]
+  - name: chained create statement execute query literal negative
+    code: |
+      import java.sql.Connection
+      class App(private val conn: Connection) {
+        fun handle() {
+          conn.createStatement().executeQuery("SELECT * FROM users")
+        }
+      }
+    expect_no_match: true
+  description: "Connection.createStatement().execute*(tainted SQL) — chained JDBC Statement execution without a prepared statement."
 - id: kotlin.sqli.statement_executebatch
   enabled: true
   language: kotlin
@@ -91,6 +129,8 @@
   constraints:
   - arg_tainted:
       index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    Statement.addBatch(input)\n\
@@ -475,8 +515,9 @@
     code: "import org.jetbrains.exposed.*\nclass App {\nfun handle(input: String)\
       \ {\n  transaction.exec(\"safe\")\n}\n}\n"
     expect_no_match: true
-  description: "Exposed `Database.transaction { exec(rawSql) }` \u2014 tail-match\
-    \ on the transaction-receiver lambda; raw SQL bypasses the type-safe DSL."
+  description: "Exposed `Database.transaction { exec(rawSql) }` \u2014 raw SQL bypasses\
+    \ the type-safe DSL; the matcher uses the adapter-visible transaction receiver\
+    \ shape."
 - id: kotlin.sqli.jooq_fetch_string
   enabled: true
   language: kotlin

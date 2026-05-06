@@ -827,7 +827,7 @@
         return Bun.spawn(["bun", "--version"]);
       }
     expect_no_match: true
-  description: "Bun.spawn — tainted executable path or argv launches arbitrary process. TODO(only_when_packaged): Bun runtime global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Bun', 'spawn']` match only."
+  description: "Bun.spawn — tainted executable path or argv launches arbitrary process. Bun runtime global has no canonical ecosystem package, so strict `['Bun', 'spawn']` match only."
 
 - id: javascript.cmdi.zx_dollar
   enabled: false

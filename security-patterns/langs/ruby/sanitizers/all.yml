@@ -215,7 +215,7 @@
   match:
     kind: call
     callee:
-      regex: "^connection\\.quote$"
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.quote$"
   match_examples:
   - name: ruby.sanitizer.activerecord_quote example
     code: |
@@ -289,7 +289,8 @@
         to_f(input)
       end
     expect_match_text: ["to_f"]
-  description: "to_f — coerces the receiver to a float; clears taint for SQL / path concat contexts because the result can no longer carry arbitrary payload bytes."
+  description: "to_f — coerces the receiver to a float; clears taint for SQL / path concat contexts because the result can
+    no longer carry arbitrary payload bytes."
 
 - id: ruby.sanitizer.rack_escape_html
   enabled: true
@@ -646,7 +647,8 @@
     kind: call
     callee:
       name: redirect_to
-  description: "Disabled - redirect_to(allow_other_host: false) is safe in Rails 7+. Enable with kwarg-presence narrowing for allow_other_host."
+  description: "Disabled - redirect_to(allow_other_host: false) is safe in Rails 7+. Enable with kwarg-presence narrowing
+    for allow_other_host."
 
 # -- Audit-derived validation / binding sanitizers -----------------------------
 - id: ruby.sanitizer.same_origin_start_with
@@ -674,15 +676,13 @@
   description: "String#start_with?(\"/\") — same-origin redirect/path guard for root-relative targets."
 
 - id: ruby.sanitizer.include_allowlist
-  enabled: true
+  enabled: false
   language: ruby
   tag: allowlist-validate
   match:
     kind: call
     callee:
-      name: include?
-  constraints:
-  - receiver_name_in: [ALLOWED, ALLOWLIST, allowed, allowlist, allowed_roles, permitted, valid_values]
+      regex: "^(ALLOWED|ALLOWLIST|allowed|allowlist|allowed_roles|permitted|valid_values)\\.include\\?$"
   match_examples:
   - name: ruby.sanitizer.include_allowlist example
     code: |
@@ -691,8 +691,11 @@
         ALLOWED.include?(role)
       end
     expect_match_text: ["ALLOWED.include?"]
-  description: "allowlist.include?(value) — enum/set membership validator for constrained values."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    allowlist.include?(value) on known allowlist receiver names — enum/set membership validator for constrained values."
 
+  disabled_reason:
+    code: over-broad
 - id: ruby.sanitizer.match_full_string_shape
   enabled: true
   language: ruby

@@ -103,7 +103,7 @@
   match:
     kind: call
     callee:
-      regex: "^(_|lodash|underscore)\\.escape$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.escape$"
   match_examples:
   - name: lodash namespace escape
     code: |
@@ -385,7 +385,7 @@
   match:
     kind: call
     callee:
-      regex: "^jwt\\.verify$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.verify$"
   match_examples:
   - name: jwt verify
     code: |
@@ -461,7 +461,8 @@
     kind: call
     callee:
       regex: "^ldapEscape\\.filter$"
-  description: "Disabled duplicate — javascript.sanitizer.ldap_escape_variants covers ldapEscape.filter plus ldapjs/ldap escapeFilter variants."
+  description: "Disabled duplicate — javascript.sanitizer.ldap_escape_variants covers ldapEscape.filter plus ldapjs/ldap escapeFilter
+    variants."
 
 # ── Numeric coercion ────────────────────────────────────────────────────────
 - id: javascript.sanitizer.number_coerce
@@ -524,7 +525,7 @@
   match:
     kind: call
     callee:
-      regex: "^schema\\.parse$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.parse$"
   match_examples:
   - name: schema parse
     code: |
@@ -543,7 +544,7 @@
   match:
     kind: call
     callee:
-      regex: "^schema\\.safeParse$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.safeParse$"
   match_examples:
   - name: schema safeParse
     code: |
@@ -629,7 +630,8 @@
         return mongoSanitize(input);
       }
     expect_match_text: [mongoSanitize]
-  description: "mongo-sanitize — strips top-level $-prefixed and dot-containing keys from input objects, neutralising operator injection."
+  description: "mongo-sanitize — strips top-level $-prefixed and dot-containing keys from input objects, neutralising operator
+    injection."
 
 - id: javascript.sanitizer.express_mongo_sanitize
   enabled: false
@@ -643,7 +645,8 @@
     kind: call
     callee:
       name: mongoSanitize
-  description: "Disabled duplicate — same `mongoSanitize()` call shape is covered by javascript.sanitizer.mongo_sanitize with express-mongo-sanitize package metadata merged."
+  description: "Disabled duplicate — same `mongoSanitize()` call shape is covered by javascript.sanitizer.mongo_sanitize with
+    express-mongo-sanitize package metadata merged."
 
 # ── Password / KDF verifiers (constant-time compare) ────────────────────────
 - id: javascript.sanitizer.bcrypt_compare
@@ -685,14 +688,16 @@
   description: "argon2.verify — Argon2id constant-time verification."
 
 - id: javascript.sanitizer.scrypt_compare
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: javascript
   tag: constant-time
   packages: [scrypt-kdf, "@noble/hashes"]
   match:
     kind: call
     callee:
-      regex: "^scrypt\\.verify$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.verify$"
   match_examples:
   - name: scrypt verify
     code: |
@@ -701,7 +706,7 @@
         return scrypt.verify(hash, input);
       }
     expect_match_text: [scrypt.verify]
-  description: "scrypt verifier — KDF-based constant-time check."
+  description: "Disabled — receiver-agnostic .verify collides with jsonwebtoken.verify; enable only after adapter facts can prove the receiver is the scrypt-kdf module."
 
 # ── Path containment ────────────────────────────────────────────────────────
 - id: javascript.sanitizer.path_resolve
@@ -715,7 +720,8 @@
     kind: call
     callee:
       attribute: [path, resolve]
-  description: "Disabled — path.resolve canonicalises but does not enforce a trusted root; only credit when followed by a startsWith check."
+  description: "Disabled — path.resolve canonicalises but does not enforce a trusted root; only credit when followed by a
+    startsWith check."
 
 # ── Context-aware HTML/URL/JS encoders (node-esapi) ─────────────────────────
 # ESAPI offers context-distinct encoders. Each is tagged so a URL-context
@@ -737,7 +743,8 @@
         return ESAPI.encoder().encodeForHTML(input);
       }
     expect_match_text: [ESAPI.encoder().encodeForHTML]
-  description: "node-esapi encodeForHTML — entity-encodes for HTML text/attribute context. NOT a substitute for URL or JS-string encoding."
+  description: "node-esapi encodeForHTML — entity-encodes for HTML text/attribute context. NOT a substitute for URL or JS-string
+    encoding."
 
 - id: javascript.sanitizer.esapi_encode_for_url
   enabled: true
@@ -809,7 +816,8 @@
     kind: call
     callee:
       name: validate
-  description: "Disabled duplicate/weak bare-name validator — `validate(...)` is already used by javascript.sanitizer.ajv_validate; class-validator's precise throwing gate remains javascript.sanitizer.class_validator_validate_or_reject."
+  description: "Disabled duplicate/weak bare-name validator — `validate(...)` is already used by javascript.sanitizer.ajv_validate;
+    class-validator's precise throwing gate remains javascript.sanitizer.class_validator_validate_or_reject."
 
 - id: javascript.sanitizer.class_validator_validate_or_reject
   enabled: true
@@ -841,7 +849,8 @@
     kind: new
     callee:
       name: URL
-  description: "Disabled - new URL(input) is the prerequisite for an origin-allowlist check, but the check itself is the sanitizer. Enable with a downstream `.origin === ALLOWED` pattern."
+  description: "Disabled - new URL(input) is the prerequisite for an origin-allowlist check, but the check itself is the sanitizer.
+    Enable with a downstream `.origin === ALLOWED` pattern."
 
 - id: javascript.sanitizer.is_url_module
   enabled: true
@@ -904,9 +913,11 @@
       }
     expect_match_text: [next.startsWith]
   - name: same-origin redirect path guard negative constraint boundary
-    code: "function safeRedirect(next) {\n  if (next.startsWith() && !next.startsWith(\"//\")) {\n    return next;\n  }\n  return \"/\";\n}\n"
+    code: "function safeRedirect(next) {\n  if (next.startsWith() && !next.startsWith(\"//\")) {\n    return next;\n  }\n\
+      \  return \"/\";\n}\n"
     expect_no_match: true
-  description: "startsWith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with a sibling `!startsWith(\"//\")` network-path guard."
+  description: "startsWith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with
+    a sibling `!startsWith(\"//\")` network-path guard."
 
 - id: javascript.sanitizer.dompurify_url_check
   enabled: false
@@ -923,13 +934,14 @@
 
 # -- Focused allowlist / regex / SQL binding validators -----------------------
 - id: javascript.sanitizer.allowlist_set_has
-  enabled: true
+  enabled: false
   language: javascript
   tag: allowlist-validate
   match:
     kind: call
     callee:
-      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\.has$"
+      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\\
+        .has$"
   constraints:
   - min_args: 1
   match_examples:
@@ -940,16 +952,20 @@
         return allowedRoles.has(role);
       }
     expect_match_text: [allowedRoles.has]
-  description: "Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
 
+  disabled_reason:
+    code: over-broad
 - id: javascript.sanitizer.allowlist_array_includes
-  enabled: true
+  enabled: false
   language: javascript
   tag: allowlist-validate
   match:
     kind: call
     callee:
-      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\.includes$"
+      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\\
+        .includes$"
   constraints:
   - min_args: 1
   match_examples:
@@ -960,10 +976,13 @@
         return allowedRoutes.includes(next);
       }
     expect_match_text: [allowedRoutes.includes]
-  description: "Named Array.includes allowlists - validates that input is one of a finite literal set."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named Array.includes allowlists - validates that input is one of a finite literal set."
 
+  disabled_reason:
+    code: over-broad
 - id: javascript.sanitizer.allowlist_object_hasown
-  enabled: true
+  enabled: false
   language: javascript
   tag: allowlist-validate
   match:
@@ -987,18 +1006,24 @@
       }
     expect_match_text: [Object.hasOwn]
   - name: object map allowlist hasOwn negative constraint boundary
-    code: "const allowedRoutes = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name) {\n  if (Object.hasOwn()) {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
+    code: "const allowedRoutes = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name) {\n  if (Object.hasOwn())
+      {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
     expect_no_match: true
-  description: "Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before selecting a trusted mapped value."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before
+    selecting a trusted mapped value."
 
+  disabled_reason:
+    code: over-broad
 - id: javascript.sanitizer.named_regex_test
-  enabled: true
+  enabled: false
   language: javascript
   tag: regex-validate
   match:
     kind: call
     callee:
-      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))\\.test$"
+      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))\\\
+        .test$"
   constraints:
   - min_args: 1
   match_examples:
@@ -1009,8 +1034,11 @@
         return uuidRe.test(id);
       }
     expect_match_text: [uuidRe.test]
-  description: "Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
 
+  disabled_reason:
+    code: over-broad
 - id: javascript.sanitizer.db_placeholder_query
   enabled: true
   language: javascript
@@ -1039,7 +1067,8 @@
   - name: pg pool query with bind args negative constraint boundary
     code: "const _u = require(\"mysql\");\nfunction byId(pool, id) {\n  return pool.query();\n}\n"
     expect_no_match: true
-  description: "mysql/mysql2/pg query or execute calls with a literal placeholder SQL string and separate bind args. Receiver-agnostic; OnlyWhenPackaged gate on the driver list prevents over-matching."
+  description: "mysql/mysql2/pg query or execute calls with a literal placeholder SQL string and separate bind args. Receiver-agnostic;
+    package context gate on the driver list prevents over-matching."
 
 - id: javascript.sanitizer.char_allowlist_replace_strip
   enabled: true
@@ -1070,7 +1099,7 @@
 
 # -- Additional focused validation, containment, binding, and escaping --------
 - id: javascript.sanitizer.named_regex_match
-  enabled: true
+  enabled: false
   language: javascript
   tag: regex-validate
   match:
@@ -1097,10 +1126,13 @@
   - name: input match slug regex negative constraint boundary
     code: "function ok(input, slugRe) {\n  return input.match();\n}\n"
     expect_no_match: true
-  description: "String.match(named allowlist regex) gates — regex object must be named for safe/id/slug/uuid/allowed validation."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    String.match(named allowlist regex) gates — regex object must be named for safe/id/slug/uuid/allowed validation."
 
+  disabled_reason:
+    code: over-broad
 - id: javascript.sanitizer.path_containment_startswith
-  enabled: true
+  enabled: false
   language: javascript
   tag: path-sanitize
   packages: [path]
@@ -1130,10 +1162,14 @@
   - name: resolved path startsWith uploadDir negative constraint boundary
     code: "const _u = require(\"path\");\nfunction ok(resolved, uploadDir) {\n  return resolved.startsWith();\n}\n"
     expect_no_match: true
-  description: "Canonical path containment guard after path.resolve/normalize — validates the resolved candidate remains under a trusted root."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Canonical path containment guard after path.resolve/normalize — validates the resolved candidate remains under a trusted
+    root."
 
+  disabled_reason:
+    code: over-broad
 - id: javascript.sanitizer.url_origin_host_allowlist
-  enabled: true
+  enabled: false
   language: javascript
   tag: open-redirect-sanitize
   match:
@@ -1160,8 +1196,11 @@
   - name: allowed origins has url origin negative constraint boundary
     code: "function ok(url, allowedOrigins) {\n  return allowedOrigins.has();\n}\n"
     expect_no_match: true
-  description: "URL origin/host allowlist membership — credits finite allowlists over parsed URL origin/host/hostname values."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    URL origin/host allowlist membership — credits finite allowlists over parsed URL origin/host/hostname values."
 
+  disabled_reason:
+    code: over-broad
 - id: javascript.sanitizer.prisma_tagged_raw_query
   enabled: true
   language: javascript
@@ -1171,7 +1210,7 @@
   match:
     kind: call
     callee:
-      regex: "^prisma\\.\\$(queryRaw|executeRaw)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.\\$(queryRaw|executeRaw)$"
   constraints:
   - arg_not_matches_regex:
       index: 0
@@ -1198,7 +1237,8 @@
         return prisma.$queryRaw(Prisma.raw("SELECT * FROM " + table));
       }
     expect_no_match: true
-  description: "Prisma $queryRaw/$executeRaw tagged-template form — interpolations are parameterized unless Prisma.raw/string concatenation is used."
+  description: "Prisma $queryRaw/$executeRaw tagged-template form — interpolations are parameterized unless Prisma.raw/string
+    concatenation is used."
 
 - id: javascript.sanitizer.sequelize_query_bindings
   enabled: true
@@ -1303,7 +1343,8 @@
         return entities.encodeXML(input);
       }
     expect_match_text: [entities.encodeXML]
-  description: "XML entity escaping for text nodes and attributes; HTML encoders such as he.encode/escapeHtml are owned by the HTML sanitizer rules to avoid duplicate sanitizer evidence."
+  description: "XML entity escaping for text nodes and attributes; HTML encoders such as he.encode/escapeHtml are owned by
+    the HTML sanitizer rules to avoid duplicate sanitizer evidence."
 
 - id: javascript.sanitizer.libxmljs_safe_options
   enabled: true

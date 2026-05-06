@@ -323,6 +323,7 @@ fn c_recv_output_rulepack() -> Rulepack {
     source.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: vec![1],
+        taint_receiver_from_args: false,
     });
     let mut sink = rule(
         "c",

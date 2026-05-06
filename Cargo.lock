@@ -411,6 +411,7 @@ name = "bonsai_lang_dart"
 version = "0.1.0"
 dependencies = [
  "bonsai_common",
+ "bonsai_conformance",
  "bonsai_lang_api",
  "tree-sitter",
 ]
@@ -420,6 +421,7 @@ name = "bonsai_lang_elixir"
 version = "0.1.0"
 dependencies = [
  "bonsai_common",
+ "bonsai_conformance",
  "bonsai_lang_api",
  "tree-sitter",
 ]
@@ -429,6 +431,7 @@ name = "bonsai_lang_erlang"
 version = "0.1.0"
 dependencies = [
  "bonsai_common",
+ "bonsai_conformance",
  "bonsai_lang_api",
  "tree-sitter",
 ]
@@ -439,8 +442,10 @@ version = "0.1.0"
 dependencies = [
  "bonsai_common",
  "bonsai_conformance",
+ "bonsai_db",
  "bonsai_lang_api",
  "bonsai_testkit",
+ "bonsai_vfs",
  "bonsai_workspace",
  "tree-sitter",
 ]
@@ -501,6 +506,7 @@ name = "bonsai_lang_objc"
 version = "0.1.0"
 dependencies = [
  "bonsai_common",
+ "bonsai_conformance",
  "bonsai_lang_api",
  "tree-sitter",
 ]
@@ -523,8 +529,10 @@ version = "0.1.0"
 dependencies = [
  "bonsai_common",
  "bonsai_conformance",
+ "bonsai_db",
  "bonsai_lang_api",
  "bonsai_testkit",
+ "bonsai_vfs",
  "bonsai_workspace",
  "tree-sitter",
 ]

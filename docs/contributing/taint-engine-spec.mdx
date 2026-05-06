@@ -95,6 +95,13 @@ through receiver-type dispatch instead. Don't add results of
 constructor-shaped calls (`repo = Repository.wrap(raw)`) to the callable
 binding map.
 
+Receiver-type facts are produced from adapter-emitted type aliases and
+constructor syntax, then finalized in the workspace `GlobalIndex`. The
+global pass extends direct receiver types through indexed base classes so
+security, inspect, trace, export, and taint consumers all see the same
+`Child` plus `Base` receiver context. Ambiguous type names fail closed;
+the engine must not merge unrelated class hierarchies by bare name.
+
 ### 5. Data-flow graph
 
 Per-function `FlowEvent::Assign` events carry `target`, `source_name`,
@@ -220,8 +227,10 @@ The taint crate is layered:
   `SSL_read` buffers.
 - `callback_invocation_methods: AHashSet<String>` — method tails that
   invoke callable receivers.
-- `collection_append_methods: AHashSet<String>` — mutator method tails
-  that move argument taint into receiver descendants.
+- `receiver_state_propagations: Vec<ReceiverStatePropagation>` —
+  rulepack-declared receiver/method shapes that move argument taint into
+  receiver state for later receiver-only sinks. The engine owns no global
+  mutator-name list.
 
 `InterTaintResult` returns:
 

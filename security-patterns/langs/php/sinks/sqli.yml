@@ -110,7 +110,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  PDO::query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
-  description: 'PDO::query() with tainted SQL — raw string becomes the prepared statement; SQL injection regardless of the driver. TODO(only_when_packaged): PHP built-in PDO class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `[''PDO'', ''query'']` match only.'
+  description: 'PDO::query() with tainted SQL — raw string becomes the prepared statement; SQL injection regardless of the driver. PHP built-in PDO class has no canonical ecosystem package, so strict `[''PDO'', ''query'']` match only.'
 - id: php.sqli.pdo_prepare_concat
   enabled: false
   disabled_reason:
@@ -254,7 +254,7 @@
   - name: arg tainted literal negative
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  SQLite3::query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
-  description: 'SQLite3::query. TODO(only_when_packaged): PHP built-in SQLite3 class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `[''SQLite3'', ''query'']` match only.'
+  description: 'SQLite3::query. PHP built-in SQLite3 class has no canonical ecosystem package, so strict `[''SQLite3'', ''query'']` match only.'
 - id: php.sqli.doctrine_dbal_execute_query
   enabled: true
   language: php

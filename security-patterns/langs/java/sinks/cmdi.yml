@@ -33,21 +33,19 @@
   match:
     kind: call
     callee:
-      name: exec
+      attribute:
+      - Runtime
+      - exec
   constraints:
-  - receiver_name_in:
-    - runtime
-    - rt
-    - r
-    - runTime
-    - javaRuntime
+  - receiver_type_in:
+    - Runtime
   - arg_tainted:
       index: 0
   match_examples:
   - name: stored Runtime exec
     code: |
       class App {
-        void handle(String input) throws Exception {
+        void handle(Runtime rt, String input) throws Exception {
           rt.exec(input);
         }
       }
@@ -55,17 +53,18 @@
   - name: local Runtime exec literal negative
     code: |
       class App {
-        void handle() throws Exception {
+        void handle(Runtime rt) throws Exception {
           rt.exec("safe");
         }
       }
     expect_no_match: true
-  description: "Runtime.exec(tainted) through a stored Runtime receiver — attacker-controlled command execution."
+  description: "Runtime.exec(tainted) through a typed Runtime receiver — attacker-controlled command execution."
 
 - id: java.cmdi.runtime_exec_string
   enabled: false
   disabled_reason:
-    code: over-broad
+    code: subsumed
+    subsumed_by: java.cmdi.runtime_exec_local
   language: java
   tag: command-injection
   severity: critical
@@ -185,6 +184,8 @@
   constraints:
   - arg_tainted:
       index: 0
+  taint_semantics:
+    taint_receiver_from_args: true
   match_examples:
   - name: generated shape example
     code: "class App {\n  void handle(String input) throws Exception {\n    ProcessBuilder.command(input);\n  }\n}\n"
@@ -193,7 +194,10 @@
     expect_no_match: true
   description: "ProcessBuilder.command(tainted) — replaces the command list with attacker-controlled executable tokens."
 - id: java.cmdi.processbuilder_command_local
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: java.cmdi.processbuilder_command
   language: java
   tag: command-injection
   severity: critical
@@ -202,16 +206,9 @@
   match:
     kind: call
     callee:
-      name: command
-  constraints:
-  - receiver_name_in:
-    - pb
-    - builder
-    - processBuilder
-    - procBuilder
-    - commandBuilder
-  - arg_tainted:
-      index: 0
+      attribute:
+      - ProcessBuilder
+      - command
   match_examples:
   - name: local process builder command
     code: |
@@ -235,7 +232,7 @@
         ProcessBuilder command(Object... args) { return this; }
       }
     expect_no_match: true
-  description: "ProcessBuilder.command(tainted) on a local builder variable — attacker-controlled executable tokens are later launched by start()."
+  description: "Disabled duplicate — semantic receiver-type matching in java.cmdi.processbuilder_command covers local ProcessBuilder receivers without receiver-name lists."
 - id: java.cmdi.commons_exec_commandline_parse
   enabled: true
   language: java
@@ -333,7 +330,7 @@
 - id: java.cmdi.runtime_exec_array
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: over-broad
   language: java
   tag: command-injection
   severity: low

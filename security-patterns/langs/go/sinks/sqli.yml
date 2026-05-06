@@ -266,7 +266,7 @@
     code: "package main\nimport (\n  \"net/http\"\n  \"gorm.io/gorm\"\n)\nfunc update(db *gorm.DB, r *http.Request) {\n  role := \"admin\"\n  db.Exec(\"UPDATE users SET role = '\" + role + \"'\")\n}\n"
     expect_match_text:
     - db.Exec
-  description: "Disabled — duplicate call shape with go.sqli.db_exec for receiver `db.Exec`; without type-aware receiver matching the database/sql rule owns Exec sinks, including GORM-style raw SQL examples."
+  description: "Disabled — duplicate call shape with go.sqli.db_exec for receiver `db.Exec`; until semantic receiver facts distinguish GORM from database/sql, the database/sql rule owns Exec sinks, including GORM-style raw SQL examples."
 - id: go.sqli.gorm_order
   enabled: true
   language: go

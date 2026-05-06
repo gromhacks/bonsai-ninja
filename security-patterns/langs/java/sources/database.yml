@@ -8,9 +8,7 @@
   match:
     kind: call
     callee:
-      name: getString
-  constraints:
-  - receiver_name_in: [rs, resultSet, results, row]
+      attribute: [ResultSet, getString]
   match_examples:
   - name: ResultSet getString
     code: |
@@ -32,9 +30,7 @@
   match:
     kind: call
     callee:
-      name: getBytes
-  constraints:
-  - receiver_name_in: [rs, resultSet, results, row]
+      attribute: [ResultSet, getBytes]
   match_examples:
   - name: ResultSet getBytes
     code: |
@@ -56,9 +52,7 @@
   match:
     kind: call
     callee:
-      name: get
-  constraints:
-  - receiver_name_in: [session, hibernateSession]
+      attribute: [Session, get]
   match_examples:
   - name: Hibernate Session get
     code: |

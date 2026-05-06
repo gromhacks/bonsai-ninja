@@ -1,8 +1,6 @@
 # Swift open-redirect.
 - id: swift.open_redirect.vapor_redirect
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: swift
   tag: open-redirect
   severity: high
@@ -11,13 +9,22 @@
   match:
     kind: call
     callee:
-      attribute: [req, redirect]
+      attribute: [Request, redirect]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: vapor request redirect
     code: |
       import Vapor
-      func test() { let input = "x"; let amount = 1; req.redirect(input) }
-  description: "Disabled — subsumed by swift.open_redirect.vapor_response_location under OnlyWhenPackaged lax-tail policy. In any Vapor-importing file `[Response, redirect]` lax-matches `req.redirect(...)`, so the strict `[req, redirect]` rule double-fires."
+      func test(_ req: Request, _ input: String) { req.redirect(input) }
+    expect_match_text: [req.redirect]
+  - name: vapor request redirect literal negative
+    code: |
+      import Vapor
+      func test(_ req: Request) { req.redirect("/home") }
+    expect_no_match: true
+  description: "Vapor Request.redirect(to: tainted)."
 
 - id: swift.open_redirect.vapor_response_location
   enabled: true

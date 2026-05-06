@@ -148,9 +148,7 @@
     expect_no_match: true
   description: Mongoid $where JavaScript query.
 - id: ruby.nosql.redis_eval
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: ruby
   tag: nosql-injection
   severity: high
@@ -161,8 +159,26 @@
   match:
     kind: call
     callee:
-      name: eval
-  description: "Disabled — Redis#eval collides with Kernel#eval (covered by ruby.eval.builtin_eval) and tail-matches every X.eval call."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.eval$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: ruby.nosql.redis_eval example
+    code: |
+      require "redis"
+      def example(redis, input)
+        redis.eval(input)
+      end
+    expect_match_text: ["redis.eval"]
+  - name: ruby.nosql.redis_eval literal negative
+    code: |
+      require "redis"
+      def example(redis)
+        redis.eval("return redis.call('PING')")
+      end
+    expect_no_match: true
+  description: "Redis#eval(script, ...) on a local Redis client receiver — package-gated receiver regex avoids colliding with bare Kernel#eval."
 - id: ruby.nosql.redis_evalsha
   enabled: true
   language: ruby
@@ -175,7 +191,7 @@
   match:
     kind: call
     callee:
-      name: evalsha
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.evalsha$"
   constraints:
   - arg_tainted:
       index: 0
@@ -183,17 +199,18 @@
   - name: ruby.nosql.redis_evalsha example
     code: |
       require "redis"
-      def example(input, url, id, payload, request, params)
-        evalsha(input)
+      def example(redis, input)
+        redis.evalsha(input)
       end
+    expect_match_text: ["redis.evalsha"]
   - name: ruby.nosql.redis_evalsha literal negative
     code: |
       require "redis"
-      def example(input, url, id, payload, request, params)
-        evalsha("0123456789abcdef")
+      def example(redis)
+        redis.evalsha("0123456789abcdef")
       end
     expect_no_match: true
-  description: "Redis#evalsha — runs cached Lua script by SHA."
+  description: "Redis#evalsha(sha, ...) on a local Redis client receiver — tainted script SHA can execute attacker-selected Lua."
 - id: ruby.nosql.elasticsearch_search
   enabled: true
   language: ruby

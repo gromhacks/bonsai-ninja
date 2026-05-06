@@ -173,15 +173,13 @@
     callee:
       attribute: [dbh, prepare]
   description: "Disabled — LuaDBI dbh:prepare is safe when placeholders are used; only dangerous if SQL is concatenated."
-# Generic Lua method-call SQL-injection sink. Lua's metatable DB
-# clients all converge on `<conn>:execute(sql)`, but the receiver
-# can be `conn`, `db`, `cur`, `cx`, ... A package-anchored rule
-# misses bare receivers; this catches the call shape via name-only
-# match + a SQL-keyword + concat constraint.
+# Generic Lua method-call SQL-injection sketch. Kept disabled because
+# bare `execute(...)` is not a database API shape; package-gated
+# receiver-method rules carry the useful coverage.
 - id: lua.sqli.method_execute_concat
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: over-broad
   language: lua
   tag: sql-injection
   severity: critical
@@ -196,7 +194,7 @@
       function example(input, url, id, payload, request, params, user)
         execute("SELECT " .. user)
       end
-  description: "Disabled duplicate/overbroad variant — receiver-specific LuaSQL/LuaDBI execute rules cover shipped examples; bare name `execute` collides across unrelated Lua APIs."
+  description: "Disabled overbroad variant — bare name `execute` collides across unrelated Lua APIs; receiver-method SQL rules cover the database call shapes."
 
 # LuaDBI-specific complement. `dbh:execute` carries the same shape but
 # with LuaDBI's `dbh` receiver convention; named-package gate for the

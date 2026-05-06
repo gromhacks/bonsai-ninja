@@ -313,7 +313,7 @@
   match:
     kind: call
     callee:
-      regex: "^InitialContext\\.lookup$"
+      attribute: [InitialContext, lookup]
   constraints:
   - arg_tainted:
       index: 0
@@ -335,7 +335,7 @@
         }
       }
     expect_no_match: true
-  description: "javax.naming.InitialContext.lookup(tainted) — Log4Shell-style remote class load and deserialization (LDAP/RMI/CORBA URI). Instance-form `initialContext.lookup` is covered by the OnlyWhenPackaged lax-tail policy when the file imports javax.naming."
+  description: "javax.naming.InitialContext.lookup(tainted) — Log4Shell-style remote class load and deserialization (LDAP/RMI/CORBA URI). Instance calls require semantic receiver-type facts for InitialContext."
 
 - id: java.access.jndi_initialcontext_lookup_local
   enabled: false
@@ -413,9 +413,7 @@
   description: "javax.naming.Context.lookup(tainted) — same JNDI remote class load risk via the abstract Context API. JNDI signature is `lookup(Name|String)` — exactly 1 arg; `min_args: 1` + `max_args: 1` rejects unrelated `lookup()` decoys (Map.lookup overloads etc.)."
 
 - id: java.access.jndi_initialdircontext_lookup
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: java
   tag: jndi-injection
   severity: critical
@@ -425,6 +423,9 @@
     kind: call
     callee:
       attribute: [InitialDirContext, lookup]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated shape example
     code: |
@@ -434,4 +435,22 @@
           InitialDirContext.lookup(input);
         }
       }
-  description: "Disabled — subsumed by java.access.jndi_context_lookup (`[Context, lookup]`) under the matcher's OnlyWhenPackaged lax-tail policy. When the file imports `javax.naming`, the Context rule already lax-matches every `*.lookup(...)` instance form including `InitialDirContext.lookup(...)`."
+  - name: local initial dir context lookup
+    code: |
+      import javax.naming.*;
+      class App {
+        Object handle(InitialDirContext ctx, String name) throws Exception {
+          return ctx.lookup(name);
+        }
+      }
+    expect_match_text: [ctx.lookup]
+  - name: arg tainted literal negative
+    code: |
+      import javax.naming.*;
+      class App {
+        void handle(String input) throws Exception {
+          InitialDirContext.lookup("safe");
+        }
+      }
+    expect_no_match: true
+  description: "javax.naming.InitialDirContext.lookup(tainted) — JNDI lookup through a directory context."

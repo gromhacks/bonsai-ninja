@@ -504,56 +504,13 @@ impl ConstraintMode {
     }
 }
 
-/// Tri-state lax-tail policy for a rule. Promoting from `bool` lets
-/// us express "this rule WANTS lax-matching, but only when the file
-/// actually imports one of the rule's declared packages."
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LaxTail {
-    /// Strict only — `[Class, method]` must match the full chain.
-    Off,
-    /// Always lax — sanitizers (false-negative aversion) and
-    /// camelCase sink/source methods (`executeQuery`, `bindValue`)
-    /// where the verb is distinctive enough that lax-matching
-    /// across all receivers is safe.
-    Always,
-    /// Lax only when the file's imports overlap the rule's
-    /// `packages:` / `imports:` / `modules:`. Used for type-like
-    /// receivers with pure-lowercase verbs ≥ 5 chars (`evaluate`,
-    /// `process`, `render`, `fetch`, `lookup`, `unmarshal`,
-    /// `fromstring`) where always-on lax-matching would collide
-    /// across libraries (`[Eta, render]` vs `pug.render(...)`).
-    /// Per-file gating preserves cross-library disambiguation
-    /// without dropping the instance-form match.
-    OnlyWhenPackaged,
-}
-
-impl LaxTail {
-    /// True when the lax-tail branch should fire for the supplied
-    /// file context. `file_packages` is the set of normalised
-    /// import roots present in the file under consideration;
-    /// `rule_signals` is the rule's `packages` ∪ `imports` ∪
-    /// `modules`.
-    fn allows_lax_match(self, file_packages: &AHashSet<String>, rule_signals: &[&str]) -> bool {
-        match self {
-            LaxTail::Off => false,
-            LaxTail::Always => true,
-            LaxTail::OnlyWhenPackaged => {
-                if rule_signals.is_empty() || file_packages.is_empty() {
-                    return false;
-                }
-                rule_signals.iter().any(|sig| file_packages.contains(*sig))
-            }
-        }
-    }
-}
-
 struct PreparedRule<'a> {
     rule: &'a Rule,
     name: Option<&'a str>,
     attribute: Option<&'a Vec<String>>,
     regex: Option<Regex>,
+    regex_requires_package_signal: bool,
     constraint_regexes: Vec<Option<Regex>>,
-    lax_tail: LaxTail,
     /// The rule's `packages` ∪ `imports` ∪ `modules`, in the
     /// canonical ecosystem-name form the rule pack uses. Borrowed
     /// from the rule (never owned) so this stays cheap.
@@ -581,6 +538,7 @@ impl<'a> PreparedRule<'a> {
                 package_signals.push(signal.as_str());
             }
         }
+        let regex_requires_package_signal = rule_regex_requires_package_signal(rule);
         let regex = match target.regex.as_deref() {
             Some(pattern) => match Regex::new(pattern) {
                 Ok(regex) => Some(regex),
@@ -607,10 +565,19 @@ impl<'a> PreparedRule<'a> {
             name: target.name.as_deref(),
             attribute: target.attribute.as_ref(),
             regex,
+            regex_requires_package_signal,
             constraint_regexes,
-            lax_tail: rule_lax_tail(rule),
             package_signals,
         })
+    }
+
+    fn file_context_allows(&self, file_packages: &AHashSet<String>) -> bool {
+        if !self.regex_requires_package_signal {
+            return true;
+        }
+        self.package_signals
+            .iter()
+            .any(|signal| file_packages.contains(*signal))
     }
 }
 
@@ -623,32 +590,38 @@ fn scan_file_rules(
     taint_view: Option<&InterTaintView<'_>>,
     out: &mut Vec<RuleMatch>,
 ) {
-    let call_rules: Vec<&PreparedRule<'_>> = rules
+    let file_packages = file_package_set(ws, file);
+    let active_rules: Vec<&PreparedRule<'_>> = rules
+        .iter()
+        .copied()
+        .filter(|r| r.file_context_allows(&file_packages))
+        .collect();
+    let call_rules: Vec<&PreparedRule<'_>> = active_rules
         .iter()
         .copied()
         .filter(|r| matches!(r.rule.match_spec.kind, MatchKind::Call | MatchKind::New))
         .collect();
-    let read_rules: Vec<&PreparedRule<'_>> = rules
+    let read_rules: Vec<&PreparedRule<'_>> = active_rules
         .iter()
         .copied()
         .filter(|r| r.rule.match_spec.kind == MatchKind::Read)
         .collect();
-    let write_rules: Vec<&PreparedRule<'_>> = rules
+    let write_rules: Vec<&PreparedRule<'_>> = active_rules
         .iter()
         .copied()
         .filter(|r| r.rule.match_spec.kind == MatchKind::Write)
         .collect();
-    let param_rules: Vec<&PreparedRule<'_>> = rules
+    let param_rules: Vec<&PreparedRule<'_>> = active_rules
         .iter()
         .copied()
         .filter(|r| r.rule.match_spec.kind == MatchKind::Param)
         .collect();
-    let return_rules: Vec<&PreparedRule<'_>> = rules
+    let return_rules: Vec<&PreparedRule<'_>> = active_rules
         .iter()
         .copied()
         .filter(|r| r.rule.match_spec.kind == MatchKind::Return)
         .collect();
-    let missing_rules: Vec<&PreparedRule<'_>> = rules
+    let missing_rules: Vec<&PreparedRule<'_>> = active_rules
         .iter()
         .copied()
         .filter(|r| r.rule.match_spec.kind == MatchKind::Missing)
@@ -741,7 +714,6 @@ fn return_rule_match(
 
 fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], out: &mut Vec<RuleMatch>) {
     let global = ws.db().global_index();
-    let file_packages = file_package_set(ws, file);
     for decl in global.decls_in(file) {
         // Resolve the enclosing-class name AND its declared bases for
         // kind:param `in_class:` rules. Decl.parent points at the
@@ -793,13 +765,7 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                     // — `RequestParam` matches `@RequestParam`).
                     param_anns.iter().any(|a| a.eq_ignore_ascii_case(want))
                 } else {
-                    callee_matches(
-                        param,
-                        prepared.name,
-                        prepared.attribute,
-                        prepared.regex.as_ref(),
-                        resolve_lax_tail(prepared, &file_packages),
-                    )
+                    callee_matches(param, prepared.name, prepared.attribute, prepared.regex.as_ref())
                 };
                 if !matched {
                     continue;
@@ -831,7 +797,6 @@ fn scan_calls_batch(
 ) {
     let global = ws.db().global_index();
     let import_aliases = file_alias_map(ws, file);
-    let file_packages = file_package_set(ws, file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let decls = global.decls_in(file);
     let mut decl_call_keys: AHashSet<(String, u64)> = AHashSet::new();
@@ -863,7 +828,6 @@ fn scan_calls_batch(
                     prepared.attribute,
                     prepared.regex.as_ref(),
                     &alias_map,
-                    resolve_lax_tail_for_call(prepared, &file_packages, &call.callee),
                 ) else {
                     continue;
                 };
@@ -935,7 +899,6 @@ fn scan_calls_batch(
                 prepared.attribute,
                 prepared.regex.as_ref(),
                 &import_aliases,
-                resolve_lax_tail_for_call(prepared, &file_packages, &r.name),
             ) else {
                 continue;
             };
@@ -992,7 +955,6 @@ fn scan_missing_batch(
 ) {
     let global = ws.db().global_index();
     let import_aliases = file_alias_map(ws, file);
-    let file_packages = file_package_set(ws, file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
 
     for decl in global.decls_in(file) {
@@ -1056,7 +1018,6 @@ fn scan_missing_batch(
                         prepared.attribute,
                         prepared.regex.as_ref(),
                         &alias_map,
-                        resolve_lax_tail_for_call(prepared, &file_packages, &call.callee),
                     )
                     .is_some()
                 }) || missing_target_in_reachable_callees(ws, file, decl, prepared, &import_aliases);
@@ -1125,7 +1086,6 @@ fn missing_target_in_reachable_callees(
             // Per-callee aliases / packages so child resolutions
             // use the callee's own imports, not the entry's.
             let callee_file = global.declaring_file(callee_decl.symbol).unwrap_or(file);
-            let callee_packages = file_package_set(ws, callee_file);
             let mut callee_alias = file_alias_map(ws, callee_file);
             extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
             bonsai_lang_api::extend_alias_map_with_flow_events(&mut callee_alias, &callee_decl.flow_events);
@@ -1137,7 +1097,6 @@ fn missing_target_in_reachable_callees(
                     prepared.attribute,
                     prepared.regex.as_ref(),
                     &callee_alias,
-                    resolve_lax_tail_for_call(prepared, &callee_packages, &call.callee),
                 )
                 .is_some()
                 {
@@ -1166,7 +1125,6 @@ fn matching_call_has_arg_index(
 ) -> bool {
     let global = ws.db().global_index();
     let import_aliases = file_alias_map(ws, file);
-    let file_packages = file_package_set(ws, file);
     for decl in global.decls_in(file) {
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
@@ -1182,7 +1140,6 @@ fn matching_call_has_arg_index(
                 prepared.attribute,
                 prepared.regex.as_ref(),
                 &alias_map,
-                resolve_lax_tail_for_call(prepared, &file_packages, &call.callee),
             )
             .is_none()
             {
@@ -1303,116 +1260,30 @@ fn insert_import_target_prefixes(out: &mut AHashSet<String>, module: &str) {
 /// Both shapes feed the same `callee_matches` check against the rule
 /// target, so a rule written as
 /// `callee.attribute: [child_process, exec]` fires for both forms.
-/// Decide which lax-tail policy a rule runs under. Sanitizers
-/// always lax-match (false-negative aversion). Sources and sinks
-/// share the rest:
-///
-/// - `Always` for type-like receiver + camelCase verb;
-/// - `OnlyWhenPackaged` for type-like receiver + lowercase verb ≥ 5
-///   chars + non-empty `packages:`/`imports:`/`modules:`;
-/// - `Off` otherwise.
-///
-/// The `OnlyWhenPackaged` decision uses a per-file gate
-/// (`LaxTail::allows_lax_match`) at match time. Without an actual
-/// import in the file under analysis, the lax-tail branch stays off
-/// — that's what prevents `[Eta, render]` from firing on
-/// `pug.render(...)` in a file that imports `pug` but not `eta`.
-fn rule_lax_tail(rule: &Rule) -> LaxTail {
-    if matches!(rule.kind, crate::rule::RuleKind::Sanitizer) {
-        return LaxTail::Always;
-    }
-    if !matches!(
-        rule.kind,
-        crate::rule::RuleKind::Sink | crate::rule::RuleKind::Source
-    ) {
-        return LaxTail::Off;
-    }
-    let attr = rule
-        .match_spec
-        .callee
-        .as_ref()
-        .and_then(|c| c.attribute.as_ref())
-        .or_else(|| rule.match_spec.target.as_ref().and_then(|t| t.attribute.as_ref()));
-    let Some(attr) = attr else {
-        return LaxTail::Off;
-    };
-    let Some(first) = attr.first() else {
-        return LaxTail::Off;
-    };
-    let type_like_receiver = first.chars().next().is_some_and(|c| c.is_ascii_uppercase());
-    if !type_like_receiver {
-        return LaxTail::Off;
-    }
-    let Some(last) = attr.last() else {
-        return LaxTail::Off;
-    };
-    let has_inner_upper = last
-        .chars()
-        .enumerate()
-        .any(|(i, c)| i > 0 && c.is_ascii_uppercase());
-    if has_inner_upper {
-        return LaxTail::Always;
-    }
-    let signals_present = !rule.packages.is_empty() || !rule.imports.is_empty() || !rule.modules.is_empty();
-    if signals_present && last.len() >= 5 && last.chars().all(|c| c.is_ascii_lowercase()) {
-        return LaxTail::OnlyWhenPackaged;
-    }
-    LaxTail::Off
-}
 
-pub(crate) fn rule_requires_package_gate(rule: &Rule) -> bool {
-    matches!(rule_lax_tail(rule), LaxTail::OnlyWhenPackaged)
-}
-
-/// Resolve a rule's `LaxTail` policy to a per-file boolean.
-fn resolve_lax_tail(prepared: &PreparedRule<'_>, file_packages: &AHashSet<String>) -> bool {
-    prepared
-        .lax_tail
-        .allows_lax_match(file_packages, &prepared.package_signals)
-}
-
-/// Same as `resolve_lax_tail`, but additionally rejects
-/// `OnlyWhenPackaged` matches when the call's receiver IS a known
-/// module/package import in the file. Without this guard,
-/// `[AsyncClient, request]` (`packages: [httpx]`) would
-/// lax-match `httpx.request(...)` — but that exact form is
-/// already covered by the more specific `[httpx, request]` rule,
-/// and the lax-match here generates a duplicate. The receiver-is-
-/// module check defers to the more-specific rule and keeps the
-/// instance-form `client.request(...)` path open.
-fn resolve_lax_tail_for_call(
-    prepared: &PreparedRule<'_>,
-    file_packages: &AHashSet<String>,
-    callee: &str,
-) -> bool {
-    if !resolve_lax_tail(prepared, file_packages) {
-        return false;
-    }
-    if matches!(prepared.lax_tail, LaxTail::OnlyWhenPackaged) {
-        // Erlang-style remote module calls (`:jose_jwt.verify(...)`,
-        // `:cowboy_req.method(...)`) start with a leading colon
-        // and name a different module than the rule's receiver
-        // class. They're never instance-form calls, so the
-        // OnlyWhenPackaged lax-tail must not fire on them; the
-        // colon-receiver carries its own module identity. Without
-        // this, `[JOSE, JWT, verify]`'s lax-tail catches
-        // `:jose_jwt.verify(...)` from the sibling
-        // `:jose_jwt.verify` rule's example, generating a false
-        // intra-pack collision in `enabled_rule_match_examples_do_not_collide`.
-        if callee.starts_with(':') {
-            return false;
+/// True when a regex target starts with a receiver-agnostic local
+/// identifier prefix such as `^[A-Za-z_$][A-Za-z0-9_$]*\.`. These
+/// rules are useful for dynamic languages, but must be gated by
+/// adapter-surfaced import/package context rather than local variable
+/// names.
+pub(crate) fn rule_regex_requires_package_signal(rule: &Rule) -> bool {
+    let target = match rule.match_spec.kind {
+        MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
+        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+            rule.match_spec.target.as_ref()
         }
-        if let Some(receiver) = callee.split(&['.', ':', '-', '\\'][..]).next() {
-            // Skip module-name receivers — `httpx.request(...)`,
-            // `os.system(...)`, etc. — when the rule's receiver is
-            // a class-like name. The strict-match path of the
-            // more-specific `[module, verb]` rule owns those.
-            if file_packages.contains(receiver) {
-                return false;
-            }
-        }
-    }
-    true
+    };
+    target
+        .and_then(|target| target.regex.as_deref())
+        .is_some_and(regex_prefix_is_receiver_agnostic)
+        && (!rule.packages.is_empty() || !rule.imports.is_empty() || !rule.modules.is_empty())
+}
+
+fn regex_prefix_is_receiver_agnostic(regex: &str) -> bool {
+    let rest = regex.trim().strip_prefix('^').unwrap_or(regex);
+    rest.starts_with("[A-Za-z_")
+        && rest.contains("]*\\.")
+        && (rest.contains("A-Za-z0-9_") || rest.contains("a-zA-Z0-9_"))
 }
 
 fn callee_or_alias_matches(
@@ -1422,25 +1293,9 @@ fn callee_or_alias_matches(
     attribute: Option<&Vec<String>>,
     regex: Option<&Regex>,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
-    lax_tail: bool,
 ) -> Option<String> {
-    if callee_matches_with_receiver_types(callee, receiver_types, name, attribute, regex, lax_tail) {
+    if callee_matches_with_receiver_types(callee, receiver_types, name, attribute, regex) {
         return Some(callee.to_string());
-    }
-    for receiver in ["this.", "self.", "super."] {
-        if let Some(unqualified) = callee.strip_prefix(receiver) {
-            if let Some(matched) = callee_or_alias_matches(
-                unqualified,
-                receiver_types,
-                name,
-                attribute,
-                regex,
-                alias_map,
-                lax_tail,
-            ) {
-                return Some(matched);
-            }
-        }
     }
     if alias_map.is_empty() {
         return None;
@@ -1470,7 +1325,7 @@ fn callee_or_alias_matches(
             format!("{type_name}{tail}")
         }
     };
-    if callee_matches_with_receiver_types(&expanded, receiver_types, name, attribute, regex, lax_tail) {
+    if callee_matches_with_receiver_types(&expanded, receiver_types, name, attribute, regex) {
         return Some(expanded);
     }
     // Type-binding case is the only path where receiver case can
@@ -1498,7 +1353,7 @@ fn callee_or_alias_matches(
         } else {
             format!("{}{}{}", first.to_ascii_uppercase(), chars.as_str(), tail)
         };
-        if callee_matches_with_receiver_types(&alt, receiver_types, name, attribute, regex, lax_tail) {
+        if callee_matches_with_receiver_types(&alt, receiver_types, name, attribute, regex) {
             return Some(alt);
         }
     }
@@ -1516,30 +1371,17 @@ fn scan_refs_batch(
         return;
     };
     let global = ws.db().global_index();
-    let file_packages = file_package_set(ws, file);
     let decls = global.decls_in(file);
     for r in &idx.refs {
         if r.kind != want_kind {
             continue;
         }
         for prepared in rules {
-            // Attribute-chain sink rules should be matched by call
-            // facts that retain their receiver/API identity. Bare
-            // reference facts such as `getInstance`, `execute`, or
-            // `parse` are too weak to disambiguate sink APIs and
-            // create rulepack collisions after sink constraints are
-            // removed.
-            let lax_tail = if matches!(prepared.rule.kind, crate::rule::RuleKind::Sink) {
-                false
-            } else {
-                resolve_lax_tail(prepared, &file_packages)
-            };
             if !callee_matches(
                 &r.name,
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
-                lax_tail,
             ) {
                 continue;
             }
@@ -1995,7 +1837,6 @@ fn scan_writes_batch(
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
-    let file_packages = file_package_set(ws, file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     for decl in global.decls_in(file) {
         let writes = collect_writes(&decl.flow_events);
@@ -2018,7 +1859,6 @@ fn scan_writes_batch(
                     prepared.name,
                     prepared.attribute,
                     prepared.regex.as_ref(),
-                    resolve_lax_tail(prepared, &file_packages),
                 ) {
                     continue;
                 }
@@ -2070,7 +1910,6 @@ fn scan_ref_writes_batch(
         return;
     };
     let global = ws.db().global_index();
-    let file_packages = file_package_set(ws, file);
     let decls = global.decls_in(file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     for r in &idx.refs {
@@ -2095,7 +1934,6 @@ fn scan_ref_writes_batch(
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
-                resolve_lax_tail(prepared, &file_packages),
             ) {
                 continue;
             }
@@ -2149,7 +1987,6 @@ fn scan_ref_writes_batch(
 
 fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'_>) -> bool {
     let global = ws.db().global_index();
-    let file_packages = file_package_set(ws, file);
     for decl in global.decls_in(file) {
         for (target, _) in collect_writes(&decl.flow_events) {
             if callee_matches(
@@ -2157,7 +1994,6 @@ fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
-                resolve_lax_tail(prepared, &file_packages),
             ) {
                 return true;
             }
@@ -2174,7 +2010,6 @@ fn matching_write_exists(ws: &Workspace, file: FileId, prepared: &PreparedRule<'
                 prepared.name,
                 prepared.attribute,
                 prepared.regex.as_ref(),
-                resolve_lax_tail(prepared, &file_packages),
             )
         {
             return true;
@@ -2782,9 +2617,8 @@ fn callee_matches_with_receiver_types(
     name: Option<&str>,
     attribute: Option<&Vec<String>>,
     regex: Option<&Regex>,
-    lax_tail: bool,
 ) -> bool {
-    if callee_matches(callee, name, attribute, regex, lax_tail) {
+    if callee_matches(callee, name, attribute, regex) {
         return true;
     }
     if regex.is_some() {
@@ -3025,7 +2859,6 @@ fn callee_matches(
     name: Option<&str>,
     attribute: Option<&Vec<String>>,
     regex: Option<&Regex>,
-    lax_tail: bool,
 ) -> bool {
     if let Some(re) = regex {
         return re.is_match(callee);
@@ -3055,10 +2888,20 @@ fn callee_matches(
         let joined_colon = attr.join("::");
         let joined_arrow = attr.join("->");
         let joined_backslash = attr.join("\\");
+        let mixed_colon_dot = attr
+            .split_last()
+            .and_then(|(last, prefix)| (!prefix.is_empty()).then(|| format!("{}.{last}", prefix.join("::"))));
+        let mixed_backslash_colon = attr.split_last().and_then(|(last, prefix)| {
+            (!prefix.is_empty()).then(|| format!("{}::{last}", prefix.join("\\")))
+        });
         if normalized == joined_dot
             || normalized == joined_colon
             || normalized == joined_arrow
             || normalized == joined_backslash
+            || mixed_colon_dot.as_ref().is_some_and(|mixed| normalized == *mixed)
+            || mixed_backslash_colon
+                .as_ref()
+                .is_some_and(|mixed| normalized == *mixed)
             || normalized == format!("{joined_dot}.new")
             || normalized == format!("{joined_colon}.new")
             || normalized == format!("{joined_arrow}->new")
@@ -3090,73 +2933,6 @@ fn callee_matches(
             || starts_with_chain_head(&normalized, &inner_backslash)
         {
             return true;
-        }
-        if attr.len() >= 2 {
-            let prefix = &attr[..attr.len() - 1];
-            let last = attr.last().expect("attribute length checked");
-            let prefix_dot = prefix.join(".");
-            let prefix_colon = prefix.join("::");
-            let prefix_arrow = prefix.join("->");
-            let prefix_backslash = prefix.join("\\");
-            let prefix_single_colon = prefix.join(":");
-            let starts_with_receiver =
-                normalized == prefix_dot || normalized.starts_with(&format!("{prefix_dot}."));
-            let starts_with_receiver_colon =
-                normalized == prefix_colon || normalized.starts_with(&format!("{prefix_colon}::"));
-            let starts_with_receiver_colon_dot =
-                normalized == prefix_colon || normalized.starts_with(&format!("{prefix_colon}."));
-            let starts_with_receiver_arrow =
-                normalized == prefix_arrow || normalized.starts_with(&format!("{prefix_arrow}->"));
-            let starts_with_receiver_backslash =
-                normalized == prefix_backslash || normalized.starts_with(&format!("{prefix_backslash}\\"));
-            let starts_with_receiver_single_colon = normalized == prefix_single_colon
-                || normalized.starts_with(&format!("{prefix_single_colon}:"));
-            let ends_with_method = normalized.ends_with(&format!(".{last}"))
-                || normalized.ends_with(&format!("::{last}"))
-                || normalized.ends_with(&format!("->{last}"))
-                || normalized.ends_with(&format!("\\{last}"))
-                || normalized.ends_with(&format!(":{last}"));
-            if (starts_with_receiver
-                || starts_with_receiver_colon
-                || starts_with_receiver_colon_dot
-                || starts_with_receiver_arrow
-                || starts_with_receiver_backslash
-                || starts_with_receiver_single_colon)
-                && ends_with_method
-            {
-                return true;
-            }
-        }
-        // Lax tail match — last-segment-only. Used for sanitizers
-        // (and other rule kinds that opt in) because adapters often
-        // emit `instance.method` without receiver-type info, and
-        // requiring the full `[Class, method]` path would miss most
-        // real-world sanitizer invocations (`name.toHtmlEscaped`,
-        // `safe.arg()`, etc). Risk of over-match on sinks is why
-        // sinks keep strict matching.
-        if lax_tail {
-            if let Some(last) = attr.last() {
-                let mut allow_lax_tail = true;
-                if let Some(first) = attr.first() {
-                    if type_like_segment(first) {
-                        if let Some(receiver) = receiver_of(&normalized) {
-                            let receiver_tail = receiver_path_tail(receiver);
-                            if type_like_segment(receiver_tail) && receiver_tail != first {
-                                allow_lax_tail = false;
-                            }
-                        }
-                    }
-                }
-                if allow_lax_tail
-                    && (normalized.ends_with(&format!(".{last}"))
-                        || normalized.ends_with(&format!("::{last}"))
-                        || normalized.ends_with(&format!("->{last}"))
-                        || normalized.ends_with(&format!("\\{last}"))
-                        || normalized.ends_with(&format!(":{last}")))
-                {
-                    return true;
-                }
-            }
         }
         return false;
     }
@@ -3235,8 +3011,7 @@ fn compile_constraint_regexes(rule_id: &str, constraints: &[ConstraintKind]) -> 
                 "constraints.any_arg_matches_regex",
                 any_arg_matches_regex,
             )?),
-            ConstraintKind::ReceiverNameIn { .. }
-            | ConstraintKind::ReceiverTypeIn { .. }
+            ConstraintKind::ReceiverTypeIn { .. }
             | ConstraintKind::SecondArgEquals { .. }
             | ConstraintKind::ArgEquals { .. }
             | ConstraintKind::KeywordArgEquals { .. }
@@ -3333,7 +3108,7 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 ///
 /// | Arm                          | Predicate                                          |
 /// |------------------------------|----------------------------------------------------|
-/// | `ReceiverNameIn`             | callee's receiver matches one of the listed names  |
+/// | `ReceiverTypeIn`             | callee's receiver type matches a semantic type     |
 /// | `Namespace`                  | callee's qualified prefix matches the namespace    |
 /// | `FormatArgIndex`             | the format-string arg slot matches expected index  |
 /// | `TopLevel`                   | enclosing decl is at module top level              |
@@ -3355,11 +3130,6 @@ fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
 fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
     for (constraint_index, c) in ctx.constraints.iter().enumerate() {
         match c {
-            ConstraintKind::ReceiverNameIn { receiver_name_in } => {
-                if !receiver_matches(ctx.callee, receiver_name_in) {
-                    return false;
-                }
-            }
             ConstraintKind::ReceiverTypeIn { receiver_type_in } => {
                 if !receiver_type_matches_any(ctx.receiver_types, receiver_type_in) {
                     return false;
@@ -3774,16 +3544,6 @@ fn receiver_path_tail(receiver: &str) -> &str {
         .trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
 }
 
-/// True when `value`'s tail starts with an uppercase ASCII letter —
-/// our "type-like" receiver heuristic (`Database`, `MyHandler`)
-/// versus an instance variable (`db`, `handler`).
-fn type_like_segment(value: &str) -> bool {
-    receiver_path_tail(value)
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase())
-}
-
 /// True when `callee` lives inside `namespace` (exact or
 /// `namespace.x` / `namespace::x` / `namespace->x` / `namespace:x`).
 /// Used by the `Namespace` constraint.
@@ -3792,86 +3552,6 @@ fn callee_in_namespace(callee: &str, namespace: &str) -> bool {
         || callee.strip_prefix(namespace).is_some_and(|rest| {
             rest.starts_with('.') || rest.starts_with("::") || rest.starts_with("->") || rest.starts_with(':')
         })
-}
-
-/// True when the callee's receiver matches one of the `allowed`
-/// names. Supports exact match, namespace containment, and
-/// qualified-chain containment (`a.b.c.method()` matches `b`
-/// when `b` is on the chain).
-fn receiver_matches(callee: &str, allowed: &[String]) -> bool {
-    let Some(receiver) = receiver_of(callee) else {
-        return false;
-    };
-    allowed.iter().any(|allowed_name| {
-        let allowed_name = allowed_name.as_str();
-        receiver == allowed_name
-            || callee == allowed_name
-            || callee_in_namespace(callee, allowed_name)
-            || receiver_chain_contains(receiver, allowed_name)
-    })
-}
-
-/// Split a callee on its rightmost qualifier separator and return
-/// the receiver portion. Tries `->`, `::`, `.`, `:` in that order so
-/// the longest separator wins (a Perl `Foo::Bar->method` doesn't
-/// stop at the lone `:`).
-fn receiver_of(callee: &str) -> Option<&str> {
-    if let Some((receiver, _)) = callee.rsplit_once("->") {
-        return Some(receiver);
-    }
-    if let Some((receiver, _)) = callee.rsplit_once("::") {
-        return Some(receiver);
-    }
-    if let Some((receiver, _)) = callee.rsplit_once('.') {
-        return Some(receiver);
-    }
-    if let Some((receiver, _)) = callee.rsplit_once(':') {
-        return Some(receiver);
-    }
-    None
-}
-
-/// True when any segment of the receiver chain equals `allowed`.
-/// Sigil-tolerant on the needle (`$x` and `x` are equivalent for
-/// PHP / Perl variable forms).
-fn receiver_chain_contains(receiver: &str, allowed: &str) -> bool {
-    let allowed = allowed.trim().trim_start_matches(['$', '@']);
-    if allowed.is_empty() {
-        return false;
-    }
-    let receiver_parts = receiver_segments(receiver);
-    if receiver_parts.iter().any(|segment| segment == allowed) {
-        return true;
-    }
-    let allowed_segments = receiver_segments(allowed);
-    allowed_segments
-        .last()
-        .is_some_and(|tail| receiver_parts.iter().any(|segment| segment == tail))
-}
-
-/// Split a receiver expression into its identifier segments. Splits
-/// on every common qualifier or punctuation char so call chains like
-/// `a.b().c[0]->d` decompose into `[a, b, c, d]`.
-fn receiver_segments(receiver: &str) -> Vec<String> {
-    receiver
-        .split(|ch: char| {
-            matches!(ch, '.' | ':' | '\\')
-                || ch == '>'
-                || ch == '-'
-                || ch == '['
-                || ch == ']'
-                || ch == '('
-                || ch == ')'
-                || ch.is_whitespace()
-        })
-        .filter_map(|segment| {
-            let segment = segment
-                .trim()
-                .trim_start_matches(['$', '@'])
-                .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'));
-            (!segment.is_empty()).then(|| segment.to_string())
-        })
-        .collect()
 }
 
 /// True when a format-string argument is "dangerous" — either dynamic

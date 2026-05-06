@@ -256,7 +256,7 @@
         return conn.query("SELECT 1");
       }
     expect_no_match: true
-  description: "<recv>.query(sql) — driver-agnostic SQL-injection sink for receiver names the package-anchored rules miss. Merged aliases: typescript.sqli.method_query_sql_variable."
+  description: "<recv>.query(sql) — package-anchored SQL-injection sink for database clients and ORMs that share the standard query verb. Merged aliases: typescript.sqli.method_query_sql_variable."
   aliases:
   - typescript.sqli.method_query_sql_variable
   - typescript.nosql.typeorm_query

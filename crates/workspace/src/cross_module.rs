@@ -735,6 +735,29 @@ impl<'a> TraceBuilder<'a> {
         seen: &mut AHashSet<SymbolId>,
         out: &mut Vec<SymbolId>,
     ) {
+        let mut seen_classes = AHashSet::new();
+        self.collect_method_candidates_for_class_inner(
+            class_sym,
+            method_name,
+            ctx,
+            seen,
+            &mut seen_classes,
+            out,
+        );
+    }
+
+    fn collect_method_candidates_for_class_inner(
+        &self,
+        class_sym: SymbolId,
+        method_name: &str,
+        ctx: &ResolveContext<'_>,
+        seen_methods: &mut AHashSet<SymbolId>,
+        seen_classes: &mut AHashSet<SymbolId>,
+        out: &mut Vec<SymbolId>,
+    ) {
+        if !seen_classes.insert(class_sym) {
+            return;
+        }
         let global = self.db.global_index();
         let Some(class_decl) = global.decl_of(class_sym) else {
             return;
@@ -748,6 +771,7 @@ impl<'a> TraceBuilder<'a> {
         let Some(class_file) = global.declaring_file(class_sym) else {
             return;
         };
+        let mut matched_local_method = false;
         for decl in global.decls_in(class_file) {
             if decl.name != method_name || !self.is_callable(decl.symbol) {
                 continue;
@@ -756,9 +780,25 @@ impl<'a> TraceBuilder<'a> {
                 continue;
             }
             if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
-                && seen.insert(decl.symbol)
+                && seen_methods.insert(decl.symbol)
             {
+                matched_local_method = true;
                 out.push(decl.symbol);
+            }
+        }
+        if matched_local_method {
+            return;
+        }
+        for base in &class_decl.bases {
+            for base_sym in resolve_class(&global, base, ctx) {
+                self.collect_method_candidates_for_class_inner(
+                    base_sym,
+                    method_name,
+                    ctx,
+                    seen_methods,
+                    seen_classes,
+                    out,
+                );
             }
         }
     }

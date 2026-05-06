@@ -43,7 +43,7 @@
   - name: ruby.path.file_write literal negative
     code: "def example(input, url, id, payload, request, params)\n  File.write(\"tmp/report.txt\", \"ok\")\nend\n"
     expect_no_match: true
-  description: "File.write with tainted path. TODO(only_when_packaged): `file_write` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'write']` match only."
+  description: "File.write with tainted path. `file_write` core class has no canonical ecosystem package, so strict `['File', 'write']` match only."
 - id: ruby.path.file_readlines
   enabled: true
   language: ruby
@@ -66,7 +66,7 @@
   - name: ruby.path.file_readlines literal negative
     code: "def example(input, url, id, payload, request, params)\n  File.readlines(\"config/settings.yml\")\nend\n"
     expect_no_match: true
-  description: "File.readlines. TODO(only_when_packaged): `file_readlines` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'readlines']` match only."
+  description: "File.readlines. `file_readlines` core class has no canonical ecosystem package, so strict `['File', 'readlines']` match only."
 - id: ruby.path.file_delete
   enabled: true
   language: ruby
@@ -89,7 +89,7 @@
   - name: ruby.path.file_delete literal negative
     code: "def example(input, url, id, payload, request, params)\n  File.delete(\"tmp/report.txt\")\nend\n"
     expect_no_match: true
-  description: "File.delete with tainted path. TODO(only_when_packaged): `file_delete` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'delete']` match only."
+  description: "File.delete with tainted path. `file_delete` core class has no canonical ecosystem package, so strict `['File', 'delete']` match only."
 - id: ruby.path.file_unlink
   enabled: true
   language: ruby
@@ -112,7 +112,7 @@
   - name: ruby.path.file_unlink literal negative
     code: "def example(input, url, id, payload, request, params)\n  File.unlink(\"tmp/report.txt\")\nend\n"
     expect_no_match: true
-  description: "File.unlink with tainted path. TODO(only_when_packaged): `file_unlink` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'unlink']` match only."
+  description: "File.unlink with tainted path. `file_unlink` core class has no canonical ecosystem package, so strict `['File', 'unlink']` match only."
 - id: ruby.path.fileutils_rm
   enabled: true
   language: ruby
@@ -396,7 +396,7 @@
   - name: ruby.path.io_binread literal negative
     code: "def example(input, url, id, payload, request, params)\n  IO.binread(\"config/settings.bin\")\nend\n"
     expect_no_match: true
-  description: "IO.binread with tainted path. TODO(only_when_packaged): `io_binread` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['IO', 'binread']` match only."
+  description: "IO.binread with tainted path. `io_binread` core class has no canonical ecosystem package, so strict `['IO', 'binread']` match only."
 - id: ruby.path.io_write
   enabled: true
   language: ruby
@@ -419,7 +419,7 @@
   - name: ruby.path.io_write literal negative
     code: "def example(input, url, id, payload, request, params)\n  IO.write(\"tmp/report.txt\", \"ok\")\nend\n"
     expect_no_match: true
-  description: "IO.write with tainted path. TODO(only_when_packaged): `io_write` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['IO', 'write']` match only."
+  description: "IO.write with tainted path. `io_write` core class has no canonical ecosystem package, so strict `['IO', 'write']` match only."
 - id: ruby.path.io_binwrite
   enabled: true
   language: ruby
@@ -442,7 +442,7 @@
   - name: ruby.path.io_binwrite literal negative
     code: "def example(input, url, id, payload, request, params)\n  IO.binwrite(\"tmp/report.bin\", \"ok\")\nend\n"
     expect_no_match: true
-  description: "IO.binwrite with tainted path. TODO(only_when_packaged): `io_binwrite` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['IO', 'binwrite']` match only."
+  description: "IO.binwrite with tainted path. `io_binwrite` core class has no canonical ecosystem package, so strict `['IO', 'binwrite']` match only."
 - id: ruby.path.dir_mkdir
   enabled: true
   language: ruby
@@ -465,7 +465,7 @@
   - name: ruby.path.dir_mkdir literal negative
     code: "def example(input, url, id, payload, request, params)\n  Dir.mkdir(\"tmp/uploads\")\nend\n"
     expect_no_match: true
-  description: "Dir.mkdir with tainted path. TODO(only_when_packaged): `dir_mkdir` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Dir', 'mkdir']` match only."
+  description: "Dir.mkdir with tainted path. `dir_mkdir` core class has no canonical ecosystem package, so strict `['Dir', 'mkdir']` match only."
 - id: ruby.path.file_rename
   enabled: true
   language: ruby
@@ -488,7 +488,7 @@
   - name: ruby.path.file_rename source literal negative
     code: "def example(input, url, id, payload, request, params)\n  File.rename(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
     expect_no_match: true
-  description: "File.rename(tainted_src, dst) — attacker-controlled source paths can move arbitrary files. TODO(only_when_packaged): `file_rename` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'rename']` match only."
+  description: "File.rename(tainted_src, dst) — attacker-controlled source paths can move arbitrary files. `file_rename` core class has no canonical ecosystem package, so strict `['File', 'rename']` match only."
 - id: ruby.path.file_rename_dest
   enabled: true
   language: ruby
@@ -511,7 +511,7 @@
   - name: ruby.path.file_rename destination literal negative
     code: "def example(input, url, id, payload, request, params)\n  File.rename(\"public/report.txt\", \"tmp/report.txt\")\nend\n"
     expect_no_match: true
-  description: "File.rename(src, tainted_dst) — attacker-controlled destinations can overwrite arbitrary files. TODO(only_when_packaged): `file_rename_dest` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['File', 'rename']` match only."
+  description: "File.rename(src, tainted_dst) — attacker-controlled destinations can overwrite arbitrary files. `file_rename_dest` core class has no canonical ecosystem package, so strict `['File', 'rename']` match only."
 - id: ruby.path.fileutils_mv_alias
   enabled: false
   disabled_reason:
@@ -564,7 +564,7 @@
     kind: call
     callee:
       name: join
-  description: "Disabled — bare `name: join` tail-matches Array#join / String#join everywhere; enable only with receiver-type narrowing for Pathname#join."
+  description: "Disabled — bare `name: join` matches Array#join / String#join everywhere; enable only with receiver-type narrowing for Pathname#join."
 - id: ruby.path.fileutils_mkdir_p
   enabled: true
   language: ruby

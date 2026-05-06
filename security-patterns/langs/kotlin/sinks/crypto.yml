@@ -97,7 +97,7 @@
   match_examples:
   - name: generated shape example
     code: "class App {\n  fun handle(input: String) {\n    Math.random(input)\n  }\n}\n"
-  description: "TODO(only-when-packaged): java.lang.Math is auto-imported in Kotlin/JVM — Math.random() — non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
+  description: "java.lang.Math.random() — non-cryptographic PRNG (predictable after a few samples); use SecureRandom for secrets / tokens."
 - id: kotlin.crypto.bouncycastle_des
   enabled: true
   language: kotlin

@@ -3,6 +3,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: solidity.tx.origin
   language: solidity
   tag: access-control
   severity: high

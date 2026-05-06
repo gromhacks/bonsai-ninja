@@ -522,7 +522,8 @@ fn call_as_assignment_source(call: &FlowEvent) -> (String, Vec<String>, Vec<Stri
         source_names.push(receiver.clone());
     }
     source_names.push(name.clone());
-    // Split `obj.method` into both halves so name-based matching catches either form.
+    // Split `obj.method` into receiver and method operands so assignment
+    // taint has structured source tokens for both sides of the call.
     if let Some((receiver_half, method_half)) = name.rsplit_once('.') {
         source_names.push(receiver_half.to_string());
         source_names.push(method_half.to_string());

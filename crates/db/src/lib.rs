@@ -271,6 +271,7 @@ impl AnalyzerDb {
                 gi.insert((*idx).clone());
             }
         }
+        gi.finalize_semantic_facts();
         let arc = Arc::new(gi);
         let mut cache = self.inner.cache.write();
         // Re-check under the write lock so a peer thread that beat

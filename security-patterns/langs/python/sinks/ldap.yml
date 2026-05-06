@@ -33,9 +33,7 @@
   description: "ldap3 Connection.search(search_base, search_filter) — the second argument is an LDAP filter; string interpolation is injectable."
 
 - id: python.ldap.ldap3_connection_search_method
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: python
   tag: ldap-injection
   severity: high
@@ -45,8 +43,25 @@
   match:
     kind: call
     callee:
-      attribute: [conn, search]
-  description: "Disabled — subsumed by python.ldap.ldap3_search (`[Connection, search]`) under OnlyWhenPackaged lax-tail policy. When a file imports `ldap3`, the canonical PascalCase rule lax-matches `conn.search(...)` directly."
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.search$"
+  constraints:
+  - arg_tainted:
+      index: 1
+  match_examples:
+  - name: ldap3 variable connection search filter
+    code: |
+      import ldap3
+      def example(conn, user_input):
+          filt = "(uid=" + user_input + ")"
+          return conn.search("dc=example,dc=com", filt)
+    expect_match_text: [conn.search]
+  - name: ldap3 variable connection search literal negative
+    code: |
+      import ldap3
+      def example(conn):
+          return conn.search("dc=example,dc=com", "(uid=safe)")
+    expect_no_match: true
+  description: "ldap3 variable receiver .search(search_base, search_filter) — the second argument is an LDAP filter."
 
 - id: python.ldap.ldap3_modify
   enabled: true

@@ -36,8 +36,8 @@ fn default_config_carries_zero_embedded_library_knowledge() {
         "default callback_invocation_methods must be empty; adapters / rulepack supply method tails",
     );
     assert!(
-        config.collection_append_methods.is_empty(),
-        "default collection_append_methods must be empty; adapters / rulepack supply mutator names",
+        config.receiver_state_propagations.is_empty(),
+        "default receiver_state_propagations must be empty; rulepack taint_semantics supplies receiver mutator shapes",
     );
 }
 

@@ -200,23 +200,24 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request$"
+      regex: "^GraphQLClient\\.request$"
   constraints:
-  - receiver_name_in: [client, gqlClient, graphqlClient]
   - arg_tainted:
       index: 0
   match_examples:
   - name: graphql-request client request tainted
     code: |
-      const _u = require("graphql-request");
-      function demo(client: any, input: string) {
+      const { GraphQLClient } = require("graphql-request");
+      function demo(input: string) {
+        const client = new GraphQLClient("/graphql");
         return client.request(input);
       }
     expect_match_text: [client.request]
   - name: graphql-request client request literal negative
     code: |
-      const _u = require("graphql-request");
-      function demo(client: any) {
+      const { GraphQLClient } = require("graphql-request");
+      function demo() {
+        const client = new GraphQLClient("/graphql");
         return client.request("{ viewer { id } }");
       }
     expect_no_match: true
@@ -240,24 +241,25 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query$"
+      regex: "^ApolloClient\\.query$"
   constraints:
-  - receiver_name_in: [client, apolloClient, graphqlClient]
   - arg_tainted:
       index: 0
   match_examples:
   - name: apollo client query tainted
     code: |
-      const _u = require("@apollo/client");
-      function demo(client: any, input: any) {
+      const { ApolloClient } = require("@apollo/client");
+      function demo(input: any) {
+        const client = new ApolloClient({});
         return client.query({ query: input });
       }
     expect_match_text: [client.query]
   - name: apollo client query literal negative
     code: |
-      const _u = require("@apollo/client");
+      const { ApolloClient } = require("@apollo/client");
       const SAFE = "{ viewer { id } }";
-      function demo(client: any) {
+      function demo() {
+        const client = new ApolloClient({});
         return client.query({ query: SAFE });
       }
     expect_no_match: true

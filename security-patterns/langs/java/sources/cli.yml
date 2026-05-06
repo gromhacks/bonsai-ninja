@@ -65,14 +65,13 @@
   match:
     kind: call
     callee:
-      name: readLine
-  constraints:
-  - receiver_name_in: [console, con, sysConsole]
+      attribute: [Console, readLine]
   match_examples:
     - name: Console readLine
       code: |
+        import java.io.*;
         class App {
-          void handle() throws Exception {
+          void handle(Console console) throws Exception {
             console.readLine();
           }
         }
@@ -87,14 +86,13 @@
   match:
     kind: call
     callee:
-      name: readPassword
-  constraints:
-  - receiver_name_in: [console, con, sysConsole]
+      attribute: [Console, readPassword]
   match_examples:
     - name: Console readPassword
       code: |
+        import java.io.*;
         class App {
-          void handle() throws Exception {
+          void handle(Console console) throws Exception {
             console.readPassword();
           }
         }
@@ -109,14 +107,13 @@
   match:
     kind: call
     callee:
-      name: nextLine
-  constraints:
-  - receiver_name_in: [scanner, sc, inputScanner, stdinScanner]
+      attribute: [Scanner, nextLine]
   match_examples:
     - name: Scanner nextLine
       code: |
+        import java.util.*;
         class App {
-          void handle() throws Exception {
+          void handle(Scanner scanner) throws Exception {
             scanner.nextLine();
           }
         }
@@ -131,14 +128,13 @@
   match:
     kind: call
     callee:
-      name: next
-  constraints:
-  - receiver_name_in: [scanner, sc, inputScanner, stdinScanner]
+      attribute: [Scanner, next]
   match_examples:
     - name: Scanner next
       code: |
+        import java.util.*;
         class App {
-          void handle() throws Exception {
+          void handle(Scanner scanner) throws Exception {
             scanner.next();
           }
         }
