@@ -5,7 +5,21 @@ description: "Run bonsai-ninja in GitHub Actions, GitLab CI, and CircleCI."
 
 # CI Integration
 
-Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts.
+Use release binaries or a cached Rust build. In CI, pass `--no-color --no-progress` for clean logs and `--format json` or `--format sarif` for artifacts. Run `index` first when you want the sidecar warmed as a separate CI step; otherwise scan commands will open the workspace and use the same cache lazily.
+
+## GitHub Release Artifacts
+
+Repository releases are built from `v*.*.*` tags by `.github/workflows/release.yml`. The workflow builds Linux x64, Linux arm64, macOS Intel, macOS Apple Silicon, Windows x64, and Windows arm64 archives, includes `security-patterns/`, `docs/`, `README.md`, `AGENTS.md`, `SKILLS.md`, and checksum files, then publishes them with `softprops/action-gh-release`.
+
+```bash
+curl -L -o bonsai.tar.gz \
+  https://github.com/gromhacks/bonsai-ninja/releases/download/v0.1.0/bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz
+curl -L -o bonsai.tar.gz.sha256 \
+  https://github.com/gromhacks/bonsai-ninja/releases/download/v0.1.0/bonsai-ninja-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c bonsai.tar.gz.sha256
+tar -xzf bonsai.tar.gz
+./bonsai-ninja-x86_64-unknown-linux-gnu/bonsai-ninja --version
+```
 
 ## GitHub Actions
 
@@ -27,6 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p bonsai_cli --locked
+      - run: ./target/release/bonsai-ninja index . --no-color --no-progress
       - run: |
           ./target/release/bonsai-ninja security . taint-analysis \
             --rules-dir security-patterns \
@@ -53,13 +68,15 @@ bonsai_security:
   stage: security
   script:
     - cargo build --release -p bonsai_cli --locked
-    - ./target/release/bonsai-ninja security . taint-analysis
-        --rules-dir security-patterns
-        --format json
-        --all
-        --no-color
-        --no-progress
-        > bonsai-findings.json
+    - ./target/release/bonsai-ninja index . --no-color --no-progress
+    - |
+        ./target/release/bonsai-ninja security . taint-analysis \
+          --rules-dir security-patterns \
+          --format json \
+          --all \
+          --no-color \
+          --no-progress \
+          > bonsai-findings.json
   artifacts:
     when: always
     paths:
@@ -78,6 +95,7 @@ jobs:
     steps:
       - checkout
       - run: cargo build --release -p bonsai_cli --locked
+      - run: ./target/release/bonsai-ninja index . --no-color --no-progress
       - run: |
           ./target/release/bonsai-ninja security . taint-analysis \
             --rules-dir security-patterns \

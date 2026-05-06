@@ -218,10 +218,18 @@ pub(crate) enum Cmd {
                       the persisted dataflow sidecar (`.bonsai/dataflow.v2.bin`) \
                       for missing or changed function facts. Later browse, \
                       inspect, trace, security, export, and debug commands \
-                      load that sidecar and compute only misses lazily."),
+                      load that sidecar and compute only misses lazily.\n\
+                      \n\
+                      Pass `--watch` to keep the process alive as a workflow \
+                      tool: bonsai polls the source tree, hot-reloads saved \
+                      changes into the live workspace, prewarms only missing \
+                      or invalidated dataflow facts, and rewrites the sidecar."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Sanity-check a workspace\n  \
                       $ bonsai-ninja index ./src\n  \
+                      \n  \
+                      # Keep the index warm while editing\n  \
+                      $ bonsai-ninja index ./src --watch\n  \
                       \n  \
                       # Force a fresh taint sidecar before measuring\n  \
                       $ bonsai-ninja cache clear ./src --dataflow-only\n  \
@@ -230,6 +238,12 @@ pub(crate) enum Cmd {
     Index {
         /// Workspace root to analyze.
         workspace: PathBuf,
+        /// Keep running and refresh the live index when files change on disk.
+        #[arg(long)]
+        watch: bool,
+        /// Poll interval for `--watch`, in milliseconds.
+        #[arg(long = "interval-ms", default_value_t = 750)]
+        interval_ms: u64,
     },
 
     /// Cross-module execution trace from a function (headline feature).

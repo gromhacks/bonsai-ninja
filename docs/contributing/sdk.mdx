@@ -21,35 +21,37 @@ no need to depend on lower crates directly.
 ## Quickstart
 
 ```rust
-use bonsai_sdk::Bonsai;
+use bonsai_sdk::{Bonsai, InspectQuery, NativeExportOptions, TaintAnalysisOptions};
 
 fn main() -> anyhow::Result<()> {
     let project = Bonsai::new()
         .with_rulepack("./security-patterns")?
         .index("./my-app")?;
 
-    // Security taint analysis
-    let report = project.security().taint_analysis().run()?;
-    for finding in report.findings() {
+    let report = project.security().taint_analysis(TaintAnalysisOptions::default())?;
+    for finding in report.findings {
         println!("{}: {} → {} ({})",
                  finding.finding_id,
                  finding.source.rule_id,
                  finding.sink.rule_id,
-                 finding.severity);
+                 finding.precision);
     }
 
-    // Inspect chains to a target
-    let chains = project.inspect()
-        .target("os.system")?
-        .from("request.args")
-        .enumerate()?;
-    for chain in chains {
-        println!("{} hops: {:?}", chain.depth, chain.steps);
-    }
+    let chains = project.inspect().chains(InspectQuery {
+        pattern: Some("os.system"),
+        ..Default::default()
+    })?;
+
+    let exported = project.export().native_json(NativeExportOptions::default())?;
 
     Ok(())
 }
 ```
+
+Long-lived `Project` handles refresh from disk before command facades run.
+Saved file changes update the live workspace in place; new or deleted
+files invalidate the affected cache state and rewrite the dataflow
+sidecar when needed.
 
 ---
 
@@ -76,7 +78,7 @@ let bonsai = Bonsai::new()
 | `.open_query(root)` | Load sidecar, compute misses lazily |
 | `.open_with_options(root, opts)` | Explicit sidecar / prewarm control |
 | `.open_with_options_and_progress(root, opts, cb)` | Same plus progress callbacks |
-| `.cache(root)` | Rootless cache handle (clear, stats, warm) |
+| `.cache(root)` | Rootless cache handle (clear, stats, default export cache) |
 | `.security_pack()` | Direct rulepack access |
 
 ### `Project` — analysis facade
@@ -84,13 +86,12 @@ let bonsai = Bonsai::new()
 ```rust
 let project = bonsai.index("./my-app")?;
 
-// All analyses are method calls on Project
-let security_report = project.security().taint_analysis().run()?;
-let chains = project.inspect().target("sink").enumerate()?;
-let trace = project.trace().from("main").run()?;
-let source_flows = project.source_analysis().run()?;
-let taint_result = project.taint_analysis().run()?;
-let exported = project.export().native_json();
+let refresh = project.refresh_from_disk()?;
+let security_report = project.security().taint_analysis(Default::default())?;
+let chains = project.inspect().chains(Default::default())?;
+let trace = project.trace().from("main")?;
+let source_flows = project.security().source_analysis(Default::default())?;
+let exported = project.export().native_json(Default::default())?;
 ```
 
 ### Workspace open events
@@ -123,69 +124,45 @@ let project = Bonsai::new()
 ```rust
 let pack = bonsai.security_pack()?;
 
-// Taint analysis (source → sink findings)
-let report = project.security().taint_analysis()
-    .severity_at_least("high")
-    .exclude_tests(true)
-    .inferred_sources(false)
-    .run()?;
+let report = project.security().taint_analysis(Default::default())?;
+let source_report = project.security().source_analysis(Default::default())?;
+let sources = project.security().sources(Default::default())?;
+let sinks = project.security().sinks(Default::default())?;
 
-for finding in report.findings() {
-    // ...
-}
-
-// Render SARIF
-let sarif = bonsai_sdk::render_sarif_json(&report);
-
-// Source analysis (downstream flows from sources)
-let source_report = project.source_analysis()
-    .trust("remote")
-    .run()?;
-
-// Pack inventory / audit / validate
-let inventory = pack.inventory();
-let audit = pack.audit_against(project.workspace());
-let validation = pack.validate();
+let inventory = pack.inventory(Default::default())?;
+let audit = pack.audit(None)?;
+let validation = pack.validate(Default::default())?;
 ```
 
 ### Inspect
 
 ```rust
-let chains = project.inspect()
-    .target("os.system")?
-    .from("request.args")
-    .to_kind("call")
-    .max_depth(20)
-    .max_paths(100)
-    .enumerate()?;
+let chains = project.inspect().chains(bonsai_sdk::InspectQuery {
+    pattern: Some("os.system"),
+    regex: false,
+    max_chains: 100,
+    max_probes: 10_000,
+})?;
 ```
 
 ### Trace
 
 ```rust
-let trace = project.trace()
-    .from("main")
-    .max_steps(10_000)
-    .max_call_depth(50)
-    .run()?;
-
-// Render
-let json = bonsai_sdk::render_trace_json(&trace);
-let text = bonsai_sdk::render_trace_text(&trace);
-let dot = bonsai_sdk::render_trace_dot(&trace);
+let trace = project.trace().from("main")?;
+let json = project.trace().to_json(&trace)?;
+let text = project.trace().to_text(&trace);
+let dot = project.trace().to_dot(&trace);
 ```
 
 ### Browse
 
 ```rust
-use bonsai_sdk::browse;
-
-let defs = browse::defs(project.workspace(), &filters);
-let calls = browse::calls(project.workspace(), &filters);
-let imports = browse::imports(project.workspace(), &filters);
-let refs = browse::refs(project.workspace(), &filters);
-let strings = browse::strings(project.workspace(), &filters);
-let classes = browse::classes(project.workspace(), &filters);
+let defs = project.browse().defs(Default::default())?;
+let calls = project.browse().calls(Default::default())?;
+let imports = project.browse().imports(Default::default())?;
+let refs = project.browse().refs("symbol", Default::default())?;
+let strings = project.browse().strings(Default::default())?;
+let classes = project.browse().classes(Default::default())?;
 ```
 
 Each function takes a workspace + filter struct, returns a `Vec<*Out>` of
@@ -194,25 +171,25 @@ stable-shaped browse results.
 ### Dump (debugging / IR introspection)
 
 ```rust
-let hir = browse::dump_hir(project.workspace(), func_id);
-let cfg = browse::dump_cfg(project.workspace(), func_id);
-let callgraph = browse::dump_callgraph(project.workspace(), &query);
-let ast = browse::dump_ast(project.workspace(), file_id, &filters);
-let resolve = browse::dump_resolve(project.workspace(), func_id);
-let edges = browse::dump_edges(project.workspace(), &filters);
-let taint = browse::dump_taint(project.workspace(), &filters);
+let hir = project.dump().hir("handle_request");
+let cfg = project.dump().cfg("handle_request");
+let callgraph = project.dump().callgraph();
+let ast = project.dump().ast(Default::default());
+let resolve = project.dump().resolve("handle_request", Default::default());
+let edges = project.dump().edges(Default::default());
+let taint = project.dump().taint(bonsai_sdk::TaintFilters {
+    source: "handle_request",
+    ..Default::default()
+});
 ```
 
 ### Export
 
 ```rust
-// Complete workspace as JSON
-let json = project.export().native_json();
-
-// Graph projections
-let networkx = project.export().networkx_json();
-let graphml = project.export().graphml();
-let cypher = project.export().cypher();
+let json = project.export().native_json(Default::default())?;
+let networkx = project.export().networkx_json()?;
+let graphml = project.export().graphml()?;
+let cypher = project.export().cypher()?;
 ```
 
 ---
@@ -221,9 +198,9 @@ let cypher = project.export().cypher();
 
 ```rust
 let cache = bonsai.cache("./my-app");
-cache.stats(); // sidecar size, prewarm count
-cache.clear()?;
-cache.warm()?; // prewarm dataflow without retaining the project
+let stats = cache.stats()?;
+cache.clear_dataflow_only()?;
+cache.clear_all()?;
 ```
 
 ---

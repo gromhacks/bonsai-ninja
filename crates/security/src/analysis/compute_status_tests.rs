@@ -547,6 +547,48 @@ fn rule_match_with_text_and_span(match_text: &str, start: u32, end: u32) -> Rule
 }
 
 #[test]
+fn nested_sanitizer_inside_tainted_sink_arg_is_dataflow_connected() {
+    let san = rule_match_with_text_and_span("uri_string:quote", 120, 136);
+    let sink_tainted_args = [TaintedArgInfo {
+        index: 0,
+        value_text: "[\"ping \", uri_string:quote(Input)]".to_string(),
+    }];
+
+    assert!(sanitizer_is_nested_in_tainted_sink_arg(&san, &sink_tainted_args));
+}
+
+#[test]
+fn nested_sanitizer_inside_sink_arg_can_attach_after_sink_callee_token() {
+    let src = RuleMatch {
+        match_text: "Input".to_string(),
+        line: 1,
+        column: 1,
+        span: Span::new(bonsai_common::FileId::new(1), 0, 5),
+        ..rule_match_with_text_and_span("Input", 0, 5)
+    };
+    let snk = RuleMatch {
+        match_text: "os:cmd".to_string(),
+        line: 3,
+        column: 5,
+        span: Span::new(bonsai_common::FileId::new(1), 100, 106),
+        ..rule_match_with_text_and_span("os:cmd", 100, 106)
+    };
+    let san = RuleMatch {
+        match_text: "uri_string:quote".to_string(),
+        line: 3,
+        column: 20,
+        span: Span::new(bonsai_common::FileId::new(1), 120, 136),
+        ..rule_match_with_text_and_span("uri_string:quote", 120, 136)
+    };
+    let sink_tainted_args = [TaintedArgInfo {
+        index: 0,
+        value_text: "[\"ping \", uri_string:quote(Input)]".to_string(),
+    }];
+
+    assert!(sanitizer_can_attach(&src, &san, &snk, &sink_tainted_args));
+}
+
+#[test]
 fn group_id_hashes_shared_tail_not_full_flow_chain() {
     let first = vec!["entry_a".to_string(), "service".to_string(), "sink".to_string()];
     let second = vec!["entry_b".to_string(), "service".to_string(), "sink".to_string()];

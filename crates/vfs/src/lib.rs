@@ -58,7 +58,7 @@ pub struct Vfs {
 #[derive(Debug, Default)]
 struct Inner {
     by_path: AHashMap<PathBuf, FileId>,
-    files: Vec<FileSnapshot>,
+    files: Vec<Option<FileSnapshot>>,
     edits_since: Vec<Vec<TextEdit>>,
 }
 
@@ -83,13 +83,15 @@ impl Vfs {
         let lookup_key = canonical_path_key(&path);
         let mut inner = self.inner.write();
         if let Some(&id) = inner.by_path.get(&lookup_key) {
-            let old = inner.files[id.raw() as usize].clone();
-            inner.files[id.raw() as usize] = FileSnapshot {
+            let old = inner.files[id.raw() as usize]
+                .clone()
+                .expect("path table pointed at removed file");
+            inner.files[id.raw() as usize] = Some(FileSnapshot {
                 file_id: id,
                 path: old.path,
                 text,
                 version: old.version + 1,
-            };
+            });
             return id;
         }
         // INTENTIONAL: panic at the structural u32 boundary. `FileId`
@@ -107,10 +109,27 @@ impl Vfs {
             text,
             version: 0,
         };
-        inner.files.push(snapshot);
+        inner.files.push(Some(snapshot));
         inner.edits_since.push(Vec::new());
         inner.by_path.insert(lookup_key, id);
         id
+    }
+
+    /// Remove a file from the intern table. Existing `FileId`s are
+    /// tombstoned rather than compacted so stale IDs cannot point at a
+    /// different file after a delete/re-add cycle.
+    pub fn remove(&self, path: &Path) -> Option<FileId> {
+        let lookup_key = canonical_path_key(path);
+        let mut inner = self.inner.write();
+        let id = inner.by_path.remove(&lookup_key)?;
+        let idx = id.raw() as usize;
+        if let Some(slot) = inner.files.get_mut(idx) {
+            *slot = None;
+        }
+        if let Some(edits) = inner.edits_since.get_mut(idx) {
+            edits.clear();
+        }
+        Some(id)
     }
 
     /// Apply an already-computed set of text edits to a file (LSP path).
@@ -133,6 +152,7 @@ impl Vfs {
         let prev = inner
             .files
             .get(idx)
+            .and_then(Option::as_ref)
             .cloned()
             .ok_or(VfsError::UnknownFile(file_id))?;
         // Install the new snapshot first; only then push the edit
@@ -141,12 +161,12 @@ impl Vfs {
         // construction and write), this order ensures we never end
         // up with a half-applied state where `edits_since[idx]`
         // contains edits that aren't yet reflected in `files[idx]`.
-        inner.files[idx] = FileSnapshot {
+        inner.files[idx] = Some(FileSnapshot {
             file_id,
             path: prev.path,
             text: new_text.into(),
             version: prev.version + 1,
-        };
+        });
         inner.edits_since[idx].extend(edits);
         Ok(file_id)
     }
@@ -158,6 +178,7 @@ impl Vfs {
             .read()
             .files
             .get(file.raw() as usize)
+            .and_then(Option::as_ref)
             .cloned()
             .ok_or(VfsError::UnknownFile(file))
     }
@@ -177,7 +198,7 @@ impl Vfs {
     pub fn take_edits(&self, file: FileId) -> Result<Vec<TextEdit>, VfsError> {
         let mut inner = self.inner.write();
         let idx = file.raw() as usize;
-        if idx >= inner.files.len() {
+        if idx >= inner.files.len() || inner.files[idx].is_none() {
             return Err(VfsError::UnknownFile(file));
         }
         Ok(std::mem::take(&mut inner.edits_since[idx]))
@@ -187,13 +208,23 @@ impl Vfs {
     /// order, which is determined by the workspace's deterministic
     /// ingest sort (see `Workspace::ingest_dir`).
     pub fn all_files(&self) -> Vec<FileId> {
-        self.inner.read().files.iter().map(|snap| snap.file_id).collect()
+        self.inner
+            .read()
+            .files
+            .iter()
+            .filter_map(|snap| snap.as_ref().map(|snap| snap.file_id))
+            .collect()
     }
 
     /// Number of interned files.
     #[must_use]
     pub fn file_count(&self) -> usize {
-        self.inner.read().files.len()
+        self.inner
+            .read()
+            .files
+            .iter()
+            .filter(|snap| snap.is_some())
+            .count()
     }
 }
 
@@ -325,6 +356,21 @@ mod tests {
         assert_eq!(vfs.snapshot(a).unwrap().version, 1);
         let c = vfs.write("b.rs", "fn other() {}");
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn remove_tombstones_file_without_reusing_id() {
+        let vfs = Vfs::new();
+        let a = vfs.write("a.rs", "fn main() {}");
+        assert_eq!(vfs.remove(Path::new("a.rs")), Some(a));
+        assert!(vfs.lookup(Path::new("a.rs")).is_none());
+        assert!(matches!(vfs.snapshot(a), Err(VfsError::UnknownFile(_))));
+        assert!(vfs.all_files().is_empty());
+        assert_eq!(vfs.file_count(), 0);
+
+        let b = vfs.write("a.rs", "fn main() { 1 }");
+        assert_ne!(a, b, "deleted FileIds must not be reused");
+        assert_eq!(vfs.file_count(), 1);
     }
 
     #[test]

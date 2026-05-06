@@ -7,6 +7,27 @@ description: "Command and flag reference for security analysis, flow inspection,
 
 Global options accepted before the command include `--no-color`, `--theme`, `--no-cache`, `--no-progress`, `--parse-timeout`, `--help`, and `--version`.
 
+## index
+
+`index` parses a workspace, builds the reusable dataflow sidecar, and prints workspace stats as JSON.
+
+```bash
+bonsai-ninja index ./src
+bonsai-ninja index ./src --watch
+```
+
+| Flag | Default | Description |
+|---|---:|---|
+| `<WORKSPACE>` | Required | Workspace root to analyze. |
+| `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and rewrite `.bonsai/dataflow.v2.bin`. |
+| `--interval-ms <N>` | 750 | Poll interval for `--watch`. Values below 100 ms are clamped to 100 ms. |
+
+Normal `index` runs are already incremental across processes: the command
+loads `.bonsai/dataflow.v2.bin`, validates cached entries by source
+content and dependency hashes, computes only missing or stale dataflow
+facts, and writes the sidecar back. `--watch` keeps the same workspace
+alive so saved file edits reparse only changed files.
+
 ## security
 
 `security` is the rulepack-driven command family. It takes a workspace and a subcommand.
@@ -186,4 +207,4 @@ without requiring a sink rule.
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every source flow. |
 | `--no-compact` | false | Expand every flow body. |
-| `--format <FORMAT>` | text | `text` or `json`. `sarif` is rejected because source-analysis is not finding output. |
+| `--format <FORMAT>` | text | `text`, `json`, or `sarif`. |

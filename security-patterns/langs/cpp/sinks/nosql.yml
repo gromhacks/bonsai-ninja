@@ -232,25 +232,27 @@
     callee:
       name: redisCommand
   constraints:
-  - arg_tainted:
+  - arg_matches_regex:
       index: 1
+      regex: '(?i)^"EVAL\b'
+  - arg_tainted:
+      index: 2
   match_examples:
-  - name: generated direct match
+  - name: tainted redis eval script
     code: |
       #include <hiredis/hiredis.h>
-      void example() {
+      void example(redisContext *ctx) {
         const char *arg = "tainted";
-        const char *fmt = arg;
-        const char *query = arg;
-        redisCommand(arg, "EVAL %s");
+        redisCommand(ctx, "EVAL %s 0", arg);
       }
   - name: literal arg 1 negative
     code: |
-      void example() {
-        redisCommand("safe", "safe");
+      #include <hiredis/hiredis.h>
+      void example(redisContext *ctx) {
+        redisCommand(ctx, "GET %s", "safe");
       }
     expect_no_match: true
-  description: "hiredis redisCommand(\"EVAL %s\", tainted) — Redis Lua injection."
+  description: "hiredis redisCommand(ctx, \"EVAL ...\", taintedScript) — Redis Lua injection."
 
 - id: cpp.nosql.hiredis_command_generic
   enabled: true

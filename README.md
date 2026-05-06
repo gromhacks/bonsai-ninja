@@ -57,6 +57,12 @@ There is no CI database build step and no code upload. The release binary
 operates on your source tree and writes local cache state only when that
 helps performance.
 
+`bonsai-ninja index` is incremental: it reuses `.bonsai/dataflow.v2.bin`
+across runs, validates cached facts by source-content hashes and
+dependency hashes, and recomputes only stale entries. For editor and
+agent workflows, `bonsai-ninja index --watch` stays running and
+hot-reloads saved file changes into the live workspace.
+
 ## Human-First And LLM-First
 
 Most code tooling and most LLM coding workflows still force a model to
@@ -171,6 +177,9 @@ The binary is statically linked aside from the system C library.
 # Index a project
 ./target/release/bonsai-ninja index ./my-app
 
+# Keep the index hot while editing
+./target/release/bonsai-ninja index ./my-app --watch
+
 # Map the tree
 ./target/release/bonsai-ninja tree ./my-app --max-depth 3
 
@@ -249,8 +258,8 @@ let project = Bonsai::new()
     .with_rulepack("./security-patterns")?
     .index("./my-app")?;
 
-let report = project.security().taint_analysis().run()?;
-for finding in report.findings() {
+let report = project.security().taint_analysis(Default::default())?;
+for finding in report.findings {
     println!(
         "{}: {} -> {}",
         finding.finding_id,
@@ -259,6 +268,9 @@ for finding in report.findings() {
     );
 }
 ```
+
+Long-lived SDK projects refresh from disk before command facades run, so
+embedded tools see saved file changes without reopening the whole project.
 
 Full API notes live in [docs/contributing/sdk.mdx](docs/contributing/sdk.mdx).
 

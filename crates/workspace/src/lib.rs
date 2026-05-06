@@ -19,6 +19,7 @@ use bonsai_abstract_interp::TraceLimits;
 use bonsai_common::{FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
+use bonsai_hash::fnv1a_bytes64;
 use bonsai_lang_api::{Decl, DeclKind, LanguageRegistry};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
 use bonsai_vfs::Vfs;
@@ -82,6 +83,26 @@ pub struct WorkspaceStats {
     pub cached_decl_indexes: usize,
     pub cached_cfgs: usize,
     pub reparsed_files: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceFileFingerprint {
+    pub path: std::path::PathBuf,
+    pub hash: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum FileRefreshKind {
+    Added,
+    Modified,
+    Unchanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FileRefresh {
+    pub file: FileId,
+    pub path: std::path::PathBuf,
+    pub kind: FileRefreshKind,
 }
 
 /// Controls how [`Workspace::open_with_options`] interacts with the
@@ -336,78 +357,14 @@ impl Workspace {
 
     pub fn ingest_dir(&self, root: &Path) -> Result<Vec<FileId>, WorkspaceError> {
         *self.inner.root_label.lock() = root.display().to_string();
-        // Canonicalize once and use the absolute path for both the
-        // workspace_root and the walker so adapters and downstream
-        // FileIds stay deterministic regardless of the caller's CWD.
-        // Falls back to `cwd.join(root)` when canonicalize fails
-        // (e.g., the path doesn't exist yet), then to the literal
-        // path. See docs/contributing/design-patterns.mdx::Stable IDs From Content.
-        let canonical_root = root
-            .canonicalize()
-            .ok()
-            .or_else(|| {
-                if root.is_absolute() {
-                    Some(root.to_path_buf())
-                } else {
-                    std::env::current_dir().ok().map(|cwd| cwd.join(root))
-                }
-            })
-            .unwrap_or_else(|| root.to_path_buf());
+        let canonical_root = canonical_workspace_root(root);
         self.inner.db.set_workspace_root(canonical_root.clone());
-        let include_minified = std::env::var("BONSAI_INCLUDE_MINIFIED")
-            .ok()
-            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         let mut ingested = Vec::new();
-        let mut skipped_minified = 0usize;
-        // The ignore walker follows .gitignore / .ignore /
-        // .bonsaiignore but still walks in OS-native order, so a fresh ingest can
-        // assign different `FileId`s to the same paths across runs
-        // (or across machines with the same content). That breaks
-        // Stable-IDs-From-Content for every downstream artifact
-        // keyed on `FileId` — sidecar bytes, native_export JSON's
-        // files/callgraph/functions, and every `symbol_id`/`func_id`.
-        // Sort by path so allocation is deterministic.
-        let mut builder = ignore::WalkBuilder::new(&canonical_root);
-        builder
-            .follow_links(false)
-            .hidden(false)
-            .git_ignore(true)
-            .git_exclude(true)
-            .git_global(true)
-            .parents(true)
-            .ignore(true)
-            .add_custom_ignore_filename(".bonsaiignore");
-        builder.filter_entry(move |entry| include_minified || !path_looks_minified(entry.path()));
-        let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
-        entries.sort_by(|a, b| a.path().cmp(b.path()));
-        for entry in entries {
-            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
-                continue;
-            }
-            let path = entry.path();
-            let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if self.inner.registry.adapter_for_extension(ext).is_none() {
-                continue;
-            }
-            if !include_minified && path_looks_minified(path) {
-                tracing::debug!(path = %path.display(), "skipping minified file (filename)");
-                skipped_minified += 1;
-                continue;
-            }
-            let text = match std::fs::read_to_string(path) {
-                Ok(t) => t,
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::InvalidData) => continue,
-                Err(e) => return Err(WorkspaceError::Io(e)),
-            };
-            if !include_minified && content_looks_minified(&text) {
-                tracing::debug!(path = %path.display(), "skipping minified file (content)");
-                skipped_minified += 1;
-                continue;
-            }
+        let (files, skipped_minified) = read_supported_source_files(&canonical_root, &self.inner.registry)?;
+        for source in files {
+            let path = &source.path;
             let old_id = self.inner.vfs.lookup(path);
-            let id = self.inner.vfs.write(path.to_path_buf(), Arc::<str>::from(text));
+            let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
             if let Some(prev) = old_id {
                 self.inner.db.invalidate_file(prev);
                 self.inner.dataflow.invalidate_file(prev);
@@ -423,6 +380,89 @@ impl Workspace {
             );
         }
         Ok(ingested)
+    }
+
+    /// Current supported source files under `root`, with stable
+    /// content hashes. Long-lived frontends use this to detect
+    /// save-time changes without reparsing every unchanged file.
+    pub fn source_file_fingerprints(
+        &self,
+        root: &Path,
+    ) -> Result<Vec<SourceFileFingerprint>, WorkspaceError> {
+        let canonical_root = canonical_workspace_root(root);
+        let (files, _) = read_supported_source_files(&canonical_root, &self.inner.registry)?;
+        Ok(files
+            .into_iter()
+            .map(|file| SourceFileFingerprint {
+                path: file.path,
+                hash: file.hash,
+            })
+            .collect())
+    }
+
+    /// Refresh one on-disk source file in place. Parser, decl/import,
+    /// CFG, flow-id, and dataflow caches are invalidated only for the
+    /// edited file and its known dataflow dependents. New files clear
+    /// the dataflow cache because they can introduce new resolution
+    /// candidates for calls in previously indexed files.
+    pub fn refresh_file_from_disk(&self, path: &Path) -> Result<FileRefresh, WorkspaceError> {
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            return Err(WorkspaceError::NoAdapter(path.display().to_string()));
+        };
+        if self.inner.registry.adapter_for_extension(ext).is_none() {
+            return Err(WorkspaceError::NoAdapter(ext.to_string()));
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(WorkspaceError::Io(error));
+            }
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        };
+        let old_id = self.inner.vfs.lookup(path);
+        if let Some(file) = old_id {
+            if self
+                .inner
+                .vfs
+                .snapshot(file)
+                .ok()
+                .is_some_and(|snapshot| snapshot.text.as_ref() == text)
+            {
+                return Ok(FileRefresh {
+                    file,
+                    path: path.to_path_buf(),
+                    kind: FileRefreshKind::Unchanged,
+                });
+            }
+        }
+        let kind = if old_id.is_some() {
+            FileRefreshKind::Modified
+        } else {
+            FileRefreshKind::Added
+        };
+        let id = self.apply_edit(path, text);
+        let _ = self.inner.db.decl_index(id);
+        let _ = self.inner.db.import_index(id);
+        if matches!(kind, FileRefreshKind::Added) {
+            self.inner.dataflow.clear();
+            self.inner.flow_ids.invalidate_all();
+        }
+        Ok(FileRefresh {
+            file: id,
+            path: path.to_path_buf(),
+            kind,
+        })
+    }
+
+    /// Remove one file from the live workspace. Used by watch/SDK
+    /// refresh paths after an on-disk delete.
+    pub fn remove_file_from_index(&self, path: &Path) -> Option<FileId> {
+        let file = self.inner.vfs.remove(path)?;
+        self.inner.db.invalidate_file(file);
+        self.inner.dataflow.invalidate_file(file);
+        self.inner.flow_ids.invalidate_all();
+        *self.inner.reparse_counter.lock() += 1;
+        Some(file)
     }
 
     /// Apply an in-memory edit to a workspace file and surgically
@@ -443,6 +483,9 @@ impl Workspace {
         if let Some(prev) = old_id {
             self.inner.db.invalidate_file(prev);
             self.inner.dataflow.invalidate_file(prev);
+            self.inner.flow_ids.invalidate_all();
+        } else {
+            self.inner.dataflow.clear();
             self.inner.flow_ids.invalidate_all();
         }
         *self.inner.reparse_counter.lock() += 1;
@@ -742,6 +785,98 @@ fn db_options_from_open_options(options: WorkspaceOpenOptions) -> AnalyzerDbOpti
     AnalyzerDbOptions {
         parse_timeout_ms: options.parse_timeout_ms,
     }
+}
+
+struct SourceFileContent {
+    path: std::path::PathBuf,
+    text: String,
+    hash: u64,
+}
+
+fn canonical_workspace_root(root: &Path) -> std::path::PathBuf {
+    // Canonicalize once and use the absolute path for both the
+    // workspace_root and the walker so adapters and downstream FileIds
+    // stay deterministic regardless of the caller's CWD. Falls back to
+    // `cwd.join(root)` when canonicalize fails (e.g. the path doesn't
+    // exist yet), then to the literal path. See
+    // docs/contributing/design-patterns.mdx::Stable IDs From Content.
+    root.canonicalize()
+        .ok()
+        .or_else(|| {
+            if root.is_absolute() {
+                Some(root.to_path_buf())
+            } else {
+                std::env::current_dir().ok().map(|cwd| cwd.join(root))
+            }
+        })
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+fn include_minified() -> bool {
+    std::env::var("BONSAI_INCLUDE_MINIFIED")
+        .ok()
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn read_supported_source_files(
+    canonical_root: &Path,
+    registry: &LanguageRegistry,
+) -> Result<(Vec<SourceFileContent>, usize), WorkspaceError> {
+    let include_minified = include_minified();
+    let mut skipped_minified = 0usize;
+    // The ignore walker follows .gitignore / .ignore / .bonsaiignore but
+    // still walks in OS-native order, so a fresh ingest can assign different
+    // FileIds to the same paths across runs. Sort by path so allocation and
+    // refresh fingerprints are deterministic.
+    let mut builder = ignore::WalkBuilder::new(canonical_root);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .ignore(true)
+        .add_custom_ignore_filename(".bonsaiignore");
+    builder.filter_entry(move |entry| include_minified || !path_looks_minified(entry.path()));
+    let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
+    entries.sort_by(|a, b| a.path().cmp(b.path()));
+
+    let mut files = Vec::new();
+    for entry in entries {
+        if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if registry.adapter_for_extension(ext).is_none() {
+            continue;
+        }
+        if !include_minified && path_looks_minified(path) {
+            tracing::debug!(path = %path.display(), "skipping minified file (filename)");
+            skipped_minified += 1;
+            continue;
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidData) => continue,
+            Err(error) => return Err(WorkspaceError::Io(error)),
+        };
+        if !include_minified && content_looks_minified(&text) {
+            tracing::debug!(path = %path.display(), "skipping minified file (content)");
+            skipped_minified += 1;
+            continue;
+        }
+        let hash = fnv1a_bytes64(text.as_bytes());
+        files.push(SourceFileContent {
+            path: path.to_path_buf(),
+            text,
+            hash,
+        });
+    }
+    Ok((files, skipped_minified))
 }
 
 /// Precision-aware summary printed by the CLI `diagnostics` command.
