@@ -1280,22 +1280,21 @@ fn arg_tainted_uses_kw(rule: &serde_yaml::Value) -> bool {
 
 /// Drift guard for `docs/contributing/design-patterns.mdx::Semantic Resolution Always`
 /// and `docs/contributing/taint-engine-spec.mdx::Non-Negotiables` — the resolver,
-/// callgraph, workspace tracer, taint engine, and security matcher must NOT call
-/// `find_by_name` outside an explicit display-only allowlist. Every
-/// non-allowlisted call site is required to be on a path that supplies
-/// a `ResolveContext` (caller_file + caller_module) so visibility /
-/// `module_path` filtering applies.
+/// callgraph, workspace tracer, taint engine, and security matcher must not call
+/// raw `find_by_name` without a local justification. Runtime paths
+/// that construct graph edges, taint edges, or security findings must
+/// supply a `ResolveContext` (caller_file + caller_module) so
+/// visibility / `module_path` filtering applies.
 ///
 /// This is the cross-codebase regression the cautionary
 /// `static void error(...)` example warns about: when hiredis and Lua
 /// each define `error()` privately and the resolver matches by bare
 /// name, taint flows into an unrelated codebase.
 ///
-/// The allowlist is enumerated explicitly — a numeric ceiling lets
-/// new bare-name calls slip in under the cap. Each entry below
-/// is paired with the file it's allowed in plus a one-line
-/// justification. Adding a new bare-name site requires updating
-/// this allowlist explicitly (so the diff is visible in code review).
+/// There is intentionally no central exception list here. Any raw
+/// lookup that remains must carry a nearby
+/// `CONTEXTLESS_LOOKUP_JUSTIFICATION:` comment at the call site, so
+/// the safety rationale travels with the code being reviewed.
 #[test]
 fn engine_resolves_via_context_not_bare_name() {
     let root = repo_root();
@@ -1305,56 +1304,6 @@ fn engine_resolves_via_context_not_bare_name() {
         root.join("crates").join("workspace").join("src"),
         root.join("crates").join("taint").join("src"),
         root.join("crates").join("security").join("src"),
-    ];
-
-    // Per-file allowlist of `find_by_name` occurrences with their
-    // justifications. The TOTAL count per file is what matters —
-    // adding a new call requires bumping the count AND adding a
-    // justification line. Removing a call requires lowering the
-    // count.
-    //
-    // Display-only / framework sites (browse output, kit primitives)
-    // live in other crates and aren't scanned by this guard.
-    let allowlist: &[(&str, usize, &str)] = &[
-        // resolve/src/lib.rs — `find_by_name` is the canonical
-        // index lookup; both `resolve_callable_with_context`
-        // (semantic) and the legacy `resolve_callable` (display)
-        // consume it. The wrappers ABOVE them are what graph-
-        // construction code is required to use; the index lookup
-        // itself is unavoidable.
-        ("resolve/src/lib.rs", 3, "canonical index lookup primitives"),
-        // callgraph/src/lib.rs — residual site:
-        //   - `collect_callable_targets_exact` (display-only entry
-        //     point's underlying call). The local-binding pre-pass
-        //     (`resolve_callable_symbol`) now routes through the
-        //     context-aware resolver, killing the cross-TU
-        //     `static error()` regression observed against Redis.
-        ("callgraph/src/lib.rs", 1, "display-only entry point only"),
-        // workspace/src/lib.rs — display / CLI entry lookup by user-
-        // supplied function name. The cross-module tracer itself
-        // (`workspace/src/cross_module.rs`) must remain at zero bare
-        // index lookups; it receives a concrete entry symbol and must
-        // route every edge through context-aware resolution.
-        (
-            "workspace/src/lib.rs",
-            3,
-            "display-only trace entry lookup by user-supplied name",
-        ),
-        // taint/src/inter.rs — residual site:
-        //   - `find_by_name` inside the head-is-workspace-symbol
-        //     probe (workspace-wide existence check, parallels
-        //     callgraph's probe — not an edge constructor).
-        ("taint/src/inter.rs", 1, "head-is-workspace-symbol probe"),
-        // security/src/matcher.rs — residual site is the
-        // workspace-existence probe inside the head-is-workspace-
-        // symbol heuristic. The other previous sites
-        // (`collect_callee_symbols`, `collect_callable_name_symbols`)
-        // were migrated to `resolve_callable_with_context`.
-        (
-            "security/src/matcher.rs",
-            1,
-            "workspace-existence probe (caller-independent)",
-        ),
     ];
 
     let mut violations: Vec<String> = Vec::new();
@@ -1375,45 +1324,43 @@ fn engine_resolves_via_context_not_bare_name() {
             } else {
                 text.as_str()
             };
-            let count = body.matches("find_by_name").count();
+            let lines = body.lines().collect::<Vec<_>>();
+            let mut count = 0usize;
+            for (line_idx, line) in lines.iter().enumerate() {
+                if !line.contains(".find_by_name(") {
+                    continue;
+                }
+                count += 1;
+                let start = line_idx.saturating_sub(5);
+                let context = lines[start..=line_idx].join("\n");
+                if !context.contains("CONTEXTLESS_LOOKUP_JUSTIFICATION:") {
+                    let rel = path
+                        .strip_prefix(root.join("crates"))
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .into_owned();
+                    violations.push(format!(
+                        "{rel}:{} calls `find_by_name` without a nearby \
+                         CONTEXTLESS_LOOKUP_JUSTIFICATION comment. Use a \
+                         context-aware resolver on graph/taint/security paths.",
+                        line_idx + 1
+                    ));
+                }
+            }
             if count == 0 {
                 continue;
             }
-            // Compute the relative path to match against allowlist
-            // entries (they're keyed by `<crate>/src/<file>.rs`).
             let rel = path
                 .strip_prefix(root.join("crates"))
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
             per_file.push((rel.clone(), count));
-            let allowed = allowlist
-                .iter()
-                .find(|(suffix, _, _)| rel.ends_with(suffix))
-                .map(|(_, expected, _)| *expected);
-            match allowed {
-                Some(expected) if count == expected => {}
-                Some(expected) => {
-                    violations.push(format!(
-                        "{rel}: expected {expected} `find_by_name` occurrences (per allowlist), \
-                         found {count}. Update the allowlist entry with a justification, or \
-                         migrate the new call to a context-aware resolver primitive."
-                    ));
-                }
-                None => {
-                    violations.push(format!(
-                        "{rel}: contains {count} `find_by_name` occurrences but is not in \
-                         the allowlist. Either route the lookup through `resolve_callable_with_context` \
-                         / `collect_callable_targets_with_context`, or add an explicit allowlist \
-                         entry with justification (per docs/contributing/design-patterns.mdx::Semantic Resolution Always)."
-                    ));
-                }
-            }
         }
     }
     assert!(
         violations.is_empty(),
-        "find_by_name allowlist violations:\n  {}\n\nPer-file counts:\n  {}",
+        "raw find_by_name justification violations:\n  {}\n\nPer-file call counts:\n  {}",
         violations.join("\n  "),
         per_file
             .iter()
@@ -1518,6 +1465,39 @@ fn adapters_do_not_emit_qualified_name_none_without_post_process() {
         "adapters must not emit qualified_name: None without subsequent post-processing — \
          every Decl needs its qualified_name patched per docs/contributing/design-patterns.mdx::Semantic \
          Resolution Always:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Every concrete language adapter needs local crate tests in
+/// addition to workspace-level integration tests. The workspace
+/// harness proves the tool can consume a language; the adapter-local
+/// conformance test proves the adapter crate itself cannot regress
+/// parse/declaration/trace wiring unnoticed.
+#[test]
+fn every_language_adapter_crate_has_local_tests() {
+    let root = repo_root();
+    let crates_dir = root.join("crates");
+    let mut violations = Vec::new();
+    for entry in fs::read_dir(&crates_dir).expect("read crates dir") {
+        let path = entry.expect("crate entry").path();
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("lang_") || name == "lang_api" {
+            continue;
+        }
+        let tests_dir = path.join("tests");
+        let has_rust_test = fs::read_dir(&tests_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.flatten())
+            .any(|entry| entry.path().extension().and_then(|s| s.to_str()) == Some("rs"));
+        if !has_rust_test {
+            violations.push(format!("{name}: missing tests/*.rs"));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "every concrete lang_* adapter crate must carry local Rust tests:\n  {}",
         violations.join("\n  ")
     );
 }

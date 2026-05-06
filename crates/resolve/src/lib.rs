@@ -4,7 +4,7 @@
 //! shared data model and a simple import-graph traversal that most
 //! adapters can reuse.
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use bonsai_common::{short_qualified_tail, FileId, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AliasTarget, ImportSpec, ModulePath, Visibility};
@@ -129,6 +129,10 @@ pub fn resolve_callable_with_context(
     use bonsai_lang_api::DeclKind;
     let collect = |lookup: &str| {
         global
+            // CONTEXTLESS_LOOKUP_JUSTIFICATION: this is the semantic
+            // resolver primitive; ResolveContext filtering is applied
+            // immediately below before any candidate leaves the
+            // function.
             .find_by_name(lookup)
             .iter()
             .filter_map(|symbol| {
@@ -144,7 +148,7 @@ pub fn resolve_callable_with_context(
             })
             .filter(|(decl, decl_file)| visibility_allows(decl, *decl_file, &decl.module_path, ctx))
             .filter(|(decl, _)| match ctx.receiver_type {
-                Some(recv) => decl.parent == Some(recv),
+                Some(recv) => method_parent_matches_receiver_type(global, decl.parent, recv, ctx),
                 None => true,
             })
             .map(|(decl, _)| bonsai_common::FuncId::new(decl.symbol.raw()))
@@ -173,6 +177,39 @@ pub fn resolve_callable_with_context(
         }
     }
     out
+}
+
+fn method_parent_matches_receiver_type(
+    global: &GlobalIndex,
+    method_parent: Option<SymbolId>,
+    receiver_type: SymbolId,
+    ctx: &ResolveContext<'_>,
+) -> bool {
+    let Some(method_parent) = method_parent else {
+        return false;
+    };
+    if method_parent == receiver_type {
+        return true;
+    }
+    let mut seen = AHashSet::new();
+    let mut stack = vec![receiver_type];
+    while let Some(class_sym) = stack.pop() {
+        if !seen.insert(class_sym) {
+            continue;
+        }
+        let Some(class_decl) = global.decl_of(class_sym) else {
+            continue;
+        };
+        for base in &class_decl.bases {
+            for base_sym in resolve_class(global, base, ctx) {
+                if base_sym == method_parent {
+                    return true;
+                }
+                stack.push(base_sym);
+            }
+        }
+    }
+    false
 }
 
 /// Rewrite `name` through `ctx.alias_map`. Returns the
@@ -213,6 +250,10 @@ pub fn resolve_class(
     use bonsai_lang_api::DeclKind;
     let collect = |lookup: &str| {
         global
+            // CONTEXTLESS_LOOKUP_JUSTIFICATION: this is the semantic
+            // class/type resolver primitive; ResolveContext filtering
+            // is applied immediately below before candidates leave
+            // the function.
             .find_by_name(lookup)
             .iter()
             .filter_map(|symbol| {
@@ -258,6 +299,10 @@ pub fn resolve_callable(global: &GlobalIndex, name: &str) -> Vec<bonsai_common::
     use bonsai_lang_api::DeclKind;
     let collect = |lookup: &str| {
         global
+            // CONTEXTLESS_LOOKUP_JUSTIFICATION: legacy display-only
+            // resolver retained for callers that intentionally list
+            // every name match; graph/taint/security edge builders
+            // use resolve_callable_with_context instead.
             .find_by_name(lookup)
             .iter()
             .filter_map(|symbol| global.decl_of(*symbol))

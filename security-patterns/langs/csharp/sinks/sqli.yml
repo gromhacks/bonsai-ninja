@@ -713,7 +713,7 @@
 - id: csharp.sqli.ef_relationaldatabasefacade_sqlqueryraw
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: over-broad
   language: csharp
   tag: sql-injection
   severity: critical
@@ -733,8 +733,8 @@
       amount = 1; SqlQueryRaw(input); } }
 
       '
-  description: "Disabled \u2014 duplicate of csharp.sqli.ef_database_sqlquery_raw\
-    \ under the current bare-name matcher."
+  description: "Disabled \u2014 bare SqlQueryRaw is too broad; canonical EF Core\
+    \ raw SQL coverage is csharp.sqli.ef_database_sqlquery_raw."
 - id: csharp.sqli.ef_dbset_fromsql
   enabled: true
   language: csharp

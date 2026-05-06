@@ -148,7 +148,7 @@
   - name: mongo updatemany literal filter negative
     code: "const _u = require(\"mongodb\");\nfunction demo(collection: any) {\n  return collection.updateMany({ active: false }, { $set: { active: true } });\n}\n"
     expect_no_match: true
-  description: "mongodb collection.updateMany(tainted filter, update). Receiver-agnostic; OnlyWhenPackaged gate on mongodb narrows to that ecosystem."
+  description: "mongodb collection.updateMany(tainted filter, update). Receiver-agnostic; package context gate on mongodb narrows to that ecosystem."
 - id: typescript.nosql.mongo_updatemany_update_doc
   enabled: true
   language: typescript

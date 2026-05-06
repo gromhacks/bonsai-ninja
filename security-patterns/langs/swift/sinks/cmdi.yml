@@ -42,7 +42,7 @@
     code: |
       func test() { process.run("whoami") }
     expect_no_match: true
-  description: "Process.run() / task.run() — Foundation subprocess execution. Bare-name `run` retained: canonical Foundation API with no static namespace; narrowed by receiver_name_in to suppress SwiftUI/Combine/Vapor `.run()` decoys."
+  description: "Process.run() / task.run() — Foundation subprocess execution. Kept narrow through the Process-shaped call target and tainted command argument."
 - id: swift.cmdi.system_libc
   enabled: true
   language: swift

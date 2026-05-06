@@ -105,7 +105,8 @@
     kind: call
     callee:
       attribute: [html, unescape]
-  description: "Disabled — placeholder; html.unescape is the INVERSE of escape (it reintroduces taint). Kept only so tooling sees it explicitly marked as not-a-sanitizer."
+  description: "Disabled — placeholder; html.unescape is the INVERSE of escape (it reintroduces taint). Kept only so tooling
+    sees it explicitly marked as not-a-sanitizer."
 
 # -- URLs ------------------------------------------------------------
 - id: python.sanitizer.urllib_parse_quote
@@ -116,7 +117,7 @@
   match:
     kind: call
     callee:
-      regex: "^urllib\\.parse\\.quote$"
+      attribute: [urllib, parse, quote]
   match_examples:
   - name: sanitizer urllib parse quote
     code: |
@@ -134,7 +135,7 @@
   match:
     kind: call
     callee:
-      regex: "^urllib\\.parse\\.quote_plus$"
+      attribute: [urllib, parse, quote_plus]
   match_examples:
   - name: sanitizer urllib parse quote plus
     code: |
@@ -151,7 +152,7 @@
   match:
     kind: call
     callee:
-      regex: "^urllib\\.parse\\.urlencode$"
+      attribute: [urllib, parse, urlencode]
   match_examples:
   - name: sanitizer urlencode
     code: |
@@ -572,7 +573,7 @@
   match:
     kind: call
     callee:
-      regex: "^jwt\\.decode$"
+      attribute: [jwt, decode]
   constraints:
   - keyword_arg_equals:
       name: verify
@@ -598,7 +599,7 @@
   match:
     kind: call
     callee:
-      regex: "^jwt\\.decode$"
+      attribute: [jwt, decode]
   constraints:
   - arg_matches_regex:
       index: 2
@@ -616,7 +617,8 @@
   - name: sanitizer pyjwt decode algorithms allowlist negative constraint boundary
     code: "import pyjwt\ndef example(user_input, key):\n    return jwt.decode()\n"
     expect_no_match: true
-  description: jwt.decode(..., algorithms=[...]) without disabled signature verification — verifies token signatures with an explicit algorithm allowlist.
+  description: jwt.decode(..., algorithms=[...]) without disabled signature verification — verifies token signatures with
+    an explicit algorithm allowlist.
 
 # -- Auth hashing ----------------------------------------------------
 - id: python.sanitizer.werkzeug_check_password_hash
@@ -648,7 +650,8 @@
     kind: call
     callee:
       attribute: [PasswordHasher, verify]
-  description: "Disabled — PasswordHasher.verify is usually called through an instance, and v1 matching would treat every .verify call as this sanitizer."
+  description: "Disabled — PasswordHasher.verify is usually called through an instance, and v1 matching would treat every
+    .verify call as this sanitizer."
 
 - id: python.sanitizer.bcrypt_checkpw
   enabled: true
@@ -685,7 +688,8 @@
       def example(user_input):
           return BaseModel.model_validate(user_input)
     expect_match_text: [BaseModel.model_validate]
-  description: "pydantic v2 Model.model_validate — coerces and validates input against a declared schema; downstream value is shape-constrained."
+  description: "pydantic v2 Model.model_validate — coerces and validates input against a declared schema; downstream value
+    is shape-constrained."
 
 - id: python.sanitizer.pydantic_model_validate_json
   enabled: true
@@ -854,7 +858,8 @@
       def example(user_input):
           return werkzeug.security.safe_join(user_input)
     expect_match_text: [werkzeug.security.safe_join]
-  description: "werkzeug.security.safe_join — joins path components and rejects traversal attempts; safe for serving from a fixed root."
+  description: "werkzeug.security.safe_join — joins path components and rejects traversal attempts; safe for serving from
+    a fixed root."
 
 - id: python.sanitizer.markupsafe_markup_constructor
   enabled: false
@@ -867,7 +872,8 @@
     kind: call
     callee:
       name: Markup
-  description: "Disabled - markupsafe.Markup() marks a value as ALREADY safe; that is the OPPOSITE of sanitization. Kept off so it's not credited as cleansing."
+  description: "Disabled - markupsafe.Markup() marks a value as ALREADY safe; that is the OPPOSITE of sanitization. Kept off
+    so it's not credited as cleansing."
 
 # -- Open-redirect mitigations (CTFd-driven gap fix) -----------------
 - id: python.sanitizer.flask_validators_is_safe_url
@@ -884,7 +890,8 @@
       def example(user_input):
           return validators.is_safe_url(user_input)
     expect_match_text: [validators.is_safe_url]
-  description: "validators.is_safe_url(url) / is_safe_url(url) - boolean redirect-target check (Flask/Flask-Login canonical mitigation); pair with a host allowlist. CTFd uses the bare `is_safe_url` form; Flask-Login exposes it as `flask_login.utils.is_safe_url`."
+  description: "validators.is_safe_url(url) / is_safe_url(url) - boolean redirect-target check (Flask/Flask-Login canonical
+    mitigation); pair with a host allowlist. CTFd uses the bare `is_safe_url` form; Flask-Login exposes it as `flask_login.utils.is_safe_url`."
 
 - id: python.sanitizer.django_url_has_allowed_host_and_scheme
   enabled: true
@@ -923,7 +930,7 @@
   description: "Django legacy http.is_safe_url (renamed to url_has_allowed_host_and_scheme in Django 3.0+); same semantics."
 
 - id: python.sanitizer.named_url_allowlist_check
-  enabled: true
+  enabled: false
   language: python
   tag: ssrf-sanitize
   match:
@@ -938,8 +945,12 @@
       def example(user_input):
           return is_allowed_url(user_input)
     expect_match_text: [is_allowed_url]
-  description: "Project-local URL/host allowlist validator by conventional name; credits explicit allowlist checks before SSRF-sensitive outbound requests."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Project-local URL/host allowlist validator by conventional name; credits explicit allowlist checks before SSRF-sensitive
+    outbound requests."
 
+  disabled_reason:
+    code: over-broad
 - id: python.sanitizer.werkzeug_url_join
   enabled: false
   disabled_reason:
@@ -951,7 +962,8 @@
     kind: call
     callee:
       attribute: [werkzeug, urls, url_join]
-  description: "Disabled - url_join only normalizes; does not validate target host. Enable only when paired with a downstream allowlist check."
+  description: "Disabled - url_join only normalizes; does not validate target host. Enable only when paired with a downstream
+    allowlist check."
 
 - id: python.sanitizer.same_origin_path_startswith
   enabled: true
@@ -960,7 +972,7 @@
   match:
     kind: call
     callee:
-      regex: "^(path|pathname|next|return_to|redirect|redirect_to|redirect_url|url)\\.startswith$"
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.startswith$"
   constraints:
   - arg_matches_regex:
       index: 0
@@ -974,13 +986,15 @@
           return "/"
     expect_match_text: [next.startswith]
   - name: same-origin redirect path guard negative constraint boundary
-    code: "def safe_redirect(next):\n    if next.startswith() and not next.startswith(\"//\"):\n        return next\n    return \"/\"\n"
+    code: "def safe_redirect(next):\n    if next.startswith() and not next.startswith(\"//\"):\n        return next\n    return
+      \"/\"\n"
     expect_no_match: true
-  description: "str.startswith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with a sibling `not startswith(\"//\")` network-path guard."
+  description: "str.startswith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used
+    with a sibling `not startswith(\"//\")` network-path guard."
 
 # -- Focused allowlist / regex / SQL binding validators -----------------------
 - id: python.sanitizer.allowlist_dict_get
-  enabled: true
+  enabled: false
   language: python
   tag: allowlist-validate
   match:
@@ -997,8 +1011,11 @@
       def pick(name):
           return allowed_routes.get(name, "/")
     expect_match_text: [allowed_routes.get]
-  description: "dict.get on allowlist-named finite maps - selects only mapped trusted values or an explicit default."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    dict.get on allowlist-named finite maps - selects only mapped trusted values or an explicit default."
 
+  disabled_reason:
+    code: over-broad
 - id: python.sanitizer.enum_members_get
   enabled: true
   language: python
@@ -1019,7 +1036,7 @@
   description: "Enum.__members__.get(value) — finite enum member lookup that only returns declared values."
 
 - id: python.sanitizer.literal_allowed_values_get
-  enabled: true
+  enabled: false
   language: python
   tag: allowlist-validate
   match:
@@ -1036,8 +1053,11 @@
       def parse_order(user_input):
           return allowed_values.get(user_input, "ASC")
     expect_match_text: [allowed_values.get]
-  description: "dict.get on choices/allowed-values maps — finite allowlist selection from trusted mapped values."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    dict.get on choices/allowed-values maps — finite allowlist selection from trusted mapped values."
 
+  disabled_reason:
+    code: over-broad
 - id: python.sanitizer.re_fullmatch_allowlist
   enabled: true
   language: python
@@ -1091,7 +1111,7 @@
   description: "re.match with an anchored literal character allowlist pattern."
 
 - id: python.sanitizer.named_regex_fullmatch
-  enabled: true
+  enabled: false
   language: python
   tag: regex-validate
   match:
@@ -1106,10 +1126,13 @@
       def ok(slug_re, slug):
           return slug_re.fullmatch(slug)
     expect_match_text: [slug_re.fullmatch]
-  description: "Named compiled regex fullmatch validators, constrained to UUID/slug/id/safe/allowed receiver names."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named compiled regex fullmatch validators, constrained to UUID/slug/id/safe/allowed receiver names."
 
+  disabled_reason:
+    code: over-broad
 - id: python.sanitizer.named_regex_match
-  enabled: true
+  enabled: false
   language: python
   tag: regex-validate
   match:
@@ -1124,8 +1147,11 @@
       def ok(slug_re, slug):
           return slug_re.match(slug)
     expect_match_text: [slug_re.match]
-  description: "Named compiled regex match validators, constrained to UUID/slug/id/safe/allowed receiver names."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named compiled regex match validators, constrained to UUID/slug/id/safe/allowed receiver names."
 
+  disabled_reason:
+    code: over-broad
 - id: python.sanitizer.dbapi_execute_params
   enabled: true
   language: python
@@ -1153,7 +1179,8 @@
   - name: dbapi execute with params negative constraint boundary
     code: "import sqlite3\ndef by_id(cursor, user_id):\n    return cursor.execute()\n"
     expect_no_match: true
-  description: "Python DB-API execute(sql, params) with a literal placeholder SQL string and separate parameter argument. Receiver-agnostic; OnlyWhenPackaged gate on canonical DB-API drivers prevents over-matching."
+  description: "Python DB-API execute(sql, params) with a literal placeholder SQL string and separate parameter argument.
+    Receiver-agnostic; package context gate on canonical DB-API drivers prevents over-matching."
 
 - id: python.sanitizer.dbapi_executemany_params
   enabled: true
@@ -1182,7 +1209,8 @@
   - name: dbapi executemany with params negative constraint boundary
     code: "import sqlite3\ndef insert_many(cursor, rows):\n    return cursor.executemany()\n"
     expect_no_match: true
-  description: "Python DB-API executemany(sql, seq_of_params) with a literal placeholder SQL string and separate parameter rows. Receiver-agnostic; OnlyWhenPackaged gate on canonical DB-API drivers prevents over-matching."
+  description: "Python DB-API executemany(sql, seq_of_params) with a literal placeholder SQL string and separate parameter
+    rows. Receiver-agnostic; package context gate on canonical DB-API drivers prevents over-matching."
 
 - id: python.sanitizer.asyncpg_execute_params
   enabled: true
@@ -1259,7 +1287,8 @@
       def example(user_input):
           return OneLogin_Saml2_Auth.is_authenticated(user_input)
     expect_match_text: [OneLogin_Saml2_Auth.is_authenticated]
-  description: "python3-saml is_authenticated - confirms SAMLResponse signature + assertions; safe gate before trusting SAML attributes."
+  description: "python3-saml is_authenticated - confirms SAMLResponse signature + assertions; safe gate before trusting SAML
+    attributes."
 
 # -- itsdangerous signed-token verifiers ----------------------------
   imports:
@@ -1298,7 +1327,8 @@
       def example(user_input):
           return signer.loads(user_input)
     expect_match_text: [signer.loads]
-  description: "itsdangerous Serializer/URLSafeSerializer/TimedSerializer.loads - signature-verifying deserialization (NOT pickle - safe by default)."
+  description: "itsdangerous Serializer/URLSafeSerializer/TimedSerializer.loads - signature-verifying deserialization (NOT
+    pickle - safe by default)."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an

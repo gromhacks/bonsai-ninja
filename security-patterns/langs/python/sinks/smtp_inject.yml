@@ -8,7 +8,7 @@
   match:
     kind: call
     callee:
-      attribute: [SMTP, sendmail]
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.sendmail$"
   constraints:
   - arg_tainted:
       index: 2
@@ -25,7 +25,7 @@
       def example(smtp, user_input):
           return smtp.sendmail("from@example.com", ["to@example.com"], "Subject: safe\n\nbody")
     expect_no_match: true
-  description: "SMTP.sendmail(from_addr, to_addrs, msg=tainted_message) — tainted message headers can inject SMTP headers or commands."
+  description: "smtplib SMTP instance sendmail(from_addr, to_addrs, msg=tainted_message) - tainted message headers can inject SMTP headers or commands."
 
 - id: python.smtpinj.smtp_sendmail_from_addr
   enabled: true
@@ -37,7 +37,7 @@
   match:
     kind: call
     callee:
-      attribute: [SMTP, sendmail]
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.sendmail$"
   constraints:
   - arg_tainted:
       index: 0
@@ -54,7 +54,7 @@
       def example(smtp, user_input):
           return smtp.sendmail("from@example.com", ["to@example.com"], "Subject: safe\n\nbody")
     expect_no_match: true
-  description: "SMTP.sendmail(from_addr=tainted_sender, to_addrs, msg) — tainted envelope sender can inject SMTP envelope data."
+  description: "smtplib SMTP instance sendmail(from_addr=tainted_sender, to_addrs, msg) - tainted envelope sender can inject SMTP envelope data."
 
 - id: python.smtpinj.smtp_sendmail_to_addrs
   enabled: true
@@ -66,7 +66,7 @@
   match:
     kind: call
     callee:
-      attribute: [SMTP, sendmail]
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.sendmail$"
   constraints:
   - arg_tainted:
       index: 1
@@ -83,4 +83,4 @@
       def example(smtp, user_input):
           return smtp.sendmail("from@example.com", ["to@example.com"], "Subject: safe\n\nbody")
     expect_no_match: true
-  description: "SMTP.sendmail(from_addr, to_addrs=tainted_recipients, msg) — tainted envelope recipients can inject extra SMTP recipients."
+  description: "smtplib SMTP instance sendmail(from_addr, to_addrs=tainted_recipients, msg) - tainted envelope recipients can inject extra SMTP recipients."

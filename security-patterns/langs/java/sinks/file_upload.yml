@@ -45,9 +45,8 @@
   match:
     kind: call
     callee:
-      name: write
+      attribute: [Part, write]
   constraints:
-  - receiver_name_in: [part, uploadPart, filePart, requestPart, servletPart]
   - arg_tainted:
       index: 0
   match_examples:
@@ -117,7 +116,7 @@
 - id: java.upload.transferto_generic
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: over-broad
   language: java
   tag: file-upload
   severity: low

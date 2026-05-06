@@ -90,8 +90,9 @@ match:
     regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.body$"
 ```
 
-Receiver-agnostic regexes **must** declare `packages:` so the
-`OnlyWhenPackaged` lax-tail narrows by file imports.
+Receiver-agnostic regexes **must** declare `packages:`, `imports:`, or
+`modules:` so the matcher can require adapter-visible file context before
+the regex is considered.
 
 **Annotation / decorator** — Spring `@RequestParam`, FastAPI binders,
 etc.:
@@ -185,21 +186,16 @@ size)` index 1, `calloc(nmemb, size)` needs a rule for each.
 - arg_matches_regex: { index: 0, regex: "^/api/" }
 ```
 
-### `receiver_name_in`
-
-```yaml
-- receiver_name_in: [client, http]
-```
-
-The receiver text must be one of the listed values. Prefer semantic
-receiver typing for typed APIs:
+### `receiver_type_in`
 
 ```yaml
 - receiver_type_in: [HttpClient]
 ```
 
 `receiver_type_in` is derived from adapter-emitted type facts and is not
-tied to local variable names.
+tied to local variable names. For untyped dynamic APIs, use a
+receiver-agnostic regex plus adapter-visible `packages:` / `imports:` /
+`modules:` signals and taint/argument constraints.
 
 ### `format_arg_index`
 
@@ -326,6 +322,32 @@ receive APIs, serial/SPI reads, and similar C/C++ out-buffer calls. Do
 not model these as ordinary call sources without `source_output_args`;
 that would also taint descriptors, lengths, flags, and handles.
 
+## Receiver-State Mutators
+
+Use `taint_semantics.taint_receiver_from_args: true` when a tainted
+argument mutates the receiver and a later receiver-only sink consumes that
+state.
+
+```yaml
+- id: java.sqli.statement_executebatch
+  enabled: true
+  language: java
+  tag: sql-injection
+  match:
+    kind: call
+    callee:
+      attribute: [Statement, addBatch]
+  constraints:
+    - arg_tainted: { index: 0 }
+  taint_semantics:
+    taint_receiver_from_args: true
+```
+
+Pair it with a later sink such as `Statement.executeBatch` using
+`receiver_tainted: true`. The engine derives the receiver type and method
+from the structured callee target; there is no global list of mutator
+method names.
+
 ## `kind: missing` walker
 
 ```yaml
@@ -367,12 +389,12 @@ Disabled rules must declare a reason:
 
 The `subsumed_by` chain must terminate at an enabled rule.
 
-## OnlyWhenPackaged lax-tail
+## Receiver Context
 
-Rules with type-like attribute receivers, lowercase verbs of length ≥ 5,
-and non-empty `packages:` trigger the matcher's `OnlyWhenPackaged`
-lax-tail. The rule may match any `<receiver>.<verb>(...)` call but only
-when the file imports a package signal.
+Structured `attribute:` rules are strict. `[Eta, render]` matches exact
+module/static calls such as `Eta.render(...)`; instance calls such as
+`engine.render(...)` require adapter-emitted receiver-type facts that prove
+`engine` is an `Eta`.
 
 ```yaml
 packages: [eta]
@@ -383,8 +405,10 @@ match:
     attribute: [Eta, render]
 ```
 
-`[Eta, render]` matches `eta.render(...)` but not `pug.render(...)` in a
-file that imports `pug` only.
+When an API is commonly imported under arbitrary local aliases, write an
+explicit receiver-agnostic regex and gate it with adapter-visible
+package/import/module signals. Do not rely on a specific local variable name
+to identify an API.
 
 ## Match examples
 

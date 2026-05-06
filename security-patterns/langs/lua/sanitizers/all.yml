@@ -197,7 +197,8 @@
         resty_sha256.sha256_bin(input)
       end
     expect_match_text: ["resty_sha256.sha256_bin"]
-  description: "lua-resty-string sha256_bin — one-way SHA-256 digest; downstream cannot recover original taint payload (use only as identifier, not for auth)."
+  description: "lua-resty-string sha256_bin — one-way SHA-256 digest; downstream cannot recover original taint payload (use
+    only as identifier, not for auth)."
 
 - id: lua.sanitizer.ngx_unescape_uri
   enabled: false
@@ -210,7 +211,8 @@
     kind: call
     callee:
       attribute: [ngx, unescape_uri]
-  description: "Disabled — ngx.unescape_uri is the DECODE inverse of escape_uri; it re-introduces percent-encoded metacharacters and MUST NOT be treated as a sanitizer. Listed for audit visibility only."
+  description: "Disabled — ngx.unescape_uri is the DECODE inverse of escape_uri; it re-introduces percent-encoded metacharacters
+    and MUST NOT be treated as a sanitizer. Listed for audit visibility only."
 
 # -- Audit-derived validation / binding sanitizers -----------------------------
 - id: lua.sanitizer.same_origin_string_match
@@ -238,7 +240,7 @@
   description: "string.match(value, '^/') — same-origin redirect/path guard for root-relative targets."
 
 - id: lua.sanitizer.table_allowlist_lookup
-  enabled: true
+  enabled: false
   language: lua
   tag: allowlist-validate
   match:
@@ -253,8 +255,11 @@
         return allowed[role]
       end
     expect_match_text: [allowed]
-  description: "allowed[value] table lookup — table-backed enum/set allowlist membership check."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    allowed[value] table lookup — table-backed enum/set allowlist membership check."
 
+  disabled_reason:
+    code: over-broad
 - id: lua.sanitizer.string_match_full_shape
   enabled: true
   language: lua
@@ -283,16 +288,17 @@
   enabled: true
   language: lua
   tag: db-bind-parameter
+  packages: [lsqlite3]
   match:
     kind: call
     callee:
-      name: bind_values
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]bind_values$
   constraints:
-  - receiver_name_in: [stmt, statement]
   - min_args: 1
   match_examples:
   - name: lua.sanitizer.statement_bind_values example
     code: |
+      local _sqlite = require("lsqlite3")
       function example(stmt, id)
         stmt:bind_values(id)
       end

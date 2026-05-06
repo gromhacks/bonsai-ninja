@@ -21,10 +21,10 @@ use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recog
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use bonsai_common::{FuncId, Precision, Span, SymbolId};
-use bonsai_lang_api::{CapabilityLevel, LanguageRegistry};
+use bonsai_lang_api::LanguageRegistry;
 use bonsai_taint::{
-    CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig, SourceOutputArgs, TaintedCall,
-    TaintedCallEdge, TaintedCallKind, TokenSet,
+    CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig, ReceiverStatePropagation,
+    SourceOutputArgs, TaintedCall, TaintedCallEdge, TaintedCallKind, TokenSet,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -681,7 +681,7 @@ where
         source_bearing_functions: AHashSet::default(),
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
         source_output_args: source_output_args_from_rulepack(pack),
-        collection_append_methods: collection_append_methods_from_rulepack(pack),
+        receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
         ..Default::default()
     };
     let mut source_graph_caches = InterTaintCaches::default();
@@ -1323,15 +1323,13 @@ pub fn validate_pack(
         // `match-example-missing-import`, expected-match-text, and
         // arg-tainted-index checks all assume the matcher pipeline
         // can fire, which is by definition not true for disabled
-        // rules. Static metadata checks (constraint coverage,
-        // type-method aliases) still run for disabled rules so we
-        // catch typos / structural drift in disabled YAML too.
+        // rules. Static metadata checks still run for disabled rules
+        // so we catch typos / structural drift in disabled YAML too.
         if !rule.enabled {
             // Bump informational counter so disabled rules still
             // report `example_count` accurately, but skip the rest.
             example_count += rule.match_examples.len();
             validate_constraint_coverage(rule, &mut issues);
-            validate_type_method_callee_has_adapter_type_aliases(rule, registry.as_ref(), &mut issues);
             continue;
         }
         for example in &rule.match_examples {
@@ -1343,13 +1341,12 @@ pub fn validate_pack(
                 &example.code,
                 registry.clone(),
             );
-            // Tree-sitter import-index check (no regex). When the
-            // rule declares package signals, every example must
-            // ship a real import line that the adapter actually
-            // parsed into the import index. This is what feeds the
-            // matcher's per-file `OnlyWhenPackaged` lax-tail gate,
-            // so without a real adapter-visible import the rule
-            // can't fire on its own example.
+            // Tree-sitter import-index check (no regex). Rules that
+            // use receiver-agnostic regexes plus package/module
+            // signals need at least one adapter-visible import in
+            // positive examples. That import is the semantic file
+            // context that keeps local receiver names from becoming
+            // global API matches.
             if !example.expect_no_match && !signals.is_empty() {
                 let mut has_import_for_signal = false;
                 for file_id in ws.db().global_index().all_files() {
@@ -1376,7 +1373,7 @@ pub fn validate_pack(
                         Some(rule),
                         &format!(
                             "example `{}` does not import any of {:?} — the rule's \
-                             OnlyWhenPackaged lax-tail gate cannot fire on this example",
+                             receiver-agnostic regex package gate cannot fire on this example",
                             example.name.as_deref().unwrap_or("<unnamed>"),
                             signals
                         ),
@@ -1479,8 +1476,7 @@ pub fn validate_pack(
             validate_arg_tainted_index_bounds(rule, &arg_tainted_index_seen, &mut issues);
         }
         validate_constraint_coverage(rule, &mut issues);
-        validate_package_signals_match_example_imports(rule, &example_imports, &mut issues);
-        validate_type_method_callee_has_adapter_type_aliases(rule, registry.as_ref(), &mut issues);
+        validate_regex_package_signals_match_example_imports(rule, &example_imports, &mut issues);
     }
 
     let enabled_rules: Vec<_> = rules.iter().copied().filter(|rule| rule.enabled).collect();
@@ -1653,102 +1649,46 @@ fn validate_constraint_coverage(rule: &Rule, issues: &mut Vec<PackValidationIssu
     }
 }
 
-/// Surface rules whose `[Type, method]` callee shape depends on
-/// adapter-emitted `Decl.type_aliases` for receiver narrowing.
-///
-/// Per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`, the
-/// resolver / matcher narrow `[Type, method]` calls by the receiver
-/// facts derived from adapter-emitted type bindings and class ancestry.
-/// Adapters that don't yet populate those facts will match such rules
-/// only via the LaxTail fallback when the file imports a recognised
-/// package signal.
-///
-/// We don't fail the validator — that would disable a lot of useful
-/// rules. We emit an `info`-level diagnostic so rule authors can see
-/// which rules depend on per-adapter receiver-type bindings being
-/// completed (T-7 in docs/contributing/review-checklist.mdx::§4).
-fn validate_type_method_callee_has_adapter_type_aliases(
-    rule: &Rule,
-    registry: &LanguageRegistry,
-    issues: &mut Vec<PackValidationIssue>,
-) {
-    if !rule.enabled {
-        return;
-    }
-    let attribute = rule
-        .match_spec
-        .callee
-        .as_ref()
-        .and_then(|target| target.attribute.as_ref());
-    let Some(attribute) = attribute else {
-        return;
-    };
-    if attribute.len() != 2 {
-        return;
-    }
-    let receiver = &attribute[0];
-    let first = receiver.chars().next();
-    if !matches!(first, Some(c) if c.is_ascii_uppercase()) {
-        return;
-    }
-    let adapter_supports_receiver_types = registry
-        .all()
-        .into_iter()
-        .find(|adapter| adapter.language_id().as_str() == rule.language)
-        .is_some_and(|adapter| adapter.capabilities().receiver_types != CapabilityLevel::Unsupported);
-    if adapter_supports_receiver_types {
-        return;
-    }
-    push_validation_issue(
-        issues,
-        "info",
-        "type-method-needs-adapter-type-aliases",
-        Some(rule),
-        &format!(
-            "rule callee `[{}, {}]` depends on semantic receiver-type facts for \
-             precise receiver narrowing; the {} adapter does not yet populate them. \
-             The rule still fires via LaxTail when the file imports a recognised package \
-             signal, but cross-class disambiguation per docs/contributing/design-patterns.mdx::Semantic \
-             Resolution Always isn't available until adapter coverage lands (docs/contributing/review-checklist.mdx \
-             §4 T-7).",
-            attribute[0], attribute[1], rule.language,
-        ),
-    );
-}
-
-fn validate_package_signals_match_example_imports(
+fn validate_regex_package_signals_match_example_imports(
     rule: &Rule,
     example_imports: &BTreeSet<String>,
     issues: &mut Vec<PackValidationIssue>,
 ) {
+    let has_signal = !rule.packages.is_empty() || !rule.imports.is_empty() || !rule.modules.is_empty();
     if !rule.enabled
-        || rule.packages.is_empty()
+        || !has_signal
         || example_imports.is_empty()
-        || !matches!(rule.language.as_str(), "java" | "python")
-        || !crate::matcher::rule_requires_package_gate(rule)
+        || !crate::matcher::rule_regex_requires_package_signal(rule)
     {
         return;
     }
-    for package in rule.packages.iter().filter(|package| !package.is_empty()) {
-        if example_imports
+    let signals: Vec<&str> = rule
+        .packages
+        .iter()
+        .chain(rule.imports.iter())
+        .chain(rule.modules.iter())
+        .map(String::as_str)
+        .filter(|signal| !signal.is_empty())
+        .collect();
+    if signals.iter().any(|signal| {
+        example_imports
             .iter()
-            .any(|imported| crate::pkg::import_matches_package(imported, package))
-        {
-            continue;
-        }
-        let imports = example_imports.iter().cloned().collect::<Vec<_>>().join(", ");
-        push_validation_issue(
-            issues,
-            "warning",
-            "package-signal-not-adapter-visible",
-            Some(rule),
-            &format!(
-                "`packages:` signal `{package}` does not match any adapter-emitted import in \
-                 the rule's match_examples; use the ImportSpec.module form seen in examples \
-                 instead. Example imports: [{imports}]"
-            ),
-        );
+            .any(|imported| crate::pkg::import_matches_package(imported, signal))
+    }) {
+        return;
     }
+    let imports = example_imports.iter().cloned().collect::<Vec<_>>().join(", ");
+    push_validation_issue(
+        issues,
+        "warning",
+        "package-signal-not-adapter-visible",
+        Some(rule),
+        &format!(
+            "none of the rule's package/import/module signals {:?} match adapter-emitted imports \
+             in match_examples; use the ImportSpec.module form seen in examples. Example imports: [{imports}]",
+            signals
+        ),
+    );
 }
 
 fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
@@ -1900,8 +1840,59 @@ fn validate_rule_metadata(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
     validate_rule_regexes(rule, issues);
     validate_no_hardcoded_receiver_regex(rule, issues);
     validate_receiver_agnostic_regex_has_package_gate(rule, issues);
+    validate_taint_semantics(rule, issues);
     validate_packages_not_maven_artifacts(rule, issues);
     validate_yaml_language_field(rule, issues);
+}
+
+fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
+    let Some(semantics) = rule.taint_semantics.as_ref() else {
+        return;
+    };
+    if semantics.taint_receiver_from_args {
+        if rule.kind != RuleKind::Sink {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.taint_receiver_from_args is only valid on sink rules",
+            );
+        }
+        let valid_attribute = rule
+            .match_spec
+            .callee
+            .as_ref()
+            .and_then(|target| target.attribute.as_ref())
+            .is_some_and(|attribute| attribute.len() >= 2);
+        if !valid_attribute {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.taint_receiver_from_args requires a structured callee.attribute with receiver type and method",
+            );
+        }
+    }
+    if !semantics.source_output_args.is_empty() && rule.kind != RuleKind::Source {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.source_output_args is only valid on source rules",
+        );
+    }
+    if semantics.clean_output_overwrite.is_some() && rule.kind != RuleKind::Sanitizer {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.clean_output_overwrite is only valid on sanitizer rules",
+        );
+    }
 }
 
 fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
@@ -1940,8 +1931,7 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
                 "constraints.any_arg_matches_regex",
                 any_arg_matches_regex.as_str(),
             )),
-            crate::rule::ConstraintKind::ReceiverNameIn { .. }
-            | crate::rule::ConstraintKind::ReceiverTypeIn { .. }
+            crate::rule::ConstraintKind::ReceiverTypeIn { .. }
             | crate::rule::ConstraintKind::SecondArgEquals { .. }
             | crate::rule::ConstraintKind::ArgEquals { .. }
             | crate::rule::ConstraintKind::KeywordArgEquals { .. }
@@ -1980,13 +1970,14 @@ fn validate_rule_regexes(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
 }
 
 fn validate_no_hardcoded_receiver_regex(rule: &Rule, issues: &mut Vec<PackValidationIssue>) {
-    // Sanitizer rules are intentionally lax (LaxTail::Always) and
-    // commonly use package-name prefixes like `^lodash\.escape$`,
-    // `^bleach\.clean$` — those are package matches, not receiver
-    // smells. Restrict the audit to source/sink rules.
-    if matches!(rule.kind, RuleKind::Sanitizer) {
+    if !rule.enabled {
         return;
     }
+    // Package-qualified regexes such as `^lodash\.escape$` or
+    // `^bleach\.clean$` are legitimate only when the rule declares the
+    // package/import/module signal that lets the matcher verify file
+    // context. Local receiver names should be represented by semantic
+    // receiver types or receiver-agnostic regexes gated by imports.
     if rule.match_spec.kind != MatchKind::Call && rule.match_spec.kind != MatchKind::Read {
         return;
     }
@@ -2007,29 +1998,24 @@ fn validate_no_hardcoded_receiver_regex(rule: &Rule, issues: &mut Vec<PackValida
     let Some(receiver) = lowercase_receiver_token_from_regex(regex) else {
         return;
     };
-    // Allowlist genuine global/stdlib namespaces; these are legitimate
-    // package matches, not local-variable hardcoding.
-    if is_global_namespace_token(&receiver, &rule.language) {
+    // Genuine module/namespace receivers must be declared by the rule
+    // itself through packages/imports/modules. The validator should
+    // never carry a central language-specific list of "known good"
+    // receiver tokens; that recreates the same name-based shortcut
+    // the engine avoids at runtime.
+    if receiver_token_is_declared_package_signal(rule, &receiver) {
         return;
     }
-    // Advisory: the rule still fires correctly when the developer
-    // names their variable `cur` / `pool` / etc., but a project that
-    // uses a different variable convention (`db_cursor`, `mainPool`)
-    // silently misses. Fixing requires either receiver-agnostic
-    // identifier regex + `packages:` gate, or a structured
-    // `attribute:` rule with adapter type-aliases. Neither is
-    // automatically deriveable, so this stays at `info` — the pack
-    // still validates clean while the cleanup is in progress.
     push_validation_issue(
         issues,
-        "info",
+        "error",
         "hardcoded-receiver-regex",
         Some(rule),
         &format!(
             "`regex:` `{regex}` hardcodes lowercase receiver `{receiver}`. Use a receiver-agnostic \
-             local-identifier regex (e.g. `^[A-Za-z_$][A-Za-z0-9_$]*\\.method$`) plus `packages:` \
-             so OnlyWhenPackaged gates over-matching, or use a structured `attribute:` rule when \
-             the receiver is a Module/Type."
+             local-identifier regex (e.g. `^[A-Za-z_$][A-Za-z0-9_$]*\\.method$`) plus adapter-visible \
+             package/import/module signals, or use a structured `attribute:` rule when the receiver is \
+             a Module/Type."
         ),
     );
 }
@@ -2083,11 +2069,11 @@ fn validate_receiver_agnostic_regex_has_package_gate(rule: &Rule, issues: &mut V
 }
 
 /// Catch package signals whose syntax can never match what the
-/// language adapter emits in `ImportSpec.module`. The OnlyWhenPackaged
-/// per-file gate consults the adapter's import index — a signal that
+/// language adapter emits in `ImportSpec.module`. Runtime package
+/// context checks consult the adapter's import index — a signal that
 /// uses package-manager distribution syntax (Maven `groupId-artifactId`,
 /// PyPI `python-jose`, Cargo `percent-encoding`, Swift `async-http-client`)
-/// instead of the adapter-visible import string is a silent gate
+/// instead of the adapter-visible import string is a silent context-gate
 /// failure: the rule loads, the matcher can't fire it on real files,
 /// and previously the validator only noticed when an example imported
 /// the wrong shape. Fail-fast at load time, language-aware.
@@ -2111,7 +2097,7 @@ fn validate_packages_not_maven_artifacts(rule: &Rule, issues: &mut Vec<PackValid
                 Some(rule),
                 &format!(
                     "`{signal}` is a {reason}, not a string the {} adapter sees in `import` / \
-                     `use` / `require` statements. The OnlyWhenPackaged gate consults the \
+                     `use` / `require` statements. Runtime package context checks consult the \
                      adapter's import index — replace with the actual import-visible \
                      package/module string.",
                     rule.language
@@ -2255,80 +2241,32 @@ fn regex_prefix_is_receiver_agnostic(regex: &str) -> bool {
         && (rest.contains("A-Za-z0-9_") || rest.contains("a-zA-Z0-9_"))
 }
 
-/// Allowlist of receiver tokens that are real global/stdlib
-/// namespaces in the rule's language, not local-variable hardcoding.
-/// `http.Get` in Go is `net/http.Get`, not `r.Get`; `os.system` in
-/// Python is the `os` stdlib module, not a variable. The matcher's
-/// regex path can't distinguish; the validator allowlists per-lang.
-fn is_global_namespace_token(token: &str, language: &str) -> bool {
+/// Returns true when `token` is accounted for by the rule's own
+/// declared import/package/module metadata. This keeps validator
+/// behavior semantic and rule-local instead of relying on a central
+/// per-language list of namespace names.
+fn receiver_token_is_declared_package_signal(rule: &Rule, token: &str) -> bool {
     let token = token.trim();
     if token.is_empty() {
         return false;
     }
-    let allow: &[&str] = match language {
-        "go" => &[
-            "http", "net", "os", "fmt", "log", "json", "sql", "crypto", "tls", "time", "context", "io",
-            "bytes", "errors", "reflect", "sync", "exec",
-        ],
-        "python" => &[
-            "re",
-            "os",
-            "sys",
-            "pickle",
-            "subprocess",
-            "socket",
-            "urllib",
-            "shutil",
-            "json",
-            "xml",
-            "html",
-            "logging",
-            "hashlib",
-            "hmac",
-            "base64",
-            "ast",
-            "yaml",
-            "marshal",
-            "shelve",
-            "dill",
-        ],
-        "javascript" | "typescript" => &[
-            "fs",
-            "path",
-            "crypto",
-            "http",
-            "https",
-            "querystring",
-            "url",
-            "buffer",
-            "child_process",
-            "cluster",
-            "dns",
-            "net",
-            "os",
-            "stream",
-            "tls",
-            "util",
-            "vm",
-            "zlib",
-            "eval",
-            "console",
-            "process",
-            "global",
-            "window",
-            "document",
-            "navigator",
-            "performance",
-            "webcrypto",
-        ],
-        "lua" => &["io", "string", "table", "math", "os"],
-        "ruby" => &["File", "IO", "Dir", "Process", "Kernel"],
-        "solidity" => &["abi", "msg", "tx", "block"],
-        "rust" => &["std", "core", "alloc"],
-        "dart" => &["int", "num", "double", "String", "List", "Map", "Set"],
-        _ => &[],
-    };
-    allow.contains(&token)
+    rule.packages
+        .iter()
+        .chain(rule.imports.iter())
+        .chain(rule.modules.iter())
+        .any(|signal| package_signal_matches_receiver_token(signal, token))
+}
+
+fn package_signal_matches_receiver_token(signal: &str, token: &str) -> bool {
+    let signal = signal.trim();
+    if signal.is_empty() {
+        return false;
+    }
+    signal == token
+        || signal
+            .rsplit(&['.', '/', ':', '\\', '-'][..])
+            .next()
+            .is_some_and(|tail| tail == token)
 }
 
 fn hardcoded_lowercase_receiver_token(token: &str) -> bool {
@@ -3451,7 +3389,7 @@ where
         source_bearing_functions,
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
         source_output_args: source_output_args_from_rulepack(pack),
-        collection_append_methods: collection_append_methods_from_rulepack(pack),
+        receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
         ..Default::default()
     };
     // Global ceiling on total interprocedural work across every
@@ -4665,44 +4603,36 @@ fn source_output_args_from_rulepack(pack: &Rulepack) -> Vec<SourceOutputArgs> {
         .collect()
 }
 
-fn collection_append_methods_from_rulepack(pack: &Rulepack) -> AHashSet<String> {
-    const STATEFUL_MUTATOR_TAILS: &[&str] = &[
-        "add",
-        "addBatch",
-        "addAll",
-        "append",
-        "body",
-        "command",
-        "put",
-        "push",
-        "push_back",
-        "set",
-        "setBody",
-        "write",
-    ];
-    let allowed: AHashSet<&str> = STATEFUL_MUTATOR_TAILS.iter().copied().collect();
+fn receiver_state_propagations_from_rulepack(pack: &Rulepack) -> Vec<ReceiverStatePropagation> {
     pack.all_rules()
         .into_iter()
-        .filter(|rule| rule.enabled && rule.kind == RuleKind::Sink && rule_has_taint_predicate(rule))
-        .filter_map(rule_callee_tail)
-        .filter(|tail| allowed.contains(tail.as_str()))
+        .filter(|rule| {
+            rule.enabled
+                && rule.kind == RuleKind::Sink
+                && rule_has_taint_predicate(rule)
+                && rule
+                    .taint_semantics
+                    .as_ref()
+                    .is_some_and(|semantics| semantics.taint_receiver_from_args)
+        })
+        .filter_map(receiver_state_propagation_from_rule)
         .collect()
 }
 
-fn rule_callee_tail(rule: &Rule) -> Option<String> {
+fn receiver_state_propagation_from_rule(rule: &Rule) -> Option<ReceiverStatePropagation> {
     let target = rule.match_spec.callee.as_ref()?;
-    let text = target
-        .name
-        .clone()
-        .or_else(|| target.attribute.as_ref().and_then(|parts| parts.last().cloned()))
-        .or_else(|| target.regex.clone())?;
-    let tail = text
-        .rsplit(['.', ':', '\\'])
-        .next()
-        .unwrap_or(text.as_str())
-        .trim()
-        .trim_matches(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()));
-    (!tail.is_empty()).then(|| tail.to_string())
+    let attribute = target.attribute.as_ref()?;
+    if attribute.len() < 2 {
+        return None;
+    }
+    let method = attribute.last()?.trim();
+    if method.is_empty() {
+        return None;
+    }
+    Some(ReceiverStatePropagation {
+        method: method.to_string(),
+        receiver_type: Some(attribute[..attribute.len() - 1].join(".")),
+    })
 }
 
 /// Map common per-language family abbreviations to their canonical

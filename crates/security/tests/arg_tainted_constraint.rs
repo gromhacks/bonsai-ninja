@@ -404,9 +404,17 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // Bumped 0x0018 → 0x0019 when receiver/constructor matching
     // started normalizing inline qualified constructors and carrier
     // args with tainted descendants became sink arg evidence.
+    // Bumped 0x0019 → 0x001a when receiver/attribute matching
+    // stopped skipping middle chain segments; typed receiver rules
+    // now require exact API paths or adapter-emitted receiver-type
+    // facts instead of tail fallback.
+    // Bumped 0x001a → 0x001b when receiver-name constraints were
+    // removed from the schema and receiver-state taint propagation
+    // became rulepack-declared via taint_semantics instead of an
+    // engine-owned method-tail list.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_0019_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_001b_u128
     );
 }
 

@@ -199,4 +199,4 @@
   match_examples:
   - name: generated shape example
     code: "object App {\n  def handle(input: String): Unit = {\n    Math.random(input)\n  }\n}\n"
-  description: "TODO(only-when-packaged): java.lang.Math / scala.math is auto-imported in Scala — java.lang.Math.random() — non-crypto."
+  description: "java.lang.Math.random() / scala.math random output — non-cryptographic PRNG."

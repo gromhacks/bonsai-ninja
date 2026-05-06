@@ -314,7 +314,7 @@
     kind: call
     callee:
       regex: \.Query$
-  description: "Disabled — bare `.Query$` regex double-fires with go.sqli.db_query. The sqli rule already covers the call shape; without receiver-type narrowing we would double-count every SQL or Cassandra Query call."
+  description: "Disabled — bare `.Query$` regex double-fires with go.sqli.db_query. The sqli rule already covers the call shape; enable only when semantic receiver facts distinguish Cassandra Query from SQL Query."
 - id: go.nosql.elasticsearch_search
   enabled: false
   disabled_reason:
@@ -331,7 +331,7 @@
     kind: call
     callee:
       regex: \.Search$
-  description: "Disabled — bare `.Search$` regex double-fires with go.ldap.conn_search. The ldap rule already covers the call shape; without receiver-type narrowing we would double-count."
+  description: "Disabled — bare `.Search$` regex double-fires with go.ldap.conn_search. The ldap rule already covers the call shape; enable only when semantic receiver facts distinguish Elasticsearch Search from LDAP Search."
 - id: go.nosql.neo4j_run
   enabled: false
   disabled_reason:
@@ -347,7 +347,7 @@
     kind: call
     callee:
       regex: \.Run$
-  description: "Disabled — bare `.Run$` regex double-fires with go.eval.otto_run. The eval rule already covers the call shape; without receiver-type narrowing we would double-count."
+  description: "Disabled — bare `.Run$` regex double-fires with go.eval.otto_run. The eval rule already covers the call shape; enable only when semantic receiver facts distinguish Neo4j Run from Otto Run."
 - id: go.nosql.dynamodb_scan
   enabled: false
   disabled_reason:

@@ -10,9 +10,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - conn
-      - search
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]search$
   constraints:
   - arg_tainted:
       index: 0
@@ -38,9 +36,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - conn
-      - modify
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]modify$
   constraints:
   - arg_tainted:
       index: 0
@@ -67,9 +63,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - conn
-      - add
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]add$
   constraints:
   - arg_tainted:
       index: 0
@@ -96,9 +90,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - conn
-      - delete
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]delete$
   constraints:
   - arg_tainted:
       index: 0
@@ -125,9 +117,7 @@
   match:
     kind: call
     callee:
-      attribute:
-      - conn
-      - compare
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*[.:]compare$
   constraints:
   - arg_tainted:
       index: 0

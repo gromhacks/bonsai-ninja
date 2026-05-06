@@ -102,23 +102,24 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.invoke$"
+      regex: "^(Runnable|RunnableSequence|LLMChain|AgentExecutor)\\.invoke$"
   constraints:
   - arg_tainted:
       index: 0
-  - receiver_name_in: [chain, llmChain, agent, executor, runnable, llm]
   match_examples:
   - name: langchain chain.invoke tainted
     code: |
-      const _u = require("langchain");
-      async function demo(chain: any, input: string) {
+      const { Runnable } = require("langchain");
+      async function demo(input: string) {
+        const chain = new Runnable();
         return chain.invoke(input);
       }
     expect_match_text: [chain.invoke]
   - name: langchain chain.invoke literal negative
     code: |
-      const _u = require("langchain");
-      async function demo(chain: any) {
+      const { Runnable } = require("langchain");
+      async function demo() {
+        const chain = new Runnable();
         return chain.invoke({ question: "What is 2+2?" });
       }
     expect_no_match: true
@@ -135,23 +136,24 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.call$"
+      regex: "^(AgentExecutor|LLMChain|Chain)\\.call$"
   constraints:
   - arg_tainted:
       index: 0
-  - receiver_name_in: [agent, executor, agentExecutor, chain]
   match_examples:
   - name: langchain agent.call tainted
     code: |
-      const _u = require("langchain");
-      async function demo(agent: any, input: string) {
+      const { AgentExecutor } = require("langchain");
+      async function demo(input: string) {
+        const agent = new AgentExecutor();
         return agent.call({ input });
       }
     expect_match_text: [agent.call]
   - name: langchain agent.call literal negative
     code: |
-      const _u = require("langchain");
-      async function demo(agent: any) {
+      const { AgentExecutor } = require("langchain");
+      async function demo() {
+        const agent = new AgentExecutor();
         return agent.call({ input: "What is 2+2?" });
       }
     expect_no_match: true
@@ -168,23 +170,24 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.chat$"
+      regex: "^CohereClient\\.chat$"
   constraints:
   - arg_tainted:
       index: 0
-  - receiver_name_in: [cohere, client, cohereClient]
   match_examples:
   - name: cohere client chat tainted
     code: |
-      const _u = require("cohere-ai");
-      async function demo(client: any, input: string) {
+      const { CohereClient } = require("cohere-ai");
+      async function demo(input: string) {
+        const client = new CohereClient();
         return client.chat({ message: input });
       }
     expect_match_text: [client.chat]
   - name: cohere client chat literal negative
     code: |
-      const _u = require("cohere-ai");
-      async function demo(client: any) {
+      const { CohereClient } = require("cohere-ai");
+      async function demo() {
+        const client = new CohereClient();
         return client.chat({ message: "Hello" });
       }
     expect_no_match: true

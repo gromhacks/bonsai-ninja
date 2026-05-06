@@ -13,7 +13,7 @@
 # req.content, req.headers, req.parameters, req.cookies, req.body). The
 # shared adapter kit now emits member-access reads for the Vapor shapes
 # below, so those rules are enabled. Framework/callback shapes that still
-# need result binding or receiver-type proof remain disabled. Per
+# need result binding or semantic receiver facts remain disabled. Per
 # docs/pattern-guide.mdx the fix for unsupported shapes is in the Swift
 # adapter, not YAML.
 #
@@ -329,9 +329,7 @@
   description: "Disabled — the current Swift adapter does not index property reads like `request.body`."
 
 - id: swift.perfect.request_param
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: http-input
@@ -342,7 +340,13 @@
     kind: call
     callee:
       attribute: [HTTPRequest, param]
-  description: "Disabled — adapters index local receivers like `request.param(...)`, and bare `param` is too broad to tail-match safely."
+  match_examples:
+  - name: perfect request param
+    code: |
+      import PerfectHTTP
+      func test() { let input = "x"; HTTPRequest.param(input) }
+    expect_match_text: [HTTPRequest.param]
+  description: "Perfect HTTPRequest.param(_:) — request parameter value; local receiver calls require semantic HTTPRequest receiver-type facts."
 
 - id: swift.urlsession_response_data
   enabled: true
@@ -473,9 +477,7 @@
   description: "Disabled — serializingDecodable call is not itself tainted; needs async result binding support."
 
 - id: swift.nio.channel_read
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: network-input
@@ -486,7 +488,13 @@
     kind: call
     callee:
       attribute: [ChannelHandlerContext, fireChannelRead]
-  description: "Disabled — adapters index local receivers like `ctx.fireChannelRead(...)`, and the typed receiver match never fired."
+  match_examples:
+  - name: nio channel read
+    code: |
+      import NIO
+      func test(input: Any) { ChannelHandlerContext.fireChannelRead(input) }
+    expect_match_text: [ChannelHandlerContext.fireChannelRead]
+  description: "SwiftNIO ChannelHandlerContext.fireChannelRead(_:) — inbound network bytes/messages; local receiver calls require semantic ChannelHandlerContext receiver-type facts."
 
 - id: swift.grpc.request_param
   enabled: false
@@ -505,9 +513,7 @@
   description: "Disabled — `kind: param` cannot currently prove the enclosing function is a grpc-swift service handler, so bare `request` overmatches ordinary Swift APIs."
 
 - id: swift.websocket_on_text
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: swift
   trust: remote
   tag: ws-input
@@ -518,4 +524,10 @@
     kind: call
     callee:
       attribute: [WebSocket, onText]
-  description: "Disabled — adapters index local receivers like `ws.onText(...)`, and the typed receiver match never fired."
+  match_examples:
+  - name: vapor websocket on text
+    code: |
+      import Vapor
+      func test() { WebSocket.onText { ws, text in _ = text } }
+    expect_match_text: [WebSocket.onText]
+  description: "Vapor WebSocket.onText(_:) — inbound WebSocket text frame; local receiver calls require semantic WebSocket receiver-type facts."

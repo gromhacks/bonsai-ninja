@@ -23,7 +23,7 @@ use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_taint::{
     assign_chain_taints, call_site_receives_taint, interprocedural_taint, intraprocedural_taint,
-    InterTaintConfig, TaintConfig, TokenSet,
+    InterTaintConfig, ReceiverStatePropagation, TaintConfig, TokenSet,
 };
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
@@ -110,6 +110,18 @@ fn go_ws_files(files: &[(&str, &str)]) -> AnalyzerDb {
     db
 }
 
+fn java_ws(source: &str) -> AnalyzerDb {
+    let vfs = Arc::new(Vfs::new());
+    vfs.write("Main.java".to_string(), Arc::<str>::from(source));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_java::JavaAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    for file in db.vfs().all_files() {
+        let _ = db.decl_index(file);
+    }
+    db
+}
+
 fn seed(names: &[&str]) -> TokenSet {
     names.iter().map(|n| (*n).to_string()).collect()
 }
@@ -117,7 +129,13 @@ fn seed(names: &[&str]) -> TokenSet {
 fn config_with_call_shapes(callbacks: &[&str], mutators: &[&str]) -> InterTaintConfig {
     InterTaintConfig {
         callback_invocation_methods: callbacks.iter().map(|name| (*name).to_string()).collect(),
-        collection_append_methods: mutators.iter().map(|name| (*name).to_string()).collect(),
+        receiver_state_propagations: mutators
+            .iter()
+            .map(|name| ReceiverStatePropagation {
+                method: (*name).to_string(),
+                receiver_type: None,
+            })
+            .collect(),
         ..Default::default()
     }
 }
@@ -1190,6 +1208,35 @@ function entry(items) {
         "item",
         &InterTaintConfig::default(),
     ));
+}
+
+#[test]
+fn semantic_java_inherited_receiver_method_resolves_to_base_method() {
+    let db = java_ws(
+        r#"
+class Base {
+  void sink(String value) {
+    audit(value);
+  }
+}
+
+class Child extends Base {}
+
+class App {
+  void entry(String input) {
+    Child child = new Child();
+    child.sink(input);
+  }
+}
+"#,
+    );
+    let entry = func_id(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["input"]), &InterTaintConfig::default(), &db);
+    assert!(
+        has_propagation(&result, "entry", "sink", &db),
+        "receiver dispatch through inherited Base.sink should be resolved; records={:?}",
+        result.call_records
+    );
 }
 
 // ---------------------------------------------------------------------------

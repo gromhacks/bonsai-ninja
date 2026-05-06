@@ -409,7 +409,7 @@ fn extract_kotlin_package(root: tree_sitter::Node<'_>, src: &[u8]) -> Option<Vec
 /// Walk Kotlin function declarations and collect parameter
 /// `name: Type` bindings as `TypeAliasBinding`. Used by the
 /// resolver to narrow `[Type, method]` rule dispatch through
-/// adapter facts instead of LaxTail fallback.
+/// adapter facts instead of local receiver-name guesses.
 fn collect_kotlin_type_aliases(
     tree: &Tree,
     file: bonsai_common::FileId,

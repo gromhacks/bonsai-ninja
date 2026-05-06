@@ -220,7 +220,7 @@
   match:
     kind: read
     target:
-      regex: "^ctx\\.request\\.body$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request\\.body$"
   match_examples:
   - name: koa ctx request body
     code: |
@@ -304,7 +304,7 @@
   match:
     kind: read
     target:
-      regex: "^ctx\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers(\\[['\"]referer['\"]\\]|\\.referer)$"
   description: "Disabled duplicate — typescript.source.koa_ctx_headers taints the same Koa request-header object; current adapter normalizes subscript reads to the parent header object."
 
 - id: typescript.source.fastify_request_body
@@ -318,7 +318,7 @@
   match:
     kind: read
     target:
-      regex: "^request\\.body$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.body$"
   match_examples:
   - name: fastify request body
     code: |
@@ -406,7 +406,7 @@
   match:
     kind: read
     target:
-      regex: "^req\\.headers$|^(req|request)\\.headers\\.userAgent$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.headers$|^[A-Za-z_$][A-Za-z0-9_$]*\\.headers\\.userAgent$"
   match_examples:
   - name: fastify req headers user agent
     code: |
@@ -888,7 +888,7 @@
   match:
     kind: call
     callee:
-      regex: "^c\\.req\\.query$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.query$"
   description: "Disabled duplicate — current matching also emits `req.query`; typescript.source.express_req_query carries Hono package metadata for this adapter fact."
 
 - id: typescript.source.hono_ctx_req_json
@@ -902,7 +902,7 @@
   match:
     kind: call
     callee:
-      regex: "^c\\.req\\.json$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.json$"
   match_examples:
   - name: hono ctx req json
     code: |
@@ -923,7 +923,7 @@
   match:
     kind: call
     callee:
-      regex: "^c\\.req\\.param$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.req\\.param$"
   match_examples:
   - name: hono ctx req param
     code: |
@@ -953,7 +953,9 @@
   description: "tRPC procedure ctx.input — attacker-supplied procedure argument."
 
 - id: typescript.source.trpc_resolver_input_property
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   trust: remote
   tag: rpc-input
@@ -962,7 +964,7 @@
   match:
     kind: read
     target:
-      regex: "^(opts|options)\\.input$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.input$"
   match_examples:
   - name: trpc opts input
     code: |
@@ -971,7 +973,7 @@
         return opts.input;
       }
     expect_match_text: [opts.input]
-  description: "tRPC resolver options input (`opts.input` / `options.input`) — procedure caller-controlled payload."
+  description: "Disabled — without semantic resolver-parameter facts this collides with ctx.input; typescript.source.trpc_input covers the canonical tRPC input object."
 
 - id: typescript.source.adonis_request_input
   enabled: true
@@ -1010,7 +1012,7 @@
   match:
     kind: call
     callee:
-      regex: "^request\\.(all|only|except)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(all|only|except)$"
   constraints:
   - max_args: 1
   match_examples:
@@ -1092,7 +1094,7 @@
   match:
     kind: read
     target:
-      regex: "^event\\.(node\\.)?req$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(node\\.)?req$"
   match_examples:
   - name: h3 event node req
     code: |
@@ -1168,7 +1170,7 @@
   match:
     kind: call
     callee:
-      regex: "^req\\.(get|header)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(get|header)$"
   constraints:
   - min_args: 1
   match_examples:
@@ -1222,7 +1224,7 @@
   match:
     kind: call
     callee:
-      regex: "^ctx\\.cookies\\.get$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.cookies\\.get$"
   constraints:
   - min_args: 1
   match_examples:
@@ -1346,7 +1348,9 @@
   description: "Browser location origin/path/host fields — attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
 
 - id: typescript.source.websocket_structured_frame_data
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   trust: remote
   tag: ws-input
@@ -1356,7 +1360,7 @@
   match:
     kind: read
     target:
-      regex: "^(frame|packet)\\.data$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.data$"
   match_examples:
   - name: websocket frame data
     code: |
@@ -1365,7 +1369,7 @@
         return frame.data;
       }
     expect_match_text: [frame.data]
-  description: "Structured WebSocket frame/packet .data fields — untrusted peer-controlled payloads without colliding with Pub/Sub's `message.data` adapter fact."
+  description: "Disabled — receiver-agnostic .data collides with event.data; enable only after adapter facts can distinguish WebSocket frame/packet payload objects."
 
 - id: typescript.source.socketio_handshake
   enabled: true
@@ -1378,7 +1382,7 @@
   match:
     kind: read
     target:
-      regex: "^socket\\.handshake\\.(query|headers|auth)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.handshake\\.(query|headers|auth)$"
   match_examples:
   - name: socket.io handshake query
     code: |
@@ -1406,7 +1410,7 @@
   match:
     kind: read
     target:
-      regex: "^args\\.(input|data|where|filter|id|variables|query|search|email|username|password)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(input|data|where|filter|id|variables|query|search|email|username|password)$"
   match_examples:
   - name: graphql args input
     code: |
@@ -1441,7 +1445,7 @@
   match:
     kind: read
     target:
-      regex: "^info\\.context\\.args(\\.(input|data|where|filter|id|variables))?$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.args(\\.(input|data|where|filter|id|variables))?$"
   match_examples:
   - name: graphql info context args
     code: |
@@ -1471,7 +1475,7 @@
   match:
     kind: call
     callee:
-      regex: "^request\\.(json|formData|text|arrayBuffer)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(json|formData|text|arrayBuffer)$"
   match_examples:
   - name: next request json
     code: |
@@ -1501,7 +1505,7 @@
   match:
     kind: read
     target:
-      regex: "^request\\.(url|cookies)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(url|cookies)$"
   match_examples:
   - name: next request url
     code: |
@@ -1553,7 +1557,7 @@
   match:
     kind: read
     target:
-      regex: "^file\\.(originalname|originalFilename|name|filename)$|^info\\.filename$|^uploadedFile\\.name$|^req\\.file\\.originalname$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(originalname|originalFilename|name|filename)$|^[A-Za-z_$][A-Za-z0-9_$]*\\.file\\.originalname$"
   match_examples:
   - name: multer file originalname
     code: |

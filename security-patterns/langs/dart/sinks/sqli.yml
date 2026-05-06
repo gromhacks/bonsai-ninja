@@ -313,7 +313,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
-  description: "Subsumed by dart.sqli.postgres_execute — same receiver-agnostic regex covers `mysql_client`, `postgres`, and `sqlite3` Connection.execute shapes; canonical rule should add mysql_client to its packages list (already covered by dart.sqli.postgres_execute's gate)."
+  description: "Subsumed by dart.sqli.postgres_execute — same receiver-agnostic regex and canonical package gate cover `mysql_client`, `postgres`, and `sqlite3` Connection.execute shapes."
 - id: dart.sqli.mysql1_query
   enabled: false
   disabled_reason:

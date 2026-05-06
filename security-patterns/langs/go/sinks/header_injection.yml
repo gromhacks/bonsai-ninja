@@ -261,7 +261,7 @@
     kind: call
     callee:
       regex: \.Add$
-  description: "Disabled — bare `.Add$` regex double-fires with go.ldap.conn_add. The ldap rule already covers the call shape; without receiver-type narrowing we would double-count."
+  description: "Disabled — bare `.Add$` regex double-fires with go.ldap.conn_add. The ldap rule already covers the call shape; enable only when semantic receiver facts distinguish http.Header.Add from LDAP Add."
 - id: go.header.gin_header
   enabled: true
   language: go

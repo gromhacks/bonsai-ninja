@@ -336,6 +336,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: java.xxe.apache_poi_xssfworkbook_inputstream
   language: java
   tag: insecure-deserialization
   severity: high
@@ -367,6 +368,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: java.xxe.unmarshaller_unmarshal
   language: java
   tag: insecure-deserialization
   severity: high
@@ -389,7 +391,7 @@
         Object unmarshal(Object... args) { return null; }
       }
     expect_match_text: [unmarshaller.unmarshal]
-  description: "Disabled — duplicate of java.xxe.unmarshaller_unmarshal under the current matcher."
+  description: "Disabled — duplicate of java.xxe.unmarshaller_unmarshal; JAXB XML parsing is classified once as XXE."
 
   imports:
   - javax

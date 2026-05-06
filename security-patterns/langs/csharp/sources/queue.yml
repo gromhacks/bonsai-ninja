@@ -78,10 +78,11 @@
   match:
     kind: call
     callee:
-      name: ReceiveMessageAsync
+      regex: "\\.ReceiveMessageAsync$"
   match_examples:
   - name: declared shape
     code: |
       using AWSSDK.SQS;
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ReceiveMessageAsync(input); } }
-  description: "AmazonSQSClient.ReceiveMessageAsync — tail-match across local client variable names."
+      class App { void Test() { dynamic input = "x"; dynamic client = input; client.ReceiveMessageAsync(); } }
+    expect_match_text: [client.ReceiveMessageAsync]
+  description: "AmazonSQSClient.ReceiveMessageAsync — package-scoped SQS receive call on a local client receiver."

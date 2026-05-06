@@ -56,6 +56,7 @@
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: solidity.delegatecall.unrestricted
   language: solidity
   tag: access-control
   severity: critical

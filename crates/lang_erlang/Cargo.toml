@@ -12,5 +12,8 @@ bonsai_common = { workspace = true }
 bonsai_lang_api = { workspace = true }
 tree-sitter = { workspace = true }
 
+[dev-dependencies]
+bonsai_conformance = { workspace = true }
+
 [lints]
 workspace = true

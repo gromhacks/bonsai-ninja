@@ -6,9 +6,9 @@
 //! flat namespace. The local `(FileId, local_symbol)` pair is still
 //! retrievable when an adapter needs to go back to the per-file data.
 
-use ahash::AHashMap;
-use bonsai_common::{FileId, SymbolId};
-use bonsai_lang_api::{Decl, DeclIndex, DeclKind, Ref};
+use ahash::{AHashMap, AHashSet};
+use bonsai_common::{short_qualified_tail, FileId, SymbolId};
+use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, Ref};
 use serde::{Deserialize, Serialize};
 
 /// A merged view over all per-file decl indices.
@@ -109,6 +109,22 @@ impl GlobalIndex {
         self.by_file.insert(file, index);
     }
 
+    /// Finish workspace-wide semantic facts that need all files.
+    ///
+    /// Per-file adapter facts already populate direct receiver types
+    /// (`Child c; c.sink()`). This pass extends those facts through
+    /// indexed base-class declarations across the whole workspace so
+    /// downstream consumers can match `[Base, sink]` on a `Child`
+    /// receiver without falling back to receiver-name heuristics.
+    pub fn finalize_semantic_facts(&mut self) {
+        let bases_by_type = self.bases_by_type_name();
+        for index in self.by_file.values_mut() {
+            for decl in &mut index.defs {
+                enrich_receiver_types_in_events(&mut decl.flow_events, &bases_by_type);
+            }
+        }
+    }
+
     /// Drop every cached fact derived from `file`: per-file indexes,
     /// name-table entries, ref backlinks, and tombstone the global
     /// id slots so old SymbolIds resolve to `None`.
@@ -141,6 +157,39 @@ impl GlobalIndex {
                 }
             }
         }
+    }
+
+    fn bases_by_type_name(&self) -> AHashMap<String, Vec<String>> {
+        let mut candidates: AHashMap<String, Option<Vec<String>>> = AHashMap::new();
+        for decl in self.by_file.values().flat_map(|index| index.defs.iter()) {
+            if !matches!(
+                decl.kind,
+                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+            ) || decl.bases.is_empty()
+            {
+                continue;
+            }
+            let mut bases = decl.bases.clone();
+            dedup_strings(&mut bases);
+            for key in type_name_keys(decl.name.as_str(), decl.qualified_name.as_deref()) {
+                candidates
+                    .entry(key)
+                    .and_modify(|existing| {
+                        if existing.as_ref().is_some_and(|known| known == &bases) {
+                            return;
+                        }
+                        // Same type spelling resolved to different
+                        // class declarations. Fail closed for this
+                        // key instead of merging unrelated ancestry.
+                        *existing = None;
+                    })
+                    .or_insert_with(|| Some(bases.clone()));
+            }
+        }
+        candidates
+            .into_iter()
+            .filter_map(|(key, bases)| bases.map(|bases| (key, bases)))
+            .collect()
     }
 
     /// Per-file decl index, keyed on global ids. Returns `None` when
@@ -225,6 +274,101 @@ impl GlobalIndex {
     pub fn is_empty(&self) -> bool {
         self.by_file.values().all(|index| index.defs.is_empty())
     }
+}
+
+fn enrich_receiver_types_in_events(events: &mut [FlowEvent], bases_by_type: &AHashMap<String, Vec<String>>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { receiver_types, .. } => {
+                let originals = receiver_types.clone();
+                for ty in originals {
+                    push_type_and_bases(receiver_types, &ty, bases_by_type, &mut AHashSet::new());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_receiver_types_in_events(then_events, bases_by_type);
+                enrich_receiver_types_in_events(else_events, bases_by_type);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_receiver_types_in_events(body, bases_by_type);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_receiver_types_in_events(body, bases_by_type);
+                enrich_receiver_types_in_events(catch_events, bases_by_type);
+                enrich_receiver_types_in_events(finally_events, bases_by_type);
+            }
+            FlowEvent::Assign { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
+}
+
+fn push_type_and_bases(
+    receiver_types: &mut Vec<String>,
+    ty: &str,
+    bases_by_type: &AHashMap<String, Vec<String>>,
+    seen: &mut AHashSet<String>,
+) {
+    let key = type_name_key(ty);
+    if key.is_empty() || !seen.insert(key.clone()) {
+        return;
+    }
+    push_unique(receiver_types, key.clone());
+    if let Some(bases) = bases_by_type.get(&key) {
+        for base in bases {
+            push_type_and_bases(receiver_types, base, bases_by_type, seen);
+        }
+    }
+}
+
+fn type_name_keys(name: &str, qualified_name: Option<&str>) -> Vec<String> {
+    let mut out = vec![type_name_key(name)];
+    if let Some(qname) = qualified_name {
+        out.push(type_name_key(qname));
+    }
+    dedup_strings(&mut out);
+    out.retain(|key| !key.is_empty());
+    out
+}
+
+fn type_name_key(name: &str) -> String {
+    let normalized = name
+        .trim()
+        .trim_start_matches(['&', '*', '$', '@', '%'])
+        .trim_end_matches("()")
+        .replace('\\', "::");
+    short_qualified_tail(&normalized)
+        .split('<')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn dedup_strings(values: &mut Vec<String>) {
+    let mut seen = AHashSet::new();
+    values.retain(|value| !value.is_empty() && seen.insert(value.clone()));
 }
 
 #[cfg(test)]

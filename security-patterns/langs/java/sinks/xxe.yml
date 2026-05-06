@@ -81,44 +81,46 @@
     expect_no_match: true
   description: "DocumentBuilder.parse."
 
-# Receiver-narrowed `db.parse(...)` shape. The attribute rule above
-# requires the receiver-text to literally be `DocumentBuilder`; common
-# real-world code keeps the builder in a typed local variable like
-# `db` / `builder` / `documentBuilder`, which the attribute rule
-# misses. Rule fires when the receiver name is one of the canonical
-# DocumentBuilder local names. This is the YAML-layer fix for the
-# CB-JAVA-CWE611-2020-jvxxe0 retarget — the engine-side fix is type-
-# inference on chained calls.
+# Package-scoped local DocumentBuilder parse shape. This keeps the local
+# receiver fallback explicit and import-gated until all Java adapters surface
+# receiver-type facts for `DocumentBuilder` locals.
 - id: java.xxe.documentbuilder_parse_local
   enabled: true
   language: java
   tag: xxe
   severity: high
+  packages: ["javax.xml.parsers"]
   cwe: [CWE-611]
   match:
     kind: call
     callee:
-      attribute: [db, parse]
+      regex: "\\.parse$"
   constraints:
   - arg_tainted:
       index: 0
   match_examples:
   - name: generated shape example
     code: |
+      import javax.xml.parsers.*;
       class App {
-        void handle(String input) throws Exception {
+        void handle(DocumentBuilder db, String input) throws Exception {
           db.parse(input);
         }
       }
+    expect_match_text: [db.parse]
   - name: arg tainted literal negative
     code: |
+      import javax.xml.parsers.*;
       class App {
-        void handle(String input) throws Exception {
+        void handle(DocumentBuilder db) throws Exception {
           db.parse("safe");
         }
       }
     expect_no_match: true
-  description: "db.parse(...) on a typed DocumentBuilder local — receiver-name narrowed from the attribute rule. Pairs with java.xxe.documentbuilder_parse to catch the common idiom `DocumentBuilder db = factory.newDocumentBuilder(); db.parse(input);` which the attribute-receiver rule misses without engine type inference."
+  description: "DocumentBuilder local receiver parse(...) — import-gated XML parse of tainted input while receiver-type facts are still adapter-dependent."
+
+  imports:
+  - javax.xml.parsers
 
 - id: java.xxe.documentbuilderfactory_newinstance
   enabled: true

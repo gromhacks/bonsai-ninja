@@ -18,8 +18,7 @@
     code: |
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
-      fun handle(name: String, doc: Any) {
-        val xpath: XPath = XPathFactory.newInstance().newXPath()
+      fun handle(name: String, xpath: XPath, doc: Any) {
         val expr = "//user[name=\"" + name + "\"]"
         xpath.evaluate(expr, doc)
       }
@@ -28,8 +27,7 @@
     code: |
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
-      fun handle() {
-        val xpath: XPath = XPathFactory.newInstance().newXPath()
+      fun handle(xpath: XPath) {
         xpath.evaluate("//safe", "")
       }
     expect_no_match: true
@@ -55,8 +53,7 @@
     code: |
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
-      fun handle(name: String) {
-        val xpath: XPath = XPathFactory.newInstance().newXPath()
+      fun handle(name: String, xpath: XPath) {
         xpath.compile("//user[name=\"" + name + "\"]")
       }
     expect_match_text: [xpath.compile]
@@ -64,8 +61,7 @@
     code: |
       import javax.xml.xpath.XPath
       import javax.xml.xpath.XPathFactory
-      fun handle() {
-        val xpath: XPath = XPathFactory.newInstance().newXPath()
+      fun handle(xpath: XPath) {
         xpath.compile("//safe")
       }
     expect_no_match: true

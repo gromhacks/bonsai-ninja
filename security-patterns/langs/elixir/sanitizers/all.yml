@@ -25,7 +25,8 @@
         end
       end
     expect_match_text: [Phoenix.HTML.html_escape]
-  description: "Phoenix.HTML.html_escape/1 — escapes `<`, `>`, `&`, `\"`, `'` and returns a :safe tuple; neutralises reflected XSS in EEx/HEEx templates."
+  description: "Phoenix.HTML.html_escape/1 — escapes `<`, `>`, `&`, `\"`, `'` and returns a :safe tuple; neutralises reflected
+    XSS in EEx/HEEx templates."
 
   imports:
   - Phoenix_html
@@ -274,7 +275,8 @@
     kind: call
     callee:
       attribute: [Path, expand]
-  description: "Disabled — Path.expand/2 normalises `..` but does NOT enforce a root on its own. Only counts as a sanitiser when paired with a `String.starts_with?(root)` check; enable manually once that pattern is confirmed."
+  description: "Disabled — Path.expand/2 normalises `..` but does NOT enforce a root on its own. Only counts as a sanitiser
+    when paired with a `String.starts_with?(root)` check; enable manually once that pattern is confirmed."
 
 # -- Numeric coercion -----------------------------------------------
 - id: elixir.sanitizer.string_to_integer
@@ -392,7 +394,8 @@
         end
       end
     expect_match_text: [Ecto.Changeset.cast]
-  description: "Ecto.Changeset.cast/4 — restricts input to declared fields and coerces types; invalid values land in errors rather than flowing through."
+  description: "Ecto.Changeset.cast/4 — restricts input to declared fields and coerces types; invalid values land in errors
+    rather than flowing through."
 
   imports:
   - Ecto
@@ -462,7 +465,8 @@
         end
       end
     expect_match_text: [Plug.HTML.html_escape]
-  description: "Plug.HTML.html_escape/1 — escapes `&`, `<`, `>`, `\"`, `'` in a binary; safe for embedding inside HTML text/attribute contexts."
+  description: "Plug.HTML.html_escape/1 — escapes `&`, `<`, `>`, `\"`, `'` in a binary; safe for embedding inside HTML text/attribute
+    contexts."
 
 # -- Password / KDF constant-time verifiers -------------------------
 # Tag `constant-time` because these compare against a stored hash in
@@ -489,7 +493,8 @@
         end
       end
     expect_match_text: [Argon2.verify_pass]
-  description: "Argon2.verify_pass/2 — constant-time Argon2id password verification; defeats timing oracles on credential checks."
+  description: "Argon2.verify_pass/2 — constant-time Argon2id password verification; defeats timing oracles on credential
+    checks."
 
   imports:
   - Argon2_elixir
@@ -558,7 +563,8 @@
         end
       end
     expect_match_text: [Comeonin.verify_pass]
-  description: "Comeonin.verify_pass/3 — constant-time hash comparison that dispatches to the configured Argon2/Bcrypt/Pbkdf2 backend."
+  description: "Comeonin.verify_pass/3 — constant-time hash comparison that dispatches to the configured Argon2/Bcrypt/Pbkdf2
+    backend."
 
 # -- Ecto parameterised splice (^var) -------------------------------
 # The `^expr` operator inside an Ecto query/fragment is what marks a
@@ -586,7 +592,8 @@
         end
       end
     expect_match_text: [Ecto.Query.dynamic]
-  description: "Ecto.Query.dynamic/2 — builds a composable WHERE clause; `^value` interpolations bind through the parameter engine instead of string-concat."
+  description: "Ecto.Query.dynamic/2 — builds a composable WHERE clause; `^value` interpolations bind through the parameter
+    engine instead of string-concat."
 
   imports:
   - Ecto
@@ -617,7 +624,7 @@
   description: "String.starts_with?(input, \"/...\") — same-origin redirect/path guard for slash-rooted local paths."
 
 - id: elixir.sanitizer.allowlist_member
-  enabled: true
+  enabled: false
   language: elixir
   tag: allowlist-validate
   match:
@@ -640,8 +647,12 @@
   - name: enum member allowlist negative constraint boundary
     code: "defmodule App do\n  def test(input) do\n    Enum.member?()\n  end\nend\n"
     expect_no_match: true
-  description: "Enum.member?/MapSet.member?/Map.has_key? against an allowlist-named collection — validates membership in a finite accepted set."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Enum.member?/MapSet.member?/Map.has_key? against an allowlist-named collection — validates membership in a finite accepted
+    set."
 
+  disabled_reason:
+    code: over-broad
 - id: elixir.sanitizer.regex_match_full
   enabled: true
   language: elixir
@@ -666,7 +677,8 @@
   - name: anchored Regex.match? negative constraint boundary
     code: "defmodule App do\n  def test(input) do\n    Regex.match?()\n  end\nend\n"
     expect_no_match: true
-  description: "Regex.match? with an anchored full-string allowlist pattern — validates slug/UUID-style shape before downstream use."
+  description: "Regex.match? with an anchored full-string allowlist pattern — validates slug/UUID-style shape before downstream
+    use."
 
 - id: elixir.sanitizer.postgrex_query_bind
   enabled: true

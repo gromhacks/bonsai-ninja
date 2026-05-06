@@ -136,12 +136,12 @@
     callee:
       regex: "^(?:.*\\.)?(GET|POST|PUT|DELETE|PATCH|HEAD)$"
   constraints:
-  - receiver_name_in: [AFHTTPSessionManager, AFHTTPRequestOperationManager, manager, sessionManager, httpManager, client]
+  - receiver_type_in: [AFHTTPSessionManager, AFHTTPRequestOperationManager]
   match_examples:
   - name: declared shape
     code: |
       #import <AFNetworking/AFNetworking.h>
-      void test(id input) { id target = input; int amount = 1; [AFHTTPSessionManager GET:input]; }
+      void test(AFHTTPSessionManager *manager, id input) { id target = input; int amount = 1; [manager GET:input]; }
   description: "AFNetworking AFHTTPSessionManager -GET:/-POST: — success block receives server-controlled responseObject (deserialized JSON)."
 
 - id: objc.source.nsurlrequest_param
@@ -270,8 +270,6 @@
     kind: write
     target:
       name: body
-  constraints:
-  - receiver_name_in: [MFMessageComposeViewController, composeVC, controller]
   description: "Disabled — MFMessageComposeViewController.body assignment with attacker-controlled deep-link content; can hijack outbound SMS draft. Reflects sink-direction; enable only when modeling outbound-SMS surfaces."
 
 - id: objc.source.app_extension_input_items

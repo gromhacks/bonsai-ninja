@@ -26,4 +26,4 @@
     kind: call
     callee:
       attribute: [Handler, handle]
-  description: "Disabled — adapters index local receivers like `$handler->handle(...)`, and bare `handle` is too broad to tail-match safely."
+  description: "Disabled — adapters index local receivers like `$handler->handle(...)`, not Bref Handler type facts; a bare `handle` fallback would match unrelated APIs."

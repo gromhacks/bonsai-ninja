@@ -229,6 +229,42 @@
       }
     expect_no_match: true
   description: "java.sql.Statement.execute(sql) — no parameter binding."
+- id: scala.sqli.jdbc_statement_execute_variable
+  enabled: true
+  language: scala
+  tag: sql-injection
+  severity: high
+  packages: [java.sql]
+  imports: [java.sql]
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: "^[a-z_$][A-Za-z0-9_$]*\\.(execute|executeQuery|executeUpdate)$"
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: jdbc statement variable execute query
+    code: |
+      import java.sql._
+      object App {
+        def handle(stmt: Statement, input: String): Unit = {
+          stmt.executeQuery(s"select * from users where id = '$input'")
+        }
+      }
+    expect_match_text: [stmt.executeQuery]
+  - name: jdbc statement variable execute query literal negative
+    code: |
+      import java.sql._
+      object App {
+        def handle(stmt: Statement): Unit = {
+          stmt.executeQuery("select * from users")
+        }
+      }
+    expect_no_match: true
+  description: "java.sql.Statement variable execute/executeQuery/executeUpdate with tainted SQL."
 - id: scala.sqli.jdbc_statement_execute_query
   enabled: true
   language: scala

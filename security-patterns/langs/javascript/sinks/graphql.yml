@@ -200,27 +200,26 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request$"
+      regex: "^GraphQLClient\\.request$"
   constraints:
-  - receiver_name_in: [client, gqlClient, graphqlClient]
   - arg_tainted:
       index: 0
   match_examples:
   - name: graphql-request client request tainted
     code: |
-      const _u = require("graphql-request");
-      function demo(client, input) {
+      const { GraphQLClient } = require("graphql-request");
+      function demo(input) {
+        const client = new GraphQLClient("/graphql");
         return client.request(input);
       }
-      demo({ request: () => null }, "");
     expect_match_text: [client.request]
   - name: graphql-request client request literal negative
     code: |
-      const _u = require("graphql-request");
-      function demo(client) {
+      const { GraphQLClient } = require("graphql-request");
+      function demo() {
+        const client = new GraphQLClient("/graphql");
         return client.request("{ viewer { id } }");
       }
-      demo({ request: () => null });
     expect_no_match: true
   - name: graphql-request unrelated receiver negative
     code: |
@@ -243,28 +242,27 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.query$"
+      regex: "^ApolloClient\\.query$"
   constraints:
-  - receiver_name_in: [client, apolloClient, graphqlClient]
   - arg_tainted:
       index: 0
   match_examples:
   - name: apollo client query tainted
     code: |
-      const _u = require("@apollo/client");
-      function demo(client, input) {
+      const { ApolloClient } = require("@apollo/client");
+      function demo(input) {
+        const client = new ApolloClient({});
         return client.query({ query: input });
       }
-      demo({ query: () => null }, "");
     expect_match_text: [client.query]
   - name: apollo client query literal negative
     code: |
-      const _u = require("@apollo/client");
+      const { ApolloClient } = require("@apollo/client");
       const SAFE = "{ viewer { id } }";
-      function demo(client) {
+      function demo() {
+        const client = new ApolloClient({});
         return client.query({ query: SAFE });
       }
-      demo({ query: () => null });
     expect_no_match: true
   - name: apollo client unrelated receiver negative
     code: |

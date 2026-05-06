@@ -37,7 +37,7 @@
         return Object.assign(target, { "__proto__": value });
       }
     expect_match_text: [Object.assign]
-  description: "Object.assign(target, source) — shallow merge can still pollute when a tainted source object carries special keys. TODO(only_when_packaged): JS Object global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Object', 'assign']` match only."
+  description: "Object.assign(target, source) — shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
 
 - id: javascript.proto_pollution.lodash_merge
   enabled: false

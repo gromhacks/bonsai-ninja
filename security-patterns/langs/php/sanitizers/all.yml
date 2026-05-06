@@ -128,7 +128,8 @@
       attribute:
       - PDO
       - quote
-  description: Disabled — PDO::quote is a partial escape helper and v1 matching cannot prove it is used only for value literals; prefer prepared statements.
+  description: Disabled — PDO::quote is a partial escape helper and v1 matching cannot prove it is used only for value literals;
+    prefer prepared statements.
 - id: php.sanitizer.addslashes
   enabled: false
   disabled_reason:
@@ -139,7 +140,8 @@
     kind: call
     callee:
       name: addslashes
-  description: "Disabled — addslashes is a naive string escape and is not database-charset-aware; it can leave SQL injection exploitable under multibyte encodings or non-string SQL contexts."
+  description: "Disabled — addslashes is a naive string escape and is not database-charset-aware; it can leave SQL injection
+    exploitable under multibyte encodings or non-string SQL contexts."
 - id: php.sanitizer.intval
   enabled: true
   language: php
@@ -178,7 +180,8 @@
     kind: call
     callee:
       name: filter_var
-  description: "Disabled — bare filter_var($value) uses the default unsafe/raw filter and does not validate or sanitize attacker-controlled data. Use constrained FILTER_VALIDATE_* rules instead."
+  description: "Disabled — bare filter_var($value) uses the default unsafe/raw filter and does not validate or sanitize attacker-controlled
+    data. Use constrained FILTER_VALIDATE_* rules instead."
 - id: php.sanitizer.filter_input
   enabled: false
   disabled_reason:
@@ -189,7 +192,8 @@
     kind: call
     callee:
       name: filter_input
-  description: "Disabled — filter_input requires a specific FILTER_VALIDATE_* or context-appropriate FILTER_SANITIZE_* argument; the bare call/default filter preserves dangerous taint."
+  description: "Disabled — filter_input requires a specific FILTER_VALIDATE_* or context-appropriate FILTER_SANITIZE_* argument;
+    the bare call/default filter preserves dangerous taint."
 - id: php.sanitizer.json_encode
   enabled: false
   disabled_reason:
@@ -617,7 +621,8 @@
   - arg_equals:
       index: 1
       value: FILTER_VALIDATE_INT
-  description: "Disabled duplicate — php.sanitizer.filter_var_validate_int is the enabled constrained FILTER_VALIDATE_INT rule with examples."
+  description: "Disabled duplicate — php.sanitizer.filter_var_validate_int is the enabled constrained FILTER_VALIDATE_INT
+    rule with examples."
 - id: php.sanitizer.htmlspecialchars_ent_quotes
   enabled: true
   language: php
@@ -638,7 +643,10 @@
   - name: php.sanitizer.htmlspecialchars_ent_quotes example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlspecialchars();\n}\n"
     expect_no_match: true
-  description: htmlspecialchars(..., ENT_QUOTES) — encodes both single and double quotes, making output safe for double- AND single-quoted attribute contexts. Without ENT_QUOTES the default (ENT_HTML401|ENT_QUOTES varies by PHP version; in <8.1 single quotes were not escaped) leaves single-quoted attribute injection possible, so this constrained variant is a stronger sanitizer than the bare-name rule above.
+  description: htmlspecialchars(..., ENT_QUOTES) — encodes both single and double quotes, making output safe for double- AND
+    single-quoted attribute contexts. Without ENT_QUOTES the default (ENT_HTML401|ENT_QUOTES varies by PHP version; in <8.1
+    single quotes were not escaped) leaves single-quoted attribute injection possible, so this constrained variant is a stronger
+    sanitizer than the bare-name rule above.
 - id: php.sanitizer.htmlentities_ent_quotes
   enabled: true
   language: php
@@ -659,7 +667,8 @@
   - name: php.sanitizer.htmlentities_ent_quotes example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  htmlentities();\n}\n"
     expect_no_match: true
-  description: 'htmlentities(..., ENT_QUOTES) — same rationale as htmlspecialchars_ent_quotes: only the ENT_QUOTES variant is safe for single-quoted attribute contexts.'
+  description: 'htmlentities(..., ENT_QUOTES) — same rationale as htmlspecialchars_ent_quotes: only the ENT_QUOTES variant
+    is safe for single-quoted attribute contexts.'
 - id: php.sanitizer.filter_var_validate_int
   enabled: true
   language: php
@@ -674,13 +683,15 @@
       value: FILTER_VALIDATE_INT
   match_examples:
   - name: php.sanitizer.filter_var_validate_int example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var($input, FILTER_VALIDATE_INT);\n}\n"
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var($input, FILTER_VALIDATE_INT);\n\
+      }\n"
     expect_match_text:
     - filter_var
   - name: php.sanitizer.filter_var_validate_int example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var();\n}\n"
     expect_no_match: true
-  description: filter_var(value, FILTER_VALIDATE_INT) — returns the int or false; constrains taint to a numeric value safe for SQL/LDAP/path concat.
+  description: filter_var(value, FILTER_VALIDATE_INT) — returns the int or false; constrains taint to a numeric value safe
+    for SQL/LDAP/path concat.
 - id: php.sanitizer.filter_var_validate_email
   enabled: true
   language: php
@@ -695,7 +706,8 @@
       value: FILTER_VALIDATE_EMAIL
   match_examples:
   - name: php.sanitizer.filter_var_validate_email example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var($input, FILTER_VALIDATE_EMAIL);\n}\n"
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var($input, FILTER_VALIDATE_EMAIL);\n\
+      }\n"
     expect_match_text:
     - filter_var
   - name: php.sanitizer.filter_var_validate_email example negative constraint boundary
@@ -716,13 +728,15 @@
       value: FILTER_VALIDATE_URL
   match_examples:
   - name: php.sanitizer.filter_var_validate_url example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var($input, FILTER_VALIDATE_URL);\n}\n"
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var($input, FILTER_VALIDATE_URL);\n\
+      }\n"
     expect_match_text:
     - filter_var
   - name: php.sanitizer.filter_var_validate_url example negative constraint boundary
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  filter_var();\n}\n"
     expect_no_match: true
-  description: 'filter_var(value, FILTER_VALIDATE_URL) — URL-shape validator. Note: validates syntax only; does NOT block SSRF (an attacker URL like http://169.254.169.254/ still passes). Pair with an allow-list host check.'
+  description: 'filter_var(value, FILTER_VALIDATE_URL) — URL-shape validator. Note: validates syntax only; does NOT block
+    SSRF (an attacker URL like http://169.254.169.254/ still passes). Pair with an allow-list host check.'
 - id: php.sanitizer.password_verify
   enabled: true
   language: php
@@ -750,7 +764,9 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  openssl_random_pseudo_bytes($input);\n}\n"
     expect_match_text:
     - openssl_random_pseudo_bytes
-  description: openssl_random_pseudo_bytes() — CSPRNG bytes. The 2nd by-ref parameter `$crypto_strong` returns true when OpenSSL used a cryptographically strong RNG; callers must check it before using the output for crypto. The bare-call match here is the source-visible site; the by-ref-check is enforced as a manual review item.
+  description: openssl_random_pseudo_bytes() — CSPRNG bytes. The 2nd by-ref parameter `$crypto_strong` returns true when OpenSSL
+    used a cryptographically strong RNG; callers must check it before using the output for crypto. The bare-call match here
+    is the source-visible site; the by-ref-check is enforced as a manual review item.
 - id: php.sanitizer.pdo_quote_value
   enabled: false
   disabled_reason:
@@ -763,7 +779,8 @@
       attribute:
       - PDO
       - quote
-  description: "Disabled — PDO::quote is only safe for string-literal value contexts and cannot prove the quoted output is not used as an identifier, keyword, or larger SQL fragment. Prefer prepared statements and bind rules."
+  description: "Disabled — PDO::quote is only safe for string-literal value contexts and cannot prove the quoted output is
+    not used as an identifier, keyword, or larger SQL fragment. Prefer prepared statements and bind rules."
 - id: php.sanitizer.symfony_is_safe_redirect
   enabled: true
   language: php
@@ -834,9 +851,10 @@
   - name: php.sanitizer.in_array_strict_allowlist example negative constraint boundary
     code: "<?php\nfunction example($role) {\n  in_array();\n}\n"
     expect_no_match: true
-  description: in_array($value, $allowed, true) — strict enum allowlist check; third argument avoids PHP loose-comparison bypasses.
+  description: in_array($value, $allowed, true) — strict enum allowlist check; third argument avoids PHP loose-comparison
+    bypasses.
 - id: php.sanitizer.array_key_exists_allowlist
-  enabled: true
+  enabled: false
   language: php
   tag: allowlist-validate
   match:
@@ -853,7 +871,10 @@
   - name: php.sanitizer.array_key_exists_allowlist example negative constraint boundary
     code: "<?php\nfunction example($role) {\n  array_key_exists();\n}\n"
     expect_no_match: true
-  description: array_key_exists($value, $allowed*) — associative-array allowlist membership check.
+  description: Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    array_key_exists($value, $allowed*) — associative-array allowlist membership check.
+  disabled_reason:
+    code: over-broad
 - id: php.sanitizer.preg_match_full_string_shape
   enabled: true
   language: php
@@ -882,20 +903,16 @@
   match:
     kind: call
     callee:
-      name: execute
+      attribute: [PDOStatement, execute]
   constraints:
-  - receiver_name_in:
-    - stmt
-    - statement
-    - pdo_stmt
-    - pdoStatement
   - arg_count: 1
   match_examples:
   - name: php.sanitizer.pdo_statement_execute_bind_array example
-    code: "<?php\nfunction example($stmt, $id) {\n  $stmt->execute([$id]);\n}\n"
+    code: "<?php\nfunction example(PDOStatement $stmt, $id) {\n  $stmt->execute([$id]);\n}\n"
     expect_match_text:
     - $stmt->execute
-  description: PDOStatement::execute([$value, ...]) — binds parameters out-of-band instead of interpolating them into SQL.
+  description: PDOStatement::execute([$value, ...]) — binds parameters out-of-band instead
+    of interpolating them into SQL.
 - id: php.sanitizer.pdo_statement_bind_value
   enabled: true
   language: php
@@ -903,16 +920,10 @@
   match:
     kind: call
     callee:
-      name: bindValue
-  constraints:
-  - receiver_name_in:
-    - stmt
-    - statement
-    - pdo_stmt
-    - pdoStatement
+      attribute: [PDOStatement, bindValue]
   match_examples:
   - name: php.sanitizer.pdo_statement_bind_value example
-    code: "<?php\nfunction example($stmt, $id) {\n  $stmt->bindValue(':id', $id);\n}\n"
+    code: "<?php\nfunction example(PDOStatement $stmt, $id) {\n  $stmt->bindValue(':id', $id);\n}\n"
     expect_match_text:
     - $stmt->bindValue
   description: PDOStatement::bindValue — explicit parameter binding for prepared statements.
@@ -956,7 +967,8 @@
   - name: php.sanitizer.libxml_disable_entity_loader example negative constraint boundary
     code: "<?php\nfunction example($xml) {\n  libxml_disable_entity_loader();\n}\n"
     expect_no_match: true
-  description: libxml_disable_entity_loader(true) — legacy PHP/libxml global guard that blocks external entity loading before XML parsing.
+  description: libxml_disable_entity_loader(true) — legacy PHP/libxml global guard that blocks external entity loading before
+    XML parsing.
 - id: php.passthrough.urldecode
   enabled: true
   language: php
@@ -970,7 +982,8 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  urldecode($input);\n}\n"
     expect_match_text:
     - urldecode
-  description: PHP urldecode($x) — preserves taint; %2F%2E%2E%2F decoded to /../ after a path-safety check is the Bludit CVE-2019-16113 amplifier.
+  description: PHP urldecode($x) — preserves taint; %2F%2E%2E%2F decoded to /../ after a path-safety check is the Bludit CVE-2019-16113
+    amplifier.
 - id: php.passthrough.rawurldecode
   enabled: true
   language: php
@@ -1011,7 +1024,8 @@
       - isTokenValid
   match_examples:
   - name: php.csrf.symfony_csrf_token_manager example
-    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $csrf_token_manager->isTokenValid($input);\n}\n"
+    code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $csrf_token_manager->isTokenValid($input);\n\
+      }\n"
     expect_match_text:
     - $csrf_token_manager->isTokenValid
   description: Symfony CsrfTokenManager::isTokenValid — explicit form CSRF check.

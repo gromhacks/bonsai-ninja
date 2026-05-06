@@ -7,8 +7,6 @@
     kind: call
     callee:
       attribute: [HtmlEncoder, Encode]
-  constraints:
-  - receiver_name_in: [HtmlEncoder, htmlEncoder]
   match_examples:
   - name: declared shape
     code: |
@@ -24,8 +22,6 @@
     kind: call
     callee:
       attribute: [WebUtility, HtmlEncode]
-  constraints:
-  - receiver_name_in: [WebUtility]
   match_examples:
   - name: declared shape
     code: |
@@ -41,8 +37,6 @@
     kind: call
     callee:
       attribute: [HttpUtility, HtmlEncode]
-  constraints:
-  - receiver_name_in: [HttpUtility]
   match_examples:
   - name: declared shape
     code: |
@@ -58,8 +52,6 @@
     kind: call
     callee:
       attribute: [HttpUtility, UrlEncode]
-  constraints:
-  - receiver_name_in: [HttpUtility]
   match_examples:
   - name: declared shape
     code: |
@@ -106,8 +98,6 @@
     kind: call
     callee:
       attribute: [Encoder, HtmlEncode]
-  constraints:
-  - receiver_name_in: [Encoder]
   match_examples:
   - name: declared shape
     code: |
@@ -125,8 +115,6 @@
     kind: call
     callee:
       attribute: [Encoder, UrlEncode]
-  constraints:
-  - receiver_name_in: [Encoder]
   match_examples:
   - name: declared shape
     code: |
@@ -177,7 +165,8 @@
     kind: call
     callee:
       name: Add
-  description: "Disabled — bare Add matches every .Add() in the codebase; rely on AddWithValue/Parameters.Add via attribute chain."
+  description: "Disabled — bare Add matches every .Add() in the codebase; rely on AddWithValue/Parameters.Add via attribute
+    chain."
 
 - id: csharp.sanitizer.parameters_add
   enabled: true
@@ -236,8 +225,6 @@
     kind: call
     callee:
       attribute: [JavaScriptEncoder, Encode]
-  constraints:
-  - receiver_name_in: [JavaScriptEncoder, javascriptEncoder]
   match_examples:
   - name: declared shape
     code: |
@@ -253,8 +240,6 @@
     kind: call
     callee:
       attribute: [UrlEncoder, Encode]
-  constraints:
-  - receiver_name_in: [UrlEncoder, urlEncoder]
   match_examples:
   - name: declared shape
     code: |
@@ -270,8 +255,6 @@
     kind: call
     callee:
       attribute: [HttpUtility, JavaScriptStringEncode]
-  constraints:
-  - receiver_name_in: [HttpUtility]
   match_examples:
   - name: declared shape
     code: |
@@ -287,8 +270,6 @@
     kind: call
     callee:
       attribute: [WebUtility, UrlEncode]
-  constraints:
-  - receiver_name_in: [WebUtility]
   match_examples:
   - name: declared shape
     code: |
@@ -304,8 +285,6 @@
     kind: call
     callee:
       attribute: [Int64, TryParse]
-  constraints:
-  - receiver_name_in: [Int64, long]
   match_examples:
   - name: declared shape
     code: |
@@ -321,8 +300,6 @@
     kind: call
     callee:
       attribute: [Double, TryParse]
-  constraints:
-  - receiver_name_in: [Double, double]
   match_examples:
   - name: declared shape
     code: |
@@ -338,8 +315,6 @@
     kind: call
     callee:
       attribute: [Guid, TryParse]
-  constraints:
-  - receiver_name_in: [Guid]
   match_examples:
   - name: declared shape
     code: |
@@ -412,8 +387,6 @@
     kind: call
     callee:
       attribute: [Int32, Parse]
-  constraints:
-  - receiver_name_in: [Int32, int]
   match_examples:
   - name: declared shape
     code: |
@@ -429,8 +402,6 @@
     kind: call
     callee:
       attribute: [Int32, TryParse]
-  constraints:
-  - receiver_name_in: [Int32, int]
   match_examples:
   - name: declared shape
     code: |
@@ -446,8 +417,6 @@
     kind: call
     callee:
       attribute: [Guid, Parse]
-  constraints:
-  - receiver_name_in: [Guid]
   match_examples:
   - name: declared shape
     code: |
@@ -470,7 +439,8 @@
     code: |
       class SqlParameter { public SqlParameter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new SqlParameter(input); } }
     expect_match_text: [SqlParameter]
-  description: "Disabled duplicate — csharp.sanitizer.sqlparameter_constructor is the canonical constrained SqlParameter(name, value) binding rule."
+  description: "Disabled duplicate — csharp.sanitizer.sqlparameter_constructor is the canonical constrained SqlParameter(name,
+    value) binding rule."
 
 - id: csharp.sanitizer.npgsql_parameter_ctor
   enabled: true
@@ -534,7 +504,8 @@
       using System.IdentityModel.Tokens.Jwt;
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; TokenValidationParameters.Clone(input); } }
     expect_match_text: [TokenValidationParameters.Clone]
-  description: "TokenValidationParameters used with ValidateToken — full signature/issuer/audience verification; canonical jwt-verify anchor."
+  description: "TokenValidationParameters used with ValidateToken — full signature/issuer/audience verification; canonical
+    jwt-verify anchor."
 
 - id: csharp.sanitizer.xmlresolver_null_assign
   enabled: false
@@ -551,7 +522,8 @@
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; XmlResolver = input; } }
     expect_match_text: [XmlResolver]
-  description: "Disabled duplicate — csharp.sanitizer.xmlreadersettings_xmlresolver_null is the precise enabled XmlResolver=null rule for v1 matching."
+  description: "Disabled duplicate — csharp.sanitizer.xmlreadersettings_xmlresolver_null is the precise enabled XmlResolver=null
+    rule for v1 matching."
 
 - id: csharp.sanitizer.dtd_processing_prohibit
   enabled: true
@@ -613,7 +585,8 @@
     kind: call
     callee:
       name: Authorize
-  description: "Disabled — bare Authorize() call matching is too broad for ASP.NET Core authorization evidence; prefer attribute/decorator or middleware-specific rules that prove a protected endpoint or policy guard."
+  description: "Disabled — bare Authorize() call matching is too broad for ASP.NET Core authorization evidence; prefer attribute/decorator
+    or middleware-specific rules that prove a protected endpoint or policy guard."
 
 - id: csharp.sanitizer.bcrypt_verify
   enabled: true
@@ -624,8 +597,6 @@
     kind: call
     callee:
       attribute: [BCrypt, Verify]
-  constraints:
-  - receiver_name_in: [BCrypt]
   match_examples:
   - name: declared shape
     code: |
@@ -644,8 +615,6 @@
     kind: call
     callee:
       attribute: [Argon2, Verify]
-  constraints:
-  - receiver_name_in: [Argon2]
   match_examples:
   - name: declared shape
     code: |
@@ -663,8 +632,6 @@
     kind: call
     callee:
       attribute: [AntiXssEncoder, HtmlEncode]
-  constraints:
-  - receiver_name_in: [AntiXssEncoder]
   match_examples:
   - name: declared shape
     code: |
@@ -682,8 +649,6 @@
     kind: call
     callee:
       attribute: [AntiXssEncoder, UrlEncode]
-  constraints:
-  - receiver_name_in: [AntiXssEncoder]
   match_examples:
   - name: declared shape
     code: |
@@ -701,8 +666,6 @@
     kind: call
     callee:
       attribute: [AntiXssEncoder, JavaScriptStringEncode]
-  constraints:
-  - receiver_name_in: [AntiXssEncoder]
   match_examples:
   - name: declared shape
     code: |
@@ -905,7 +868,8 @@
   - name: paired same-origin path guard negative constraint boundary
     code: "class App { bool Allow(string next) { return next.StartsWith() && !next.StartsWith(\"//\"); } }\n"
     expect_no_match: true
-  description: "Same-origin redirect path guard paired with a second StartsWith call on the same receiver for the `!path.StartsWith(\"//\")` scheme-relative rejection shape."
+  description: "Same-origin redirect path guard paired with a second StartsWith call on the same receiver for the `!path.StartsWith(\"\
+    //\")` scheme-relative rejection shape."
 
 - id: csharp.sanitizer.same_origin_path_reject_scheme_relative
   enabled: false
@@ -932,7 +896,7 @@
   description: "Disabled — same-receiver StartsWith(\"/\") + StartsWith(\"//\") is modeled by csharp.sanitizer.same_origin_path_startswith_slash."
 
 - id: csharp.sanitizer.allowlist_contains
-  enabled: true
+  enabled: false
   language: csharp
   tag: allowlist-validate
   match:
@@ -940,17 +904,19 @@
     callee:
       name: Contains
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 1
   match_examples:
   - name: hashset allowlist contains
     code: |
       class App { bool Allow(string role) { dynamic allowed = null; return allowed.Contains(role); } }
     expect_match_text: [allowed.Contains]
-  description: "HashSet/List allowlist membership check on explicitly allowlist-named receivers."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. HashSet/List
+    allowlist membership check on explicitly allowlist-named receivers."
 
+  disabled_reason:
+    code: over-broad
 - id: csharp.sanitizer.dictionary_getvalueordefault_allowlist
-  enabled: true
+  enabled: false
   language: csharp
   tag: allowlist-validate
   match:
@@ -958,15 +924,17 @@
     callee:
       name: GetValueOrDefault
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 2
   match_examples:
   - name: dictionary default allowlist
     code: |
       class App { string Allow(string key) { dynamic allowed = null; return allowed.GetValueOrDefault(key, "/"); } }
     expect_match_text: [allowed.GetValueOrDefault]
-  description: "Dictionary.GetValueOrDefault on an allowlist-named mapping bounds attacker input to known values or a safe default."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Dictionary.GetValueOrDefault
+    on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
+  disabled_reason:
+    code: over-broad
 - id: csharp.sanitizer.enum_tryparse_allowlist
   enabled: true
   language: csharp
@@ -976,7 +944,6 @@
     callee:
       attribute: [Enum, TryParse]
   constraints:
-  - receiver_name_in: [Enum]
   - min_args: 2
   match_examples:
   - name: enum tryparse allowlist
@@ -1035,7 +1002,7 @@
   description: "Regex.Replace with a negated safe character class and empty replacement strips characters outside the allowlist."
 
 - id: csharp.sanitizer.uri_host_allowlist
-  enabled: true
+  enabled: false
   language: csharp
   tag: allowlist-validate
   match:
@@ -1043,7 +1010,6 @@
     callee:
       name: Contains
   constraints:
-  - receiver_name_in: [allowedHosts, safeHosts, permittedHosts]
   - arg_matches_regex:
       index: 0
       regex: 'Host'
@@ -1055,10 +1021,13 @@
   - name: uri host allowlist negative constraint boundary
     code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedHosts = \"x\"; allowedHosts.Contains(); } }\n"
     expect_no_match: true
-  description: "URI host allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
+    allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
 
+  disabled_reason:
+    code: over-broad
 - id: csharp.sanitizer.uri_scheme_allowlist
-  enabled: true
+  enabled: false
   language: csharp
   tag: allowlist-validate
   match:
@@ -1066,7 +1035,6 @@
     callee:
       name: Contains
   constraints:
-  - receiver_name_in: [allowedSchemes, safeSchemes, permittedSchemes]
   - arg_matches_regex:
       index: 0
       regex: 'Scheme'
@@ -1078,10 +1046,13 @@
   - name: uri scheme allowlist negative constraint boundary
     code: "class App { void Test() { dynamic uri = \"x\"; dynamic allowedSchemes = \"x\"; allowedSchemes.Contains(); } }\n"
     expect_no_match: true
-  description: "URI scheme allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI scheme
+    allowlist check — only explicitly permitted schemes are allowed before redirect or outbound request use."
 
+  disabled_reason:
+    code: over-broad
 - id: csharp.sanitizer.path_fullpath_startswith_root
-  enabled: true
+  enabled: false
   language: csharp
   tag: path-sanitize
   match:
@@ -1089,7 +1060,6 @@
     callee:
       name: StartsWith
   constraints:
-  - receiver_name_in: [fullPath, normalized, normalizedPath, resolvedPath, safePath]
   - arg_matches_regex:
       index: 0
       regex: 'root|base|allowed|uploadDir|safeDir'
@@ -1101,8 +1071,11 @@
   - name: full path containment negative constraint boundary
     code: "class App { void Test() { dynamic fullPath = \"x\"; dynamic root = \"x\"; fullPath.StartsWith(); } }\n"
     expect_no_match: true
-  description: "Full-path containment check — a normalized absolute path is accepted only if it remains under a trusted root."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Full-path
+    containment check — a normalized absolute path is accepted only if it remains under a trusted root."
 
+  disabled_reason:
+    code: over-broad
 - id: csharp.sanitizer.urlhelper_islocalurl
   enabled: true
   language: csharp
@@ -1147,7 +1120,6 @@
     callee:
       name: Query
   constraints:
-  - receiver_name_in: [db, conn, connection]
   - min_args: 2
   match_examples:
   - name: dapper query with anonymous parameter object
@@ -1167,7 +1139,6 @@
     callee:
       name: Execute
   constraints:
-  - receiver_name_in: [db, conn, connection]
   - min_args: 2
   match_examples:
   - name: dapper execute with anonymous parameter object
@@ -1205,6 +1176,6 @@
   match_examples:
   - name: sql command create parameter
     code: |
-      class App { object Bind(dynamic command) { return command.CreateParameter(); } }
+      class App { object Bind(SqlCommand command) { return command.CreateParameter(); } }
     expect_match_text: [command.CreateParameter]
   description: "SqlCommand.CreateParameter creates a command parameter object for bound values."

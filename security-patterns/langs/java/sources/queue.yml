@@ -12,8 +12,8 @@
 # identifier, not by its declared type.
 #
 # Per docs/pattern-guide.mdx the fix lives in the adapter, not in YAML.
-# Below this header: callable-shape rules using receiver-name constraints
-# that DO work today.
+# Below this header: callable-shape rules that stay package/import-scoped until
+# adapters surface receiver-type facts for local queue message objects.
 
 - id: java.source.kafka_consumer_record
   enabled: false
@@ -155,8 +155,6 @@
       attribute: [PubsubMessage, getData]
   description: "Disabled — adapters index local receivers like `message.getData`, not receiver types like `PubsubMessage.getData`."
 
-# Callable-shape rules (work today) ----------------------------------------
-
 - id: java.source.kafka_record_value
   enabled: true
   language: java
@@ -166,20 +164,14 @@
   match:
     kind: call
     callee:
-      name: value
-  constraints:
-  - receiver_name_in:
-    - record
-    - consumerRecord
-    - msg
-    - message
+      attribute: [ConsumerRecord, value]
   match_examples:
-  - name: generated shape example
+  - name: kafka record value
     code: |
       import org.apache.kafka.clients.consumer.*;
       class App {
-        void handle(String input) throws Exception {
-          record.value(input);
+        Object handle(ConsumerRecord record) throws Exception {
+          return record.value();
         }
       }
   description: "Kafka ConsumerRecord.value() — message payload via the typical `record` receiver name."
@@ -195,18 +187,14 @@
   match:
     kind: call
     callee:
-      name: key
-  constraints:
-  - receiver_name_in:
-    - record
-    - consumerRecord
+      attribute: [ConsumerRecord, key]
   match_examples:
-  - name: generated shape example
+  - name: kafka record key
     code: |
       import org.apache.kafka.clients.consumer.*;
       class App {
-        void handle(String input) throws Exception {
-          record.key(input);
+        Object handle(ConsumerRecord record) throws Exception {
+          return record.key();
         }
       }
   description: "Kafka ConsumerRecord.key() — partitioning key from the broker."
@@ -246,20 +234,14 @@
   match:
     kind: call
     callee:
-      name: getText
-  constraints:
-  - receiver_name_in:
-    - msg
-    - message
-    - textMessage
-    - jmsMessage
+      attribute: [TextMessage, getText]
   match_examples:
-  - name: generated shape example
+  - name: jms text message get text
     code: |
       import javax.jms.*;
       class App {
-        void handle(String input) throws Exception {
-          msg.getText(input);
+        Object handle(TextMessage message) throws Exception {
+          return message.getText();
         }
       }
   description: "JMS TextMessage.getText() — broker-supplied string body via local message receiver."
@@ -274,19 +256,14 @@
   match:
     kind: call
     callee:
-      name: getBody
-  constraints:
-  - receiver_name_in:
-    - msg
-    - message
-    - jmsMessage
+      attribute: [Message, getBody]
   match_examples:
-  - name: generated shape example
+  - name: jms message get body
     code: |
       import javax.jms.*;
       class App {
-        void handle(String input) throws Exception {
-          msg.getBody(input);
+        Object handle(Message message) throws Exception {
+          return message.getBody(String.class);
         }
       }
   description: "JMS Message.getBody() — broker-supplied body via local message receiver."
@@ -301,19 +278,14 @@
   match:
     kind: call
     callee:
-      name: readBytes
-  constraints:
-  - receiver_name_in:
-    - msg
-    - message
-    - bytesMessage
+      attribute: [BytesMessage, readBytes]
   match_examples:
-  - name: generated shape example
+  - name: jms bytes message read bytes
     code: |
       import javax.jms.*;
       class App {
-        void handle(String input) throws Exception {
-          msg.readBytes(input);
+        Object handle(BytesMessage message, byte[] out) throws Exception {
+          return message.readBytes(out);
         }
       }
   description: "JMS BytesMessage.readBytes() — raw broker-supplied bytes via local receiver."
@@ -328,19 +300,14 @@
   match:
     kind: call
     callee:
-      name: body
-  constraints:
-  - receiver_name_in:
-    - msg
-    - message
-    - sqsMessage
+      attribute: [Message, body]
   match_examples:
-  - name: generated shape example
+  - name: sqs message body
     code: |
       import software.amazon.awssdk.sqs.*;
       class App {
-        void handle(String input) throws Exception {
-          msg.body(input);
+        Object handle(Message message) throws Exception {
+          return message.body();
         }
       }
   description: "SQS Message.body() — broker-supplied message body."
@@ -357,19 +324,14 @@
   match:
     kind: call
     callee:
-      name: getData
-  constraints:
-  - receiver_name_in:
-    - message
-    - msg
-    - pubsubMessage
+      attribute: [PubsubMessage, getData]
   match_examples:
-  - name: generated shape example
+  - name: pubsub message get data
     code: |
       import com.google.cloud.pubsub.*;
       class App {
-        void handle(String input) throws Exception {
-          message.getData(input);
+        Object handle(PubsubMessage message) throws Exception {
+          return message.getData();
         }
       }
   description: "Google Pub/Sub PubsubMessage.getData() — broker-supplied data via local receiver."

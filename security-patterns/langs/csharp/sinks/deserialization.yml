@@ -485,15 +485,13 @@
     expect_no_match: true
   description: "ObjectStateFormatter.DeserializeWithAssert — ViewState parsing path; gadget RCE when MAC is disabled or key leaked."
 
-# Inline-new shape: `new BinaryFormatter().Deserialize(stream)`. The
-# attribute rule above keys on `[BinaryFormatter, Deserialize]` which
-# requires receiver-name `BinaryFormatter`; the inline-new shape has
-# no receiver name and is missed. Match the temp-receiver Deserialize
-# call directly. Engine taint flow remains the second gate.
+# Historical alias retained disabled; the canonical BinaryFormatter rule owns
+# this exact/typed receiver surface under the strict matcher.
 - id: csharp.deser.binaryformatter
   enabled: false
   disabled_reason:
     code: subsumed
+    subsumed_by: csharp.deser.binaryformatter_deserialize
   language: csharp
   tag: insecure-deserialization
   severity: critical
@@ -506,4 +504,4 @@
   - name: declared shape
     code: |
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; BinaryFormatter.Deserialize(input); } }
-  description: "Disabled — duplicate of csharp.deser.binaryformatter_deserialize with the current matcher shape."
+  description: "Disabled — duplicate of csharp.deser.binaryformatter_deserialize under strict exact/typed receiver matching."

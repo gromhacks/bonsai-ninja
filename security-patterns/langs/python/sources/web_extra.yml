@@ -79,7 +79,7 @@
       def example(name):
           return request.headers.get(name)
     expect_match_text: [request.headers.get]
-  description: "request.headers.get(name), including Tornado's self.request.headers.get suffix fact — attacker-controlled HTTP request header value."
+  description: "request.headers.get(name) — attacker-controlled HTTP request header value for frameworks that expose headers directly on the request object."
 
 - id: python.web.request_cookies_get
   enabled: false
@@ -518,7 +518,7 @@
   match:
     kind: read
     target:
-      regex: "^(request|req|self_request|http_request)\\.body$"
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.body$"
   match_examples:
   - name: pyramid request body
     code: |
@@ -660,7 +660,7 @@
   disabled_reason:
     code: subsumed
     subsumed_by: python.pyramid.request_body
-    reenable_when: "Reading `request.body` is a kind:read source on its own; the .read(size) tail flows through normally via taint propagation. The pyramid rule now lists Bottle in frameworks/packages and covers this idiom."
+    reenable_when: "Reading `request.body` is a kind:read source on its own; the .read(size) result is covered by taint propagation. The pyramid rule now lists Bottle in frameworks/packages and covers this idiom."
   language: python
   trust: remote
   category: http-input
@@ -674,7 +674,7 @@
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.body\\.read$"
   constraints:
   - max_args: 1
-  description: "Disabled — pyramid.request_body covers Bottle via merged frameworks/packages. The .read() tail propagates through taint without needing a separate kind:call source."
+  description: "Disabled — pyramid.request_body covers Bottle via merged frameworks/packages. The .read() result propagates taint without needing a separate kind:call source."
 
 - id: python.bottle.request_query
   enabled: false

@@ -134,7 +134,7 @@
   - name: ruby.deser.marshal_restore literal negative
     code: "def example(input, url, id, payload, request, params)\n  Marshal.restore(\"\\x04\\bo:\\vObject\\x00\")\nend\n"
     expect_no_match: true
-  description: "Marshal.restore — alias for load. TODO(only_when_packaged): `marshal_restore` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Marshal', 'restore']` match only."
+  description: "Marshal.restore — alias for load. `marshal_restore` core class has no canonical ecosystem package, so strict `['Marshal', 'restore']` match only."
 - id: ruby.deser.oj_object_load
   enabled: true
   language: ruby

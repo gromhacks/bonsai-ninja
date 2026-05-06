@@ -59,10 +59,10 @@
       name: params
   description: "Disabled — current Elixir adapter does not emit property-read facts for `conn.params`; Phoenix `params` parameter rules cover the common source shape."
 
-# Bare-name `params` source on Plug.Conn. Distinct ID from the read-
+# Bare-name `conn` source on Plug.Conn. Distinct ID from the read-
 # shape rule above so the param-shape match (which the elixir adapter
-# DOES emit on bare receivers) provides cross-fn coverage of the
-# `conn.params["body"]` access pattern via the param identifier.
+# emits for function parameters) provides cross-fn coverage of the
+# `conn.params["body"]` access pattern via the parameter identifier.
 - id: elixir.source.plug_conn_params
   enabled: true
   language: elixir

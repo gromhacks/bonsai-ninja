@@ -8,14 +8,20 @@
   match:
     kind: call
     callee:
-      name: getStringExtra
+      regex: "\\.getStringExtra$"
+  constraints:
+  - min_args: 1
   match_examples:
   - name: generated shape example
     code: |
       import android.*;
       class App {
-        void handle(String input) throws Exception {
-          getStringExtra(input);
+        void handle(Intent intent, String key) throws Exception {
+          intent.getStringExtra(key);
         }
       }
-  description: "Android getStringExtra(...) — tail-match across local intent variable names."
+      class Intent {
+        String getStringExtra(Object... args) { return ""; }
+      }
+    expect_match_text: [intent.getStringExtra]
+  description: "Android Intent.getStringExtra(...) — package-scoped IPC extra read from a local intent receiver."

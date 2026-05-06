@@ -1,7 +1,7 @@
 use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{
     ArgRegexSpec, ArgTaintedSpec, ConstraintKind, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
-    RuleTarget, Severity,
+    RuleTarget, Severity, TaintSemantics,
 };
 use bonsai_security::{run_taint_analysis, Rulepack, TaintAnalysisOptions};
 use bonsai_workspace::Workspace;
@@ -114,15 +114,12 @@ class App {
 }
 ",
     );
-    let mut sink = call_regex_rule(
+    let sink = call_attr_rule(
         "java",
         "java.test.random_next",
         "weak-randomness",
-        r"(^|[.])next(Int|Long|Float|Double|Gaussian|Bytes)$",
+        &["Random", "nextFloat"],
     );
-    sink.constraints = RuleConstraint(vec![ConstraintKind::ReceiverNameIn {
-        receiver_name_in: vec!["new java.util.Random()".to_string()],
-    }]);
     let pack = pack_for("java", vec![sink]);
 
     let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("analysis");
@@ -131,7 +128,7 @@ class App {
             .findings
             .iter()
             .any(|finding| finding.finding.sink.rule_id == "java.test.random_next"),
-        "inline qualified java.util.Random receiver should satisfy receiver_name_in: {:#?}",
+        "inline qualified java.util.Random receiver should satisfy typed Random.nextFloat matching: {:#?}",
         report.findings
     );
 }
@@ -300,13 +297,23 @@ class App {
 }
 ",
     );
-    let mut list_add = call_name_rule("java", "java.test.list_add_mutator", "test-mutator", "add");
+    let mut list_add = call_attr_rule(
+        "java",
+        "java.test.list_add_mutator",
+        "test-mutator",
+        &["ArrayList", "add"],
+    );
     list_add.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
         arg_tainted: ArgTaintedSpec {
             index: Some(0),
             kw: None,
         },
     }]);
+    list_add.taint_semantics = Some(TaintSemantics {
+        clean_output_overwrite: None,
+        source_output_args: Vec::new(),
+        taint_receiver_from_args: true,
+    });
     let mut command = call_attr_rule(
         "java",
         "java.test.processbuilder_command",
@@ -319,6 +326,11 @@ class App {
             kw: None,
         },
     }]);
+    command.taint_semantics = Some(TaintSemantics {
+        clean_output_overwrite: None,
+        source_output_args: Vec::new(),
+        taint_receiver_from_args: true,
+    });
     let mut start = call_attr_rule(
         "java",
         "java.test.processbuilder_start",

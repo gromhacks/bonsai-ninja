@@ -185,7 +185,11 @@ fn collect_java_method_type_aliases(
         method_aliases.extend(collect_java_type_aliases(
             method_node,
             src,
-            &["formal_parameter", "local_variable_declaration"],
+            &[
+                "formal_parameter",
+                "local_variable_declaration",
+                "enhanced_for_statement",
+            ],
         ));
         dedup_type_aliases(&mut method_aliases);
         aliases_by_method.push((span_of(file, &method_node), method_aliases));

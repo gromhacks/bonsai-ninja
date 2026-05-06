@@ -301,23 +301,28 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.run$
+      regex: ^(AgentExecutor|LLMChain|Chain)\.run$
   constraints:
   - arg_tainted:
       index: 0
-  - receiver_name_in: [agent, executor, agent_executor, chain, chain_executor]
   match_examples:
   - name: langchain agent.run tainted
     code: |
       import langchain
-      def example(agent, user_input):
+      def example(user_input):
+          agent = AgentExecutor()
           return agent.run(user_input)
+      class AgentExecutor:
+          def run(self, *args): pass
     expect_match_text: [agent.run]
   - name: langchain agent.run literal negative
     code: |
       import langchain
-      def example(agent):
+      def example():
+          agent = AgentExecutor()
           return agent.run("What is the capital of France?")
+      class AgentExecutor:
+          def run(self, *args): pass
     expect_no_match: true
   description: "LangChain agent.run(tainted) / executor.run(tainted) — agent instruction surface; attacker can steer tool calls, leak data, or escape system prompt."
 
@@ -339,23 +344,28 @@
   match:
     kind: call
     callee:
-      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.ainvoke$
+      regex: ^(Runnable|RunnableSequence|LLMChain|AgentExecutor)\.ainvoke$
   constraints:
   - arg_tainted:
       index: 0
-  - receiver_name_in: [chain, llm_chain, agent, executor, runnable]
   match_examples:
   - name: langchain chain.ainvoke tainted
     code: |
       import langchain
-      async def example(chain, user_input):
+      async def example(user_input):
+          chain = Runnable()
           return await chain.ainvoke(user_input)
+      class Runnable:
+          async def ainvoke(self, *args): pass
     expect_match_text: [chain.ainvoke]
   - name: langchain chain.ainvoke literal negative
     code: |
       import langchain
-      async def example(chain):
+      async def example():
+          chain = Runnable()
           return await chain.ainvoke({"question": "What is 2+2?"})
+      class Runnable:
+          async def ainvoke(self, *args): pass
     expect_no_match: true
   description: "LangChain chain.ainvoke(tainted) / runnable.ainvoke — async LCEL invocation with attacker-controlled input drives downstream LLM/tool surface."
 

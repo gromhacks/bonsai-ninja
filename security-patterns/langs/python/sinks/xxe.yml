@@ -326,9 +326,7 @@
   description: "ElementTree.XML / ET.XML parse XML text directly; prefer defusedxml for untrusted input."
 
 - id: python.xxe.minidom_parse
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: python
   tag: xxe
   severity: high
@@ -338,7 +336,23 @@
     kind: call
     callee:
       attribute: [minidom, parse]
-  description: "Disabled — subsumed by python.xxe.etree_parse / python.xxe.et_alias_parse under OnlyWhenPackaged lax-tail policy. When a file imports `xml`, the `[ElementTree, parse]` rule already lax-matches `minidom.parse(...)`."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe minidom parse
+    code: |
+      import xml
+      def example(user_input):
+          return minidom.parse(user_input)
+    expect_match_text: [minidom.parse]
+  - name: minidom parse literal negative
+    code: |
+      import xml
+      def example():
+          return minidom.parse("safe.xml")
+    expect_no_match: true
+  description: "xml.dom.minidom.parse with an attacker-controlled path or stream."
 
 - id: python.xxe.minidom_parse_string
   enabled: true
@@ -370,9 +384,7 @@
   description: "xml.dom.minidom.parseString."
 
 - id: python.xxe.pulldom_parse
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: python
   tag: xxe
   severity: high
@@ -382,12 +394,26 @@
     kind: call
     callee:
       attribute: [pulldom, parse]
-  description: "Disabled — subsumed by python.xxe.etree_parse / python.xxe.et_alias_parse under OnlyWhenPackaged lax-tail policy. When a file imports `xml`, the `[ElementTree, parse]` rule already lax-matches `pulldom.parse(...)`."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe pulldom parse
+    code: |
+      import xml
+      def example(user_input):
+          return pulldom.parse(user_input)
+    expect_match_text: [pulldom.parse]
+  - name: pulldom parse literal negative
+    code: |
+      import xml
+      def example():
+          return pulldom.parse("safe.xml")
+    expect_no_match: true
+  description: "xml.dom.pulldom.parse with an attacker-controlled path or stream."
 
 - id: python.xxe.sax_parse
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: python
   tag: xxe
   severity: high
@@ -397,7 +423,23 @@
     kind: call
     callee:
       attribute: [sax, parse]
-  description: "Disabled — subsumed by python.xxe.etree_parse / python.xxe.et_alias_parse under OnlyWhenPackaged lax-tail policy. When a file imports `xml`, the `[ElementTree, parse]` rule already lax-matches `sax.parse(...)`."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: xxe sax parse
+    code: |
+      import xml
+      def example(user_input):
+          return sax.parse(user_input)
+    expect_match_text: [sax.parse]
+  - name: sax parse literal negative
+    code: |
+      import xml
+      def example():
+          return sax.parse("safe.xml")
+    expect_no_match: true
+  description: "xml.sax.parse with an attacker-controlled path or stream."
 
 - id: python.xxe.expatreader_make
   enabled: true

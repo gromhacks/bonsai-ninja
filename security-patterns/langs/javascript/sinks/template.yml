@@ -90,9 +90,7 @@
   aliases:
   - javascript.template.handlebars_compile_template_variable
 - id: javascript.template.handlebars_lower_compile
-  enabled: false
-  disabled_reason:
-    code: subsumed
+  enabled: true
   language: javascript
   tag: ssti
   severity: high
@@ -106,8 +104,20 @@
       attribute:
       - handlebars
       - compile
-  description: "Disabled \u2014 subsumed by javascript.template.handlebars_compile\
-    \ under OnlyWhenPackaged lax-tail policy."
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: lowercase handlebars compile
+    code: "const handlebars = require(\"handlebars\");\nfunction render(input) {\n\
+      \  return handlebars.compile(input);\n}\n"
+    expect_match_text:
+    - handlebars.compile
+  - name: lowercase handlebars compile literal negative
+    code: "const handlebars = require(\"handlebars\");\nfunction render() {\n  return\
+      \ handlebars.compile(\"Hello user\");\n}\n"
+    expect_no_match: true
+  description: "handlebars.compile(tainted) — lowercase module binding for Handlebars template compilation."
 - id: javascript.template.hbs_compile
   enabled: true
   language: javascript

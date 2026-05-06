@@ -59,7 +59,7 @@
   - name: declared shape
     code: |
       func test() { let input = "x"; let amount = 1; evaluateJavaScript(input) }
-  description: "Disabled duplicate — same bare `evaluateJavaScript` call fact as swift.xss.wkwebview_evaluate_javascript. Keep the WebKit/XSS rule enabled until receiver typing can distinguish a broader code-injection variant."
+  description: "Disabled duplicate — same bare `evaluateJavaScript` call fact as swift.xss.wkwebview_evaluate_javascript. Keep the WebKit/XSS rule enabled until semantic WebKit receiver facts can distinguish a broader code-injection variant."
 - id: swift.eval.jscontext_evaluate
   enabled: true
   language: swift

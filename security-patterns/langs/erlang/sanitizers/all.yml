@@ -31,7 +31,8 @@
       test(Input) ->
         http_uri:encode(Input).
     expect_match_text: ["http_uri:encode"]
-  description: "http_uri:encode — DEPRECATED in OTP 23+ (replaced by uri_string:quote); still encodes correctly when present in legacy code, so honor it as a sanitizer."
+  description: "http_uri:encode — DEPRECATED in OTP 23+ (replaced by uri_string:quote); still encodes correctly when present
+    in legacy code, so honor it as a sanitizer."
 - id: erlang.sanitizer.cow_qs_urlencode
   enabled: true
   language: erlang
@@ -167,7 +168,8 @@
       test(Input) ->
         list_to_existing_atom(Input).
     expect_match_text: [list_to_existing_atom]
-  description: "list_to_existing_atom / binary_to_existing_atom — only resolves to atoms already in the table; defeats atom-exhaustion and constrains arbitrary-MFA shape."
+  description: "list_to_existing_atom / binary_to_existing_atom — only resolves to atoms already in the table; defeats atom-exhaustion
+    and constrains arbitrary-MFA shape."
 - id: erlang.sanitizer.public_key_verify
   enabled: true
   language: erlang
@@ -219,7 +221,9 @@
     kind: call
     callee:
       regex: "^binary_to_term$"
-  description: "Disabled — same `^binary_to_term$` regex as erlang.deser.binary_to_term sink; without list-contains constraint support we cannot distinguish the safe arity-2 [{safe,true}] form from the unsafe form. Defaulting to the sink (flag everywhere) is safer than spuriously sanitizing."
+  description: "Disabled — same `^binary_to_term$` regex as erlang.deser.binary_to_term sink; without list-contains constraint
+    support we cannot distinguish the safe arity-2 [{safe,true}] form from the unsafe form. Defaulting to the sink (flag everywhere)
+    is safer than spuriously sanitizing."
 
 - id: erlang.sanitizer.lists_prefix_same_origin
   enabled: true
@@ -247,7 +251,7 @@
   description: "lists:prefix(\"/...\", Input) — same-origin redirect/path guard for slash-rooted local paths."
 
 - id: erlang.sanitizer.allowlist_lookup
-  enabled: true
+  enabled: false
   language: erlang
   tag: allowlist-validate
   match:
@@ -267,8 +271,11 @@
   - name: sets allowlist lookup negative constraint boundary
     code: "-module(example).\n-export([test/2]).\ntest(Input, Allowed) ->\n  sets:is_element().\n"
     expect_no_match: true
-  description: "sets/ordsets/maps/proplists finite allowlist lookup — validates a tainted value against accepted values or keys."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    sets/ordsets/maps/proplists finite allowlist lookup — validates a tainted value against accepted values or keys."
 
+  disabled_reason:
+    code: over-broad
 - id: erlang.sanitizer.re_run_full_match
   enabled: true
   language: erlang

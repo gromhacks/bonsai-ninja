@@ -33,7 +33,8 @@
     code: |
       void test(id input) { id target = input; int amount = 1; stringByAddingPercentEncodingWithAllowedCharacters(input); }
     expect_match_text: [stringByAddingPercentEncodingWithAllowedCharacters]
-  description: "NSString -stringByAddingPercentEncodingWithAllowedCharacters: — percent-encodes for URL path/query components; neutralizes URL-injection."
+  description: "NSString -stringByAddingPercentEncodingWithAllowedCharacters: — percent-encodes for URL path/query components;
+    neutralizes URL-injection."
 
 - id: objc.sanitizer.nsurlcomponents_build
   enabled: true
@@ -48,7 +49,8 @@
     code: |
       void test(id input) { id target = input; int amount = 1; componentsWithString(input); }
     expect_match_text: [componentsWithString]
-  description: "NSURLComponents / NSURLQueryItem builders — structured URL assembly that escapes path/query components per RFC 3986; safer than +URLWithString: on a concatenated string."
+  description: "NSURLComponents / NSURLQueryItem builders — structured URL assembly that escapes path/query components per
+    RFC 3986; safer than +URLWithString: on a concatenated string."
 
 - id: objc.sanitizer.sqlite3_bind
   enabled: true
@@ -80,7 +82,8 @@
       #import <fmdb/fmdb.h>
       void test(id input) { id target = input; int amount = 1; executeQueryWithFormat(input); }
     expect_match_text: [executeQueryWithFormat]
-  description: "FMDB parameterized forms (-executeUpdate:withArgumentsInArray:, -executeQueryWithFormat:) — binds values as SQLite parameters."
+  description: "FMDB parameterized forms (-executeUpdate:withArgumentsInArray:, -executeQueryWithFormat:) — binds values as
+    SQLite parameters."
 
 - id: objc.sanitizer.gtm_string_escape_html
   enabled: true
@@ -125,7 +128,8 @@
     code: |
       void test(id input) { id target = input; int amount = 1; CCHmacVerify(input); }
     expect_match_text: [CCHmacVerify]
-  description: "Constant-time comparison helper (CCHmacVerify / timingsafe_bcmp / timingsafe_memcmp) — avoids MAC/HMAC timing oracles. Replaces memcmp on CC_SHA256/CC_SHA512 digest pairs."
+  description: "Constant-time comparison helper (CCHmacVerify / timingsafe_bcmp / timingsafe_memcmp) — avoids MAC/HMAC timing
+    oracles. Replaces memcmp on CC_SHA256/CC_SHA512 digest pairs."
 
 - id: objc.sanitizer.cccryptor_create_with_mode
   enabled: true
@@ -140,7 +144,9 @@
     code: |
       void test(id input) { id target = input; int amount = 1; CCCryptorCreateWithMode(input); }
     expect_match_text: [CCCryptorCreateWithMode]
-  description: "CommonCrypto CCCryptorCreateWithMode — explicit mode/IV selection (CBC/GCM); use over CCCrypt's positional defaults to avoid silent ECB. Sanitizer effect requires a non-ECB mode literal at the call site (rule fires regardless; pair with weak-crypto detector)."
+  description: "CommonCrypto CCCryptorCreateWithMode — explicit mode/IV selection (CBC/GCM); use over CCCrypt's positional
+    defaults to avoid silent ECB. Sanitizer effect requires a non-ECB mode literal at the call site (rule fires regardless;
+    pair with weak-crypto detector)."
 
 - id: objc.sanitizer.cccryptor_update
   enabled: true
@@ -155,7 +161,8 @@
     code: |
       void test(id input) { id target = input; int amount = 1; CCCryptorUpdate(input); }
     expect_match_text: [CCCryptorUpdate]
-  description: "CommonCrypto CCCryptorUpdate / CCCryptorFinal — bounds-checked block updates over CCCryptorRef; safer than CCCrypt one-shot when input length isn't statically known."
+  description: "CommonCrypto CCCryptorUpdate / CCCryptorFinal — bounds-checked block updates over CCCryptorRef; safer than
+    CCCrypt one-shot when input length isn't statically known."
 
 - id: objc.sanitizer.cc_keyderivation_pbkdf
   enabled: true
@@ -185,7 +192,9 @@
     code: |
       void test(id input) { id target = input; int amount = 1; [NSKeyedUnarchiver unarchivedObjectOfClass:input fromData:input error:nil]; }
     expect_match_text: [NSKeyedUnarchiver.unarchivedObjectOfClass]
-  description: "NSKeyedUnarchiver +unarchivedObjectOfClass:fromData:error: / +unarchivedObjectOfClasses:fromData:error: — secure-coding-enforced decode that requires the target class to conform to NSSecureCoding; neutralizes class-substitution RCE."
+  description: "NSKeyedUnarchiver +unarchivedObjectOfClass:fromData:error: / +unarchivedObjectOfClasses:fromData:error: —
+    secure-coding-enforced decode that requires the target class to conform to NSSecureCoding; neutralizes class-substitution
+    RCE."
 
 - id: objc.sanitizer.requires_secure_coding_yes
   enabled: true
@@ -194,15 +203,16 @@
   match:
     kind: write
     target:
-      name: requiresSecureCoding
-  constraints:
-  - receiver_name_in: [NSKeyedUnarchiver, unarchiver, keyedUnarchiver]
+      attribute:
+      - NSKeyedUnarchiver
+      - requiresSecureCoding
   match_examples:
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; NSKeyedUnarchiver.requiresSecureCoding = input; }
     expect_match_text: [NSKeyedUnarchiver.requiresSecureCoding]
-  description: "NSKeyedUnarchiver .requiresSecureCoding = YES — forces NSSecureCoding enforcement on legacy unarchive paths. Sanitizer effect on insecure-deserialization sinks earlier on the same path."
+  description: "NSKeyedUnarchiver .requiresSecureCoding = YES — forces NSSecureCoding enforcement on legacy unarchive paths.
+    Sanitizer effect on insecure-deserialization sinks earlier on the same path."
 
 - id: objc.sanitizer.nsnumber_integervalue
   enabled: true
@@ -217,7 +227,8 @@
     code: |
       void test(id input) { id target = input; int amount = 1; integerValue(input); }
     expect_match_text: [integerValue]
-  description: "NSString/NSScanner numeric coercion — converts tainted text to integer/double/bool, neutralizing SQL/command injection when value is reserialized as a number."
+  description: "NSString/NSScanner numeric coercion — converts tainted text to integer/double/bool, neutralizing SQL/command
+    injection when value is reserialized as a number."
 
 - id: objc.sanitizer.has_prefix_same_origin
   enabled: true
@@ -240,22 +251,23 @@
   description: "NSString -hasPrefix:@\"/...\" — slash-rooted same-origin redirect/path guard."
 
 - id: objc.sanitizer.contains_object_allowlist
-  enabled: true
+  enabled: false
   language: objc
   tag: allowlist-validate
   match:
     kind: call
     callee:
       regex: "(^|\\.)(containsObject|containsObject:|objectForKey|objectForKeyedSubscript)$"
-  constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, safeValues, safePaths]
   match_examples:
   - name: NSArray containsObject allowlist
     code: |
       void test(id input) { [allowed containsObject:input]; }
     expect_match_text: [allowed.containsObject]
-  description: "NSArray/NSSet/NSDictionary lookup on allowlist-named receivers — finite set/map validation."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. NSArray/NSSet/NSDictionary
+    lookup on allowlist-named receivers — finite set/map validation."
 
+  disabled_reason:
+    code: over-broad
 - id: objc.sanitizer.nspredicate_self_matches
   enabled: true
   language: objc
@@ -308,7 +320,8 @@
     kind: call
     callee:
       name: numberOfMatchesInString
-  description: "Disabled — NSRegularExpression -numberOfMatchesInString: is only a sanitizer when used as an allowlist guard; cannot prove guard semantics from the call shape alone. Enable per-project with rule-narrowing."
+  description: "Disabled — NSRegularExpression -numberOfMatchesInString: is only a sanitizer when used as an allowlist guard;
+    cannot prove guard semantics from the call shape alone. Enable per-project with rule-narrowing."
 
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an

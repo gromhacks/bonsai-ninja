@@ -1,6 +1,6 @@
-# Go HTTP / RPC sources. Engine matches method-call
-# callees as "<receiver>.<Method>"; we use common short receiver names
-# (r, req, c, ctx, cli, msg) so real code matches.
+# Go HTTP / RPC sources. Receiver-agnostic regex rules are package-gated
+# and, where needed, constrained by adapter-emitted receiver types so
+# real handlers match without broad tails.
 
 # --- net/http stdlib --------------------------------------------------
 - id: go.nethttp.request_param
@@ -115,7 +115,7 @@
         value := "value"
         URL.Query(target)
       }
-  description: "Disabled — duplicate of go.nethttp.query_value_get for chained Query().Get examples under the current matcher."
+  description: "Disabled — Query() exposes the url.Values container; go.nethttp.query_value_get models concrete string reads and avoids double-counting chained Query().Get expressions."
   imports:
   - net
 - id: go.nethttp.query_value_get
@@ -153,7 +153,7 @@
     callee:
       regex: "\\.Header\\.Get$"
   constraints:
-  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - receiver_type_in: [Request]
   match_examples:
   - name: net/http request header get
     code: |
@@ -177,7 +177,7 @@
     callee:
       regex: "\\.Cookie$"
   constraints:
-  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - receiver_type_in: [Request]
   match_examples:
   - name: net/http request cookie
     code: |
@@ -187,7 +187,7 @@
         _, _ = req.Cookie("session")
       }
     expect_match_text: [req.Cookie]
-  description: "r.Cookie(name) — attacker-controlled cookie value; narrowed to common net/http request receiver names so framework cookie helpers own their own rules."
+  description: "http.Request.Cookie(name) — attacker-controlled cookie value; narrowed by receiver type so framework cookie helpers own their own rules."
 - id: go.nethttp.request_pathvalue
   enabled: true
   language: go
@@ -201,7 +201,7 @@
     callee:
       regex: "\\.PathValue$"
   constraints:
-  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - receiver_type_in: [Request]
   - min_args: 1
   match_examples:
   - name: net/http serve mux path value
@@ -234,7 +234,7 @@
     callee:
       regex: "\\.(UserAgent|Referer)$"
   constraints:
-  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - receiver_type_in: [Request]
   - max_args: 0
   match_examples:
   - name: net/http user agent
@@ -267,7 +267,7 @@
     callee:
       regex: "\\.BasicAuth$"
   constraints:
-  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - receiver_type_in: [Request]
   - max_args: 0
   match_examples:
   - name: net/http basic auth
@@ -293,7 +293,7 @@
     callee:
       regex: "\\.FormFile$|\\.MultipartReader$|\\.ParseMultipartForm$"
   constraints:
-  - receiver_name_in: [r, req, request, httpReq, theRequest, originalReq]
+  - receiver_type_in: [Request]
   match_examples:
   - name: net/http uploaded file
     code: |
@@ -365,7 +365,7 @@
         _ = req.Body
       }
     expect_match_text: [req.Body]
-  description: "Disabled — duplicate read-site shape with go.nethttp.io_readall_request_body under the current matcher."
+  description: "Disabled — Body reads expose the stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
 - id: go.nethttp.io_readall_request_body
   enabled: true
   language: go
@@ -520,7 +520,7 @@
     callee:
       regex: "\\.Query$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin query
     code: |
@@ -545,7 +545,7 @@
     callee:
       regex: "\\.PostForm$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin post form
     code: |
@@ -570,7 +570,7 @@
     callee:
       regex: "\\.Param$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin path param
     code: |
@@ -619,7 +619,7 @@
     callee:
       regex: "\\.GetHeader$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin request header
     code: |
@@ -652,7 +652,7 @@
     callee:
       regex: "\\.(Cookie|Cookies)$"
   constraints:
-  - receiver_name_in: [c, ctx, context, echoContext]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin cookie
     code: |
@@ -702,7 +702,7 @@
     callee:
       regex: "\\.(Bind|BindHeader|BindQuery|BindUri|ShouldBind|ShouldBindBodyWith|ShouldBindHeader|ShouldBindQuery|ShouldBindUri|ShouldBindXML|ShouldBindYAML|ShouldBindWith)$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin generic body bind
     code: |
@@ -772,7 +772,7 @@
     callee:
       regex: "\\.(DefaultPostForm|DefaultQuery|QueryArray|QueryMap|GetQuery|GetQueryArray|GetQueryMap|PostFormArray|PostFormMap|GetPostForm|GetPostFormArray|GetPostFormMap)$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin query map
     code: |
@@ -813,7 +813,7 @@
     callee:
       regex: "\\.BindJSON$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin bind json
     code: |
@@ -838,7 +838,7 @@
     callee:
       regex: "\\.ShouldBindJSON$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin should bind json
     code: |
@@ -863,7 +863,7 @@
     callee:
       regex: "\\.GetRawData$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: gin raw request body
     code: |
@@ -947,7 +947,7 @@
     callee:
       regex: "\\.Bind$"
   constraints:
-  - receiver_name_in: [c, ctx, context, echoContext]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: echo bind
     code: |
@@ -982,7 +982,7 @@
     callee:
       regex: "\\.Cookie$|\\.Cookies$"
   constraints:
-  - receiver_name_in: [c, ctx, context, echoContext]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: echo cookie
     code: |
@@ -1042,7 +1042,7 @@
     callee:
       regex: "\\.(QueryParams|FormParams)$"
   constraints:
-  - receiver_name_in: [c, ctx, context, echoContext]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: echo query params
     code: |
@@ -1068,7 +1068,7 @@
     callee:
       regex: "\\.Request\\(\\)\\.Header\\.Get$|\\.Request\\.Header\\.Get$"
   constraints:
-  - receiver_name_in: [c, ctx, context]
+  - receiver_type_in: [Context, Ctx]
   - min_args: 1
   match_examples:
   - name: echo wrapped request header get
@@ -1120,7 +1120,7 @@
         _ = ctx.Request().Body
       }
     expect_match_text: ["ctx.Request().Body"]
-  description: "Disabled — duplicate read-site shape with go.nethttp.io_readall_request_body under the current matcher."
+  description: "Disabled — Request().Body reads expose the wrapped stream object; go.nethttp.io_readall_request_body models the materialized request bytes and avoids double-counting Body reads passed to ReadAll."
 
 # --- iris -------------------------------------------------------------
 - id: go.iris.context_urlparam
@@ -1137,7 +1137,7 @@
     callee:
       regex: "\\.URLParam[A-Za-z]*$"
   constraints:
-  - receiver_name_in: [c, ctx, context]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: iris url param
     code: |
@@ -1171,7 +1171,7 @@
     callee:
       regex: "\\.(GetBody|GetBodyString|ReadBody|ReadJSON|ReadXML|ReadForm)$"
   constraints:
-  - receiver_name_in: [c, ctx, context]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: iris get body string
     code: |
@@ -1205,7 +1205,7 @@
     callee:
       regex: "\\.(PostValue|PostValueDefault|FormValues)$"
   constraints:
-  - receiver_name_in: [c, ctx, context]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: iris post value
     code: |
@@ -1232,7 +1232,7 @@
     callee:
       regex: "\\.GetString$"
   constraints:
-  - receiver_name_in: [c, ctx, controller]
+  - receiver_type_in: [Controller]
   match_examples:
   - name: beego get string
     code: |
@@ -1260,7 +1260,7 @@
     callee:
       regex: "\\.GetFile$"
   constraints:
-  - receiver_name_in: [c, ctx, controller]
+  - receiver_type_in: [Controller]
   match_examples:
   - name: beego get file
     code: |
@@ -1432,7 +1432,7 @@
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(Get|GetReqHeaders)$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: fiber header get
     code: |
@@ -1467,7 +1467,7 @@
     callee:
       regex: "\\.(FormFile|MultipartForm|QueryParser)$"
   constraints:
-  - receiver_name_in: [c, ctx, gctx, ginCtx, requestCtx]
+  - receiver_type_in: [Context, Ctx]
   match_examples:
   - name: fiber multipart form
     code: |
@@ -1561,7 +1561,7 @@
     callee:
       regex: "\\.NextReader$"
   constraints:
-  - receiver_name_in: [conn, c, ws]
+  - receiver_type_in: [Conn]
   match_examples:
   - name: gorilla websocket next reader
     code: |
@@ -1585,7 +1585,7 @@
     callee:
       regex: "\\.Read$"
   constraints:
-  - receiver_name_in: [c, conn, ws]
+  - receiver_type_in: [Conn]
   - min_args: 1
   match_examples:
   - name: nhooyr conn read

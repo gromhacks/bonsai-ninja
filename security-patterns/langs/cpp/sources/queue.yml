@@ -21,9 +21,7 @@
       }
   description: "librdkafka rd_kafka_consumer_poll — broker message payload."
 - id: cpp.input.cppkafka_consume
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: cpp
   trust: service
   tag: queue-input
@@ -32,7 +30,15 @@
     kind: call
     callee:
       attribute: [Consumer, poll]
-  description: "Disabled — adapters index local receivers like `consumer.poll`, not receiver types like `Consumer.poll`."
+  match_examples:
+  - name: cppkafka consumer poll
+    code: |
+      #include <cppkafka/cppkafka.h>
+      void example() {
+        Consumer.poll();
+      }
+    expect_match_text: [Consumer.poll]
+  description: "cppkafka Consumer::poll — broker message payload; local receiver calls require semantic Consumer receiver-type facts."
 - id: cpp.input.amqpcpp_message
   enabled: true
   language: cpp

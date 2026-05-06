@@ -130,7 +130,7 @@
   - name: arg tainted literal negative
     code: "def example(input, url, id, payload, request, params)\n  IO.popen(\"safe\")\nend\n"
     expect_no_match: true
-  description: "IO.popen — single-string form invokes a shell. TODO(only_when_packaged): `io_popen` core class has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['IO', 'popen']` match only."
+  description: "IO.popen — single-string form invokes a shell. `io_popen` core class has no canonical ecosystem package, so strict `['IO', 'popen']` match only."
 - id: ruby.cmdi.open3_popen3
   enabled: true
   language: ruby

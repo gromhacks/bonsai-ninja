@@ -270,6 +270,15 @@ pub struct TaintSemantics {
     /// becomes tainted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_output_args: Vec<usize>,
+    /// Sink rules only: tainted arguments mutate the receiver's
+    /// state. This covers APIs such as `Statement.addBatch(sql)` and
+    /// `ProcessBuilder.command(cmd)`, where the dangerous operation
+    /// happens later on the same receiver (`executeBatch()`,
+    /// `start()`). The security layer derives the receiver type and
+    /// method from the rule's structured callee target; the taint
+    /// engine never owns a central method-name list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub taint_receiver_from_args: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -285,9 +294,6 @@ pub struct CleanOutputOverwriteSemantics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConstraintKind {
-    ReceiverNameIn {
-        receiver_name_in: Vec<String>,
-    },
     ReceiverTypeIn {
         receiver_type_in: Vec<String>,
     },
@@ -389,7 +395,6 @@ impl ConstraintKind {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
-            Self::ReceiverNameIn { .. } => "receiver_name_in",
             Self::ReceiverTypeIn { .. } => "receiver_type_in",
             Self::SecondArgEquals { .. } => "second_arg_equals",
             Self::ArgEquals { .. } => "arg_equals",
@@ -474,10 +479,8 @@ pub struct ArgIntSpec {
 /// `{ index, type_name }` for the typed-flow-narrowing constraint
 /// (`requires_runtime_type`). The arg at `index` must be statically
 /// narrowed to a value of declared type `type_name` at the call site.
-/// P1 in `docs/contributing/analysis-roadmap.mdx` — recognised by the schema, but
-/// the engine's runtime_type tracking is not yet wired so the
-/// constraint is currently an unconditional pass. Rules using it will
-/// gain precision automatically when the adapter+engine work lands.
+/// The matcher fails closed when no preceding runtime type-test
+/// narrowing dominates the call site.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeTypeSpec {

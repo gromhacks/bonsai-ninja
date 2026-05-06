@@ -215,7 +215,7 @@
   match_examples:
   - name: math random
     code: "function demo(input, req, obj) {\n  return Math.random(input);\n}\n"
-  description: "Math.random — non-cryptographic; flag in security-sensitive paths. TODO(only_when_packaged): JS Math global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Math', 'random']` match only."
+  description: "Math.random — non-cryptographic; flag in security-sensitive paths. JS Math global has no canonical ecosystem package, so strict `['Math', 'random']` match only."
 - id: javascript.crypto.bcrypt_low_rounds
   enabled: true
   language: javascript

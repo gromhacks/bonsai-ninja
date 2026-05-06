@@ -1,5 +1,5 @@
 # PHP DOMXPath is a built-in class (no `use` import) and the matcher's
-# lax-tail gate requires a `packages:` signal. The instance-form
+# package context gate requires a `packages:` signal. The instance-form
 # `$xpath->query($expr)` cannot be matched safely without an
 # adapter-emitted import, and the literal static form
 # `DOMXPath::query(...)` is unusual. Disabled until either:

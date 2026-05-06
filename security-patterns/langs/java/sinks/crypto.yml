@@ -189,19 +189,14 @@
     callee:
       regex: '(^|[.])next(Int|Long|Float|Double|Gaussian|Bytes)$'
   constraints:
-  - receiver_name_in:
-    - random
-    - rand
-    - rng
-    - r
-    - new Random()
-    - new java.util.Random()
+  - receiver_type_in:
+    - Random
   match_examples:
   - name: java util Random nextInt
     code: |
       import java.util.*;
       class App {
-        void handle() throws Exception {
+        void handle(Random random) throws Exception {
           random.nextInt();
         }
       }

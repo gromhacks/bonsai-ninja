@@ -384,4 +384,4 @@
         return Reflect.apply(Math.max, null, [1, 2]);
       }
     expect_no_match: true
-  description: "Reflect.apply (TS) — same as JS. TODO(only_when_packaged): JS Reflect global has no canonical ecosystem package, so OnlyWhenPackaged lax-tail can never fire — strict `['Reflect', 'apply']` match only."
+  description: "Reflect.apply (TS) — same as JS. JS Reflect global has no canonical ecosystem package, so strict `['Reflect', 'apply']` match only."

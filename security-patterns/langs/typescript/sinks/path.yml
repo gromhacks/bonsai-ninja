@@ -390,7 +390,7 @@
   match:
     kind: call
     callee:
-      regex: "^fs\\.promises\\.readFile$"
+      attribute: [fs, promises, readFile]
   constraints:
   - arg_tainted: {index: 0}
   match_examples:
@@ -419,7 +419,7 @@
   match:
     kind: call
     callee:
-      regex: "^fs\\.promises\\.writeFile$"
+      attribute: [fs, promises, writeFile]
   constraints:
   - arg_tainted: {index: 0}
   match_examples:

@@ -1,5 +1,5 @@
 //! Shared package-name matching used by both the dependency
-//! inventory (`deps.rs`) and the per-file lax-tail gate
+//! inventory (`deps.rs`) and the per-file package context gate
 //! (`matcher.rs`).
 //!
 //! Adapters surface import targets in the form they appear in source

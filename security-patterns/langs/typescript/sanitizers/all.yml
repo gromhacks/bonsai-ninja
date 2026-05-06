@@ -264,7 +264,7 @@
   match:
     kind: call
     callee:
-      regex: "^schema\\.parse$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.parse$"
   match_examples:
   - name: schema parse
     code: |
@@ -283,7 +283,7 @@
   match:
     kind: call
     callee:
-      regex: "^schema\\.safeParse$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.safeParse$"
   match_examples:
   - name: schema safeParse
     code: |
@@ -354,7 +354,7 @@
   match:
     kind: call
     callee:
-      regex: "^jwt\\.verify$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.verify$"
   match_examples:
   - name: jwt verify
     code: |
@@ -450,7 +450,8 @@
     kind: call
     callee:
       name: mongoSanitize
-  description: "Disabled duplicate — same `mongoSanitize()` call shape is covered by typescript.sanitizer.mongo_sanitize with express-mongo-sanitize package metadata merged."
+  description: "Disabled duplicate — same `mongoSanitize()` call shape is covered by typescript.sanitizer.mongo_sanitize with
+    express-mongo-sanitize package metadata merged."
 
 # ── Schema validation gates ────────────────────────────────────────────────
 - id: typescript.sanitizer.iots_decode
@@ -591,19 +592,22 @@
       }
     expect_match_text: [next.startsWith]
   - name: same-origin redirect path guard negative constraint boundary
-    code: "function safeRedirect(next: string): string {\n  if (next.startsWith() && !next.startsWith(\"//\")) {\n    return next;\n  }\n  return \"/\";\n}\n"
+    code: "function safeRedirect(next: string): string {\n  if (next.startsWith() && !next.startsWith(\"//\")) {\n    return
+      next;\n  }\n  return \"/\";\n}\n"
     expect_no_match: true
-  description: "startsWith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with a sibling `!startsWith(\"//\")` network-path guard."
+  description: "startsWith(\"/\") on redirect/path variables - credits same-origin relative-path validation when used with
+    a sibling `!startsWith(\"//\")` network-path guard."
 
 # -- Focused allowlist / regex / SQL binding validators -----------------------
 - id: typescript.sanitizer.allowlist_set_has
-  enabled: true
+  enabled: false
   language: typescript
   tag: allowlist-validate
   match:
     kind: call
     callee:
-      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\.has$"
+      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\\
+        .has$"
   constraints:
   - min_args: 1
   match_examples:
@@ -614,16 +618,20 @@
         return allowedRoles.has(role);
       }
     expect_match_text: [allowedRoles.has]
-  description: "Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named Set.has allowlists - boolean finite-set validation, limited to allowlist-named receivers."
 
+  disabled_reason:
+    code: over-broad
 - id: typescript.sanitizer.allowlist_array_includes
-  enabled: true
+  enabled: false
   language: typescript
   tag: allowlist-validate
   match:
     kind: call
     callee:
-      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\.includes$"
+      regex: "^(allowed|allowlist|allowedValues|allowedNames|allowedRoles|allowedRoutes|allowedTargets|ALLOWED_[A-Za-z0-9_]+)\\\
+        .includes$"
   constraints:
   - min_args: 1
   match_examples:
@@ -634,10 +642,13 @@
         return allowedRoutes.includes(next);
       }
     expect_match_text: [allowedRoutes.includes]
-  description: "Named Array.includes allowlists - validates that input is one of a finite literal set."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named Array.includes allowlists - validates that input is one of a finite literal set."
 
+  disabled_reason:
+    code: over-broad
 - id: typescript.sanitizer.allowlist_object_hasown
-  enabled: true
+  enabled: false
   language: typescript
   tag: allowlist-validate
   match:
@@ -661,18 +672,24 @@
       }
     expect_match_text: [Object.hasOwn]
   - name: object map allowlist hasOwn negative constraint boundary
-    code: "const allowedRoutes: Record<string, string> = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name: string): string {\n  if (Object.hasOwn()) {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
+    code: "const allowedRoutes: Record<string, string> = { home: \"/home\", profile: \"/profile\" };\nfunction pick(name:
+      string): string {\n  if (Object.hasOwn()) {\n    return allowedRoutes[name];\n  }\n  return \"/\";\n}\n"
     expect_no_match: true
-  description: "Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before selecting a trusted mapped value."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Object.hasOwn/Object.prototype.hasOwnProperty.call over allowlist-named maps - validates finite object-map keys before
+    selecting a trusted mapped value."
 
+  disabled_reason:
+    code: over-broad
 - id: typescript.sanitizer.named_regex_test
-  enabled: true
+  enabled: false
   language: typescript
   tag: regex-validate
   match:
     kind: call
     callee:
-      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))\\.test$"
+      regex: "^(uuid(Re|Regex|Pattern)|slug(Re|Regex|Pattern)|id(Re|Regex|Pattern)|safe(Re|Regex|Pattern)|allowed(Re|Regex|Pattern))\\\
+        .test$"
   constraints:
   - min_args: 1
   match_examples:
@@ -683,8 +700,11 @@
         return uuidRe.test(id);
       }
     expect_match_text: [uuidRe.test]
-  description: "Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Named allowlist regex .test validators - constrained to receivers named for UUID/slug/id/safe/allowed validation."
 
+  disabled_reason:
+    code: over-broad
 - id: typescript.sanitizer.db_placeholder_query
   enabled: true
   language: typescript
@@ -713,7 +733,8 @@
   - name: pg pool query with bind args negative constraint boundary
     code: "const _u = require(\"mysql\");\nfunction byId(pool: any, id: string) {\n  return pool.query();\n}\n"
     expect_no_match: true
-  description: "mysql/mysql2/pg query or execute calls with a literal placeholder SQL string and separate bind args. Receiver-agnostic; OnlyWhenPackaged gate on the driver list prevents over-matching."
+  description: "mysql/mysql2/pg query or execute calls with a literal placeholder SQL string and separate bind args. Receiver-agnostic;
+    package context gate on the driver list prevents over-matching."
 
 - id: typescript.sanitizer.char_allowlist_replace_strip
   enabled: true
@@ -782,7 +803,7 @@
   description: "escape-html module — returns an HTML-encoded copy of the input."
 
 - id: typescript.sanitizer.named_regex_match
-  enabled: true
+  enabled: false
   language: typescript
   tag: regex-validate
   match:
@@ -809,10 +830,13 @@
   - name: input match slug regex negative constraint boundary
     code: "function ok(input: string, slugRe: RegExp) {\n  return input.match();\n}\n"
     expect_no_match: true
-  description: "String.match(named allowlist regex) gates — regex object must be named for safe/id/slug/uuid/allowed validation."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    String.match(named allowlist regex) gates — regex object must be named for safe/id/slug/uuid/allowed validation."
 
+  disabled_reason:
+    code: over-broad
 - id: typescript.sanitizer.path_containment_startswith
-  enabled: true
+  enabled: false
   language: typescript
   tag: path-sanitize
   packages: [path]
@@ -840,12 +864,17 @@
       }
     expect_match_text: [fullPath.startsWith]
   - name: resolved path startsWith uploadDir negative constraint boundary
-    code: "const _u = require(\"path\");\nfunction ok(resolved: string, uploadDir: string) {\n  return resolved.startsWith();\n}\n"
+    code: "const _u = require(\"path\");\nfunction ok(resolved: string, uploadDir: string) {\n  return resolved.startsWith();\n\
+      }\n"
     expect_no_match: true
-  description: "Canonical path containment guard after path.resolve/normalize — validates the resolved candidate remains under a trusted root."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    Canonical path containment guard after path.resolve/normalize — validates the resolved candidate remains under a trusted
+    root."
 
+  disabled_reason:
+    code: over-broad
 - id: typescript.sanitizer.url_origin_host_allowlist
-  enabled: true
+  enabled: false
   language: typescript
   tag: open-redirect-sanitize
   match:
@@ -872,8 +901,11 @@
   - name: allowed origins has url origin negative constraint boundary
     code: "function ok(url: URL, allowedOrigins: Set<string>) {\n  return allowedOrigins.has();\n}\n"
     expect_no_match: true
-  description: "URL origin/host allowlist membership — credits finite allowlists over parsed URL origin/host/hostname values."
+  description: "Disabled — this rule depends on naming conventions rather than semantic finite-set, guard, or regex facts.
+    URL origin/host allowlist membership — credits finite allowlists over parsed URL origin/host/hostname values."
 
+  disabled_reason:
+    code: over-broad
 - id: typescript.sanitizer.prisma_tagged_raw_query
   enabled: true
   language: typescript
@@ -883,7 +915,7 @@
   match:
     kind: call
     callee:
-      regex: "^prisma\\.\\$(queryRaw|executeRaw)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.\\$(queryRaw|executeRaw)$"
   constraints:
   - arg_not_matches_regex:
       index: 0
@@ -910,7 +942,8 @@
         return prisma.$queryRaw(Prisma.raw("SELECT * FROM " + table));
       }
     expect_no_match: true
-  description: "Prisma $queryRaw/$executeRaw tagged-template form — interpolations are parameterized unless Prisma.raw/string concatenation is used."
+  description: "Prisma $queryRaw/$executeRaw tagged-template form — interpolations are parameterized unless Prisma.raw/string
+    concatenation is used."
 
 - id: typescript.sanitizer.sequelize_query_bindings
   enabled: true
@@ -942,7 +975,8 @@
       }
     expect_match_text: [sequelize.query]
   - name: sequelize replacements negative constraint boundary
-    code: "const _u = require(\"sequelize\");\nfunction byId(sequelize: any, id: string) {\n  return sequelize.query();\n}\n"
+    code: "const _u = require(\"sequelize\");\nfunction byId(sequelize: any, id: string) {\n  return sequelize.query();\n\
+      }\n"
     expect_no_match: true
   description: "Sequelize raw query with replacements/bind options and literal SQL text — parameterized form."
 
@@ -1015,7 +1049,8 @@
         return entities.encodeXML(input);
       }
     expect_match_text: [entities.encodeXML]
-  description: "XML entity escaping for text nodes and attributes; HTML encoders such as he.escape/escapeHtml are owned by the HTML sanitizer rules to avoid duplicate sanitizer evidence."
+  description: "XML entity escaping for text nodes and attributes; HTML encoders such as he.escape/escapeHtml are owned by
+    the HTML sanitizer rules to avoid duplicate sanitizer evidence."
 
 - id: typescript.sanitizer.libxmljs_safe_options
   enabled: true
@@ -1044,7 +1079,8 @@
       }
     expect_match_text: [libxmljs.loadXml]
   - name: libxmljs parseXml safe noent false negative constraint boundary
-    code: "const _u = require(\"libxmljs\");\nfunction parse(libxmljs: any, input: string) {\n  return libxmljs.parseXml();\n}\n"
+    code: "const _u = require(\"libxmljs\");\nfunction parse(libxmljs: any, input: string) {\n  return libxmljs.parseXml();\n\
+      }\n"
     expect_no_match: true
   description: "libxmljs parser calls with safe XXE options — entity expansion/DTD loading disabled and network access blocked."
 

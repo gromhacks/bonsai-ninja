@@ -11,22 +11,24 @@
   match:
     kind: call
     callee:
-      attribute:
-      - TemplateEngine
-      - process
+      regex: '^[A-Za-z_$][A-Za-z0-9_$]*\.process$'
   constraints:
+  - receiver_type_in:
+    - TemplateEngine
+    - Template
   - arg_tainted:
       index: 0
   match_examples:
   - name: generated shape example
-    code: "import org.thymeleaf.*;\nclass App {\n  void handle(String input) throws\
-      \ Exception {\n    TemplateEngine.process(\"{{\" + input);\n  }\n}\n"
+    code: "import org.thymeleaf.*;\nclass App {\n  void handle(TemplateEngine engine,\
+      \ String input) throws Exception {\n    engine.process(\"{{\" + input);\n  }\n\
+      }\n}\n"
   - name: thymeleaf fragment expression concat
-    code: "import org.thymeleaf.*;\nclass App {\n  Object handle(String fragment,\
-      \ Object ctx) {\n    return TemplateEngine.process(\"layout :: \" + fragment,\
-      \ ctx);\n  }\n}\n"
+    code: "import org.thymeleaf.*;\nclass App {\n  Object handle(TemplateEngine engine,\
+      \ String fragment, Object ctx) {\n    return engine.process(\"layout :: \" +\
+      \ fragment, ctx);\n  }\n}\n"
     expect_match_text:
-    - TemplateEngine.process
+    - engine.process
   - name: freemarker template process local
     code: "import freemarker.template.*;\nclass App {\n  Object handle(Template template,\
       \ Object model) throws Exception {\n    return template.process(model);\n  }\n\
@@ -34,8 +36,9 @@
     expect_match_text:
     - template.process
   - name: arg tainted literal negative
-    code: "import org.thymeleaf.*;\nclass App {\n  void handle(String input) throws\
-      \ Exception {\n    TemplateEngine.process(\"safe\");\n  }\n}\n"
+    code: "import org.thymeleaf.*;\nclass App {\n  void handle(TemplateEngine engine,\
+      \ String input) throws Exception {\n    engine.process(\"safe\");\n  }\n}\n\
+      "
     expect_no_match: true
   description: "Thymeleaf TemplateEngine.process \u2014 flag when template source\
     \ is tainted. Merged collision aliases: java.template.freemarker_process, java.template.freemarker_template_process_local,\
@@ -396,7 +399,7 @@
 - id: java.template.spel_parseexpression_instance
   enabled: false
   disabled_reason:
-    code: subsumed
+    code: over-broad
   language: java
   tag: ssti
   severity: critical

@@ -103,7 +103,6 @@ fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
         None,
         Some(&attr),
         None,
-        false,
     ));
     assert!(callee_matches_with_receiver_types(
         "c.getValue",
@@ -111,7 +110,6 @@ fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
         None,
         Some(&attr),
         None,
-        false,
     ));
     assert!(!callee_matches_with_receiver_types(
         "c.getValue",
@@ -119,7 +117,6 @@ fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
         None,
         Some(&attr),
         None,
-        false,
     ));
 }
 
@@ -158,24 +155,16 @@ fn method_chain_fallback_requires_chain_head_match() {
         r#"Command::new("sh").arg("-c").output"#,
         None,
         Some(&attr),
-        None,
-        false
+        None
     ));
     assert!(callee_matches(
         r#"std/process/Command::new("sh").arg("-c").output"#,
         None,
         Some(&attr),
-        None,
-        false
+        None
     ));
     assert!(
-        !callee_matches(
-            r#"callbacks.add(Command::new("sh"))"#,
-            None,
-            Some(&attr),
-            None,
-            false
-        ),
+        !callee_matches(r#"callbacks.add(Command::new("sh"))"#, None, Some(&attr), None),
         "callback-passing expressions must not match the inner method-chain head"
     );
     assert!(
@@ -183,8 +172,7 @@ fn method_chain_fallback_requires_chain_head_match() {
             r#"callbacks.add(std/process/Command::new("sh"))"#,
             None,
             Some(&attr),
-            None,
-            false
+            None
         ),
         "import-path chain heads inside callback arguments must not match"
     );
@@ -307,7 +295,7 @@ fn empty_inferred_type_alias_does_not_panic() {
     let attr = vec!["HttpClient".to_string(), "execute".to_string()];
 
     assert_eq!(
-        callee_or_alias_matches("client.execute", &[], None, Some(&attr), None, &aliases, false),
+        callee_or_alias_matches("client.execute", &[], None, Some(&attr), None, &aliases),
         None
     );
 }

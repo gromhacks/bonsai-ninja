@@ -18,11 +18,9 @@
 //!
 //! - **P6 — `RequiresState`**. A rule with `requires_state` fires only
 //!   when the named binding is in the expected lifecycle state at
-//!   the call site. Adapters do not yet emit
-//!   `FlowEvent::ResourceTransition` events, so `requires_state`
-//!   today fails closed for any expected state — these tests pin
-//!   that conservative behaviour so a future adapter rollout can
-//!   tighten the expectation incrementally.
+//!   the call site. Adapters emit `FlowEvent::Lifecycle` for
+//!   supported close/free/cancel/unlock transitions; unsupported
+//!   states still fail closed.
 
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_security::{load_rulepack, match_rule_against_facts, run_taint_analysis, TaintAnalysisOptions};
@@ -475,14 +473,11 @@ def handler(fd):
 
 // ---------------------------------------------------------------- P6
 
-/// `requires_state` fails closed today because adapters do not emit
-/// `FlowEvent::ResourceTransition` events. This pins the conservative
-/// behaviour: rules declaring `requires_state` are dormant until the
-/// adapter wires the relevant transition events. When that happens
-/// the matcher will start firing automatically without any rule
-/// rewrite.
+/// `requires_state` fails closed when no observed lifecycle
+/// transition reaches the expected state. Positive coverage for
+/// emitted transitions lives in `lifecycle_requires_state.rs`.
 #[test]
-fn requires_state_fails_closed_until_adapter_emits_transitions() {
+fn requires_state_fails_closed_without_matching_transition() {
     let tmp = TempDir::new("p6_dormant");
     write(
         &tmp.path().join("langs/python/sinks/state.yml"),
@@ -524,7 +519,7 @@ def handler():
     let matches = match_rule_against_facts(&ws, rule);
     assert!(
         matches.is_empty(),
-        "requires_state must fail closed until adapters emit transitions; got {:?}",
+        "requires_state must fail closed when the expected state was never observed; got {:?}",
         matches
     );
 }

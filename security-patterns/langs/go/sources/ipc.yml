@@ -9,19 +9,19 @@
     kind: call
     callee:
       regex: "\\.StdoutPipe$"
+  constraints:
+  - max_args: 0
   match_examples:
-  - name: generated direct match
+  - name: exec command stdout pipe
     code: |
-      import "os/exec"
       package main
-
+      import "os/exec"
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.StdoutPipe(target)
+        cmd := exec.Command("id")
+        _, _ = cmd.StdoutPipe()
       }
-  description: "exec.Cmd.StdoutPipe — subprocess stdout; tail-match across local receiver names like `cmd.StdoutPipe()`."
+    expect_match_text: [cmd.StdoutPipe]
+  description: "exec.Cmd.StdoutPipe() — subprocess stdout; receiver-agnostic method regex gated to os/exec and zero arguments."
 
 - id: go.ipc.cmd_stderrpipe
   enabled: true
@@ -33,16 +33,16 @@
     kind: call
     callee:
       regex: "\\.StderrPipe$"
+  constraints:
+  - max_args: 0
   match_examples:
-  - name: generated direct match
+  - name: exec command stderr pipe
     code: |
-      import "os/exec"
       package main
-
+      import "os/exec"
       func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        obj.StderrPipe(target)
+        cmd := exec.Command("id")
+        _, _ = cmd.StderrPipe()
       }
-  description: "exec.Cmd.StderrPipe — subprocess stderr; tail-match across local receiver names like `cmd.StderrPipe()`."
+    expect_match_text: [cmd.StderrPipe]
+  description: "exec.Cmd.StderrPipe() — subprocess stderr; receiver-agnostic method regex gated to os/exec and zero arguments."

@@ -16,9 +16,7 @@
       name: event
   description: "Disabled — `kind: param` cannot currently prove the enclosing function is a Lambda handler, so bare `event` overmatches unrelated Rust callbacks."
 - id: rust.aws.lambda_handler_event
-  enabled: false
-  disabled_reason:
-    code: pending-adapter-fact
+  enabled: true
   language: rust
   trust: service
   tag: event-input
@@ -29,4 +27,12 @@
     kind: call
     callee:
       attribute: [LambdaEvent, payload]
-  description: "Disabled — adapters index local receivers like `event.payload`, not type-qualified paths like `LambdaEvent::payload`. No canonical exists; re-enable when the Rust adapter supports type-qualified attribute matching."
+  match_examples:
+  - name: lambda event payload
+    code: |
+      use lambda_runtime::LambdaEvent;
+      fn example() {
+          LambdaEvent::payload();
+      }
+    expect_match_text: ["LambdaEvent::payload"]
+  description: "lambda_runtime LambdaEvent::payload — AWS Lambda event payload; local receiver calls require semantic LambdaEvent receiver-type facts."

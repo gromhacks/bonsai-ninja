@@ -550,6 +550,10 @@ impl Workspace {
         // collision-free hit must pass a more-qualified name.
         let global = self.inner.db.global_index();
         let mut candidates: Vec<(SymbolId, Decl)> = global
+            // CONTEXTLESS_LOOKUP_JUSTIFICATION: CLI/user-supplied
+            // trace entry lookup only. The cross-module tracer starts
+            // from the resolved symbol and resolves subsequent edges
+            // with caller context.
             .find_by_name(qualified)
             .iter()
             .filter_map(|sym| self.decl_for_symbol(*sym).map(|d| (*sym, d)))

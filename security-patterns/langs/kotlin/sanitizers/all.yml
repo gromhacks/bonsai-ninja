@@ -205,7 +205,10 @@
     kind: call
     callee:
       attribute: [Path, normalize]
-  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component). Marking these as sanitizers produced false negatives on attacker-controlled paths."
+  description: "Disabled — path normalisation (normpath / canonical / clean / realpath / expand_path) does NOT prevent directory
+    traversal. `/var/www/../etc/passwd` canonicalises to `/etc/passwd`, which is still outside the intended root. A real sanitizer
+    must be normalisation PLUS a containment check (startswith / strip_prefix / basename that drops the directory component).
+    Marking these as sanitizers produced false negatives on attacker-controlled paths."
 - id: kotlin.sanitizer.path_startswith
   enabled: false
   disabled_reason:
@@ -216,7 +219,8 @@
     kind: call
     callee:
       attribute: [Path, startsWith]
-  description: "Disabled — startsWith only proves containment with a normalized Path receiver and trusted-root argument; v1 matching cannot verify that shape."
+  description: "Disabled — startsWith only proves containment with a normalized Path receiver and trusted-root argument; v1
+    matching cannot verify that shape."
 - id: kotlin.sanitizer.integer_parseint
   enabled: true
   language: kotlin
@@ -404,7 +408,8 @@
     kind: call
     callee:
       name: text
-  description: "Disabled — kotlinx.html `+\"text\"` and `text(value)` builders auto-escape (safe vs `unsafe { +raw }`), but the bare `text` name overmatches helpers; enable when the matcher can scope it to the kotlinx.html DSL receiver."
+  description: "Disabled — kotlinx.html `+\"text\"` and `text(value)` builders auto-escape (safe vs `unsafe { +raw }`), but
+    the bare `text` name overmatches helpers; enable when the matcher can scope it to the kotlinx.html DSL receiver."
 
 - id: kotlin.sanitizer.okhttp_httpurl_builder
   enabled: true
@@ -425,7 +430,8 @@
         }
       }
     expect_match_text: [HttpUrl.parse]
-  description: "OkHttp HttpUrl.parse — strict URL parsing; subsequent .newBuilder().addQueryParameter() escapes path/query segments."
+  description: "OkHttp HttpUrl.parse — strict URL parsing; subsequent .newBuilder().addQueryParameter() escapes path/query
+    segments."
 
 - id: kotlin.sanitizer.okhttp_httpurl_addqueryparameter
   enabled: true
@@ -446,7 +452,8 @@
         }
       }
     expect_match_text: [Builder.addQueryParameter]
-  description: "OkHttp HttpUrl.Builder.addQueryParameter(name, value) — percent-encodes the query value, preventing CRLF/URL injection."
+  description: "OkHttp HttpUrl.Builder.addQueryParameter(name, value) — percent-encodes the query value, preventing CRLF/URL
+    injection."
 
 - id: kotlin.sanitizer.bcrypt_verify
   enabled: true
@@ -467,7 +474,8 @@
         }
       }
     expect_match_text: [BCrypt.verifyer]
-  description: "bcrypt verifier path (at.favre.lib `BCrypt.verifyer().verify(...)`) — constant-time hash check, not a string comparison."
+  description: "bcrypt verifier path (at.favre.lib `BCrypt.verifyer().verify(...)`) — constant-time hash check, not a string
+    comparison."
 
 - id: kotlin.sanitizer.bcrypt_checkpw
   enabled: true
@@ -656,9 +664,11 @@
       }
     expect_match_text: [next.startsWith]
   - name: paired same-origin path guard negative constraint boundary
-    code: "class App {\n  fun allow(next: String): Boolean {\n    return next.startsWith() && !next.startsWith(\"//\")\n  }\n}\n"
+    code: "class App {\n  fun allow(next: String): Boolean {\n    return next.startsWith() && !next.startsWith(\"//\")\n \
+      \ }\n}\n"
     expect_no_match: true
-  description: "Same-origin redirect path guard paired with a second startsWith call on the same receiver for the `!path.startsWith(\"//\")` scheme-relative rejection shape."
+  description: "Same-origin redirect path guard paired with a second startsWith call on the same receiver for the `!path.startsWith(\"\
+    //\")` scheme-relative rejection shape."
 
 - id: kotlin.sanitizer.same_origin_path_reject_scheme_relative
   enabled: false
@@ -684,12 +694,14 @@
       }
     expect_match_text: [next.startsWith]
   - name: reject scheme-relative redirect target negative constraint boundary
-    code: "class App {\n  fun allow(next: String): Boolean {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\")\n  }\n}\n"
+    code: "class App {\n  fun allow(next: String): Boolean {\n    return next.startsWith(\"/\") && !next.startsWith(\"http://\"\
+      )\n  }\n}\n"
     expect_no_match: true
-  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"//\") shape in kotlin.sanitizer.same_origin_path_startswith_slash."
+  description: "Disabled duplicate — the complete same-origin-path sanitizer is the paired startsWith(\"/\") + !startsWith(\"\
+    //\") shape in kotlin.sanitizer.same_origin_path_startswith_slash."
 
 - id: kotlin.sanitizer.allowlist_contains
-  enabled: true
+  enabled: false
   language: kotlin
   tag: allowlist-validate
   match:
@@ -697,7 +709,6 @@
     callee:
       name: contains
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 1
   match_examples:
   - name: set allowlist contains
@@ -709,10 +720,13 @@
         }
       }
     expect_match_text: [allowed.contains]
-  description: "Set/List allowlist membership check on explicitly allowlist-named receivers."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Set/List
+    allowlist membership check on explicitly allowlist-named receivers."
 
+  disabled_reason:
+    code: over-broad
 - id: kotlin.sanitizer.map_get_or_default_allowlist
-  enabled: true
+  enabled: false
   language: kotlin
   tag: allowlist-validate
   match:
@@ -720,7 +734,6 @@
     callee:
       name: getOrDefault
   constraints:
-  - receiver_name_in: [allowed, allowlist, whitelist, permitted, valid, safeValues, safeRoutes]
   - arg_count: 2
   match_examples:
   - name: map default allowlist
@@ -732,10 +745,13 @@
         }
       }
     expect_match_text: [allowed.getOrDefault]
-  description: "Map.getOrDefault on an allowlist-named mapping bounds attacker input to known values or a safe default."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Map.getOrDefault
+    on an allowlist-named mapping bounds attacker input to known values or a safe default."
 
+  disabled_reason:
+    code: over-broad
 - id: kotlin.sanitizer.enum_valueof_allowlist
-  enabled: true
+  enabled: false
   language: kotlin
   tag: allowlist-validate
   match:
@@ -743,7 +759,6 @@
     callee:
       name: valueOf
   constraints:
-  - receiver_name_in: [AllowedRole, SafeRoute, RouteName, SortField, Status]
   - arg_count: 1
   match_examples:
   - name: enum parse allowlist
@@ -755,8 +770,11 @@
         }
       }
     expect_match_text: [AllowedRole.valueOf]
-  description: "Enum valueOf on narrowly named allowlist enums rejects values outside the enum domain."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. Enum valueOf
+    on narrowly named allowlist enums rejects values outside the enum domain."
 
+  disabled_reason:
+    code: over-broad
 - id: kotlin.sanitizer.pattern_matches_safe_shape
   enabled: true
   language: kotlin
@@ -842,7 +860,6 @@
     callee:
       attribute: [JdbcTemplate, query]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 3
   match_examples:
   - name: jdbc template rowmapper varargs
@@ -866,7 +883,6 @@
     callee:
       attribute: [JdbcTemplate, update]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 2
   match_examples:
   - name: jdbc template update varargs
@@ -901,7 +917,8 @@
         }
       }
     expect_match_text: [xpath.setXPathVariableResolver]
-  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath text."
+  description: "XPath.setXPathVariableResolver enables variable binding instead of concatenating attacker input into XPath
+    text."
 
 - id: kotlin.sanitizer.xpath_evaluate_variable_placeholder
   enabled: true
@@ -928,7 +945,8 @@
       }
     expect_match_text: [xpath.evaluate]
   - name: xpath evaluate placeholder negative constraint boundary
-    code: "import javax.xml.xpath.*\nclass App {\n  fun find(xpath: XPath, doc: Any): Any {\n    return xpath.evaluate()\n  }\n}\n"
+    code: "import javax.xml.xpath.*\nclass App {\n  fun find(xpath: XPath, doc: Any): Any {\n    return xpath.evaluate()\n\
+      \  }\n}\n"
     expect_no_match: true
   description: "XPath.evaluate with `$name` placeholders is the parameterized side of XPath variable binding."
 
@@ -942,7 +960,6 @@
     callee:
       attribute: [JdbcTemplate, queryForObject]
   constraints:
-  - receiver_name_in: [jdbcTemplate, namedJdbcTemplate]
   - min_args: 3
   match_examples:
   - name: jdbc template query for object varargs
@@ -966,7 +983,9 @@
     callee:
       name: addValue
   constraints:
-  - receiver_name_in: [params, parameters, sqlParams, paramSource]
+  - receiver_type_in:
+    - MapSqlParameterSource
+    - SqlParameterSource
   - min_args: 2
   match_examples:
   - name: named parameter source add value
@@ -981,7 +1000,8 @@
         fun addValue(vararg args: Any?) {}
       }
     expect_match_text: [params.addValue]
-  description: "MapSqlParameterSource.addValue(name, value) binds a named JDBC parameter rather than interpolating the value into SQL."
+  description: "MapSqlParameterSource.addValue(name, value) binds a named JDBC parameter rather than interpolating the value
+    into SQL."
 
 - id: kotlin.sanitizer.bean_validation_pattern_param
   enabled: true
@@ -1045,7 +1065,7 @@
   description: "javax.naming.ldap.Rdn.escapeValue — escapes attacker input for an LDAP RDN value."
 
 - id: kotlin.sanitizer.uri_host_allowlist
-  enabled: true
+  enabled: false
   language: kotlin
   tag: allowlist-validate
   match:
@@ -1053,7 +1073,6 @@
     callee:
       name: contains
   constraints:
-  - receiver_name_in: [allowedHosts, safeHosts, permittedHosts]
   - arg_matches_regex:
       index: 0
       regex: 'host|getHost'
@@ -1067,10 +1086,14 @@
       }
     expect_match_text: [allowedHosts.contains]
   - name: uri host allowlist negative constraint boundary
-    code: "class App {\n  fun allow(uri: java.net.URI, allowedHosts: Set<String>): Boolean {\n    return allowedHosts.contains()\n  }\n}\n"
+    code: "class App {\n  fun allow(uri: java.net.URI, allowedHosts: Set<String>): Boolean {\n    return allowedHosts.contains()\n\
+      \  }\n}\n"
     expect_no_match: true
-  description: "URI host allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
+  description: "Disabled — receiver-name allowlist heuristics are not semantic enough to grant sanitizer credit. URI host
+    allowlist check — validates the parsed host against a trusted set before SSRF-sensitive use."
 
+  disabled_reason:
+    code: over-broad
 - id: kotlin.sanitizer.xml_factory_disallow_doctype_true
   enabled: true
   language: kotlin
@@ -1081,7 +1104,9 @@
     callee:
       name: setFeature
   constraints:
-  - receiver_name_in: [factory, dbf, saxFactory, documentBuilderFactory]
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
   - arg_matches_regex:
       index: 0
       regex: 'disallow-doctype-decl'
@@ -1102,7 +1127,8 @@
       }
     expect_match_text: [factory.setFeature]
   - name: document builder disallow doctype negative constraint boundary
-    code: "import javax.xml.parsers.*\nclass App {\n  fun configure(factory: DocumentBuilderFactory) {\n    factory.setFeature()\n  }\n}\nclass DocumentBuilderFactory {\n  fun setFeature(vararg args: Any?) {}\n}\n"
+    code: "import javax.xml.parsers.*\nclass App {\n  fun configure(factory: DocumentBuilderFactory) {\n    factory.setFeature()\n\
+      \  }\n}\nclass DocumentBuilderFactory {\n  fun setFeature(vararg args: Any?) {}\n}\n"
     expect_no_match: true
   description: "XML parser feature hardening — disallows DOCTYPE declarations to block XXE payloads."
 
@@ -1116,7 +1142,11 @@
     callee:
       name: setAttribute
   constraints:
-  - receiver_name_in: [factory, dbf, schemaFactory, transformerFactory]
+  - receiver_type_in:
+    - DocumentBuilderFactory
+    - SAXParserFactory
+    - SchemaFactory
+    - TransformerFactory
   - arg_matches_regex:
       index: 0
       regex: 'ACCESS_EXTERNAL_DTD|ACCESS_EXTERNAL_SCHEMA|ACCESS_EXTERNAL_STYLESHEET'
@@ -1140,6 +1170,8 @@
       }
     expect_match_text: [factory.setAttribute]
   - name: restrict external dtd access negative constraint boundary
-    code: "import javax.xml.XMLConstants.*\nclass App {\n  fun configure(factory: DocumentBuilderFactory) {\n    factory.setAttribute()\n  }\n}\nclass DocumentBuilderFactory {\n  fun setAttribute(vararg args: Any?) {}\n}\nobject XMLConstants {\n  const val ACCESS_EXTERNAL_DTD = \"\"\n}\n"
+    code: "import javax.xml.XMLConstants.*\nclass App {\n  fun configure(factory: DocumentBuilderFactory) {\n    factory.setAttribute()\n\
+      \  }\n}\nclass DocumentBuilderFactory {\n  fun setAttribute(vararg args: Any?) {}\n}\nobject XMLConstants {\n  const
+      val ACCESS_EXTERNAL_DTD = \"\"\n}\n"
     expect_no_match: true
   description: "XMLConstants ACCESS_EXTERNAL_* set to empty string — blocks external DTD/schema/stylesheet resolution."

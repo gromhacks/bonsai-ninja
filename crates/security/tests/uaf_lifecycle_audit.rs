@@ -1728,6 +1728,7 @@ fn javascript_abort_controller_audit_site() {
     let ws = ws_for(
         "app.js",
         r#"
+const http = require("http");
 function handle(controller, url) {
   controller.abort();
   return fetch(url, { signal: controller.signal });
@@ -1743,6 +1744,7 @@ fn javascript_subscription_unsubscribe_audit_site() {
     let ws = ws_for(
         "app.js",
         r#"
+const rxjs = require("rxjs");
 function handle(sub) {
   sub.unsubscribe();
 }
@@ -1776,6 +1778,7 @@ fn typescript_abort_controller_audit_site() {
     let ws = ws_for(
         "app.ts",
         r#"
+const http = require("http");
 function handle(controller: AbortController, url: string) {
   controller.abort();
   return fetch(url, { signal: controller.signal });

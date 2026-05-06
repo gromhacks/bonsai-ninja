@@ -40,7 +40,8 @@ pub use inter::{
     interprocedural_taint_to_completion_with_caches, interprocedural_taint_with_caches,
     resume_interprocedural_taint_with_caches, CallPropagation, CleanOutputOverwrite, FunctionSeed,
     FunctionSummary, InterTaintCaches, InterTaintConfig, InterTaintContinuation, InterTaintResult,
-    InterTaintWorkItem, SourceOutputArgs, TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
+    InterTaintWorkItem, ReceiverStatePropagation, SourceOutputArgs, TaintedArg, TaintedArgAtCall,
+    TaintedCall, TaintedCallKind,
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{

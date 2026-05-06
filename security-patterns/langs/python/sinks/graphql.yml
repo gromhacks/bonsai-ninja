@@ -101,23 +101,28 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute_sync$"
+      regex: "^Schema\\.execute_sync$"
   constraints:
-  - receiver_name_in: [schema, graphql_schema, strawberry_schema]
   - arg_tainted:
       index: 0
   match_examples:
   - name: strawberry schema execute_sync tainted
     code: |
       import strawberry
-      def example(schema, user_input):
+      def example(user_input):
+          schema = Schema()
           return schema.execute_sync(user_input)
+      class Schema:
+          def execute_sync(self, *args): pass
     expect_match_text: [schema.execute_sync]
   - name: strawberry schema execute_sync literal negative
     code: |
       import strawberry
-      def example(schema, user_input):
+      def example(user_input):
+          schema = Schema()
           return schema.execute_sync('{ viewer { id } }')
+      class Schema:
+          def execute_sync(self, *args): pass
     expect_no_match: true
   description: "Strawberry GraphQL schema.execute_sync(tainted_query) — attacker-controlled query string drives resolver execution and may probe introspection."
 
@@ -162,23 +167,28 @@
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
+      regex: "^Client\\.execute$"
   constraints:
-  - receiver_name_in: [client, gql_client, graphql_client]
   - arg_tainted:
       index: 0
   match_examples:
   - name: gql client execute tainted
     code: |
       import gql
-      def example(client, user_input):
+      def example(user_input):
+          client = Client()
           return client.execute(user_input)
+      class Client:
+          def execute(self, *args): pass
     expect_match_text: [client.execute]
   - name: gql client execute literal negative
     code: |
       import gql
-      def example(client, user_input):
+      def example(user_input):
+          client = Client()
           return client.execute('{ viewer { id } }')
+      class Client:
+          def execute(self, *args): pass
     expect_no_match: true
   - name: unrelated execute receiver negative
     code: |
