@@ -5110,36 +5110,10 @@ fn resolve_workspace_module_targets(
     out
 }
 
-/// True when the module-namespace alias text (e.g. `MyApp.AuthService`
-/// or `pipeline`) matches the canonical `Decl.module_path` of a
-/// workspace decl. Compares dotted segments to `module_path.segments`,
-/// using either equality or a suffix match so a fully-qualified alias
-/// (`MyApp.AuthService`) hits a decl whose module_path is exactly
-/// that, AND a leaf alias (`AuthService`) hits a decl declared inside
-/// `MyApp.AuthService` so the local-name binding produced by
-/// `parse_imports` resolves the cross-module call.
-fn module_target_matches_decl_module_path(alias_target: &str, decl_module: &ModulePath) -> bool {
-    if alias_target.is_empty() || decl_module.is_empty() {
-        return false;
-    }
-    let target_segments: Vec<&str> = alias_target
-        .split('.')
-        .map(str::trim)
-        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
-        .collect();
-    if target_segments.is_empty() {
-        return false;
-    }
-    let decl_segments = &decl_module.segments;
-    if target_segments.len() > decl_segments.len() {
-        return false;
-    }
-    let suffix_start = decl_segments.len() - target_segments.len();
-    decl_segments[suffix_start..]
-        .iter()
-        .zip(target_segments.iter())
-        .all(|(decl_seg, target_seg)| decl_seg == target_seg)
-}
+// `module_target_matches_decl_module_path` lives in
+// `bonsai_resolve` so the callgraph, taint, and resolve passes
+// share one canonical alias-target match.
+use bonsai_resolve::module_target_matches_decl_module_path;
 
 fn export_name_variants(alias_tail: &str) -> Vec<String> {
     vec![
