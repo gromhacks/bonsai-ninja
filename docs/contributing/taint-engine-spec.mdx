@@ -220,7 +220,9 @@ The taint crate is layered:
 `InterTaintConfig` covers the knobs:
 
 - `sanitizers: TokenSet` — informational only.
-- `budget: u32` — total `(func, seed)` pairs analysed (default 256).
+- `budget: u32` — `(func, seed)` worklist chunk size (default 512);
+  to-completion drivers resume chunks until the semantic worklist
+  drains.
 - `intra_worklist_cap: Option<u32>` — per-function safety cap.
 - `source_bearing_functions: AHashSet<FuncId>` — security-layer source
   helpers.
@@ -245,7 +247,7 @@ The taint crate is layered:
   operands carry tainted values.
 - `precision: Precision` — worst seen along any traversed edge.
 - `pairs_analyzed: u32`, `saturated: bool`, `continuation:
-  Option<InterTaintContinuation>` — for budget-truncated runs.
+  Option<InterTaintContinuation>` — for resumable chunked runs.
 
 ## Read-side semantic checks
 

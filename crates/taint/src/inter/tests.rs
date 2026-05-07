@@ -1138,6 +1138,44 @@ fn budgeted_run_can_resume_to_completion() {
 }
 
 #[test]
+fn to_completion_has_no_hidden_pair_ceiling() {
+    let mut src = String::new();
+    for i in 0..40 {
+        src.push_str(&format!("def hop{i}(x):\n    hop{next}(x)\n\n", next = i + 1));
+    }
+    src.push_str("def hop40(x):\n    sink(x)\n\n");
+    src.push_str("def sink(x):\n    pass\n\n");
+    src.push_str("def entry(user_input):\n    hop0(user_input)\n");
+    let db = python_ws_one_file(&src);
+    let entry = func_id_of(&db, "entry");
+    let sink = func_id_of(&db, "sink");
+    let config = InterTaintConfig {
+        sanitizers: TokenSet::default(),
+        budget: 3,
+        intra_worklist_cap: None,
+        ..Default::default()
+    };
+    let mut caches = InterTaintCaches::default();
+    let result = interprocedural_taint_to_completion_with_caches(
+        entry,
+        &seed(&["user_input"]),
+        &config,
+        &db,
+        &mut caches,
+    );
+    assert!(!result.saturated);
+    assert!(result.continuation.is_none());
+    assert!(
+        result.pairs_analyzed > config.budget * 8,
+        "to-completion must keep resuming beyond the old hidden budget*8 ceiling"
+    );
+    assert!(
+        result.call_records.iter().any(|record| record.callee == sink),
+        "to-completion must reach sinks beyond the old hidden pair ceiling",
+    );
+}
+
+#[test]
 fn function_without_matching_param_doesnt_crash() {
     // sink takes zero args; entry still calls it. Edge case —
     // we record a propagation with zero tainted_args.

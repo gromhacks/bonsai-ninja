@@ -739,8 +739,9 @@ pub(crate) enum Cmd {
         #[arg(long)]
         sink: Option<String>,
         /// Override the interprocedural pass's `(FuncId, seed)`
-        /// analysis budget. Default 512 — raise for larger
-        /// workspaces, lower for stricter debugging loops.
+        /// chunk size. Default 512. This affects how often the
+        /// resumable worklist yields, not whether complete flows are
+        /// explored.
         #[arg(long)]
         budget: Option<u32>,
         /// Override the intraprocedural CFG worklist iteration cap per
@@ -2491,8 +2492,9 @@ pub(crate) enum SecurityAction {
         /// exists.
         #[arg(long = "show-sanitized", default_value_t = false)]
         show_sanitized: bool,
-        /// Override the interprocedural `(function, seed)` analysis
-        /// budget for security taint-analysis. Default 256.
+        /// Override the interprocedural `(function, seed)` chunk size
+        /// for security taint-analysis. Default 512. This affects
+        /// scheduling granularity, not result completeness.
         #[arg(long = "taint-budget")]
         taint_budget: Option<u32>,
         /// Override the intraprocedural CFG worklist iteration cap per

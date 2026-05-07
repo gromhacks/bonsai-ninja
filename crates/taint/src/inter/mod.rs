@@ -23,9 +23,9 @@
 //!   chains keep their precision.
 //! - **Recursion-safe:** `(func, taint-set)` pairs are memoized, so
 //!   cycles terminate once the taint set stabilises.
-//! - **Bounded:** the worklist has a per-run budget
-//!   ([`InterTaintConfig::budget`]) so pathological call graphs can
-//!   never deadlock the host.
+//! - **Resumable:** the worklist can be sliced into bounded chunks
+//!   ([`InterTaintConfig::budget`]) and resumed to a fixed point by
+//!   callers that need complete flow evidence.
 //!
 //! ## Remaining approximations
 //!
@@ -128,9 +128,12 @@ pub struct InterTaintConfig {
     /// sanitizer list. Sanitizers are classification evidence, not a
     /// taint-transfer input, so this set does not alter propagation.
     pub sanitizers: TokenSet,
-    /// Max distinct `(func, seed)` pairs analyzed. Prevents
-    /// runaway on pathological call graphs. Default 512 — each
-    /// pair is one intraprocedural run, which is bounded itself.
+    /// Max distinct `(func, seed)` pairs analyzed in one worklist
+    /// chunk before returning a continuation. Default 512. Each pair
+    /// is one intraprocedural run, which is bounded itself.
+    /// To-completion drivers resume chunks until the semantic
+    /// worklist drains, so this controls scheduling granularity
+    /// rather than result completeness.
     pub budget: u32,
     /// Optional per-function intraprocedural worklist cap. When unset,
     /// the intraprocedural engine derives a cap from CFG size.
@@ -250,9 +253,9 @@ pub struct InterTaintResult {
     pub precision: Precision,
     /// Total `(func, seed)` pairs analyzed.
     pub pairs_analyzed: u32,
-    /// `true` when the `InterTaintConfig::budget` cap hit before the
-    /// worklist drained. Findings produced from a saturated run
-    /// should be labelled approximate.
+    /// `true` when one worklist chunk hit `InterTaintConfig::budget`
+    /// before the worklist drained. To-completion drivers resume the
+    /// continuation and should normally return `saturated = false`.
     pub saturated: bool,
     /// Remaining work and visited-state needed to continue a
     /// saturated run. `None` means the worklist drained.
@@ -467,23 +470,9 @@ pub fn resume_interprocedural_taint_with_caches(
     run_interprocedural_worklist(accum, continuation.pending, continuation.seen, config, db, caches)
 }
 
-/// Hard ceiling on total `(func, seed)` pairs across all chunks of a
-/// single `to_completion` run. Without this, bundled mega-files
-/// (lodash.js with ~4400 interconnected functions in one TU) pull the
-/// resume-loop into >10-minute walls because every chunk produces new
-/// pairs faster than the budget drains. The ceiling forces a clean
-/// `saturated=true` return at a predictable cost — findings emitted
-/// from a saturated run are already labelled approximate. The
-/// multiplier is `8x budget` so the default budget=256 caps each
-/// source at 2048 pairs (≈ a few seconds wall time on 28 MB
-/// projects). Small budgets used in tests (e.g. budget=3 for 13-hop
-/// chains) need ≥5x just to drain naturally; 8x leaves headroom for
-/// realistic resume scenarios while still bounding the megafile case.
-const TO_COMPLETION_PAIR_CAP_MULTIPLIER: u32 = 8;
-
-/// Run until the worklist drains OR a hard total-pair cap is hit
-/// (whichever comes first). `config.budget` is the per-chunk size;
-/// the cap is `budget × TO_COMPLETION_PAIR_CAP_MULTIPLIER`.
+/// Run until the worklist drains. `config.budget` is the per-chunk
+/// size, not a completeness cap; this driver keeps resuming
+/// continuations until semantic fixed point.
 #[must_use]
 pub fn interprocedural_taint_to_completion_with_caches(
     entry_func: FuncId,
@@ -492,12 +481,8 @@ pub fn interprocedural_taint_to_completion_with_caches(
     db: &AnalyzerDb,
     caches: &mut InterTaintCaches,
 ) -> InterTaintResult {
-    let pair_cap = config.budget.saturating_mul(TO_COMPLETION_PAIR_CAP_MULTIPLIER);
     let mut result = interprocedural_taint_with_caches(entry_func, entry_sources, config, db, caches);
     while result.continuation.is_some() {
-        if result.pairs_analyzed >= pair_cap {
-            break;
-        }
         result = resume_interprocedural_taint_with_caches(result, config, db, caches);
     }
     result

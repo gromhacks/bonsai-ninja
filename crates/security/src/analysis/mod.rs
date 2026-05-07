@@ -77,8 +77,10 @@ pub struct TaintAnalysisOptions {
     /// attached to propagated paths, not propagation blockers, so sanitized
     /// paths are always present when source-to-sink reachability exists.
     pub show_sanitized: bool,
-    /// Optional interprocedural `(FuncId, seed)` pair budget. Defaults
-    /// to the existing analysis budget when unset.
+    /// Optional interprocedural `(FuncId, seed)` chunk size. Defaults
+    /// to the taint engine's standard chunk size when unset. This is
+    /// not a completeness cap; the security driver resumes chunks
+    /// until the semantic worklist drains.
     pub interprocedural_budget: Option<u32>,
     /// Optional per-function intraprocedural CFG worklist cap.
     /// Defaults to the CFG-size-derived cap when unset.
@@ -676,7 +678,7 @@ where
     let func_ids = function_ids_by_lang_file_name(ws);
     let source_graph_config = InterTaintConfig {
         sanitizers: TokenSet::default(),
-        budget: 256,
+        budget: InterTaintConfig::default().budget,
         intra_worklist_cap: None,
         source_bearing_functions: AHashSet::default(),
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
@@ -3174,8 +3176,8 @@ fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
 ///    proven to carry source-derived data so the inter pass can
 ///    propagate `var = helper()` taint.
 /// 5. **Run interprocedural taint per source** — `exact_source_seed_graph`
-///    drives `interprocedural_taint_to_completion_with_caches` with
-///    a `global_pair_budget = budget × 8` ceiling.
+///    drives `interprocedural_taint_to_completion_with_caches` until
+///    the per-source semantic worklist drains.
 /// 6. **Sink matching** — iterate `tainted_calls`, prefer
 ///    span-equality match for multi-sink-in-same-fn attribution,
 ///    apply sink-rule constraints with single-call `InterTaintView`.
@@ -3387,7 +3389,7 @@ where
         .collect();
     let config = InterTaintConfig {
         sanitizers: TokenSet::default(),
-        budget: interprocedural_budget.unwrap_or(256),
+        budget: interprocedural_budget.unwrap_or_else(|| InterTaintConfig::default().budget),
         intra_worklist_cap,
         source_bearing_functions,
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
@@ -3395,25 +3397,11 @@ where
         receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
         ..Default::default()
     };
-    // Global ceiling on total interprocedural work across every
-    // source on this analysis. Without this, projects with bundled
-    // mega-files (lodash.js: ~4400 functions in one TU, dozens of
-    // matched source rules per file) burn 10+ minutes because the
-    // per-source budget multiplies across many entry points. The
-    // per-source cap bounds each individual run; this one bounds
-    // the analysis as a whole. `budget × 8` ≈ 2k pairs at default
-    // budget=256 — covers every realistic project we tested in
-    // <60s and lets lodash saturate cleanly with
-    // `precision = approximate`. Bumping the budget raises this in
-    // proportion (so power users can opt into wider sweeps).
-    let global_pair_budget = config.budget.saturating_mul(8);
-    let mut total_pairs_analyzed: u32 = 0;
     let mut taint_caches = InterTaintCaches::default();
     let mut exact_graphs: AHashMap<(FuncId, Vec<String>), EntryTaintGraph> = AHashMap::new();
     // AHashMap iteration order is hash-randomized per process. Sort
-    // by FuncId.raw() so the per-source-group analysis order — and
-    // therefore the global-pair-budget cutoff and the resulting
-    // finding fingerprints — are stable across runs.
+    // by FuncId.raw() so the per-source-group analysis order and
+    // resulting finding fingerprints are stable across runs.
     let mut source_groups_sorted: Vec<(FuncId, &Vec<usize>)> =
         source_groups.iter().map(|(k, v)| (*k, v)).collect();
     source_groups_sorted.sort_by_key(|(k, _)| k.raw());
@@ -3421,19 +3409,14 @@ where
         label: "building taint chains",
         total: source_groups_sorted.len() as u64,
     });
-    'sources: for &(src_func_id, indices) in &source_groups_sorted {
+    for &(src_func_id, indices) in &source_groups_sorted {
         let mut emitted_for_source_sink: AHashSet<(usize, String, u32, u64, u64)> = AHashSet::new();
         for &idx in indices {
-            if total_pairs_analyzed >= global_pair_budget {
-                on_progress(AnalysisProgress::PhaseTicked);
-                break 'sources;
-            }
             let (src, _, seeds) = &source_work[idx];
             let graph_key = (src_func_id, sorted_seed_key(seeds));
             let graph = exact_graphs.entry(graph_key).or_insert_with(|| {
                 exact_source_seed_graph(src_func_id, seeds, &config, ws.db(), &mut taint_caches)
             });
-            total_pairs_analyzed = total_pairs_analyzed.saturating_add(graph.pairs_analyzed);
             if graph.tainted_calls.is_empty() {
                 continue;
             }

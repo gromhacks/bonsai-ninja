@@ -505,6 +505,44 @@ fn benchmark_shaped_security_flows_resume_budget_chunks() {
 }
 
 #[test]
+fn taint_analysis_does_not_stop_after_scan_wide_pair_budget() {
+    let ws = Workspace::new(bonsai_adapters::all_languages_registry());
+    for i in 0..12 {
+        let path = format!("/app/case_{i}.py");
+        let src = format!(
+            "def source():\n    return \"\"\n\n\
+             def sink(x):\n    pass\n\n\
+             def handle_{i}():\n    value = source()\n    sink(value)\n"
+        );
+        ws.vfs().write(path, Arc::<str>::from(src));
+    }
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    let report = run_taint_analysis(
+        &ws,
+        &rulepack("python", "source", "sink"),
+        TaintAnalysisOptions {
+            interprocedural_budget: Some(1),
+            ..Default::default()
+        },
+    )
+    .expect("taint analysis");
+    let sink_files: BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|finding| finding.finding.sink.file.clone())
+        .collect();
+    assert_eq!(
+        sink_files.len(),
+        12,
+        "security taint-analysis must evaluate every source group; findings={:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn taint_fixture_matrix_exists_for_every_supported_language() {
     let mut missing = Vec::new();
     for lang in ALL_LANGS {

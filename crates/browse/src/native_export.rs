@@ -1122,7 +1122,14 @@ fn build_taint_graph(
                 for p in &ep.params {
                     seed.insert(p.clone());
                 }
-                let result = bonsai_taint::interprocedural_taint(entry_func, &seed, &config, db);
+                let mut caches = bonsai_taint::InterTaintCaches::default();
+                let result = bonsai_taint::interprocedural_taint_to_completion_with_caches(
+                    entry_func,
+                    &seed,
+                    &config,
+                    db,
+                    &mut caches,
+                );
                 let records: Vec<ExportTaintRecord> = result
                     .call_records
                     .iter()
