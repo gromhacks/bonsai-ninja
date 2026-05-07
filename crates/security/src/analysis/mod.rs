@@ -521,9 +521,9 @@ where
     // Sort matches so the chain-aware engine sees a deterministic
     // order. `gather_matches` produces a stable-per-process order
     // but parallel match collection can interleave files
-    // differently between runs; without a sort the source-frontier,
-    // global-pair-budget cutoff, and resulting finding fingerprints
-    // drift run-to-run (`finding_ids_deterministic_across_runs`).
+    // differently between runs; without a sort the source-frontier and
+    // resulting finding fingerprints drift run-to-run
+    // (`finding_ids_deterministic_across_runs`).
     sort_matches(&mut source_hits);
     sort_matches(&mut sink_hits);
     sort_matches(&mut sanitizer_hits);
@@ -724,7 +724,7 @@ where
             })
             .unwrap_or_else(|| ws.dataflow().graph_for(start, ws.db()).as_ref().clone());
         let lineages = enumerate_tainted_source_lineages(&graph.call_records, start, 6, 24);
-        if lineages.is_empty() && graph.call_records.is_empty() {
+        if lineages.is_empty() {
             let path = vec![start];
             let Some(chain_names) = chain_names_for_path(ws, &path) else {
                 on_progress(AnalysisProgress::PhaseTicked);
@@ -746,32 +746,6 @@ where
                     chain_names,
                     taint_path,
                 });
-            }
-            on_progress(AnalysisProgress::PhaseTicked);
-            continue;
-        }
-        if lineages.is_empty() {
-            for path in enumerate_tainted_source_paths(&graph.call_records, start, 6, 24) {
-                let Some(chain_names) = chain_names_for_path(ws, &path) else {
-                    continue;
-                };
-                let taint_path = taint_path_for_chain(ws, &path, &graph.call_records, None);
-                let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
-                let dedupe_key = (
-                    source_match.rule_id.clone(),
-                    source_match.file.clone(),
-                    source_match.line,
-                    flow_id.clone(),
-                );
-                if seen.insert(dedupe_key) {
-                    candidates.push(SourceAnalysisCandidate {
-                        source: source_match.clone(),
-                        path,
-                        flow_id,
-                        chain_names,
-                        taint_path,
-                    });
-                }
             }
             on_progress(AnalysisProgress::PhaseTicked);
             continue;
@@ -2521,50 +2495,6 @@ fn func_id_for_match(
         .copied()
 }
 
-fn enumerate_tainted_source_paths(
-    records: &[TaintedCallEdge],
-    start: FuncId,
-    max_extra: usize,
-    max_paths: usize,
-) -> Vec<Vec<FuncId>> {
-    let edges = tainted_call_adjacency(records);
-    let mut out = Vec::new();
-    let mut stack = vec![(vec![start], 0usize)];
-    while let Some((path, depth)) = stack.pop() {
-        if out.len() >= max_paths {
-            break;
-        }
-        let Some(&tail) = path.last() else {
-            continue;
-        };
-        if depth >= max_extra {
-            out.push(path);
-            continue;
-        }
-        let Some(callees) = edges.get(&tail) else {
-            out.push(path);
-            continue;
-        };
-        let mut advanced = false;
-        for callee in callees.iter().rev() {
-            if path.contains(callee) {
-                continue;
-            }
-            let mut next = path.clone();
-            next.push(*callee);
-            stack.push((next, depth + 1));
-            advanced = true;
-        }
-        if !advanced {
-            out.push(path);
-        }
-    }
-    if out.is_empty() {
-        out.push(vec![start]);
-    }
-    out
-}
-
 fn enumerate_tainted_source_lineages(
     records: &[TaintedCallEdge],
     source: FuncId,
@@ -2613,41 +2543,6 @@ fn enumerate_tainted_source_lineages(
         }
     }
     out
-}
-
-/// Build an adjacency map from the taint engine's call records:
-/// `caller → [callee, ...]`. Sorted and deduped so BFS is
-/// deterministic and never visits the same edge twice.
-fn tainted_call_adjacency(call_records: &[TaintedCallEdge]) -> AHashMap<FuncId, Vec<FuncId>> {
-    let mut edges: AHashMap<FuncId, Vec<FuncId>> = AHashMap::new();
-    for record in call_records {
-        edges.entry(record.caller).or_default().push(record.callee);
-    }
-    for callees in edges.values_mut() {
-        callees.sort_by_key(|id| id.raw());
-        callees.dedup();
-    }
-    edges
-}
-
-/// Meet the precision values across every call edge on the chain.
-/// One coarse hop drags the whole chain to the coarsest precision
-/// (Exact ⊔ OverApproximate = OverApproximate).
-fn chain_precision(chain: &[FuncId], records: &[TaintedCallEdge]) -> Precision {
-    let mut precision = Precision::Exact;
-    for pair in chain.windows(2) {
-        let [caller, callee] = pair else {
-            continue;
-        };
-        let edge_precision = records
-            .iter()
-            .filter(|record| record.caller == *caller && record.callee == *callee)
-            .map(|record| record.precision)
-            .min()
-            .unwrap_or(Precision::Unknown);
-        precision = precision.meet(edge_precision);
-    }
-    precision
 }
 
 fn chain_precision_for_records(records: &[&TaintedCallEdge]) -> Precision {
@@ -2771,39 +2666,6 @@ fn taint_path_for_lineage(
         .iter()
         .map(|record| propagation_step_for_edge(ws, record))
         .collect();
-    if let Some(call) = terminal_call {
-        path.push(propagation_step_for_terminal_call(ws, call));
-    }
-    path
-}
-
-fn taint_path_for_chain(
-    ws: &Workspace,
-    chain: &[FuncId],
-    records: &[TaintedCallEdge],
-    terminal_call: Option<&TaintedCall>,
-) -> Vec<TaintPropagationStep> {
-    let mut path = Vec::new();
-    for pair in chain.windows(2) {
-        let [caller, callee] = pair else {
-            continue;
-        };
-        let Some(record) = records
-            .iter()
-            .filter(|record| record.caller == *caller && record.callee == *callee)
-            .min_by_key(|record| {
-                (
-                    record.call_span.file.raw(),
-                    record.call_span.start,
-                    record.call_span.end,
-                )
-            })
-        else {
-            continue;
-        };
-        path.push(propagation_step_for_edge(ws, record));
-    }
-
     if let Some(call) = terminal_call {
         path.push(propagation_step_for_terminal_call(ws, call));
     }
@@ -3181,11 +3043,12 @@ fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
 /// 6. **Sink matching** — iterate `tainted_calls`, prefer
 ///    span-equality match for multi-sink-in-same-fn attribution,
 ///    apply sink-rule constraints with single-call `InterTaintView`.
-/// 7. **Chain assembly** — prefer propagation lineage IDs recorded by
-///    the taint engine; fall back to `indexed_tainted_path_between`
-///    only for old/cache-missing graphs. Precision is met across the
-///    chosen edges, then `flow_id` / `group_id` include concrete call
-///    sites. Sanitizer attachment by chain hop with data-flow gate
+/// 7. **Chain assembly** — use propagation lineage IDs recorded by
+///    the taint engine. If lineage evidence is missing, skip the
+///    finding rather than fabricating a call-graph-only path. Precision
+///    is met across the chosen edges, then `flow_id` / `group_id`
+///    include concrete call sites. Sanitizer attachment by chain hop
+///    with data-flow gate
 ///    (`sanitizer_call_overlaps_tainted_call` or a sanitizer nested
 ///    directly inside a tainted sink argument).
 /// 8. **Trust-aware severity** — `local`/`inferred` source tier
@@ -3410,7 +3273,8 @@ where
         total: source_groups_sorted.len() as u64,
     });
     for &(src_func_id, indices) in &source_groups_sorted {
-        let mut emitted_for_source_sink: AHashSet<(usize, String, u32, u64, u64)> = AHashSet::new();
+        let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
+            AHashSet::new();
         for &idx in indices {
             let (src, _, seeds) = &source_work[idx];
             let graph_key = (src_func_id, sorted_seed_key(seeds));
@@ -3420,7 +3284,6 @@ where
             if graph.tainted_calls.is_empty() {
                 continue;
             }
-            let tainted_edges = tainted_call_adjacency(&graph.call_records);
             // Span set of every recorded tainted call on this
             // source graph — sanitizer credit pass uses it to
             // require data-flow connectivity rather than mere
@@ -3476,32 +3339,15 @@ where
                             continue;
                         }
                     }
-                    if !emitted_for_source_sink.insert(source_sink_emission_key(idx, snk)) {
-                        continue;
-                    }
                     let lineage_records = lineage_records_for_call(&graph.call_records, call);
                     let lineage_chain = lineage_records
                         .as_ref()
                         .and_then(|records| chain_funcs_for_lineage(records, src_func_id, call.caller));
-                    let (chain_funcs, mut chain_precision, taint_path) =
-                        if let (Some(records), Some(chain_funcs)) = (lineage_records.as_ref(), lineage_chain)
-                        {
-                            (
-                                chain_funcs,
-                                chain_precision_for_records(records),
-                                taint_path_for_lineage(ws, records, Some(call)),
-                            )
-                        } else {
-                            let Some(chain_funcs) =
-                                indexed_tainted_path_between(&tainted_edges, src_func_id, call.caller)
-                            else {
-                                continue;
-                            };
-                            let chain_precision = chain_precision(&chain_funcs, &graph.call_records);
-                            let taint_path =
-                                taint_path_for_chain(ws, &chain_funcs, &graph.call_records, Some(call));
-                            (chain_funcs, chain_precision, taint_path)
-                        };
+                    let (Some(records), Some(chain_funcs)) = (lineage_records.as_ref(), lineage_chain) else {
+                        continue;
+                    };
+                    let mut chain_precision = chain_precision_for_records(records);
+                    let taint_path = taint_path_for_lineage(ws, records, Some(call));
                     if graph.saturated {
                         chain_precision = chain_precision.meet(Precision::OverApproximate);
                     }
@@ -3511,6 +3357,9 @@ where
                         .collect();
                     let group_id = group_id_for_taint_path(&chain_names, &taint_path);
                     let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+                    if !emitted_for_source_sink_flow.insert(source_sink_flow_emission_key(idx, snk, call)) {
+                        continue;
+                    }
                     let sink_tainted_args: Vec<TaintedArgInfo> = call
                         .tainted_args
                         .iter()
@@ -3690,47 +3539,6 @@ fn tainted_call_matches_sink(call: &TaintedCall, sink: &RuleMatch) -> bool {
     // happen to share a method name. See
     // `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
     spans_overlap(call.call_span, sink.span)
-}
-
-fn indexed_tainted_path_between(
-    edges: &AHashMap<FuncId, Vec<FuncId>>,
-    source: FuncId,
-    sink: FuncId,
-) -> Option<Vec<FuncId>> {
-    if source == sink {
-        return Some(vec![source]);
-    }
-    let mut queue = std::collections::VecDeque::new();
-    let mut prev: AHashMap<FuncId, FuncId> = AHashMap::new();
-    let mut seen = AHashSet::new();
-    queue.push_back(source);
-    seen.insert(source);
-    while let Some(func) = queue.pop_front() {
-        let Some(callees) = edges.get(&func) else {
-            continue;
-        };
-        for &callee in callees {
-            if !seen.insert(callee) {
-                continue;
-            }
-            prev.insert(callee, func);
-            if callee == sink {
-                let mut path = vec![sink];
-                let mut cur = sink;
-                while let Some(&p) = prev.get(&cur) {
-                    path.push(p);
-                    if p == source {
-                        break;
-                    }
-                    cur = p;
-                }
-                path.reverse();
-                return Some(path);
-            }
-            queue.push_back(callee);
-        }
-    }
-    None
 }
 
 /// Build the `(language, file, fn_name)` lookup key for a matcher
@@ -4370,13 +4178,18 @@ fn demote_severity_one_tier(sev: Severity) -> Severity {
     }
 }
 
-fn source_sink_emission_key(idx: usize, snk: &RuleMatch) -> (usize, String, u32, u64, u64) {
+fn source_sink_flow_emission_key(
+    idx: usize,
+    snk: &RuleMatch,
+    call: &TaintedCall,
+) -> (usize, String, u32, u64, u64, Option<u64>) {
     (
         idx,
         snk.rule_id.clone(),
         snk.span.file.raw(),
         snk.span.start,
         snk.span.end,
+        call.parent_trace_id,
     )
 }
 

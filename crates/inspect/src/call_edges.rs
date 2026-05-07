@@ -1,5 +1,5 @@
 use bonsai_common::{FuncId, Span, SymbolId};
-use bonsai_lang_api::{Decl, FlowEvent};
+use bonsai_lang_api::{AliasTarget, Decl, FlowEvent};
 use bonsai_workspace::Workspace;
 
 /// Cached call-edge source-span resolver used by inspect renderers.
@@ -10,7 +10,7 @@ use bonsai_workspace::Workspace;
 /// The CLI should only consume the resulting spans.
 pub struct CallEdgeResolver<'a> {
     workspace: &'a Workspace,
-    aliases_by_file: ahash::AHashMap<bonsai_common::FileId, ahash::AHashMap<String, String>>,
+    aliases_by_file: ahash::AHashMap<bonsai_common::FileId, ahash::AHashMap<String, AliasTarget>>,
     local_bindings_by_func: ahash::AHashMap<FuncId, ahash::AHashMap<String, FuncId>>,
     edge_spans: ahash::AHashMap<(FuncId, FuncId), Option<Span>>,
 }
@@ -26,10 +26,12 @@ impl<'a> CallEdgeResolver<'a> {
         }
     }
 
-    fn aliases_for_file(&mut self, file: bonsai_common::FileId) -> &ahash::AHashMap<String, String> {
-        self.aliases_by_file
-            .entry(file)
-            .or_insert_with(|| bonsai_resolve::alias_map_for_file(&self.workspace.db().imports_for(file)))
+    fn aliases_for_file(&mut self, file: bonsai_common::FileId) -> &ahash::AHashMap<String, AliasTarget> {
+        self.aliases_by_file.entry(file).or_insert_with(|| {
+            bonsai_lang_api::alias_map_from_import_specs(&self.workspace.db().imports_for(file))
+                .into_iter()
+                .collect()
+        })
     }
 
     fn local_bindings_for_func(
@@ -53,13 +55,14 @@ impl<'a> CallEdgeResolver<'a> {
         if let Some(hit) = self.edge_spans.get(&(caller_func, target_func)) {
             return *hit;
         }
-        let aliases = self.aliases_for_file(caller_decl.span.file).clone();
+        let mut aliases = self.aliases_for_file(caller_decl.span.file).clone();
+        bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &caller_decl.flow_events);
         let local_bindings = self.local_bindings_for_func(caller_func, caller_decl).clone();
         let global = self.workspace.db().global_index();
         let span = find_call_span_resolved(
             &caller_decl.flow_events,
             target_name,
-            Some((&global, &aliases, &local_bindings, target_func)),
+            Some((&global, &aliases, &local_bindings, caller_decl, target_func)),
         );
         self.edge_spans.insert((caller_func, target_func), span);
         span
@@ -177,13 +180,17 @@ pub fn find_call_span_to_func_uncached(
     target_name: &str,
 ) -> Option<Span> {
     let global = workspace.db().global_index();
-    let aliases = bonsai_resolve::alias_map_for_file(&workspace.db().imports_for(caller_decl.span.file));
+    let mut aliases: ahash::AHashMap<String, AliasTarget> =
+        bonsai_lang_api::alias_map_from_import_specs(&workspace.db().imports_for(caller_decl.span.file))
+            .into_iter()
+            .collect();
+    bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &caller_decl.flow_events);
     let local_bindings =
         bonsai_callgraph::collect_local_callable_bindings(&caller_decl.flow_events, &global, caller_decl);
     find_call_span_resolved(
         &caller_decl.flow_events,
         target_name,
-        Some((&global, &aliases, &local_bindings, target_func)),
+        Some((&global, &aliases, &local_bindings, caller_decl, target_func)),
     )
 }
 
@@ -194,8 +201,9 @@ pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span
 
 type ResolvedCallTarget<'a> = (
     &'a bonsai_index::GlobalIndex,
-    &'a ahash::AHashMap<String, String>,
+    &'a ahash::AHashMap<String, AliasTarget>,
     &'a ahash::AHashMap<String, FuncId>,
+    &'a Decl,
     FuncId,
 );
 
@@ -212,28 +220,7 @@ fn find_call_span_resolved(
                 receiver,
                 args,
                 ..
-            } if name == target
-                || name.ends_with(&format!(".{target}"))
-                || resolved_target.is_some_and(|(global, aliases, local_bindings, target_func)| {
-                    call_resolves_to_func(global, aliases, local_bindings, name, target_func)
-                })
-                || receiver.is_some()
-                    && args.iter().any(|arg| {
-                        let short = bonsai_resolve::short_tail(arg.value_text.trim());
-                        short == target
-                            || resolved_target.is_some_and(
-                                |(global, aliases, local_bindings, target_func)| {
-                                    call_resolves_to_func(
-                                        global,
-                                        aliases,
-                                        local_bindings,
-                                        arg.value_text.trim(),
-                                        target_func,
-                                    )
-                                },
-                            )
-                    }) =>
-            {
+            } if call_event_matches_target(name, receiver.as_deref(), args, target, resolved_target) => {
                 return Some(*span);
             }
             FlowEvent::Branch {
@@ -275,12 +262,7 @@ fn find_call_span_resolved(
                 source_call: Some(name),
                 span,
                 ..
-            } if name == target
-                || name.ends_with(&format!(".{target}"))
-                || resolved_target.is_some_and(|(global, aliases, local_bindings, target_func)| {
-                    call_resolves_to_func(global, aliases, local_bindings, name, target_func)
-                }) =>
-            {
+            } if assign_call_matches_target(name, target, resolved_target) => {
                 return Some(*span);
             }
             _ => {}
@@ -289,10 +271,51 @@ fn find_call_span_resolved(
     None
 }
 
+fn call_event_matches_target(
+    name: &str,
+    receiver: Option<&str>,
+    args: &[bonsai_lang_api::CallArg],
+    target: &str,
+    resolved_target: Option<ResolvedCallTarget<'_>>,
+) -> bool {
+    if let Some((global, aliases, local_bindings, caller_decl, target_func)) = resolved_target {
+        return call_resolves_to_func(global, aliases, local_bindings, caller_decl, name, target_func)
+            || receiver.is_some()
+                && args.iter().any(|arg| {
+                    call_resolves_to_func(
+                        global,
+                        aliases,
+                        local_bindings,
+                        caller_decl,
+                        arg.value_text.trim(),
+                        target_func,
+                    )
+                });
+    }
+    name == target
+        || name.ends_with(&format!(".{target}"))
+        || receiver.is_some()
+            && args
+                .iter()
+                .any(|arg| bonsai_resolve::short_tail(arg.value_text.trim()) == target)
+}
+
+fn assign_call_matches_target(
+    name: &str,
+    target: &str,
+    resolved_target: Option<ResolvedCallTarget<'_>>,
+) -> bool {
+    if let Some((global, aliases, local_bindings, caller_decl, target_func)) = resolved_target {
+        return call_resolves_to_func(global, aliases, local_bindings, caller_decl, name, target_func);
+    }
+    name == target || name.ends_with(&format!(".{target}"))
+}
+
 fn call_resolves_to_func(
     global: &bonsai_index::GlobalIndex,
-    aliases: &ahash::AHashMap<String, String>,
+    aliases: &ahash::AHashMap<String, AliasTarget>,
     local_bindings: &ahash::AHashMap<String, FuncId>,
+    caller_decl: &Decl,
     call_name: &str,
     target_func: FuncId,
 ) -> bool {
@@ -304,10 +327,19 @@ fn call_resolves_to_func(
     {
         return true;
     }
-    let resolved_name = aliases.get(short).map(String::as_str).unwrap_or(short);
-    let mut candidates = bonsai_callgraph::collect_callable_targets(global, resolved_name);
-    if candidates.is_empty() && resolved_name != call_name {
-        candidates = bonsai_callgraph::collect_callable_targets(global, call_name);
+    let mut candidates = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
+        global,
+        call_name,
+        caller_decl,
+        aliases,
+    );
+    if candidates.is_empty() && short != call_name {
+        candidates = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
+            global,
+            short,
+            caller_decl,
+            aliases,
+        );
     }
     candidates.contains(&target_func)
 }

@@ -2,7 +2,7 @@
 
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_lang_rust::RustAdapter;
-use bonsai_workspace::{Workspace, WorkspaceOpenOptions};
+use bonsai_workspace::{Workspace, WorkspaceError, WorkspaceOpenOptions};
 use std::sync::Arc;
 
 fn make_ws() -> Workspace {
@@ -25,6 +25,24 @@ fn ingest_and_trace_roundtrip() {
         .steps
         .iter()
         .any(|s| matches!(s.kind, bonsai_trace::TraceStepKind::EnterFunction)));
+}
+
+#[test]
+fn trace_rejects_ambiguous_entry_symbol() {
+    let ws = make_ws();
+    ws.vfs().write("/virtual/a.rs", Arc::<str>::from("fn dup() {}"));
+    ws.vfs().write("/virtual/b.rs", Arc::<str>::from("fn dup() {}"));
+
+    let err = ws.trace_from("dup").expect_err("ambiguous entry should fail");
+    match err {
+        WorkspaceError::AmbiguousSymbol {
+            count, candidates, ..
+        } => {
+            assert_eq!(count, 2);
+            assert_eq!(candidates.len(), 2);
+        }
+        other => panic!("expected AmbiguousSymbol, got {other:?}"),
+    }
 }
 
 #[test]

@@ -5,7 +5,7 @@ use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, Ref, RefKind,
+    LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind,
 };
 use tree_sitter::{Language, Tree};
 
@@ -92,6 +92,7 @@ impl LanguageAdapter for RubyAdapter {
                 }
             }
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
+            apply_ruby_class_semantic_identity(&mut idx);
             // Recognised Ruby lifecycle transitions. Method-style
             // `close` for files / sockets, `unlink` / `dispose` for
             // freed resources, `cancel` for async work.
@@ -248,6 +249,42 @@ impl LanguageAdapter for RubyAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
+    let mut classes: Vec<(Span, String, bonsai_common::SymbolId)> = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.name.clone(), decl.symbol))
+        .collect();
+    classes.sort_by_key(|(span, _, _)| span.end.saturating_sub(span.start));
+    if classes.is_empty() {
+        return;
+    }
+    for decl in &mut idx.defs {
+        if is_class_like(decl.kind) {
+            decl.module_path = ModulePath::from_segments([decl.name.clone()]);
+            decl.qualified_name = Some(decl.name.clone());
+            continue;
+        }
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let Some((_, class_name, class_symbol)) = classes
+            .iter()
+            .filter(|(span, _, _)| span.start <= decl.span.start && span.end >= decl.span.end)
+            .min_by_key(|(span, _, _)| span.end.saturating_sub(span.start))
+        else {
+            continue;
+        };
+        decl.parent = Some(*class_symbol);
+        decl.module_path = ModulePath::from_segments([class_name.clone()]);
+        decl.qualified_name = Some(format!("{class_name}.{}", decl.name));
     }
 }
 
@@ -672,5 +709,50 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             scope: ImportScope::Module,
         });
     }
+    for assignment in collect_kinds(tree, &["assignment"]) {
+        if inside_ruby_executable_scope(assignment) {
+            continue;
+        }
+        let (Some(left), Some(right)) = (
+            assignment.child_by_field_name("left"),
+            assignment.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if left.kind() != "constant" || right.kind() != "constant" {
+            continue;
+        }
+        let alias = node_text(&left, src).trim();
+        let module = node_text(&right, src).trim();
+        if alias.is_empty() || module.is_empty() || alias == module {
+            continue;
+        }
+        if imports.iter().any(|import| {
+            import.alias.as_deref() == Some(alias)
+                && import.module == module
+                && import.original_name.is_none()
+        }) {
+            continue;
+        }
+        imports.push(ImportSpec {
+            span: span_of(file, &assignment),
+            module: module.to_string(),
+            alias: Some(alias.to_string()),
+            is_wildcard: false,
+            original_name: None,
+            scope: ImportScope::Module,
+        });
+    }
     imports
+}
+
+fn inside_ruby_executable_scope(node: tree_sitter::Node<'_>) -> bool {
+    let mut parent = node.parent();
+    while let Some(current) = parent {
+        if matches!(current.kind(), "method" | "singleton_method" | "block" | "do_block") {
+            return true;
+        }
+        parent = current.parent();
+    }
+    false
 }

@@ -212,6 +212,25 @@ impl LanguageAdapter for RustAdapter {
             let visibility_by_span = collect_rust_visibility(tree.root_node(), file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &RUST_TYPE_ALIASES);
             let tuple_struct_bases = collect_rust_tuple_struct_bases(&tree, file, src);
+            let impl_method_parents = collect_rust_impl_method_parents(&tree, file, src);
+            let impl_method_parent_symbols = impl_method_parents
+                .iter()
+                .filter_map(|(span, type_name)| {
+                    idx.defs
+                        .iter()
+                        .find(|candidate| {
+                            candidate.name == *type_name
+                                && matches!(
+                                    candidate.kind,
+                                    bonsai_lang_api::DeclKind::Class
+                                        | bonsai_lang_api::DeclKind::Struct
+                                        | bonsai_lang_api::DeclKind::Trait
+                                        | bonsai_lang_api::DeclKind::Interface
+                                )
+                        })
+                        .map(|parent| (*span, parent.symbol))
+                })
+                .collect::<Vec<_>>();
             for decl in &mut idx.defs {
                 if let Some(vis) = visibility_by_span.get(&decl.span).copied() {
                     decl.visibility = vis;
@@ -223,6 +242,14 @@ impl LanguageAdapter for RustAdapter {
                     (*span == decl.span || name == &decl.name).then_some(bases)
                 }) {
                     decl.bases = bases.clone();
+                }
+                if decl.parent.is_none() {
+                    if let Some(parent_symbol) = impl_method_parent_symbols
+                        .iter()
+                        .find_map(|(span, parent_symbol)| (*span == decl.span).then_some(*parent_symbol))
+                    {
+                        decl.parent = Some(parent_symbol);
+                    }
                 }
             }
         }
@@ -675,8 +702,92 @@ fn collect_rust_tuple_struct_bases(
     out
 }
 
+fn collect_rust_impl_method_parents(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, String)> {
+    let functions = collect_kinds(tree, &["function_item"]);
+    let mut out = Vec::new();
+    for impl_node in collect_kinds(tree, &["impl_item"]) {
+        let Some(type_name) = rust_impl_self_type(node_text(&impl_node, src)) else {
+            continue;
+        };
+        let impl_span = span_of(file, &impl_node);
+        for function in &functions {
+            let fn_span = span_of(file, function);
+            if fn_span.start >= impl_span.start && fn_span.end <= impl_span.end {
+                out.push((fn_span, type_name.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn rust_impl_self_type(text: &str) -> Option<String> {
+    let header = text.split('{').next()?.trim();
+    let rest = header.strip_prefix("impl")?.trim();
+    let self_type = if let Some((_, rhs)) = rest.rsplit_once(" for ") {
+        rhs.trim()
+    } else {
+        let mut rest = rest;
+        if rest.starts_with('<') {
+            if let Some(end) = matching_angle_close(rest) {
+                rest = rest[end + 1..].trim();
+            }
+        }
+        rest
+    };
+    let candidate = self_type
+        .split(|ch: char| !(ch == '_' || ch == ':' || ch.is_ascii_alphanumeric()))
+        .find(|part| !part.is_empty())?;
+    candidate
+        .rsplit("::")
+        .next()
+        .filter(|tail| {
+            tail.chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+        })
+        .map(str::to_string)
+}
+
+fn matching_angle_close(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices() {
+        match ch {
+            '<' => depth = depth.saturating_add(1),
+            '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     let mut out = Vec::new();
+    for node in collect_kinds(tree, &["mod_item"]) {
+        let Some(name_node) = node.child_by_field_name("name") else {
+            continue;
+        };
+        let module = node_text(&name_node, src).trim();
+        if module.is_empty() {
+            continue;
+        }
+        out.push(ImportSpec {
+            span: span_of(file, &node),
+            module: module.to_string(),
+            alias: Some(module.to_string()),
+            is_wildcard: false,
+            original_name: None,
+            scope: ImportScope::Module,
+        });
+    }
     for node in collect_kinds(tree, &["use_declaration"]) {
         let text = node_text(&node, src)
             .trim_start_matches("use ")

@@ -11,9 +11,9 @@ use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, Visibility,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Visibility,
 };
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("elixir");
 const PACK_NAME: &str = "elixir";
@@ -59,12 +59,17 @@ impl LanguageAdapter for ElixirAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
         // Elixir privacy: `defp` is module-private, `def` is public.
         // Both lower to `call` nodes whose target identifier names
         // the macro. Walk for `defp` call spans, then mark matching
         // decls private.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            let module_spans = collect_elixir_module_spans(&tree, snapshot.text.as_bytes(), file);
+            if module_spans.is_empty() {
+                bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
+            } else {
+                apply_elixir_module_identity(&mut decl_index, &module_spans);
+            }
             let private_spans = collect_elixir_defp_spans(&tree, snapshot.text.as_bytes());
             for decl in &mut decl_index.defs {
                 let body_start = decl.body_span.map(|s| s.start).unwrap_or(decl.span.start);
@@ -82,6 +87,8 @@ impl LanguageAdapter for ElixirAdapter {
                     decl.visibility = Visibility::Module;
                 }
             }
+        } else {
+            bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
         }
         // Recognised Elixir lifecycle transitions. Elixir's
         // tree-sitter call names land as bare atoms (e.g.
@@ -124,6 +131,99 @@ impl LanguageAdapter for ElixirAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+#[derive(Clone, Debug)]
+struct ElixirModuleSpan {
+    span: bonsai_common::Span,
+    module: String,
+}
+
+fn collect_elixir_module_spans(tree: &Tree, src: &[u8], file: FileId) -> Vec<ElixirModuleSpan> {
+    let mut raw = Vec::new();
+    for call_node in collect_kinds(tree, &["call"]) {
+        if call_target_text(&call_node, src).as_deref() != Some("defmodule") {
+            continue;
+        }
+        let Some(args_node) = call_node
+            .child_by_field_name("arguments")
+            .or_else(|| first_named_child_of_kind(&call_node, "arguments"))
+        else {
+            continue;
+        };
+        let mut args_cursor = args_node.walk();
+        let Some(module_node) = args_node
+            .named_children(&mut args_cursor)
+            .find(|child| child.kind() == "alias")
+        else {
+            continue;
+        };
+        let module = node_text(&module_node, src).trim().to_string();
+        if module.is_empty() {
+            continue;
+        }
+        raw.push((span_of(file, &call_node), module));
+    }
+
+    raw.sort_by_key(|(span, _)| (span.start, std::cmp::Reverse(span.end)));
+    let mut resolved = Vec::new();
+    for (idx, (span, module)) in raw.iter().enumerate() {
+        let parent = raw
+            .iter()
+            .enumerate()
+            .filter(|(parent_idx, (parent_span, _))| {
+                *parent_idx != idx
+                    && parent_span.start <= span.start
+                    && parent_span.end >= span.end
+                    && (parent_span.start, parent_span.end) != (span.start, span.end)
+            })
+            .min_by_key(|(_, (parent_span, _))| parent_span.end.saturating_sub(parent_span.start))
+            .and_then(|(parent_idx, _)| resolved_module_for_raw_index(parent_idx, &raw, &resolved));
+        let full_module = if module.contains('.') {
+            module.clone()
+        } else if let Some(parent) = parent {
+            format!("{parent}.{module}")
+        } else {
+            module.clone()
+        };
+        resolved.push(ElixirModuleSpan {
+            span: *span,
+            module: full_module,
+        });
+    }
+    resolved
+}
+
+fn resolved_module_for_raw_index(
+    raw_idx: usize,
+    raw: &[(bonsai_common::Span, String)],
+    resolved: &[ElixirModuleSpan],
+) -> Option<String> {
+    let (span, module) = raw.get(raw_idx)?;
+    resolved
+        .iter()
+        .find(|entry| entry.span.start == span.start && entry.span.end == span.end)
+        .map(|entry| entry.module.clone())
+        .or_else(|| module.contains('.').then(|| module.clone()))
+}
+
+fn apply_elixir_module_identity(idx: &mut DeclIndex, modules: &[ElixirModuleSpan]) {
+    for decl in &mut idx.defs {
+        let Some(module) = innermost_module_for_span(modules, decl.span) else {
+            continue;
+        };
+        let segments: Vec<String> = module.split('.').map(str::to_string).collect();
+        decl.module_path = ModulePath::from_segments(segments);
+        decl.qualified_name = Some(format!("{module}.{}", decl.name));
+    }
+}
+
+fn innermost_module_for_span(modules: &[ElixirModuleSpan], span: bonsai_common::Span) -> Option<&str> {
+    modules
+        .iter()
+        .filter(|module| module.span.start <= span.start && module.span.end >= span.end)
+        .min_by_key(|module| module.span.end.saturating_sub(module.span.start))
+        .map(|module| module.module.as_str())
 }
 
 /// Extract `alias`, `import`, `require`, `use` directives from an Elixir
@@ -183,6 +283,17 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+fn call_target_text(call_node: &Node<'_>, src: &[u8]) -> Option<String> {
+    call_node
+        .child_by_field_name("target")
+        .or_else(|| {
+            let mut cursor = call_node.walk();
+            let first = call_node.named_children(&mut cursor).next();
+            first
+        })
+        .map(|target| node_text(&target, src).trim().to_string())
 }
 
 /// Find every `defp` call site in the tree and return its byte span.

@@ -2,7 +2,7 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, span_of},
+    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, Ref, RefKind,
 };
@@ -186,7 +186,23 @@ impl LanguageAdapter for LuaAdapter {
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
-        extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+        let mut idx = extract_imports_via(PACK_NAME, file, ctx, parse_imports);
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            if let (Some(table_name), Some(module)) = (
+                collect_lua_module_export_table(&tree, snapshot.text.as_bytes()),
+                lua_file_module_name(file, ctx),
+            ) {
+                idx.imports.push(ImportSpec {
+                    span: span_of(file, &tree.root_node()),
+                    module,
+                    alias: Some(table_name),
+                    is_wildcard: false,
+                    original_name: None,
+                    scope: ImportScope::Module,
+                });
+            }
+        }
+        idx
     }
 }
 
@@ -238,17 +254,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             .filter(|parent| parent.kind() == "assignment_statement")
             .and_then(|assignment| first_named_child_of_kind(&assignment, "variable_list"))
             .and_then(|var_list| first_named_child_of_kind(&var_list, "identifier"))
-            .map(|ident| node_text(&ident, src).to_string())
-            // Skip self-binding aliases (`local user_service =
-            // require("user_service")`). Lua workspaces resolve
-            // module names directly to in-tree files; emitting a
-            // `user_service -> user_service` entry triggers the
-            // taint engine's external-head detector, which would
-            // shadow workspace resolution for `user_service.foo`.
-            // Aliased forms (`local x = require("user_service")`)
-            // still surface — those genuinely rebind the local
-            // name and need the alias entry.
-            .filter(|local_name| local_name != &module);
+            .map(|ident| node_text(&ident, src).to_string());
         imports.push(ImportSpec {
             span: span_of(file, &call_node),
             module,
@@ -259,6 +265,15 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+fn lua_file_module_name(file: FileId, ctx: &AdapterContext<'_>) -> Option<String> {
+    let path = ctx
+        .workspace_relative_path(file)
+        .or_else(|| ctx.vfs.path(file).ok().map(|p| (*p).clone()))?;
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
 }
 
 /// Find the file's tail `return <ident>` and return `<ident>` if the

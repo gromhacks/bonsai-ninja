@@ -120,6 +120,7 @@ use bonsai_resolve::{
     alias_map_for_file, resolve_callable_with_context, resolve_class, short_tail, visibility_allows,
     ResolveContext,
 };
+use std::borrow::Cow;
 
 /// Configuration knobs for an interprocedural run.
 #[derive(Clone, Debug)]
@@ -270,6 +271,7 @@ pub struct InterTaintWorkItem {
     pub dyn_bindings: AHashMap<String, FuncId>,
     pub const_bindings: AHashMap<String, ConstValue>,
     pub lineage: Option<u64>,
+    pub lineage_history: AHashSet<FunctionSeedBase>,
 }
 
 /// Small cross-call value fact used only for path pruning. This is not
@@ -297,17 +299,47 @@ pub struct InterTaintContinuation {
     pub seen: AHashSet<FunctionSeed>,
 }
 
-/// Cache key identifying one intraprocedural analysis invocation — the
-/// function being analyzed plus the taint set it was seeded with
-/// (represented as a sorted `Vec<String>` so the key is `Hash + Eq`).
+/// Cache key identifying one interprocedural analysis invocation — the
+/// function being analyzed, the taint set it was seeded with
+/// (represented as a sorted `Vec<String>` so the key is `Hash + Eq`),
+/// and the propagation edge that brought the value into that function.
+///
+/// The lineage is part of the key on purpose. Two call sites can feed
+/// the same tainted parameter set into the same function; collapsing
+/// them by `(func, seed)` loses one parent_trace_id and later forces
+/// report assembly to guess from the call graph. Recursive expansion is
+/// still bounded by `lineage_would_reenter_func` before enqueue.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FunctionSeed {
     pub func: FuncId,
     pub seed: Vec<String>,
     pub consts: Vec<(String, ConstValue)>,
+    pub lineage: Option<u64>,
 }
 
 impl FunctionSeed {
+    fn new(base: FunctionSeedBase, lineage: Option<u64>) -> Self {
+        Self {
+            func: base.func,
+            seed: base.seed,
+            consts: base.consts,
+            lineage,
+        }
+    }
+}
+
+/// Recursion guard key for one function/seed/value-domain state,
+/// intentionally excluding lineage. It is carried per lineage path so
+/// diamonds can analyze the same callee seed from two different call
+/// sites, while recursive cycles with the same state are widened.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FunctionSeedBase {
+    pub func: FuncId,
+    pub seed: Vec<String>,
+    pub consts: Vec<(String, ConstValue)>,
+}
+
+impl FunctionSeedBase {
     fn new(func: FuncId, seed: &TokenSet, const_bindings: &AHashMap<String, ConstValue>) -> Self {
         let mut sorted: Vec<String> = seed.iter().cloned().collect();
         sorted.sort();
@@ -438,6 +470,7 @@ pub fn interprocedural_taint_with_caches(
         dyn_bindings: AHashMap::new(),
         const_bindings: AHashMap::new(),
         lineage: None,
+        lineage_history: AHashSet::new(),
     }];
     run_interprocedural_worklist(
         InterTaintAccum::default(),
@@ -532,8 +565,10 @@ fn run_interprocedural_worklist(
             dyn_bindings,
             const_bindings,
             lineage,
+            mut lineage_history,
         } = item;
-        let key = FunctionSeed::new(func, &seed, &const_bindings);
+        let base_key = FunctionSeedBase::new(func, &seed, &const_bindings);
+        let key = FunctionSeed::new(base_key.clone(), lineage);
         if seen.contains(&key) {
             continue;
         }
@@ -544,6 +579,7 @@ fn run_interprocedural_worklist(
                 dyn_bindings,
                 const_bindings,
                 lineage,
+                lineage_history,
             });
             return InterTaintResult {
                 per_function,
@@ -559,6 +595,7 @@ fn run_interprocedural_worklist(
             };
         }
         seen.insert(key.clone());
+        lineage_history.insert(base_key);
         pairs_analyzed += 1;
 
         // Fetch the function's decl via the resolver-agnostic global
@@ -631,6 +668,7 @@ fn run_interprocedural_worklist(
             tainted_calls: &mut tainted_calls,
             precision: &mut precision,
             current_trace_id: lineage,
+            lineage_history: &lineage_history,
         };
         propagate_taint_through_events(
             &decl.flow_events,
@@ -666,6 +704,7 @@ struct PropagationCtx<'a> {
     tainted_calls: &'a mut Vec<TaintedCall>,
     precision: &'a mut Precision,
     current_trace_id: Option<u64>,
+    lineage_history: &'a AHashSet<FunctionSeedBase>,
 }
 
 fn propagate_taint_through_events(
@@ -710,6 +749,7 @@ fn propagate_taint_through_events(
                 name,
                 receiver,
                 receiver_types,
+                call_kind,
                 args,
                 span,
                 ..
@@ -720,6 +760,7 @@ fn propagate_taint_through_events(
                         name,
                         receiver: receiver.as_deref(),
                         receiver_types,
+                        call_kind: *call_kind,
                         args,
                         span: *span,
                     },
@@ -910,6 +951,21 @@ fn push_call_propagation(
         edge_precision,
     });
     trace_id
+}
+
+fn child_lineage_history(
+    ctx: &PropagationCtx<'_>,
+    callee: FuncId,
+    seed: &TokenSet,
+    const_bindings: &AHashMap<String, ConstValue>,
+) -> Option<AHashSet<FunctionSeedBase>> {
+    let child_key = FunctionSeedBase::new(callee, seed, const_bindings);
+    if ctx.lineage_history.contains(&child_key) {
+        return None;
+    }
+    let mut lineage_history = ctx.lineage_history.clone();
+    lineage_history.insert(child_key);
+    Some(lineage_history)
 }
 
 fn adjacent_call_args_for_assignment(events: &[FlowEvent], event_index: usize) -> Vec<String> {
@@ -1314,6 +1370,7 @@ struct CallEventView<'a> {
     name: &'a str,
     receiver: Option<&'a str>,
     receiver_types: &'a [String],
+    call_kind: bonsai_lang_api::CallKind,
     args: &'a [bonsai_lang_api::CallArg],
     span: Span,
 }
@@ -1359,14 +1416,22 @@ fn propagate_call_event(
             diagnostic_tainted_at_call.push((idx, arg.value_text.clone()));
         }
     }
-    let tainted_receiver = call
-        .receiver
-        .filter(|receiver| receiver_expr_is_tainted(receiver, state));
+    apply_configured_source_output_args(call.name, call.args, ctx.config, state);
+    let implicit_receiver = implicit_receiver_from_call_name(call.name, call.call_kind);
+    let effective_receiver = call.receiver.or(implicit_receiver.as_deref());
+    let tainted_receiver = effective_receiver
+        .filter(|receiver| receiver_expr_is_tainted(receiver, state))
+        .map(Cow::Borrowed)
+        .or_else(|| {
+            (call.receiver.is_none() && implicit_receiver.is_some())
+                .then(|| caller_implicit_receiver_taint_binding(ctx, state).map(Cow::Owned))
+                .flatten()
+        });
     if args_to_propagate_into_callee.is_empty() && tainted_receiver.is_none() {
         return;
     }
 
-    if let Some(receiver_value) = call.receiver {
+    if let Some(receiver_value) = effective_receiver {
         if !diagnostic_tainted_at_call.is_empty()
             && configured_receiver_state_propagation_matches(
                 &ctx.config.receiver_state_propagations,
@@ -1378,7 +1443,7 @@ fn propagate_call_event(
         }
     }
 
-    if let Some(receiver_value) = tainted_receiver {
+    if let Some(receiver_value) = tainted_receiver.as_deref() {
         propagate_receiver_taint_to_callback_args(receiver_value, call.args, call.span, ctx);
     }
 
@@ -1394,7 +1459,7 @@ fn propagate_call_event(
                 value_text: value.clone(),
             })
             .collect(),
-        tainted_receiver: tainted_receiver.map(str::to_string),
+        tainted_receiver: tainted_receiver.as_deref().map(str::to_string),
         kind: TaintedCallKind::Call,
     });
 
@@ -1430,7 +1495,7 @@ fn propagate_call_event(
         let mut tainted_param_indices: Vec<(usize, usize, String)> = Vec::new();
         let mut receiver_taint_bound = tainted_receiver.is_none();
         if let (Some(receiver_index), Some(receiver_value)) =
-            (callee_decl.receiver_param_index, tainted_receiver)
+            (callee_decl.receiver_param_index, tainted_receiver.as_deref())
         {
             let Some(param_name) = callee_decl.params.get(receiver_index).cloned() else {
                 continue;
@@ -1447,7 +1512,7 @@ fn propagate_call_event(
             });
         }
         if callee_decl.receiver_param_index.is_none() {
-            if let Some(receiver_value) = tainted_receiver {
+            if let Some(receiver_value) = tainted_receiver.as_deref() {
                 let receiver_state_names = receiver_state_names_for_decl(callee_decl);
                 for receiver_seed in &receiver_state_names {
                     if !receiver_seed.is_empty() {
@@ -1550,7 +1615,7 @@ fn propagate_call_event(
                     ctx.caller,
                     ctx.config,
                 );
-                if let Some(func) = candidates.first().map(|c| c.func) {
+                if let Some(func) = unique_narrowed_candidate(&candidates) {
                     callable = Some(func);
                     break;
                 }
@@ -1580,13 +1645,17 @@ fn propagate_call_event(
             candidate.kind,
             candidate.precision,
         );
-        if !callee_seed.is_empty() || !dyn_bindings.is_empty() || !callee_consts.is_empty() {
+        if let Some(lineage_history) =
+            child_lineage_history(ctx, candidate.func, &callee_seed, &callee_consts)
+                .filter(|_| !callee_seed.is_empty() || !dyn_bindings.is_empty() || !callee_consts.is_empty())
+        {
             ctx.worklist.push(InterTaintWorkItem {
                 func: candidate.func,
                 seed: callee_seed,
                 dyn_bindings,
                 const_bindings: callee_consts,
                 lineage: Some(trace_id),
+                lineage_history,
             });
         }
     }
@@ -1643,13 +1712,18 @@ fn propagate_receiver_taint_to_callback_args(
                 EdgeKind::Indirect,
                 Precision::OverApproximate,
             );
-            ctx.worklist.push(InterTaintWorkItem {
-                func: callback.func,
-                seed: callee_seed,
-                dyn_bindings: AHashMap::new(),
-                const_bindings: AHashMap::new(),
-                lineage: Some(trace_id),
-            });
+            if let Some(lineage_history) =
+                child_lineage_history(ctx, callback.func, &callee_seed, &AHashMap::new())
+            {
+                ctx.worklist.push(InterTaintWorkItem {
+                    func: callback.func,
+                    seed: callee_seed,
+                    dyn_bindings: AHashMap::new(),
+                    const_bindings: AHashMap::new(),
+                    lineage: Some(trace_id),
+                    lineage_history,
+                });
+            }
             *ctx.precision = ctx
                 .precision
                 .meet(callback.precision)
@@ -1717,13 +1791,16 @@ fn propagate_super_return_event(
             EdgeKind::Direct,
             Precision::Narrowed,
         );
-        ctx.worklist.push(InterTaintWorkItem {
-            func,
-            seed: callee_seed,
-            dyn_bindings: AHashMap::new(),
-            const_bindings: AHashMap::new(),
-            lineage: Some(trace_id),
-        });
+        if let Some(lineage_history) = child_lineage_history(ctx, func, &callee_seed, &AHashMap::new()) {
+            ctx.worklist.push(InterTaintWorkItem {
+                func,
+                seed: callee_seed,
+                dyn_bindings: AHashMap::new(),
+                const_bindings: AHashMap::new(),
+                lineage: Some(trace_id),
+                lineage_history,
+            });
+        }
     }
 }
 
@@ -1816,7 +1893,31 @@ fn configured_source_output_call(
     !tainted_at_call.is_empty()
         && tainted_at_call
             .iter()
-            .all(|(idx, _)| shape.output_arg_indices.contains(idx))
+        .all(|(idx, _)| shape.output_arg_indices.contains(idx))
+}
+
+fn apply_configured_source_output_args(
+    name: &str,
+    args: &[bonsai_lang_api::CallArg],
+    config: &InterTaintConfig,
+    state: &mut TokenSet,
+) {
+    for shape in &config.source_output_args {
+        if !configured_name_match(&shape.callee, name) {
+            continue;
+        }
+        for &index in &shape.output_arg_indices {
+            let Some(arg) = args.get(index) else {
+                continue;
+            };
+            let text = arg.place.as_deref().unwrap_or(arg.value_text.as_str()).trim();
+            if text.is_empty() || is_quoted_literal(text) {
+                continue;
+            }
+            insert_value_target_taint(state, text);
+            insert_descendant_target_taint(state, text);
+        }
+    }
 }
 
 fn configured_name_match(configured: &str, observed: &str) -> bool {
@@ -2100,6 +2201,7 @@ fn walk_events_for_sink(
                 continue;
             }
             if let FlowEvent::Call { name, args, .. } = event {
+                apply_configured_source_output_args(name, args, ctx.config, &mut state);
                 let candidates = resolve_call_candidates_with_caller(
                     name,
                     ctx.aliases,
@@ -3094,10 +3196,42 @@ fn receiver_expr_is_tainted(receiver: &str, state: &TokenSet) -> bool {
 // here.
 
 pub(super) fn call_receiver_from_name(name: &str) -> Option<String> {
-    let normalised = normalise_qualified_text(&name.replace("->", "."));
+    let normalised = normalise_qualified_text(&name.replace("->", ".").replace("::", "."));
     let (receiver, _) = normalised.rsplit_once('.')?;
     let receiver = receiver.trim();
     (!receiver.is_empty()).then(|| receiver.to_string())
+}
+
+fn implicit_receiver_from_call_name(
+    name: &str,
+    call_kind: bonsai_lang_api::CallKind,
+) -> Option<String> {
+    if call_kind != bonsai_lang_api::CallKind::Method {
+        return None;
+    }
+    let receiver = call_receiver_from_name(name)?;
+    let scoped_call = name.contains("::");
+    (matches!(receiver.as_str(), "super" | "parent" | "base")
+        || (!scoped_call && matches!(receiver.as_str(), "self" | "this"))
+        || (!scoped_call && receiver_projects_implicit_receiver(&format!("{receiver}."))))
+    .then_some(receiver)
+}
+
+fn caller_implicit_receiver_taint_binding(ctx: &PropagationCtx<'_>, state: &TokenSet) -> Option<String> {
+    let global = ctx.db.global_index();
+    let caller_decl = global.decl_of(SymbolId::new(ctx.caller.raw()))?;
+    receiver_state_names_for_decl(caller_decl)
+        .into_iter()
+        .filter(|name| receiver_state_name_is_implicit_marker(name))
+        .find(|name| receiver_expr_is_tainted(name, state) || actual_has_descendant_taint(name, state))
+}
+
+fn receiver_state_name_is_implicit_marker(name: &str) -> bool {
+    let bare = normalise_target_text(name)
+        .trim_start_matches(&['$', '@', '%'][..])
+        .trim()
+        .to_string();
+    matches!(bare.as_str(), "self" | "this" | "super" | "parent" | "base")
 }
 
 fn source_call_name_is_seeded(callee_name: &str, state: &TokenSet) -> bool {
@@ -3486,7 +3620,18 @@ fn resolve_call_candidates_with_caller_at(
     receiver_types: &[String],
     call_span: Option<Span>,
 ) -> Vec<ResolvedCallee> {
-    for variant in callable_reference_variants(name) {
+    let mut saw_expression_receiver = false;
+    let variants = callable_reference_variants(name);
+    let original_has_receiver = variants.iter().any(|variant| {
+        let normalised = normalise_qualified_text(variant);
+        let lookup_name = if normalised.is_empty() {
+            variant.as_str()
+        } else {
+            &normalised
+        };
+        call_receiver_from_name(lookup_name).is_some()
+    });
+    for variant in variants {
         let normalised = normalise_qualified_text(&variant);
         let lookup_name = if normalised.is_empty() {
             variant.as_str()
@@ -3494,6 +3639,9 @@ fn resolve_call_candidates_with_caller_at(
             &normalised
         };
         let tail = short_tail(lookup_name);
+        if original_has_receiver && call_receiver_from_name(lookup_name).is_none() {
+            continue;
+        }
         if let Some(func) = scope
             .local_bindings
             .get(lookup_name)
@@ -3505,6 +3653,10 @@ fn resolve_call_candidates_with_caller_at(
                 kind: EdgeKind::Direct,
                 precision: Precision::Narrowed,
             }];
+        }
+        let exact_targets = resolve_contextual_call_name(lookup_name, scope);
+        if !exact_targets.is_empty() {
+            return exact_targets;
         }
         if let Some(receiver) = call_receiver_from_name(lookup_name) {
             let targets = if is_super_receiver(&receiver) {
@@ -3535,6 +3687,60 @@ fn resolve_call_candidates_with_caller_at(
                     })
                     .collect();
             }
+            if let Some((alias_target, alias_tail)) =
+                namespace_alias_target_tail(lookup_name, scope.alias_targets)
+            {
+                let caller_ctx = caller_resolve_context_data(scope.db, scope.caller);
+                let candidates = resolve_workspace_module_targets(
+                    scope.db,
+                    alias_target,
+                    alias_tail,
+                    caller_ctx.as_ref(),
+                    scope.alias_targets,
+                );
+                if !candidates.is_empty() {
+                    let (kind, precision) = if candidates.len() == 1 {
+                        (EdgeKind::Direct, Precision::Narrowed)
+                    } else {
+                        (EdgeKind::Virtual, Precision::OverApproximate)
+                    };
+                    return candidates
+                        .into_iter()
+                        .map(|func| ResolvedCallee {
+                            func,
+                            kind,
+                            precision,
+                        })
+                        .collect();
+                }
+            }
+            if let Some(alias_tail) = qualified_alias_tail(lookup_name, scope.aliases) {
+                if let Some(alias_target) = alias_head_target(lookup_name, scope.aliases) {
+                    let caller_ctx = caller_resolve_context_data(scope.db, scope.caller);
+                    let candidates = resolve_workspace_module_targets(
+                        scope.db,
+                        alias_target,
+                        alias_tail,
+                        caller_ctx.as_ref(),
+                        scope.alias_targets,
+                    );
+                    if !candidates.is_empty() {
+                        let (kind, precision) = if candidates.len() == 1 {
+                            (EdgeKind::Direct, Precision::Narrowed)
+                        } else {
+                            (EdgeKind::Virtual, Precision::OverApproximate)
+                        };
+                        return candidates
+                            .into_iter()
+                            .map(|func| ResolvedCallee {
+                                func,
+                                kind,
+                                precision,
+                            })
+                            .collect();
+                    }
+                }
+            }
             if let Some(func) = scope.local_bindings.get(receiver.as_str()).copied() {
                 let configured_callback =
                     configured_tail_match(&scope.config.callback_invocation_methods, tail);
@@ -3548,7 +3754,12 @@ fn resolve_call_candidates_with_caller_at(
                     }];
                 }
             }
+            saw_expression_receiver = true;
+            continue;
         }
+    }
+    if saw_expression_receiver {
+        return Vec::new();
     }
     resolve_call_candidates(
         name,
@@ -3557,6 +3768,65 @@ fn resolve_call_candidates_with_caller_at(
         scope.db,
         Some(scope.caller),
     )
+}
+
+fn resolve_contextual_call_name(lookup_name: &str, scope: &CallResolveScope<'_>) -> Vec<ResolvedCallee> {
+    let global = scope.db.global_index();
+    let Some((caller_file, caller_module)) = caller_resolve_context_data(scope.db, scope.caller) else {
+        return Vec::new();
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(scope.alias_targets);
+    let candidates = resolve_callable_with_context(&global, lookup_name, &ctx);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let (kind, precision) = if candidates.len() == 1 {
+        (EdgeKind::Direct, Precision::Narrowed)
+    } else {
+        (EdgeKind::Virtual, Precision::OverApproximate)
+    };
+    candidates
+        .into_iter()
+        .map(|func| ResolvedCallee {
+            func,
+            kind,
+            precision,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn receiver_allows_name_fallback(
+    lookup_name: &str,
+    receiver: &str,
+    aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> bool {
+    let receiver = normalise_qualified_text(receiver);
+    let receiver = receiver.trim();
+    if receiver.is_empty() {
+        return false;
+    }
+    let head = receiver
+        .split(&['.', ':', '\\', '('][..])
+        .next()
+        .unwrap_or(receiver);
+    if receiver
+        .chars()
+        .any(|ch| matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`') || ch.is_whitespace())
+    {
+        return false;
+    }
+    let tail = short_tail(receiver);
+    let _ = (lookup_name, tail);
+    aliases.contains_key(head) || alias_targets.contains_key(head)
+}
+
+fn unique_narrowed_candidate(candidates: &[ResolvedCallee]) -> Option<FuncId> {
+    let [candidate] = candidates else {
+        return None;
+    };
+    (candidate.precision == Precision::Narrowed).then_some(candidate.func)
 }
 
 fn local_binding_is_callable_value(db: &AnalyzerDb, func: FuncId) -> bool {
@@ -3595,6 +3865,16 @@ fn resolve_receiver_method_candidates(
         {
             push_unique_string(&mut type_names, type_name);
         }
+        for type_name in receiver_call_return_type_names(
+            caller_decl,
+            receiver,
+            call_span,
+            db,
+            caller,
+            alias_targets,
+        ) {
+            push_unique_string(&mut type_names, type_name);
+        }
     }
     let normalized_receiver = normalise_qualified_text(receiver);
     let receiver_tail = short_tail(&normalized_receiver);
@@ -3618,6 +3898,7 @@ fn resolve_receiver_method_candidates(
     // Per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
     let caller_module = caller_decl.module_path.clone();
     let class_ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
+    let type_names = prune_receiver_type_names_for_dispatch(type_names, &global, &class_ctx);
     let mut out = Vec::new();
     let mut seen = AHashSet::new();
     for type_name in type_names {
@@ -3633,6 +3914,67 @@ fn resolve_receiver_method_candidates(
         }
     }
     out
+}
+
+fn prune_receiver_type_names_for_dispatch(
+    type_names: Vec<String>,
+    global: &GlobalIndex,
+    ctx: &ResolveContext<'_>,
+) -> Vec<String> {
+    if type_names.len() < 2 {
+        return type_names;
+    }
+    let canonical_types: Vec<String> = type_names
+        .iter()
+        .map(|name| canonical_dispatch_type_name(name))
+        .collect();
+    let mut inherited = AHashSet::new();
+    for type_name in &type_names {
+        for class_sym in resolve_class(global, type_name, ctx) {
+            collect_transitive_base_type_names(global, class_sym, ctx, &mut inherited);
+        }
+    }
+    let mut out = Vec::new();
+    for (idx, type_name) in type_names.into_iter().enumerate() {
+        if inherited.contains(&canonical_types[idx])
+            && canonical_types
+                .iter()
+                .enumerate()
+                .any(|(other_idx, other)| other_idx != idx && other != &canonical_types[idx])
+        {
+            continue;
+        }
+        push_unique_string(&mut out, type_name);
+    }
+    out
+}
+
+fn collect_transitive_base_type_names(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    ctx: &ResolveContext<'_>,
+    out: &mut AHashSet<String>,
+) {
+    let Some(class_decl) = global.decl_of(class_sym) else {
+        return;
+    };
+    for base in &class_decl.bases {
+        let canonical = canonical_dispatch_type_name(base);
+        if !out.insert(canonical) {
+            continue;
+        }
+        for base_sym in resolve_class(global, base, ctx) {
+            collect_transitive_base_type_names(global, base_sym, ctx, out);
+        }
+    }
+}
+
+fn canonical_dispatch_type_name(name: &str) -> String {
+    short_tail(name)
+        .trim_start_matches(['&', '*', '$', '@', '%'])
+        .trim_end_matches("()")
+        .trim()
+        .to_string()
 }
 
 fn type_alias_for_receiver(decl: &Decl, receiver: &str) -> Option<String> {
@@ -3850,6 +4192,246 @@ fn inferred_receiver_type_names(
     out
 }
 
+fn receiver_call_return_type_names(
+    caller_decl: &Decl,
+    receiver: &str,
+    _call_span: Option<Span>,
+    db: &AnalyzerDb,
+    caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> Vec<String> {
+    let Some(inner_call) = receiver_inner_call_name(receiver) else {
+        return Vec::new();
+    };
+    let global = db.global_index();
+    let Some(caller_file) = global.declaring_file(SymbolId::new(caller.raw())) else {
+        return Vec::new();
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    let mut funcs = Vec::new();
+    let mut late_static_type: Option<String> = None;
+    if let Some(receiver_name) = call_receiver_from_name(&inner_call) {
+        let method_name = callee_without_call_args(short_tail(&inner_call));
+        let receiver_type = short_tail(&receiver_name).trim_end_matches("()").to_string();
+        if !receiver_type.is_empty() {
+            late_static_type = Some(receiver_type.clone());
+        }
+        if !receiver_type.is_empty() && !resolve_class(&global, &receiver_type, &ctx).is_empty() {
+            let mut seen = AHashSet::new();
+            for class_sym in resolve_class(&global, &receiver_type, &ctx) {
+                collect_method_candidates_for_class(
+                    &global,
+                    class_sym,
+                    method_name,
+                    &ctx,
+                    &mut seen,
+                    &mut funcs,
+                );
+            }
+        }
+    } else {
+        for func in resolve_callable_with_context(&global, &inner_call, &ctx) {
+            push_unique_func(&mut funcs, func);
+        }
+    }
+    let mut out = Vec::new();
+    for func in funcs {
+        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
+        collect_constructed_return_type_names(
+            decl,
+            db,
+            caller,
+            alias_targets,
+            late_static_type.as_deref(),
+            &mut out,
+        );
+    }
+    out
+}
+
+fn receiver_inner_call_name(receiver: &str) -> Option<String> {
+    let receiver = normalise_qualified_text(receiver);
+    let receiver = receiver.trim();
+    if !receiver.ends_with(')') {
+        return None;
+    }
+    let open = receiver.find('(')?;
+    let callee = receiver[..open].trim();
+    if callee.is_empty() || callee.contains('"') || callee.contains('\'') || callee.contains('`') {
+        return None;
+    }
+    Some(callee.to_string())
+}
+
+fn callee_without_call_args(callee: &str) -> &str {
+    callee.split('(').next().unwrap_or(callee).trim()
+}
+
+fn collect_constructed_return_type_names(
+    decl: &Decl,
+    db: &AnalyzerDb,
+    caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    late_static_type: Option<&str>,
+    out: &mut Vec<String>,
+) {
+    collect_constructed_return_type_names_from_events(
+        decl,
+        late_static_type,
+        &decl.flow_events,
+        db,
+        caller,
+        alias_targets,
+        out,
+    );
+}
+
+fn collect_constructed_return_type_names_from_events(
+    decl: &Decl,
+    late_static_type: Option<&str>,
+    events: &[FlowEvent],
+    db: &AnalyzerDb,
+    caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    out: &mut Vec<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_text: Some(value_text),
+                ..
+            } => {
+                if let Some(type_name) =
+                    constructed_return_type_from_text(value_text, db, caller, alias_targets)
+                {
+                    push_unique_string(out, type_name);
+                } else if static_constructor_return(value_text) {
+                    let global = db.global_index();
+                    if let Some(type_name) = late_static_type {
+                        push_unique_string(out, type_name.to_string());
+                    } else if let Some(parent) = decl.parent.and_then(|symbol| global.decl_of(symbol)) {
+                        push_unique_string(out, parent.name.clone());
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_constructed_return_type_names_from_events(
+                    decl,
+                    late_static_type,
+                    then_events,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_constructed_return_type_names_from_events(
+                    decl,
+                    late_static_type,
+                    else_events,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_constructed_return_type_names_from_events(
+                    decl,
+                    late_static_type,
+                    body,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_constructed_return_type_names_from_events(
+                    decl,
+                    late_static_type,
+                    body,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_constructed_return_type_names_from_events(
+                    decl,
+                    late_static_type,
+                    catch_events,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_constructed_return_type_names_from_events(
+                    decl,
+                    late_static_type,
+                    finally_events,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn constructed_return_type_from_text(
+    value_text: &str,
+    db: &AnalyzerDb,
+    caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> Option<String> {
+    let mut text = value_text.trim();
+    text = text.strip_prefix("return ").unwrap_or(text).trim();
+    text = text.strip_prefix("new ").unwrap_or(text).trim();
+    let candidate = text
+        .split(['(', '{', '[', ' ', '\t', '\r', '\n'])
+        .next()
+        .unwrap_or(text)
+        .trim();
+    if candidate.is_empty() || !call_name_looks_type_constructor(candidate) {
+        return None;
+    }
+    if class_like_constructor_call(candidate, db, caller, alias_targets) {
+        Some(short_tail(candidate).to_string())
+    } else {
+        None
+    }
+}
+
+fn static_constructor_return(value_text: &str) -> bool {
+    let mut text = value_text.trim();
+    text = text.strip_prefix("return ").unwrap_or(text).trim();
+    if text.starts_with("Self(") || text.starts_with("Self {") || text.starts_with("self(") {
+        return true;
+    }
+    matches!(
+        text.strip_prefix("new ").map(str::trim),
+        Some(rest) if rest.starts_with("static(") || rest.starts_with("self(")
+    )
+}
+
+fn push_unique_func(out: &mut Vec<FuncId>, func: FuncId) {
+    if !out.contains(&func) {
+        out.push(func);
+    }
+}
+
 fn collect_receiver_type_names_from_events(
     events: &[FlowEvent],
     receiver: &str,
@@ -3876,6 +4458,21 @@ fn collect_receiver_type_names_from_events(
                 if normalise_target_text(target) != receiver {
                     continue;
                 }
+                if let Some(source_call) = source_call {
+                    let global = db.global_index();
+                    if let Some(caller_decl) = global.decl_of(SymbolId::new(caller.raw())) {
+                        for type_name in receiver_call_return_type_names(
+                            caller_decl,
+                            &format!("{source_call}()"),
+                            Some(*span),
+                            db,
+                            caller,
+                            alias_targets,
+                        ) {
+                            push_unique_string(out, type_name);
+                        }
+                    }
+                }
                 for candidate in source_call
                     .iter()
                     .chain(source_name.iter())
@@ -3896,6 +4493,15 @@ fn collect_receiver_type_names_from_events(
                         push_unique_string(out, short_tail(&candidate).to_string());
                     }
                 }
+                collect_constructor_call_types_in_span(
+                    events,
+                    *span,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
             }
             FlowEvent::Branch {
                 then_events,
@@ -3959,6 +4565,105 @@ fn collect_receiver_type_names_from_events(
                 collect_receiver_type_names_from_events(
                     finally_events,
                     &receiver,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_constructor_call_types_in_span(
+    events: &[FlowEvent],
+    assign_span: Span,
+    call_span: Option<Span>,
+    db: &AnalyzerDb,
+    caller: FuncId,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    out: &mut Vec<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { name, span, .. } => {
+                if span.start < assign_span.start || span.end > assign_span.end {
+                    continue;
+                }
+                if call_span.is_some_and(|call_span| span.start > call_span.start) {
+                    continue;
+                }
+                let candidate = normalise_qualified_text(name);
+                if call_name_looks_type_constructor(&candidate)
+                    && class_like_constructor_call(&candidate, db, caller, alias_targets)
+                {
+                    push_unique_string(out, short_tail(&candidate).to_string());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_constructor_call_types_in_span(
+                    then_events,
+                    assign_span,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_constructor_call_types_in_span(
+                    else_events,
+                    assign_span,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_constructor_call_types_in_span(
+                    body,
+                    assign_span,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_constructor_call_types_in_span(
+                    body,
+                    assign_span,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_constructor_call_types_in_span(
+                    catch_events,
+                    assign_span,
+                    call_span,
+                    db,
+                    caller,
+                    alias_targets,
+                    out,
+                );
+                collect_constructor_call_types_in_span(
+                    finally_events,
+                    assign_span,
                     call_span,
                     db,
                     caller,
@@ -4252,6 +4957,19 @@ fn qualified_alias_tail<'a>(name: &'a str, aliases: &AHashMap<String, String>) -
 fn alias_head_target<'a>(name: &'a str, aliases: &'a AHashMap<String, String>) -> Option<&'a str> {
     let (head, _) = split_qualified_head_tail(name)?;
     aliases.get(head).map(String::as_str)
+}
+
+fn namespace_alias_target_tail<'a>(
+    name: &'a str,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+) -> Option<(&'a str, &'a str)> {
+    let (head, tail) = split_qualified_head_tail(name)?;
+    match alias_targets.get(head)? {
+        AliasTarget::Namespace { module } if !module.is_empty() && !tail.is_empty() => {
+            Some((module.as_str(), tail))
+        }
+        _ => None,
+    }
 }
 
 fn resolve_workspace_module_targets(

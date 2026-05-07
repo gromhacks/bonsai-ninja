@@ -396,12 +396,21 @@ fn path_filter_keeps_file_suffix_and_plain_substring_filters() {
 fn source_sink_dedup_uses_byte_span_not_display_position() {
     let first = rule_match_with_span(10, 20);
     let second = rule_match_with_span(30, 40);
+    let mut first_flow = tainted_call_with_span("sink", 10, 20);
+    first_flow.parent_trace_id = Some(1);
+    let mut second_flow = tainted_call_with_span("sink", 10, 20);
+    second_flow.parent_trace_id = Some(2);
 
     assert_eq!(first.line, second.line);
     assert_eq!(first.column, second.column);
     assert_ne!(
-        source_sink_emission_key(0, &first),
-        source_sink_emission_key(0, &second)
+        source_sink_flow_emission_key(0, &first, &first_flow),
+        source_sink_flow_emission_key(0, &second, &first_flow)
+    );
+    assert_ne!(
+        source_sink_flow_emission_key(0, &first, &first_flow),
+        source_sink_flow_emission_key(0, &first, &second_flow),
+        "two real lineages to the same sink site must remain distinct until flow-level grouping"
     );
 }
 
@@ -487,6 +496,28 @@ fn taint_lineage_reconstructs_parent_edge_chain() {
     assert_eq!(
         chain_funcs_for_lineage(&lineage, source, sink_func),
         Some(vec![source, middle, sink_func])
+    );
+}
+
+#[test]
+fn taint_lineage_requires_recorded_parent_trace() {
+    let source = FuncId::new(10);
+    let middle = FuncId::new(20);
+    let sink_func = FuncId::new(30);
+    let records = vec![tainted_edge(1, None, source, middle, 10)];
+    let terminal = TaintedCall {
+        parent_trace_id: Some(999),
+        caller: sink_func,
+        name: "sink".to_string(),
+        call_span: Span::new(bonsai_common::FileId::new(1), 30, 31),
+        tainted_args: Vec::new(),
+        tainted_receiver: None,
+        kind: TaintedCallKind::Call,
+    };
+
+    assert!(
+        lineage_records_for_call(&records, &terminal).is_none(),
+        "missing lineage evidence must not be replaced with a call-graph-only path"
     );
 }
 

@@ -984,6 +984,12 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         }) {
             bonsai_sdk::TaintOutcome::Report(report) => report,
             bonsai_sdk::TaintOutcome::SourceNotFound => panic!("{lang} sdk dump-taint source not found"),
+            bonsai_sdk::TaintOutcome::SourceAmbiguous { candidates, .. } => {
+                panic!(
+                    "{lang} sdk dump-taint source ambiguous: {} candidates",
+                    candidates.len()
+                )
+            }
             bonsai_sdk::TaintOutcome::TaintIdNotFound => panic!("{lang} sdk dump-taint id not found"),
         };
         assert_json_eq(

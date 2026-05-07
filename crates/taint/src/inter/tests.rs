@@ -653,6 +653,84 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
 }
 
 #[test]
+fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
+    let init_span = Span::new(FileId::INVALID, 1, 10);
+    let source_assign_span = Span::new(FileId::INVALID, 11, 20);
+    let source_call_span = Span::new(FileId::INVALID, 21, 30);
+    let envelope_span = Span::new(FileId::INVALID, 31, 40);
+    let sink_span = Span::new(FileId::INVALID, 41, 50);
+    let events = vec![
+        FlowEvent::Assign {
+            span: init_span,
+            target: "raw".to_string(),
+            source_name: None,
+            source_call: Some("String::new".to_string()),
+            source_call_args: Vec::new(),
+            source_names: vec!["String".to_string(), "new".to_string()],
+        },
+        FlowEvent::Assign {
+            span: source_assign_span,
+            target: "_".to_string(),
+            source_name: None,
+            source_call: Some("stdin.lock().read_line".to_string()),
+            source_call_args: vec!["&mut raw".to_string()],
+            source_names: vec!["raw".to_string(), "stdin.lock().read_line".to_string()],
+        },
+        FlowEvent::Call {
+            span: source_call_span,
+            name: "stdin.lock().read_line".to_string(),
+            receiver: Some("stdin.lock()".to_string()),
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Method,
+            args: vec![arg(21, "&mut raw", Some("raw"))],
+        },
+        FlowEvent::Assign {
+            span: envelope_span,
+            target: "envelope".to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: vec!["raw.trim".to_string()],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![arg(41, "envelope", Some("envelope"))],
+        },
+    ];
+    let db = python_ws_one_file("def placeholder():\n    pass\n");
+    let config = InterTaintConfig {
+        source_output_args: vec![SourceOutputArgs {
+            callee: "read_line".to_string(),
+            output_arg_indices: vec![0],
+        }],
+        ..config(&[])
+    };
+    let aliases = AHashMap::new();
+    let alias_targets = AHashMap::new();
+    let local_bindings = AHashMap::new();
+    let const_bindings = AHashMap::new();
+    let ctx = SinkWalkCtx {
+        sink_span,
+        config: &config,
+        db: &db,
+        aliases: &aliases,
+        alias_targets: &alias_targets,
+        local_bindings: &local_bindings,
+        const_bindings: &const_bindings,
+        caller: func_id_of(&db, "placeholder"),
+    };
+    let (_, found) = walk_events_for_sink(&events, TokenSet::default(), &ctx, &mut AHashMap::new());
+    assert!(
+        found,
+        "configured source-output calls must introduce taint at the call site, after earlier clean initializers"
+    );
+}
+
+#[test]
 fn compound_non_call_assignment_rhs_preserves_taint() {
     let src = r#"
 sub entry {
@@ -1327,5 +1405,55 @@ def main():
         result.call_records.is_empty(),
         "Yield/Await/comprehension handlers must not invent taint on empty seed; got {:?}",
         result.call_records
+    );
+}
+
+#[test]
+fn expression_receiver_does_not_fall_back_to_bare_method_name() {
+    let aliases = AHashMap::new();
+    let alias_targets = AHashMap::new();
+
+    assert!(
+        !receiver_allows_name_fallback(
+            "pkg.Command(\"sh\").Run",
+            "pkg.Command(\"sh\")",
+            &aliases,
+            &alias_targets
+        ),
+        "expression receivers must not resolve through the bare tail `Run`"
+    );
+    assert!(
+        !receiver_allows_name_fallback("Runtime.run", "Runtime", &aliases, &alias_targets),
+        "class-looking receivers are not semantic evidence by themselves"
+    );
+    assert!(
+        !receiver_allows_name_fallback(
+            "Repository.wrap(envelope)",
+            "Repository.wrap(envelope)",
+            &aliases,
+            &alias_targets
+        ),
+        "factory receivers must resolve through semantic return-type evidence, not the bare tail"
+    );
+
+    let db = python_ws_one_file(
+        r#"
+def Run(value):
+    sink(value)
+
+def entry(args):
+    pkg.Command("sh").Run(args)
+"#,
+    );
+    let entry = func_id_of(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &config(&[]), &db);
+    assert!(
+        result.call_records.iter().all(|record| {
+            let global = db.global_index();
+            global
+                .decl_of(SymbolId::new(record.callee.raw()))
+                .is_none_or(|decl| decl.name != "Run")
+        }),
+        "expression receiver must not fabricate an edge to a same-named top-level `Run`"
     );
 }

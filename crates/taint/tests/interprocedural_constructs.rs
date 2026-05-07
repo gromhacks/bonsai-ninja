@@ -110,6 +110,36 @@ fn go_ws_files(files: &[(&str, &str)]) -> AnalyzerDb {
     db
 }
 
+fn rust_ws_files(files: &[(&str, &str)]) -> AnalyzerDb {
+    let vfs = Arc::new(Vfs::new());
+    for (path, source) in files {
+        vfs.write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_rust::RustAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    for file in db.vfs().all_files() {
+        let _ = db.decl_index(file);
+        let _ = db.import_index(file);
+    }
+    db
+}
+
+fn php_ws_files(files: &[(&str, &str)]) -> AnalyzerDb {
+    let vfs = Arc::new(Vfs::new());
+    for (path, source) in files {
+        vfs.write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_php::PhpAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    for file in db.vfs().all_files() {
+        let _ = db.decl_index(file);
+        let _ = db.import_index(file);
+    }
+    db
+}
+
 fn java_ws(source: &str) -> AnalyzerDb {
     let vfs = Arc::new(Vfs::new());
     vfs.write("Main.java".to_string(), Arc::<str>::from(source));
@@ -339,6 +369,157 @@ def middle(x):
     let middle = func_id(&db, "middle");
     let result = interprocedural_taint(middle, &seed(&["x"]), &InterTaintConfig::default(), &db);
     assert!(has_propagation(&result, "middle", "sink", &db));
+}
+
+#[test]
+fn php_static_factory_parent_call_propagates_receiver_state_to_sink() {
+    let db = php_ws_files(&[(
+        "app.php",
+        r#"<?php
+class Executor {
+    public static function execute($cmd) {
+        shell_exec($cmd);
+    }
+}
+
+abstract class BaseRepository {
+    public function __construct(protected array $data) {}
+    public function cmd() {
+        return $this->data['cmd'];
+    }
+    abstract public function run();
+}
+
+class Repository extends BaseRepository {
+    public static function wrap(array $data): static {
+        return new static($data);
+    }
+    public function run() {
+        return Executor::execute($this->cmd());
+    }
+}
+
+class AuditedRepository extends Repository {
+    public function run() {
+        return parent::run();
+    }
+}
+
+function entry($envelope) {
+    return AuditedRepository::wrap($envelope)->run();
+}
+"#,
+    )]);
+    let entry = func_id(&db, "entry");
+    let execute = func_id(&db, "execute");
+    let sink_span = call_span(&db, execute, "shell_exec", Some("$cmd"));
+    let result = interprocedural_taint(
+        entry,
+        &seed(&["$envelope", "envelope"]),
+        &InterTaintConfig::default(),
+        &db,
+    );
+    assert!(
+        has_propagation(&result, "entry", "run", &db),
+        "fluent static factory receiver must carry taint into the concrete run method"
+    );
+    assert!(
+        has_propagation(&result, "run", "run", &db),
+        "parent::run must resolve through the parent class and preserve receiver taint"
+    );
+    assert!(
+        result
+            .per_function
+            .keys()
+            .filter(|key| key.func == execute)
+            .any(|key| {
+                let sink_seed = key.seed.iter().cloned().collect();
+                call_site_receives_taint(execute, sink_span, &sink_seed, &InterTaintConfig::default(), &db)
+            }),
+        "receiver state must reach shell_exec($cmd) through cmd() and Executor::execute"
+    );
+}
+
+#[test]
+fn rust_self_constructor_newtype_receiver_propagates_to_sink() {
+    let db = rust_ws_files(&[(
+        "main.rs",
+        r#"
+struct Repository {
+    data: String,
+}
+
+impl Repository {
+    fn new(data: String) -> Self {
+        Self { data }
+    }
+
+    fn cmd(&self) -> String {
+        self.data.clone()
+    }
+
+    fn run(&self) {
+        let cmd = self.cmd();
+        execute(cmd);
+    }
+}
+
+struct AuditedRepository(Repository);
+
+impl AuditedRepository {
+    fn wrap(data: String) -> Self {
+        Self(Repository::new(data))
+    }
+
+    fn run(&self) {
+        self.0.run();
+    }
+}
+
+fn entry(input: String) {
+    let repo = AuditedRepository::wrap(input);
+    repo.run();
+}
+
+fn execute(cmd: String) {
+    sink(cmd);
+}
+
+fn sink(_cmd: String) {}
+"#,
+    )]);
+    let entry = func_id(&db, "entry");
+    let execute = func_id(&db, "execute");
+    let sink_span = call_span(&db, execute, "sink", Some("cmd"));
+    let result = interprocedural_taint(
+        entry,
+        &seed(&["input"]),
+        &InterTaintConfig::default(),
+        &db,
+    );
+    assert!(
+        has_propagation(&result, "entry", "wrap", &db),
+        "associated constructor wrapper must receive tainted input"
+    );
+    assert!(
+        has_propagation(&result, "entry", "run", &db),
+        "receiver type inferred from wrap() must resolve repo.run()"
+    );
+    assert!(
+        has_propagation(&result, "run", "run", &db),
+        "newtype receiver field self.0 must dispatch to the wrapped repository run method"
+    );
+    assert!(
+        result
+            .per_function
+            .keys()
+            .filter(|key| key.func == execute)
+            .any(|key| {
+                let sink_seed = key.seed.iter().cloned().collect();
+                call_site_receives_taint(execute, sink_span, &sink_seed, &InterTaintConfig::default(), &db)
+            }),
+        "Self constructors must preserve aggregate taint until the command reaches sink(cmd)"
+    );
 }
 
 #[test]

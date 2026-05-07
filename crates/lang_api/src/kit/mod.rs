@@ -1175,6 +1175,10 @@ fn walk_into(
         return;
     }
 
+    if ruby_append_mutation_assignment(&node, file, src, out) {
+        return;
+    }
+
     if handler.is_assignment(kind) {
         if kind == "binary_operator" && !binary_operator_is_assignment(&node, src) {
             // G3 follow-up: synthesizing a Call event for every
@@ -1469,9 +1473,14 @@ fn walk_into(
     }
 
     if handler.is_call(kind) {
-        if let Some(event) = build_call_event(node, file, src, handler, class_names) {
+        let call_event = build_call_event(node, file, src, handler, class_names);
+        if let Some(event) = call_event.clone() {
             out.push(event);
         }
+        let closure_source_names = call_event
+            .as_ref()
+            .map(call_event_value_source_names)
+            .unwrap_or_default();
         // Also descend into nested calls inside arguments. For lambda
         // arguments (`xs.forEach { x -> body }`, `xs.map(x => body)`,
         // `[...].forEach(x => body)`), inline the closure body into
@@ -1507,6 +1516,7 @@ fn walk_into(
             for arg in container.named_children(&mut cursor) {
                 if is_closure_arg(arg.kind(), handler) {
                     walked_closures.insert(arg.id());
+                    emit_inline_closure_param_bindings(arg, file, src, &closure_source_names, out);
                     // Inline the lambda body so its calls belong to
                     // the enclosing function. Walks via a helper that
                     // bypasses the is_lambda short-circuit.
@@ -1527,6 +1537,7 @@ fn walk_into(
                 if !walked_closures.insert(child.id()) {
                     continue;
                 }
+                emit_inline_closure_param_bindings(child, file, src, &closure_source_names, out);
                 walk_lambda_body(child, file, src, handler, class_names, out);
             }
         }
@@ -1965,6 +1976,7 @@ fn walk_method_chain_receivers(
         "member_expression",
         "member_access_expression",
         "navigation_expression",
+        "selector_expression",
         "scoped_identifier",
         "scope_resolution",
         "selector",
@@ -1984,6 +1996,7 @@ fn walk_method_chain_receivers(
         .or_else(|| node.child_by_field_name("receiver"))
         .or_else(|| node.child_by_field_name("function"))
         .or_else(|| node.child_by_field_name("callee"))
+        .or_else(|| node.child_by_field_name("operand"))
         .or_else(|| node.child_by_field_name("expression"))
         .or_else(|| node.child_by_field_name("target"));
     if let Some(inner) = next {
@@ -2304,6 +2317,7 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
     out.extend(qualified_accesses_from_text(node_text(node, src)));
     let mut stack: Vec<Node<'_>> = vec![*node];
     while let Some(n) = stack.pop() {
+        out.extend(call_receiver_source_names(&n, src));
         // Avoid descending into nested CALL sites — those are handled
         // separately by `extract_direct_call_info` on the outer call.
         if COMMON_CALL_KINDS.contains(&n.kind()) && n.id() != node.id() {
@@ -2342,6 +2356,121 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
     let value_bearing_text = strip_value_free_operator_operands(node_text(node, src));
     out.retain(|operand| operand_occurs_in_value_bearing_text(&value_bearing_text, operand));
     out
+}
+
+fn call_receiver_source_names(node: &Node<'_>, src: &[u8]) -> Vec<String> {
+    if !COMMON_CALL_KINDS.contains(&node.kind()) {
+        return Vec::new();
+    }
+    let Some(receiver) = call_receiver_node(node) else {
+        return Vec::new();
+    };
+    receiver_value_bases(receiver, src)
+}
+
+fn call_receiver_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
+    node.child_by_field_name("receiver")
+        .or_else(|| node.child_by_field_name("object"))
+        .or_else(|| node.child_by_field_name("invocant"))
+        .or_else(|| {
+            let function = node.child_by_field_name("function")?;
+            let inner = if function.kind() == "expression" {
+                first_named_child(&function).unwrap_or(function)
+            } else {
+                function
+            };
+            if MEMBER_EXPR_KINDS.contains(&inner.kind()) {
+                inner.child_by_field_name("object")
+                    .or_else(|| inner.child_by_field_name("receiver"))
+            } else {
+                None
+            }
+        })
+}
+
+fn receiver_value_bases(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(base) = leftmost_value_base(node, src) {
+        push_receiver_base_variants(&mut out, &base);
+    }
+    if out.is_empty() {
+        if let Some(base) = receiver_base_from_text(node_text(&node, src)) {
+            push_receiver_base_variants(&mut out, &base);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn leftmost_value_base(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let kind = node.kind();
+    if matches!(
+        kind,
+        "identifier"
+            | "simple_identifier"
+            | "constant"
+            | "variable_name"
+            | "var"
+            | "varname"
+            | "name"
+            | "identifier_dollar_escaped"
+    ) {
+        let text = node_text(&node, src).trim();
+        if looks_like_bare_identifier(text.trim_start_matches('$')) {
+            return Some(text.to_string());
+        }
+    }
+    if COMMON_CALL_KINDS.contains(&kind) {
+        if let Some(receiver) = call_receiver_node(&node) {
+            return leftmost_value_base(receiver, src);
+        }
+    }
+    if MEMBER_EXPR_KINDS.contains(&kind) || matches!(kind, "element_reference" | "subscript_expression") {
+        if let Some(object) = node
+            .child_by_field_name("object")
+            .or_else(|| node.child_by_field_name("receiver"))
+            .or_else(|| node.child_by_field_name("value"))
+        {
+            return leftmost_value_base(object, src);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(base) = leftmost_value_base(child, src) {
+            return Some(base);
+        }
+    }
+    None
+}
+
+fn receiver_base_from_text(text: &str) -> Option<String> {
+    let trimmed = text.trim().trim_start_matches('&').trim_start_matches('*').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut end = trimmed.len();
+    for sep in [".", "->", "::", "[", "(", " "] {
+        if let Some(idx) = trimmed.find(sep) {
+            end = end.min(idx);
+        }
+    }
+    let candidate = trimmed[..end].trim().trim_start_matches('$');
+    looks_like_bare_identifier(candidate).then(|| candidate.to_string())
+}
+
+fn push_receiver_base_variants(out: &mut Vec<String>, base: &str) {
+    let base = base.trim();
+    if base.is_empty() {
+        return;
+    }
+    let cleaned = base.trim_start_matches('$');
+    if looks_like_bare_identifier(cleaned) {
+        out.push(cleaned.to_string());
+        if cleaned != base {
+            out.push(base.to_string());
+        }
+    }
 }
 
 fn strip_value_free_operator_operands(text: &str) -> String {
@@ -3154,6 +3283,54 @@ fn extra_lhs_binding_targets(
     out
 }
 
+fn ruby_append_mutation_assignment(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<FlowEvent>,
+) -> bool {
+    if node.kind() != "binary" {
+        return false;
+    }
+    let (Some(left), Some(right)) = (
+        node.child_by_field_name("left"),
+        node.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    let Ok(operator_text) = std::str::from_utf8(&src[left.end_byte()..right.start_byte()]) else {
+        return false;
+    };
+    if operator_text.trim() != "<<" {
+        return false;
+    }
+    let target = qualified_assign_target(Some(left), src)
+        .unwrap_or_else(|| sanitize_assign_target(node_text(&left, src)));
+    if target.is_empty() {
+        return false;
+    }
+    let right_text = node_text(&right, src).trim();
+    let source_name = looks_like_bare_identifier(right_text).then(|| right_text.to_string());
+    let mut source_names = extract_rhs_expr_operands(&right, src);
+    if source_names.is_empty() {
+        if let Some(source_name) = source_name.as_ref() {
+            source_names.push(source_name.clone());
+        }
+    }
+    source_names.retain(|name| !same_identifier_name(name, &target));
+    source_names.sort();
+    source_names.dedup();
+    out.push(FlowEvent::Assign {
+        span: span_of(file, node),
+        target,
+        source_name,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names,
+    });
+    true
+}
+
 fn binding_tokens_from_pattern(pattern: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
@@ -3600,16 +3777,16 @@ pub fn decl_index_with_handler(
     // diagnostics but never clash with a real function name.
     let lambda_nodes = collect_kinds(&tree, handler.lambda_kinds);
     for lambda in lambda_nodes {
-        // Skip lambdas whose parent is itself a fn/method — those are
-        // function-body helpers (Rust `|x| { ... }` inside a fn body
-        // counts as a lambda child of a fn; we want to decl ONLY the
-        // top-level lambda, not the fn's lambda children). We already
-        // walk into lambdas from the enclosing fn's body walker, so
-        // redundant decls would just duplicate events.
-        // The rule is: create a lambda decl ONLY when its parent chain
-        // does NOT already contain a fn/class — i.e. when this lambda
-        // lives directly at module scope or as a HOF argument.
-        // For simplicity, we always emit; tracer de-dups on symbol id.
+        // Skip lambdas that are passed directly as call arguments.
+        // `walk_into` inlines those bodies into the enclosing call's
+        // owner via `walk_lambda_body`; emitting a second synthetic
+        // decl for the same source events creates duplicate source
+        // starts and duplicate findings with different chain roots.
+        // Keep non-call-argument lambdas, including local or top-level
+        // assignments, because their bodies are not otherwise inlined.
+        if lambda_is_inlined_call_argument(&lambda, handler) {
+            continue;
+        }
         let span = span_of(file, &lambda);
         let binding_name = binding_name_node(&lambda);
         let name = binding_name.map_or_else(
@@ -6494,6 +6671,78 @@ fn is_closure_arg(kind: &str, handler: &GrammarHandler) -> bool {
     matches!(kind, "block" | "do_block")
 }
 
+fn emit_inline_closure_param_bindings(
+    lambda: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    source_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) {
+    if source_names.is_empty() {
+        return;
+    }
+    let params = extract_param_names(&lambda, src);
+    if params.is_empty() {
+        return;
+    }
+    let mut sources = source_names.to_vec();
+    sources.sort();
+    sources.dedup();
+    for param in params {
+        if param.is_empty() {
+            continue;
+        }
+        out.push(FlowEvent::Assign {
+            span: span_of(file, &lambda),
+            target: param,
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: sources.clone(),
+        });
+    }
+}
+
+fn call_event_value_source_names(event: &FlowEvent) -> Vec<String> {
+    let FlowEvent::Call { receiver, args, .. } = event else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(receiver) = receiver.as_deref().and_then(receiver_base_from_text) {
+        push_receiver_base_variants(&mut out, &receiver);
+    }
+    for arg in args {
+        if let Some(place) = arg.place.as_deref() {
+            push_value_text_source_name(&mut out, place);
+        }
+        push_value_text_source_name(&mut out, &arg.value_text);
+        for source in &arg.source_names {
+            push_value_text_source_name(&mut out, source);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn push_value_text_source_name(out: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    if let Some(base) = receiver_base_from_text(value) {
+        push_receiver_base_variants(out, &base);
+        return;
+    }
+    let cleaned = value.trim_start_matches('$');
+    if looks_like_bare_identifier(cleaned) {
+        out.push(cleaned.to_string());
+        if cleaned != value {
+            out.push(value.to_string());
+        }
+    }
+}
+
 /// Walk a lambda-like node's body into `out`. Bypasses the is_lambda
 /// short-circuit so callers can inline closures passed as higher-order
 /// function arguments (e.g. `xs.forEach { x -> body }` — the body's
@@ -6607,6 +6856,24 @@ fn nearest_class_owner_span<'tree>(node: &Node<'tree>, handler: &GrammarHandler)
         parent = candidate.parent();
     }
     None
+}
+
+fn lambda_is_inlined_call_argument(node: &Node<'_>, handler: &GrammarHandler) -> bool {
+    let mut parent = node.parent();
+    while let Some(candidate) = parent {
+        let kind = candidate.kind();
+        if handler.is_call(kind) {
+            return true;
+        }
+        if handler.fn_kinds.contains(&kind)
+            || handler.class_kinds.contains(&kind)
+            || handler.lambda_kinds.contains(&kind)
+        {
+            return false;
+        }
+        parent = candidate.parent();
+    }
+    false
 }
 
 /// Find the first named child of a call-expression node that names the
@@ -6887,6 +7154,10 @@ fn receiver_types_for_expr(
     let tail = short_name_of(&normalized);
     let root = receiver_root_name(&normalized);
     let mut out = Vec::new();
+    if let Some(projected_type) = receiver_projected_type_name(&normalized, class_facts) {
+        push_receiver_type_and_bases(&mut out, projected_type, class_facts);
+        return out;
+    }
     if let Some(type_name) = receiver_type_from_constructor_expr(&normalized) {
         push_receiver_type_and_bases(&mut out, type_name, class_facts);
     }
@@ -6909,6 +7180,31 @@ fn receiver_types_for_expr(
         }
     }
     out
+}
+
+fn receiver_projected_type_name(
+    receiver: &str,
+    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+) -> Option<String> {
+    let has_member_projection = receiver.contains('.')
+        || receiver.contains("->")
+        || receiver.contains("::")
+        || receiver.contains('\\');
+    if !has_member_projection {
+        return None;
+    }
+    let tail = short_name_of(receiver)
+        .trim_end_matches("()")
+        .trim_matches(['&', '*', '$', '@', '%'])
+        .to_string();
+    if tail.is_empty() {
+        return None;
+    }
+    let canonical_tail = canonical_simple_type_name(&tail);
+    class_facts
+        .iter()
+        .find(|(_, name, _)| canonical_simple_type_name(name) == canonical_tail)
+        .map(|(_, name, _)| name.clone())
 }
 
 fn push_receiver_type_and_bases(

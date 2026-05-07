@@ -1,5 +1,5 @@
 //! Scala language adapter.
-use bonsai_common::{FileId, Span};
+use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
@@ -91,12 +91,33 @@ impl LanguageAdapter for ScalaAdapter {
             let src = snapshot.text.as_bytes();
             let vis_map = collect_scala_visibility(tree.root_node(), file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &SCALA_TYPE_ALIASES);
+            let method_owners = collect_scala_method_owners(&tree, file);
+            let class_symbols: Vec<(Span, SymbolId)> = idx
+                .defs
+                .iter()
+                .filter(|decl| is_class_like(decl.kind))
+                .map(|decl| (decl.span, decl.symbol))
+                .collect();
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
                 }
                 if let Some(aliases) = alias_map.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
+                }
+                if let Some((_, owner_span, owner_kind)) =
+                    method_owners.iter().find(|(span, _, _)| *span == decl.span)
+                {
+                    if let Some((_, owner_symbol)) =
+                        class_symbols.iter().find(|(span, _)| span == owner_span)
+                    {
+                        decl.parent = Some(*owner_symbol);
+                        decl.kind = DeclKind::Method;
+                        if *owner_kind != "object_definition" && decl.implicit_receiver_names.is_empty() {
+                            decl.implicit_receiver_names =
+                                vec!["this".to_string(), "super".to_string()];
+                        }
+                    }
                 }
             }
             // Per-class `bases`: `class C extends Base with Mixin` →
@@ -158,6 +179,29 @@ impl LanguageAdapter for ScalaAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn collect_scala_method_owners(tree: &Tree, file: FileId) -> Vec<(Span, Span, &'static str)> {
+    let mut out = Vec::new();
+    for method in collect_kinds(tree, &["function_definition", "function_declaration"]) {
+        let Some(owner) = nearest_scala_owner(method) else {
+            continue;
+        };
+        out.push((span_of(file, &method), span_of(file, &owner), owner.kind()));
+    }
+    out
+}
+
+fn nearest_scala_owner(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    let mut parent = node.parent();
+    while let Some(candidate) = parent {
+        match candidate.kind() {
+            "class_definition" | "trait_definition" | "object_definition" => return Some(candidate),
+            "function_definition" | "function_declaration" => return None,
+            _ => parent = candidate.parent(),
+        }
+    }
+    None
 }
 
 /// Parse `import_declaration` nodes into `ImportSpec`s, one per surfaced symbol.

@@ -77,6 +77,15 @@ pub struct TaintRecord {
 }
 
 #[derive(Serialize, Clone, Debug)]
+pub struct TaintSourceCandidate {
+    pub name: String,
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub func_id: u32,
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct TaintedArgRecord {
     pub index: usize,
     pub value_text: String,
@@ -92,6 +101,13 @@ pub enum TaintOutcome {
     Report(TaintReport),
     /// `--source X` didn't resolve to any callable decl.
     SourceNotFound,
+    /// `--source X` matched multiple callable decls. The caller must
+    /// disambiguate instead of letting the engine pick a workspace-order
+    /// winner.
+    SourceAmbiguous {
+        source: String,
+        candidates: Vec<TaintSourceCandidate>,
+    },
     /// `--taint T:id` didn't match any propagation in the report.
     TaintIdNotFound,
 }
@@ -104,9 +120,44 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let global = db.global_index();
 
     let candidates = bonsai_resolve::resolve_callable(&global, f.source);
-    let Some(source_func) = candidates.first().copied() else {
+    let mut source_candidates: Vec<(bonsai_common::FuncId, TaintSourceCandidate)> = candidates
+        .into_iter()
+        .filter_map(|func| {
+            let symbol = bonsai_common::SymbolId::new(func.raw());
+            let decl = global.decl_of(symbol)?;
+            let (file, line, column) = format_span(&decl.name_span, ws);
+            Some((
+                func,
+                TaintSourceCandidate {
+                    name: decl.name.clone(),
+                    file,
+                    line,
+                    column,
+                    func_id: func.raw(),
+                },
+            ))
+        })
+        .collect();
+    if source_candidates.is_empty() {
         return TaintOutcome::SourceNotFound;
-    };
+    }
+    source_candidates.sort_by(|(_, a), (_, b)| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
+            .then_with(|| a.func_id.cmp(&b.func_id))
+    });
+    if source_candidates.len() > 1 {
+        return TaintOutcome::SourceAmbiguous {
+            source: f.source.to_string(),
+            candidates: source_candidates
+                .into_iter()
+                .map(|(_, candidate)| candidate)
+                .collect(),
+        };
+    }
+    let source_func = source_candidates[0].0;
 
     let effective_seed: bonsai_taint::TokenSet = if f.seeds.is_empty() {
         let symbol = bonsai_common::SymbolId::new(source_func.raw());

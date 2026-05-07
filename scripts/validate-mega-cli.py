@@ -85,9 +85,11 @@ EXPECTED_FINDINGS = {
     # counted as separate findings.
     "typescript": 1,
     "dart": 2,
-    # Go reports the explicit request-header source plus the opt-in
-    # inferred request parameter source through the same shell wrapper.
-    "go": 2,
+    # Go reports the concrete request query source through the shell
+    # wrapper once; receiver dispatch is narrowed through the concrete
+    # AuditedRepository allocation, so the base Repository path is not
+    # counted as a second raw finding.
+    "go": 1,
 }
 
 CONTEXT_FOOTER_RE = re.compile(r"context\s+~?([0-9,]+) / ([0-9,]+) tokens \((\d+)%\)")

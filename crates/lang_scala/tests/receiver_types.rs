@@ -1,0 +1,97 @@
+use bonsai_db::AnalyzerDb;
+use bonsai_lang_api::{DeclKind, FlowEvent, LanguageRegistry};
+use bonsai_vfs::Vfs;
+use std::sync::Arc;
+
+fn db_with(source: &str) -> AnalyzerDb {
+    let vfs = Arc::new(Vfs::new());
+    vfs.write("Storage.scala".to_string(), Arc::<str>::from(source));
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_scala::ScalaAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    for file in db.vfs().all_files() {
+        let _ = db.decl_index(file);
+    }
+    db
+}
+
+fn collect_calls(events: &[FlowEvent], out: &mut Vec<(String, Vec<String>)>) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name, receiver_types, ..
+            } => out.push((name.clone(), receiver_types.clone())),
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_calls(then_events, out);
+                collect_calls(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_calls(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_calls(body, out);
+                collect_calls(catch_events, out);
+                collect_calls(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn class_methods_have_parent_and_companion_factory_receiver_is_typed() {
+    let db = db_with(
+        r#"
+package demo
+
+class Repository(val cmd: String) {
+  def run(): Int = 1
+}
+
+class AuditedRepository(cmd: String) extends Repository(cmd) {
+  override def run(): Int = super.run()
+}
+
+object Repository {
+  def wrap(data: String): AuditedRepository = new AuditedRepository(data)
+}
+
+object Storage {
+  def persist(envelope: String): Int = Repository.wrap(envelope).run()
+}
+"#,
+    );
+    let global = db.global_index();
+    let mut audited_symbol = None;
+    let mut audited_run_parent = None;
+    let mut persist_calls = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            match (decl.name.as_str(), decl.kind) {
+                ("AuditedRepository", DeclKind::Class) if decl.span.start < 170 => {
+                    audited_symbol = Some(decl.symbol);
+                    assert_eq!(decl.bases, vec!["Repository"]);
+                }
+                ("run", DeclKind::Method) if decl.span.start > 120 => audited_run_parent = decl.parent,
+                ("persist", DeclKind::Method) => collect_calls(&decl.flow_events, &mut persist_calls),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(audited_run_parent, audited_symbol);
+    assert!(
+        persist_calls
+            .iter()
+            .any(|(name, _)| name == "Repository.wrap(envelope).run"),
+        "factory receiver call should be surfaced: {persist_calls:?}"
+    );
+}

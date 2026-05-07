@@ -583,8 +583,10 @@ version = "0.1.0"
 dependencies = [
  "bonsai_common",
  "bonsai_conformance",
+ "bonsai_db",
  "bonsai_lang_api",
  "bonsai_testkit",
+ "bonsai_vfs",
  "bonsai_workspace",
  "tree-sitter",
 ]
