@@ -35,6 +35,37 @@ callable value. Constructed objects (`repo = Repository(x); repo.run()`) go
 through receiver-type semantics, not callable resolution. Don't add results
 of constructor-shaped calls to the callable binding map.
 
+### 1a. Alias rewrites are constrained by the alias's target module
+
+When `resolve_callable_with_context` and `resolve_class` rewrite a name
+through `ctx.alias_map` (e.g. `cp.exec` →
+`child_process.exec` for `const cp = require("child_process")`,
+`pipeline::orchestrate` → `pipeline.orchestrate` for Rust `mod pipeline;`),
+the rewrite produces both a rewritten name and the alias's target
+module identity. The exact-rewrite lookup trusts the alias map. The
+*bare-name fallback* (the `collect(tail)` retry that exists because
+many adapters index decls only by leaf identifier) is filtered by
+`module_target_matches_decl_module_path` — a candidate is accepted
+only when its `Decl.module_path` suffix-matches the alias target's
+dotted segments.
+
+This is the resolver's defense against the "stitch together unrelated
+workspace functions" failure mode: without the filter, calling
+`Envelope::method` on a type-only Rust import would happily return
+any `method()` decl elsewhere in the workspace. With the filter, the
+rewrite produces no candidates because no workspace decl named
+`method` lives in module `Envelope` — exactly the right answer.
+
+The filter splits the alias target on `.`, `/`, `\`, with `::`
+pre-collapsed to `.`, so Java `com.example.Utils`, Dart
+`storage.dart`, PHP `App\Util`, and Rust `pipeline::orchestrate` all
+decompose correctly. A trailing target segment that doesn't appear
+in the decl's module_path is dropped before retrying — handles the
+file-extension trailers (Dart) and class-name trailers (Java
+`com.example.Utils` vs decl module `com.example`, since the class
+name lives in `decl.name`/`decl.parent`, not the module_path)
+uniformly without a hardcoded extension allow-list.
+
 ## 2. Empty seed produces no propagation
 
 Given `(entry_func, empty_seed, config, db)`, the engine produces zero
