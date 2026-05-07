@@ -1037,18 +1037,21 @@ fn strip_use_tree_comments(input: &str) -> String {
     out
 }
 
-/// Last `::`-separated segment of a `use` path, but only when the
-/// path is rooted at a workspace prefix (`crate::`, `super::`,
-/// `self::`) and the leaf segment looks like a Rust module
-/// (lowercase first character — module names follow snake_case while
-/// types and constants are PascalCase / SCREAMING_SNAKE).
+/// Last `::`-separated segment of a `use` path, when the path is
+/// rooted at a workspace prefix (`crate::`, `super::`, `self::`).
+/// Returns `Some(leaf)` so `use crate::executor;` binds `executor`
+/// as a workspace-namespace alias the resolver can follow.
 ///
-/// Returning `Some(leaf)` is the signal to bind that name as a
-/// workspace-namespace alias; everything else returns `None` so
-/// external imports (`use std::process::Command;`) and type-only
-/// imports (`use crate::Envelope;`) don't get a spurious namespace
-/// rewrite that the resolver's bare-name fallback could expand
-/// into an unrelated workspace function.
+/// Type imports (`use crate::Envelope;`) get the same alias —
+/// the resolver's bare-name fallback is filtered by the alias
+/// target's module path, so a `Envelope::method` call on a name
+/// that doesn't actually live in workspace module `Envelope`
+/// produces no candidates instead of stitching together an
+/// unrelated workspace function. External imports
+/// (`use std::process::Command;`) skip this path because their
+/// path doesn't start with a workspace prefix; the alias would
+/// have nothing to point at and `module_target_matches_decl_module_path`
+/// would reject every workspace candidate anyway.
 fn workspace_use_leaf(text: &str) -> Option<&str> {
     let body = text.trim_end_matches(';').trim();
     if body.is_empty() || body.contains('{') || body.contains(" as ") {
@@ -1067,8 +1070,7 @@ fn workspace_use_leaf(text: &str) -> Option<&str> {
             stripped_any.then_some(rest)
         })?;
     let leaf = stripped.rsplit("::").next()?.trim();
-    let first = leaf.chars().next()?;
-    (first.is_ascii_lowercase() || first == '_').then_some(leaf)
+    (!leaf.is_empty()).then_some(leaf)
 }
 
 /// Split a brace-list body on top-level (depth-0) commas only.

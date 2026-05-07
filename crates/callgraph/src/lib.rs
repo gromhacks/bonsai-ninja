@@ -1570,37 +1570,11 @@ fn collect_workspace_module_targets(
     targets
 }
 
-/// Suffix-aware match between a module-namespace alias text (e.g.
-/// `MyApp.AuthService` or `pipeline`) and the canonical
-/// `Decl.module_path` for a workspace decl. Returns true when the
-/// alias's segments match the trailing segments of the decl's
-/// module_path so a leaf alias (`AuthService`) hits a decl declared
-/// inside `MyApp.AuthService`.
-fn module_target_matches_decl_module_path(
-    alias_target: &str,
-    decl_module: &bonsai_lang_api::ModulePath,
-) -> bool {
-    if alias_target.is_empty() || decl_module.is_empty() {
-        return false;
-    }
-    let target_segments: Vec<&str> = alias_target
-        .split('.')
-        .map(str::trim)
-        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
-        .collect();
-    if target_segments.is_empty() {
-        return false;
-    }
-    let decl_segments = &decl_module.segments;
-    if target_segments.len() > decl_segments.len() {
-        return false;
-    }
-    let suffix_start = decl_segments.len() - target_segments.len();
-    decl_segments[suffix_start..]
-        .iter()
-        .zip(target_segments.iter())
-        .all(|(decl_seg, target_seg)| decl_seg == target_seg)
-}
+// `module_target_matches_decl_module_path` lives in
+// `bonsai_resolve` and is re-used here so callgraph and taint
+// share the same canonical match. See `bonsai_resolve` for the
+// suffix-aware semantic.
+use bonsai_resolve::module_target_matches_decl_module_path;
 
 fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]) -> Vec<String> {
     let mut variants = vec![alias_tail.to_string()];

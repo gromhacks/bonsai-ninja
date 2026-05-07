@@ -168,15 +168,22 @@ pub fn resolve_callable_with_context(
     // Walk the alias map: `cp.exec` where `cp = require("child_process")`
     // should resolve to `child_process.exec`. Without this rewrite,
     // in-workspace aliased calls miss and entry-point inference
-    // flags called functions as unreferenced sources.
+    // flags called functions as unreferenced sources. The exact
+    // rewrite trusts the rewrite — if the resolver finds a decl
+    // by the rewritten name, that IS the match. The bare-name
+    // fallback (when the exact rewrite doesn't hit) is the only
+    // path that needs the alias-target filter, because
+    // `collect(tail)` is a workspace-wide leaf lookup that would
+    // otherwise stitch together unrelated workspace functions.
     if out.is_empty() {
-        if let Some(rewritten) = rewrite_through_alias_map(name, ctx) {
-            out = collect(&rewritten);
-            // Many adapters index decls only by the bare name —
-            // retry with the leaf segment.
+        if let Some(rewrite) = rewrite_through_alias_map_with_target(name, ctx) {
+            out = collect(&rewrite.rewritten);
             if out.is_empty() {
-                if let Some((_, tail)) = rewritten.rsplit_once(['.', ':']) {
+                if let Some((_, tail)) = rewrite.rewritten.rsplit_once(['.', ':']) {
                     out = collect(tail);
+                    if let Some(target_module) = rewrite.target_module.as_deref() {
+                        out.retain(|func| candidate_in_alias_target(global, *func, target_module));
+                    }
                 }
             }
         }
@@ -266,28 +273,191 @@ fn method_parent_matches_receiver_type(
     false
 }
 
-/// Rewrite `name` through `ctx.alias_map`. Returns the
-/// qualified form (e.g. `child_process.exec`) so the caller can
-/// retry the lookup against the workspace decl table.
-fn rewrite_through_alias_map(name: &str, ctx: &ResolveContext<'_>) -> Option<String> {
+/// Rewrite `name` through `ctx.alias_map` and return both the
+/// qualified rewrite (e.g. `child_process.exec`) and the alias
+/// target descriptor so callers can constrain the bare-name
+/// fallback to the workspace location the alias actually points
+/// at — closing the hole that would otherwise stitch together any
+/// workspace function with a matching leaf identifier.
+///
+/// The head/tail split is `::`-aware so qualified-call shapes like
+/// Rust / C++'s `pipeline::orchestrate` yield the right tail
+/// (`orchestrate`) instead of being chopped at the first `:`. The
+/// dotted/colon fallback covers JS / Python / PHP shapes.
+fn rewrite_through_alias_map_with_target(
+    name: &str,
+    ctx: &ResolveContext<'_>,
+) -> Option<AliasRewrite> {
     let map = ctx.alias_map?;
     // Whole-name alias: `req` → `flask.request`.
     if let Some(target) = map.get(name) {
-        return Some(match target {
+        return Some(AliasRewrite::from_target(target, target.target_text()));
+    }
+    let (head, tail) = split_alias_head_tail(name)?;
+    let target = map.get(head)?;
+    Some(AliasRewrite::from_target(target, target.rewrite_with_tail(tail)))
+}
+
+/// Split `name` into (head, tail) using the longest-form module
+/// separator first so `pipeline::orchestrate` yields `("pipeline",
+/// "orchestrate")` rather than `("pipeline", ":orchestrate")`.
+fn split_alias_head_tail(name: &str) -> Option<(&str, &str)> {
+    if let Some((head, tail)) = name.split_once("::") {
+        return Some((head, tail));
+    }
+    if let Some((head, tail)) = name.split_once('.') {
+        return Some((head, tail));
+    }
+    if let Some((head, tail)) = name.split_once(':') {
+        return Some((head, tail));
+    }
+    None
+}
+
+/// Result of an alias-map rewrite, including the workspace target
+/// the alias points at (when it's a module-path target) so callers
+/// can constrain the bare-name fallback to that target.
+#[derive(Clone, Debug)]
+struct AliasRewrite {
+    rewritten: String,
+    /// `Some(module)` for [`AliasTarget::Namespace`] and
+    /// [`AliasTarget::Member`] aliases — the dotted module identity
+    /// the alias points at. `None` for [`AliasTarget::Type`] aliases
+    /// (those route through class-member resolution which already
+    /// constrains by the type's own decl).
+    target_module: Option<String>,
+}
+
+impl AliasRewrite {
+    fn from_target(target: &AliasTarget, rewritten: String) -> Self {
+        let target_module = match target {
+            AliasTarget::Namespace { module } if !module.trim().is_empty() => {
+                Some(module.clone())
+            }
+            AliasTarget::Member { module, .. } if !module.trim().is_empty() => Some(module.clone()),
+            _ => None,
+        };
+        Self {
+            rewritten,
+            target_module,
+        }
+    }
+}
+
+trait AliasTargetExt {
+    fn target_text(&self) -> String;
+    fn rewrite_with_tail(&self, tail: &str) -> String;
+}
+
+impl AliasTargetExt for AliasTarget {
+    fn target_text(&self) -> String {
+        match self {
             AliasTarget::Member { module, member } => format!("{module}.{member}"),
             AliasTarget::Namespace { module } => module.clone(),
             AliasTarget::Type { type_name } => type_name.clone(),
-        });
+        }
     }
-    // Qualified-prefix alias: `cp.exec` → `child_process.exec`.
-    let (head, tail) = name.split_once(['.', ':'])?;
-    let target = map.get(head)?;
-    let prefix = match target {
-        AliasTarget::Namespace { module } => module.clone(),
-        AliasTarget::Member { module, member } => format!("{module}.{member}"),
-        AliasTarget::Type { type_name } => type_name.clone(),
+
+    fn rewrite_with_tail(&self, tail: &str) -> String {
+        let prefix = match self {
+            AliasTarget::Namespace { module } => module.clone(),
+            AliasTarget::Member { module, member } => format!("{module}.{member}"),
+            AliasTarget::Type { type_name } => type_name.clone(),
+        };
+        format!("{prefix}.{tail}")
+    }
+}
+
+/// True when `target_module` (a dotted module identity from an
+/// alias target) is a suffix of `decl_module`'s segments. A bare
+/// leaf alias (`AuthService`) hits a decl declared inside
+/// `MyApp.AuthService`; a fully-qualified alias is matched by the
+/// equality case of the same suffix test.
+///
+/// The check is tolerant of two divergences between the alias
+/// text and the decl's canonical module identity:
+///
+/// 1. Path-style separators (`/`) and dot-style separators (`.`)
+///    both split into segments, so Dart `package:foo/foo.dart`
+///    (after the `package:` strip) and Java `com.example.Utils`
+///    both decompose correctly.
+/// 2. A trailing segment that doesn't appear in the decl's
+///    module_path is dropped before retrying the suffix match.
+///    This handles two real shapes uniformly:
+///     - file-extension-only trailers (Dart `storage.dart` vs
+///       decl `storage`),
+///     - class-name trailers in dotted package-qualified imports
+///       (Java `com.example.Utils` vs decl module `com.example`,
+///       since the class name lives in `decl.name`/`decl.parent`,
+///       not the module_path).
+///    The drop is unconditional rather than driven by a
+///    file-extension allow-list — the suffix match itself
+///    enforces the constraint.
+#[must_use]
+pub fn module_target_matches_decl_module_path(
+    target_module: &str,
+    decl_module: &bonsai_lang_api::ModulePath,
+) -> bool {
+    if target_module.is_empty() || decl_module.is_empty() {
+        return false;
+    }
+    // Split on every common module-separator: `.` (dotted modules
+    // — Java, Python, Elixir), `/` (path-style URIs — Dart pub
+    // packages, JS specifiers), `\` (PHP namespaces), `::` (Rust /
+    // C++ qualified-id, handled below by collapsing the literal
+    // `::` bytes before splitting). The decl's `module_path`
+    // is already canonical-segment-form so the only normalization
+    // needed here is on the alias text.
+    let normalized: String = target_module.replace("::", ".");
+    let target_segments: Vec<&str> = normalized
+        .split(|c: char| c == '.' || c == '/' || c == '\\')
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+        .collect();
+    if target_segments.is_empty() {
+        return false;
+    }
+    let decl_segments = &decl_module.segments;
+    if try_suffix_match(&target_segments, decl_segments) {
+        return true;
+    }
+    if target_segments.len() > 1 {
+        let trimmed = &target_segments[..target_segments.len() - 1];
+        if try_suffix_match(trimmed, decl_segments) {
+            return true;
+        }
+    }
+    false
+}
+
+fn try_suffix_match(target: &[&str], decl: &[String]) -> bool {
+    if target.is_empty() || target.len() > decl.len() {
+        return false;
+    }
+    let suffix_start = decl.len() - target.len();
+    decl[suffix_start..]
+        .iter()
+        .zip(target.iter())
+        .all(|(decl_seg, target_seg)| decl_seg == target_seg)
+}
+
+/// Filter the alias-rewrite bare-name fallback candidates to those
+/// whose decl actually lives in the alias's target module. Without
+/// this constraint the `collect(tail)` retry inside the rewrite
+/// path would stitch together any workspace function with a
+/// matching leaf identifier — turning `Envelope::method` (where
+/// `Envelope` was a type-only import) into an entry pointing at
+/// some unrelated `method()` decl elsewhere in the workspace.
+fn candidate_in_alias_target(
+    global: &GlobalIndex,
+    func: bonsai_common::FuncId,
+    target_module: &str,
+) -> bool {
+    let sym = SymbolId::new(func.raw());
+    let Some(decl) = global.decl_of(sym) else {
+        return false;
     };
-    Some(format!("{prefix}.{tail}"))
+    module_target_matches_decl_module_path(target_module, &decl.module_path)
 }
 
 /// Resolve a class / type identifier to every matching class-like
@@ -334,15 +504,33 @@ pub fn resolve_class(
         }
     }
     if out.is_empty() {
-        if let Some(rewritten) = rewrite_through_alias_map(name, ctx) {
-            for lookup in type_lookup_variants(&rewritten) {
+        if let Some(rewrite) = rewrite_through_alias_map_with_target(name, ctx) {
+            for lookup in type_lookup_variants(&rewrite.rewritten) {
+                // Exact rewrite trusts the alias map — if the
+                // resolver finds a class decl named exactly this,
+                // that IS the alias's target.
                 out.extend(collect(&lookup));
                 if !out.is_empty() {
                     dedup_symbols(&mut out);
                     return out;
                 }
                 if let Some((_, tail)) = lookup.rsplit_once(['.', ':']) {
-                    out.extend(collect(tail));
+                    // Bare-name fallback: workspace-wide lookup of
+                    // the leaf identifier. Constrain to the alias
+                    // target's module so an unrelated class with
+                    // the same leaf identifier doesn't get stitched
+                    // in as a spurious candidate.
+                    let mut candidates: Vec<SymbolId> = collect(tail);
+                    if let Some(target_module) = rewrite.target_module.as_deref() {
+                        candidates.retain(|sym| {
+                            global
+                                .decl_of(*sym)
+                                .is_some_and(|decl| {
+                                    module_target_matches_decl_module_path(target_module, &decl.module_path)
+                                })
+                        });
+                    }
+                    out.extend(candidates);
                     if !out.is_empty() {
                         dedup_symbols(&mut out);
                         return out;
@@ -577,7 +765,12 @@ mod tests {
         let module = ModulePath::default();
         let ctx = ResolveContext::new(FileId::new(0), &module).with_alias_map(&map);
 
-        assert_eq!(rewrite_through_alias_map("u", &ctx).as_deref(), Some("pkg.util"));
+        assert_eq!(
+            rewrite_through_alias_map_with_target("u", &ctx)
+                .map(|r| r.rewritten)
+                .as_deref(),
+            Some("pkg.util")
+        );
     }
 
     #[test]
@@ -594,9 +787,69 @@ mod tests {
         let ctx = ResolveContext::new(FileId::new(0), &module).with_alias_map(&map);
 
         assert_eq!(
-            rewrite_through_alias_map("u.run", &ctx).as_deref(),
+            rewrite_through_alias_map_with_target("u.run", &ctx)
+                .map(|r| r.rewritten)
+                .as_deref(),
             Some("pkg.util.run")
         );
+    }
+
+    #[test]
+    fn rewrite_handles_double_colon_separator() {
+        // Rust / C++ `pipeline::orchestrate` must split into the
+        // module head and bare tail, not chop at the first `:`
+        // (which would leave a stray colon in the rewritten form).
+        let mut map = ahash::AHashMap::new();
+        map.insert(
+            "pipeline".to_string(),
+            AliasTarget::Namespace {
+                module: "pipeline".to_string(),
+            },
+        );
+        let module = ModulePath::default();
+        let ctx = ResolveContext::new(FileId::new(0), &module).with_alias_map(&map);
+
+        assert_eq!(
+            rewrite_through_alias_map_with_target("pipeline::orchestrate", &ctx)
+                .map(|r| r.rewritten)
+                .as_deref(),
+            Some("pipeline.orchestrate")
+        );
+    }
+
+    #[test]
+    fn module_target_match_handles_php_namespace_separator() {
+        // PHP `use App\Util as H;` produces alias target
+        // `App\Util`. The decl module path is `["App"]` (file
+        // namespace). Match should drop the trailing class-name
+        // segment and accept the suffix.
+        let module = ModulePath::from_segments(["App"]);
+        assert!(module_target_matches_decl_module_path("App\\Util", &module));
+    }
+
+    #[test]
+    fn module_target_match_handles_dart_file_extension() {
+        // Dart `import 'storage.dart' as store;` exposes the
+        // `.dart` extension in the alias target. The decl path
+        // canonicalizes to `["storage"]`; the trailing-segment
+        // drop is what closes the gap.
+        let module = ModulePath::from_segments(["storage"]);
+        assert!(module_target_matches_decl_module_path(
+            "storage.dart",
+            &module
+        ));
+    }
+
+    #[test]
+    fn module_target_match_rejects_unrelated_modules() {
+        // Negative: alias `Envelope` (a type-only import) must
+        // not match a decl in module `helpers` even though both
+        // are workspace-internal.
+        let module = ModulePath::from_segments(["helpers"]);
+        assert!(!module_target_matches_decl_module_path(
+            "Envelope",
+            &module
+        ));
     }
 
     #[test]
