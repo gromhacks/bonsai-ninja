@@ -1870,6 +1870,11 @@ fn emit_using_as_pattern_assigns(
     let mut emitted_spans: std::collections::HashSet<bonsai_common::Span> =
         std::collections::HashSet::new();
     while let Some(current) = work.pop() {
+        // Match only the binding shapes the main walker doesn't
+        // already turn into `Assign` events. `variable_declarator`,
+        // `variable_declaration`, and `init_declarator` are in
+        // [`GrammarHandler::assignment_kinds`] and would emit a
+        // duplicate Assign here; let the main walker own those.
         if matches!(
             current.kind(),
             "with_item"
@@ -1878,8 +1883,6 @@ fn emit_using_as_pattern_assigns(
                 | "as_pattern"
                 | "using_variable_declaration"
                 | "using_declarator"
-                | "variable_declarator"
-                | "init_declarator"
         ) {
             if let (Some(name_node), Some(value_node)) =
                 (extract_alias_target(current), extract_alias_value(current))
