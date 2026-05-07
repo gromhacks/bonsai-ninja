@@ -781,6 +781,9 @@ fn collect_receiver_method_targets(
         ) {
             push_unique_string(&mut receiver_type_names, type_name);
         }
+        for type_name in class_field_receiver_type_names(global, caller_decl, receiver) {
+            push_unique_string(&mut receiver_type_names, type_name);
+        }
     }
     if receiver_type_names.is_empty() {
         return Vec::new();
@@ -1221,6 +1224,72 @@ fn enclosing_class_for_decl<'a>(global: &'a GlobalIndex, decl: &Decl) -> Option<
         }
     }
     None
+}
+
+/// Infer receiver-types for a `self.<field>` / `this.<field>`
+/// reference by consulting the enclosing class's constructor
+/// `receiver_field_writes`. When a sibling method binds the field
+/// from a typed parameter (e.g. `def __init__(self, runner:
+/// CommandRunner): self.runner = runner`), every other method's
+/// `self.runner.X(...)` call dispatches through `CommandRunner.X`
+/// without the engine re-walking the constructor at every call
+/// site. Mirrors `bonsai_taint::class_field_receiver_type_names`
+/// so the static call graph and the taint pass share the same
+/// receiver-type evidence.
+fn class_field_receiver_type_names(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    receiver: &str,
+) -> Vec<String> {
+    let receiver_norm = normalize_receiver_alias_text(receiver);
+    let receiver_norm = receiver_norm.trim().trim_matches('.').to_string();
+    if receiver_norm.is_empty() {
+        return Vec::new();
+    }
+    let Some((head, _)) = receiver_norm.rsplit_once('.') else {
+        return Vec::new();
+    };
+    if !matches!(head, "self" | "this" | "super" | "parent" | "base") {
+        return Vec::new();
+    }
+    let Some(class_decl) = enclosing_class_for_decl(global, caller_decl) else {
+        return Vec::new();
+    };
+    let Some(class_file) = global.declaring_file(class_decl.symbol) else {
+        return Vec::new();
+    };
+    let class_sym = class_decl.symbol;
+    let mut out = Vec::new();
+    for sibling in global.decls_in(class_file) {
+        if sibling.parent != Some(class_sym) {
+            continue;
+        }
+        if !matches!(
+            sibling.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        for field_write in &sibling.receiver_field_writes {
+            let target_norm = normalize_receiver_alias_text(&field_write.target)
+                .trim()
+                .trim_matches('.')
+                .to_string();
+            if target_norm != receiver_norm {
+                continue;
+            }
+            for &param_idx in &field_write.source_param_indices {
+                let Some(param_name) = sibling.params.get(param_idx) else {
+                    continue;
+                };
+                let Some(type_name) = type_alias_for_receiver(sibling, param_name) else {
+                    continue;
+                };
+                push_unique_string(&mut out, type_name.to_string());
+            }
+        }
+    }
+    out
 }
 
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
