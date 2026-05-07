@@ -4,7 +4,7 @@
 //! `InspectReport`.
 
 use anyhow::{Context, Result};
-use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
+use bonsai_lang_api::{AliasTarget, DeclKind, FlowEvent, RefKind};
 use bonsai_sdk::Workspace;
 use bonsai_sdk::{
     chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id,
@@ -526,21 +526,10 @@ pub(crate) fn cmd_inspect(
                             }
                         }
                     }
-                    // Tail-only taint facts: unioned chain facts
-                    // leaked sibling-branch propagations (e.g. a
-                    // handle_request entry whose interproc pass
-                    // reached RunAdmin via update_user made every
-                    // chain from handle_request — including ones
-                    // that dead-ended at verify_token — pass a
-                    // `--to RunAdmin` filter). Narrowing to the
-                    // tail function keeps the signal specific to
-                    // THIS path's endpoint.
-                    let taint_facts_fn = || {
-                        path.last()
-                            .copied()
-                            .map(|f| chain_cache.taint_facts_for_entry(f))
-                            .unwrap_or_default()
-                    };
+                    // Path-only structural facts avoid sibling-branch
+                    // leakage while still allowing kind filters to land
+                    // on args/calls/reads/writes in intermediate hops.
+                    let taint_facts_fn = || chain_cache.chain_structural_tokens(path);
                     bonsai_sdk::chain_matches_filters(
                         Some(&decl.name),
                         &chain_names,
@@ -722,21 +711,46 @@ pub(crate) fn cmd_inspect(
         let mut hit_from_match: Option<FilterMatch> = None;
         let mut hit_to_match: Option<FilterMatch> = None;
         let chains_r: Vec<ResolvedChain> = if let Some(c_id) = containing_id {
-            let (raw, _) = chain_cache.chains_resolved(c_id, max_flows, max_entry_probes);
-            // Ensure the containing function itself is a candidate chain
-            // even when it's an entry point (no upstream callers). Without
-            // this synthetic chain, a sink that lives in an entry function
-            // would have zero chains and get dropped by the filter below.
-            // The synthetic seed is `Exact` because there's no upstream
-            // edge to introduce uncertainty.
-            let seed: Vec<ResolvedChain> = if raw.is_empty() {
-                vec![ResolvedChain {
-                    funcs: vec![c_id],
-                    precision: bonsai_common::Precision::Exact,
-                }]
-            } else {
-                raw
-            };
+            let mut seed = Vec::new();
+            let mut seed_from_call_target = false;
+            if kind == "call" {
+                for target in resolve_call_hit_targets(ws, &chain_cache, c_id, &text) {
+                    let (raw, _) = chain_cache.chains_resolved(target, max_flows, max_entry_probes);
+                    let target_seed = if raw.is_empty() {
+                        vec![ResolvedChain {
+                            funcs: vec![target],
+                            precision: bonsai_common::Precision::Exact,
+                        }]
+                    } else {
+                        raw
+                    };
+                    seed.extend(
+                        target_seed
+                            .into_iter()
+                            .filter(|chain| chain.funcs.contains(&c_id)),
+                    );
+                }
+                seed = dedupe_chains_keep_best_precision(seed);
+                seed_from_call_target = !seed.is_empty();
+            }
+            if seed.is_empty() {
+                let (raw, _) = chain_cache.chains_resolved(c_id, max_flows, max_entry_probes);
+                // Ensure the containing function itself is a candidate
+                // chain even when it's an entry point (no upstream
+                // callers). Without this synthetic chain, a sink that
+                // lives in an entry function would have zero chains and
+                // get dropped by the filter below. The synthetic seed is
+                // `Exact` because there's no upstream edge to introduce
+                // uncertainty.
+                seed = if raw.is_empty() {
+                    vec![ResolvedChain {
+                        funcs: vec![c_id],
+                        precision: bonsai_common::Precision::Exact,
+                    }]
+                } else {
+                    raw
+                };
+            }
             // Accurate-taint default: drop chains whose worst-case
             // precision is `OverApproximate` or `Unknown`, AND drop
             // chains with any unresolvable edge (caller body doesn't
@@ -745,10 +759,11 @@ pub(crate) fn cmd_inspect(
             let seed: Vec<ResolvedChain> = seed
                 .into_iter()
                 .filter(|c| {
-                    matches!(
+                    let precise = matches!(
                         c.precision,
                         bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed,
-                    ) && edge_resolver.chain_edges_resolvable(&c.funcs)
+                    );
+                    precise && (seed_from_call_target || edge_resolver.chain_edges_resolvable(&c.funcs))
                 })
                 .collect();
             // Per-chain filter: extend with the containing function's
@@ -957,15 +972,10 @@ pub(crate) fn cmd_inspect(
                         }
                     }
                 }
-                // Tail-only taint facts — see the decl-hit branch
-                // for the rationale (prevents sibling-branch leakage
-                // through union).
-                let taint_facts_fn = || {
-                    path.last()
-                        .copied()
-                        .map(|f| chain_cache.taint_facts_for_entry(f))
-                        .unwrap_or_default()
-                };
+                // Path-only structural facts avoid sibling-branch
+                // leakage while preserving kind-filter matches on
+                // intermediate arguments/calls.
+                let taint_facts_fn = || chain_cache.chain_structural_tokens(path);
                 bonsai_sdk::chain_matches_filters(
                     Some(&text),
                     &chain_names,
@@ -2893,7 +2903,68 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
     }
 }
 
-/// Compute the downstream-from-`target` DFS of user-defined functions it
+/// Resolve a call occurrence to the workspace callee(s) it invokes in
+/// the enclosing function's import/module context.
+fn resolve_call_hit_targets(
+    ws: &Workspace,
+    chain_cache: &ChainCache<'_>,
+    caller_func: bonsai_common::FuncId,
+    call_name: &str,
+) -> Vec<bonsai_common::FuncId> {
+    let global = ws.db().global_index();
+    let Some(caller_decl) = global.decl_of(bonsai_common::SymbolId::new(caller_func.raw())) else {
+        return Vec::new();
+    };
+    let alias_targets: ahash::AHashMap<String, AliasTarget> =
+        bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(caller_decl.span.file))
+            .into_iter()
+            .collect();
+    let mut targets = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
+        &global,
+        call_name,
+        caller_decl,
+        &alias_targets,
+    );
+    let short = bonsai_callgraph::short_callee(call_name);
+    if targets.is_empty() && short != call_name {
+        targets = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
+            &global,
+            short,
+            caller_decl,
+            &alias_targets,
+        );
+    }
+    if targets.is_empty() {
+        targets = chain_cache
+            .callees_of_resolved(caller_func)
+            .into_iter()
+            .filter(|callee| {
+                global
+                    .decl_of(bonsai_common::SymbolId::new(callee.raw()))
+                    .is_some_and(|decl| decl.name == call_name || decl.name == short)
+            })
+            .collect();
+    }
+    targets.sort_by_key(|func| func.raw());
+    targets.dedup();
+    targets
+}
+
+fn dedupe_chains_keep_best_precision(mut chains: Vec<ResolvedChain>) -> Vec<ResolvedChain> {
+    chains.sort_by(|a, b| a.funcs.cmp(&b.funcs).then_with(|| a.precision.cmp(&b.precision)));
+    let mut deduped: Vec<ResolvedChain> = Vec::with_capacity(chains.len());
+    for chain in chains {
+        if deduped
+            .last()
+            .is_some_and(|previous| previous.funcs == chain.funcs)
+        {
+            continue;
+        }
+        deduped.push(chain);
+    }
+    deduped
+}
+
 fn format_filter_match_cell(ui: &Ui, matched: Option<&FilterMatch>) -> String {
     let Some(matched) = matched else {
         return ui.dim("—");

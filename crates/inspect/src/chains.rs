@@ -85,7 +85,7 @@ pub fn enumerate_chains_resolved(
         vec![(vec![target], initial_set, Precision::Exact)];
     let mut visited_budget = 0usize;
     let mut truncation = ChainTruncation::None;
-    let mut emitted_chains: ahash::AHashSet<Vec<FuncId>> = ahash::AHashSet::new();
+    let mut emitted_chains: ahash::AHashMap<Vec<FuncId>, Precision> = ahash::AHashMap::new();
     while let Some((path_rev, path_set, path_prec)) = stack.pop() {
         if results.len() >= max_chains {
             truncation = ChainTruncation::MaxChains;
@@ -125,17 +125,39 @@ pub fn enumerate_chains_resolved(
             // exact/narrowed view.
             let mut chain = path_rev.clone();
             chain.reverse();
-            if emitted_chains.insert(chain.clone()) && results.len() < max_chains {
-                results.push(ResolvedChain {
-                    funcs: chain,
-                    precision: path_prec,
-                });
+            let should_record = emitted_chains
+                .get(&chain)
+                .is_none_or(|previous| path_prec < *previous);
+            if should_record {
+                emitted_chains.insert(chain.clone(), path_prec);
+                if let Some(existing) = results.iter_mut().find(|existing| existing.funcs == chain) {
+                    existing.precision = path_prec;
+                } else if results.len() < max_chains {
+                    results.push(ResolvedChain {
+                        funcs: chain,
+                        precision: path_prec,
+                    });
+                }
             }
         }
     }
-    // Sort + dedup so the cache key is deterministic.
-    results.sort_by(|a, b| a.funcs.cmp(&b.funcs));
-    results.dedup_by(|a, b| a.funcs == b.funcs);
+    // Sort + dedup so the cache key is deterministic. When two
+    // resolution routes produce the same FuncId path, keep the
+    // most precise copy; otherwise a duplicate over-approximate
+    // edge can hide an exact/narrowed chain from inspect's default
+    // view.
+    results.sort_by(|a, b| a.funcs.cmp(&b.funcs).then_with(|| a.precision.cmp(&b.precision)));
+    let mut deduped = Vec::with_capacity(results.len());
+    for chain in results {
+        if deduped
+            .last()
+            .is_some_and(|previous: &ResolvedChain| previous.funcs == chain.funcs)
+        {
+            continue;
+        }
+        deduped.push(chain);
+    }
+    results = deduped;
     if results.len() > max_chains {
         truncation = ChainTruncation::MaxChains;
         results.truncate(max_chains);

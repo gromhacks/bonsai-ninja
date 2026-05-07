@@ -571,10 +571,6 @@ impl<'a> PreparedRule<'a> {
         })
     }
 
-    fn file_context_allows(&self, _file_packages: &AHashSet<String>) -> bool {
-        true
-    }
-
     fn call_context_allows(
         &self,
         callee: &str,
@@ -660,12 +656,7 @@ fn scan_file_rules(
     taint_view: Option<&InterTaintView<'_>>,
     out: &mut Vec<RuleMatch>,
 ) {
-    let file_packages = file_package_set(ws, file);
-    let active_rules: Vec<&PreparedRule<'_>> = rules
-        .iter()
-        .copied()
-        .filter(|r| r.file_context_allows(&file_packages))
-        .collect();
+    let active_rules: Vec<&PreparedRule<'_>> = rules.to_vec();
     let call_rules: Vec<&PreparedRule<'_>> = active_rules
         .iter()
         .copied()
@@ -1371,7 +1362,7 @@ fn insert_import_target_prefixes(out: &mut AHashSet<String>, module: &str) {
 /// Both shapes feed the same `callee_matches` check against the rule
 /// target, so a rule written as
 /// `callee.attribute: [child_process, exec]` fires for both forms.
-
+///
 /// True when a regex target starts with a receiver-agnostic local
 /// identifier prefix such as `^[A-Za-z_$][A-Za-z0-9_$]*\.`. These
 /// rules are useful for dynamic languages, but must be gated by

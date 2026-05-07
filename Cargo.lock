@@ -248,6 +248,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "bonsai_adapters",
+ "bonsai_callgraph",
  "bonsai_common",
  "bonsai_hash",
  "bonsai_lang_api",

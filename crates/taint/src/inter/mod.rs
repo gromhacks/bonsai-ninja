@@ -731,11 +731,13 @@ fn propagate_taint_through_events(
             } => {
                 apply_clean_output_call_overwrite(name, args, state, ctx.config);
                 propagate_call_event(
-                    name,
-                    receiver.as_deref(),
-                    receiver_types,
-                    args,
-                    *span,
+                    CallEventView {
+                        name,
+                        receiver: receiver.as_deref(),
+                        receiver_types,
+                        args,
+                        span: *span,
+                    },
                     state,
                     ctx,
                     summary_cache,
@@ -1323,12 +1325,16 @@ fn record_tainted_return_event(
     });
 }
 
-fn propagate_call_event(
-    name: &str,
-    receiver: Option<&str>,
-    receiver_types: &[String],
-    args: &[bonsai_lang_api::CallArg],
+struct CallEventView<'a> {
+    name: &'a str,
+    receiver: Option<&'a str>,
+    receiver_types: &'a [String],
+    args: &'a [bonsai_lang_api::CallArg],
     span: Span,
+}
+
+fn propagate_call_event(
+    call: CallEventView<'_>,
     state: &mut TokenSet,
     ctx: &mut PropagationCtx<'_>,
     summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
@@ -1347,7 +1353,8 @@ fn propagate_call_event(
     //     field, but they must NOT count as "directly tainted" because
     //     that would re-create the object-wide overtaint we explicitly
     //     reject (see `over_taint_matrix::field_taint_passed_as_carrier_stays_field_scoped`).
-    let tainted_at_call: Vec<(usize, String)> = args
+    let tainted_at_call: Vec<(usize, String)> = call
+        .args
         .iter()
         .enumerate()
         .filter(|(_, arg)| call_arg_has_direct_value_taint(arg, state))
@@ -1355,7 +1362,7 @@ fn propagate_call_event(
         .collect();
     let mut args_to_propagate_into_callee = tainted_at_call.clone();
     let mut diagnostic_tainted_at_call = tainted_at_call.clone();
-    for (idx, arg) in args.iter().enumerate() {
+    for (idx, arg) in call.args.iter().enumerate() {
         if args_to_propagate_into_callee
             .iter()
             .any(|(existing_idx, _)| *existing_idx == idx)
@@ -1367,17 +1374,19 @@ fn propagate_call_event(
             diagnostic_tainted_at_call.push((idx, arg.value_text.clone()));
         }
     }
-    let tainted_receiver = receiver.filter(|receiver| receiver_expr_is_tainted(receiver, state));
+    let tainted_receiver = call
+        .receiver
+        .filter(|receiver| receiver_expr_is_tainted(receiver, state));
     if args_to_propagate_into_callee.is_empty() && tainted_receiver.is_none() {
         return;
     }
 
-    if let Some(receiver_value) = receiver {
+    if let Some(receiver_value) = call.receiver {
         if !diagnostic_tainted_at_call.is_empty()
             && configured_receiver_state_propagation_matches(
                 &ctx.config.receiver_state_propagations,
-                name,
-                receiver_types,
+                call.name,
+                call.receiver_types,
             )
         {
             insert_descendant_target_taint(state, receiver_value);
@@ -1385,14 +1394,14 @@ fn propagate_call_event(
     }
 
     if let Some(receiver_value) = tainted_receiver {
-        propagate_receiver_taint_to_callback_args(receiver_value, args, span, ctx);
+        propagate_receiver_taint_to_callback_args(receiver_value, call.args, call.span, ctx);
     }
 
     ctx.tainted_calls.push(TaintedCall {
         parent_trace_id: ctx.current_trace_id,
         caller: ctx.caller,
-        name: name.to_string(),
-        call_span: span,
+        name: call.name.to_string(),
+        call_span: call.span,
         tainted_args: diagnostic_tainted_at_call
             .iter()
             .map(|(idx, value)| TaintedArgAtCall {
@@ -1404,20 +1413,16 @@ fn propagate_call_event(
         kind: TaintedCallKind::Call,
     });
 
+    let resolve_scope = CallResolveScope::from_ctx(ctx);
     let candidates = resolve_call_candidates_with_caller_at(
-        name,
-        ctx.aliases,
-        ctx.alias_targets,
-        ctx.local_bindings,
-        ctx.db,
-        ctx.caller,
-        receiver_types,
-        Some(span),
-        ctx.config,
+        call.name,
+        &resolve_scope,
+        call.receiver_types,
+        Some(call.span),
     );
     if candidates.is_empty() {
-        if !configured_source_output_call(name, &tainted_at_call, ctx.config)
-            && apply_unresolved_call_side_effects(args, &tainted_at_call, state)
+        if !configured_source_output_call(call.name, &tainted_at_call, ctx.config)
+            && apply_unresolved_call_side_effects(call.args, &tainted_at_call, state)
         {
             *ctx.precision = ctx.precision.meet(Precision::OverApproximate);
         }
@@ -1516,7 +1521,12 @@ fn propagate_call_event(
                 param_name,
             });
         }
-        apply_resolved_param_side_effects(args, &tainted_param_indices, &summary.taints_params_from, state);
+        apply_resolved_param_side_effects(
+            call.args,
+            &tainted_param_indices,
+            &summary.taints_params_from,
+            state,
+        );
         // Build callback-param bindings for the call: any arg whose
         // value_text resolves to a workspace function name binds
         // the corresponding callee parameter to that function. Lets
@@ -1527,7 +1537,7 @@ fn propagate_call_event(
         // mirrors the tainted-arg loop above.
         let mut dyn_bindings: AHashMap<String, FuncId> = AHashMap::new();
         let mut callee_consts: AHashMap<String, ConstValue> = AHashMap::new();
-        for (arg_index, arg) in args.iter().enumerate() {
+        for (arg_index, arg) in call.args.iter().enumerate() {
             let param_index = callee_decl
                 .receiver_param_index
                 .filter(|receiver_index| arg_index >= *receiver_index)
@@ -1580,7 +1590,7 @@ fn propagate_call_event(
         let trace_id = push_call_propagation(
             ctx,
             candidate.func,
-            span,
+            call.span,
             record_args,
             candidate.kind,
             candidate.precision,
@@ -2427,17 +2437,15 @@ fn apply_return_taint(
     } else {
         source_call_args.as_slice()
     };
-    let candidates = resolve_call_candidates_with_caller_at(
-        callee_name,
+    let resolve_scope = CallResolveScope {
         aliases,
         alias_targets,
         local_bindings,
         db,
         caller,
-        &[],
-        Some(*span),
         config,
-    );
+    };
+    let candidates = resolve_call_candidates_with_caller_at(callee_name, &resolve_scope, &[], Some(*span));
     let tainted_call_arg = effective_source_call_args
         .iter()
         .any(|arg| arg_text_is_tainted(arg, state) || actual_has_descendant_taint(arg, state));
@@ -3445,6 +3453,28 @@ struct ResolvedCallee {
     precision: Precision,
 }
 
+struct CallResolveScope<'a> {
+    aliases: &'a AHashMap<String, String>,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+    local_bindings: &'a AHashMap<String, FuncId>,
+    db: &'a AnalyzerDb,
+    caller: FuncId,
+    config: &'a InterTaintConfig,
+}
+
+impl<'a> CallResolveScope<'a> {
+    fn from_ctx(ctx: &'a PropagationCtx<'a>) -> Self {
+        Self {
+            aliases: ctx.aliases,
+            alias_targets: ctx.alias_targets,
+            local_bindings: ctx.local_bindings,
+            db: ctx.db,
+            caller: ctx.caller,
+            config: ctx.config,
+        }
+    }
+}
+
 fn resolve_call_candidates_with_caller(
     name: &str,
     aliases: &AHashMap<String, String>,
@@ -3454,29 +3484,22 @@ fn resolve_call_candidates_with_caller(
     caller: FuncId,
     config: &InterTaintConfig,
 ) -> Vec<ResolvedCallee> {
-    resolve_call_candidates_with_caller_at(
-        name,
+    let scope = CallResolveScope {
         aliases,
         alias_targets,
         local_bindings,
         db,
         caller,
-        &[],
-        None,
         config,
-    )
+    };
+    resolve_call_candidates_with_caller_at(name, &scope, &[], None)
 }
 
 fn resolve_call_candidates_with_caller_at(
     name: &str,
-    aliases: &AHashMap<String, String>,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    local_bindings: &AHashMap<String, FuncId>,
-    db: &AnalyzerDb,
-    caller: FuncId,
+    scope: &CallResolveScope<'_>,
     receiver_types: &[String],
     call_span: Option<Span>,
-    config: &InterTaintConfig,
 ) -> Vec<ResolvedCallee> {
     for variant in callable_reference_variants(name) {
         let normalised = normalise_qualified_text(&variant);
@@ -3486,9 +3509,10 @@ fn resolve_call_candidates_with_caller_at(
             &normalised
         };
         let tail = short_tail(lookup_name);
-        if let Some(func) = local_bindings
+        if let Some(func) = scope
+            .local_bindings
             .get(lookup_name)
-            .or_else(|| local_bindings.get(tail))
+            .or_else(|| scope.local_bindings.get(tail))
             .copied()
         {
             return vec![ResolvedCallee {
@@ -3499,12 +3523,12 @@ fn resolve_call_candidates_with_caller_at(
         }
         if let Some(receiver) = call_receiver_from_name(lookup_name) {
             let targets = if is_super_receiver(&receiver) {
-                resolve_super_method_candidates(db, caller, alias_targets, tail)
+                resolve_super_method_candidates(scope.db, scope.caller, scope.alias_targets, tail)
             } else {
                 resolve_receiver_method_candidates(
-                    db,
-                    caller,
-                    alias_targets,
+                    scope.db,
+                    scope.caller,
+                    scope.alias_targets,
                     &receiver,
                     receiver_types,
                     tail,
@@ -3526,10 +3550,11 @@ fn resolve_call_candidates_with_caller_at(
                     })
                     .collect();
             }
-            if let Some(func) = local_bindings.get(receiver.as_str()).copied() {
-                let configured_callback = configured_tail_match(&config.callback_invocation_methods, tail);
-                if (configured_callback || config.callback_invocation_methods.is_empty())
-                    && local_binding_is_callable_value(db, func)
+            if let Some(func) = scope.local_bindings.get(receiver.as_str()).copied() {
+                let configured_callback =
+                    configured_tail_match(&scope.config.callback_invocation_methods, tail);
+                if (configured_callback || scope.config.callback_invocation_methods.is_empty())
+                    && local_binding_is_callable_value(scope.db, func)
                 {
                     return vec![ResolvedCallee {
                         func,
@@ -3540,7 +3565,13 @@ fn resolve_call_candidates_with_caller_at(
             }
         }
     }
-    resolve_call_candidates(name, aliases, alias_targets, db, Some(caller))
+    resolve_call_candidates(
+        name,
+        scope.aliases,
+        scope.alias_targets,
+        scope.db,
+        Some(scope.caller),
+    )
 }
 
 fn local_binding_is_callable_value(db: &AnalyzerDb, func: FuncId) -> bool {

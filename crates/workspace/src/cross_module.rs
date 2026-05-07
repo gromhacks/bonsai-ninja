@@ -70,13 +70,13 @@ struct TraceBuilder<'a> {
 #[derive(Default, Clone)]
 struct CallFrame {
     /// parameter name -> callable symbol passed at the call site
-    callback_bindings: AHashMap<String, SymbolId>,
+    callbacks: AHashMap<String, SymbolId>,
     /// whole-local variable bindings (e.g. `x = some_func`)
-    local_bindings: AHashMap<String, SymbolId>,
+    locals: AHashMap<String, SymbolId>,
     /// local / parameter / field receiver type bindings visible in
     /// this frame. Seeded from adapter-emitted `Decl.type_aliases`
     /// and updated from call-site parameter bindings.
-    type_bindings: AHashMap<String, String>,
+    types: AHashMap<String, String>,
 }
 
 struct CallSite<'a> {
@@ -161,7 +161,7 @@ impl<'a> TraceBuilder<'a> {
         // Build a new frame; bind parameter names to concrete callables
         // when the argument at that position resolves to one.
         let mut frame = CallFrame {
-            type_bindings: type_bindings_from_decl(&decl),
+            types: types_from_decl(&decl),
             ..Default::default()
         };
         let zip_params = if param_names.is_empty() {
@@ -176,10 +176,10 @@ impl<'a> TraceBuilder<'a> {
             let arg = kw.or(positional);
             if let Some(a) = arg {
                 if let Some(sym) = self.resolve_callable_by_name(&a.value_text, &decl) {
-                    frame.callback_bindings.insert(param.clone(), sym);
+                    frame.callbacks.insert(param.clone(), sym);
                 }
                 if let Some(type_name) = self.type_name_for_expr(&a.value_text, &decl) {
-                    frame.type_bindings.insert(param.clone(), type_name);
+                    frame.types.insert(param.clone(), type_name);
                 }
             }
         }
@@ -346,7 +346,7 @@ impl<'a> TraceBuilder<'a> {
                     if let Some(caller_decl) = caller_decl {
                         if let Some(sym) = self.resolve_callable_by_name(name, caller_decl) {
                             if let Some(frame) = self.frames.last_mut() {
-                                frame.local_bindings.insert(target.clone(), sym);
+                                frame.locals.insert(target.clone(), sym);
                             }
                         }
                     }
@@ -361,11 +361,11 @@ impl<'a> TraceBuilder<'a> {
                 });
                 if let Some(type_name) = assigned_type {
                     if let Some(frame) = self.frames.last_mut() {
-                        frame.type_bindings.insert(target.clone(), type_name);
+                        frame.types.insert(target.clone(), type_name);
                     }
                 } else if let Some(frame) = self.frames.last_mut() {
                     if !declares_type_alias(caller_decl, target) {
-                        frame.type_bindings.remove(target);
+                        frame.types.remove(target);
                     }
                 }
                 self.emit(
@@ -524,9 +524,9 @@ impl<'a> TraceBuilder<'a> {
         //   3. Global class match -> route to that class's constructor.
         //   4. Global callable match.
         let callback_sym = self.frames.last().and_then(|f| {
-            f.callback_bindings
+            f.callbacks
                 .get(site.name)
-                .or_else(|| f.local_bindings.get(site.name))
+                .or_else(|| f.locals.get(site.name))
                 .copied()
         });
 
@@ -666,11 +666,11 @@ impl<'a> TraceBuilder<'a> {
         self.frames
             .last()
             .and_then(|f| {
-                f.callback_bindings
+                f.callbacks
                     .get(trimmed)
-                    .or_else(|| f.callback_bindings.get(short))
-                    .or_else(|| f.local_bindings.get(trimmed))
-                    .or_else(|| f.local_bindings.get(short))
+                    .or_else(|| f.callbacks.get(short))
+                    .or_else(|| f.locals.get(trimmed))
+                    .or_else(|| f.locals.get(short))
                     .copied()
             })
             .or_else(|| {
@@ -861,12 +861,12 @@ impl<'a> TraceBuilder<'a> {
             .last()
             .and_then(|frame| {
                 frame
-                    .type_bindings
+                    .types
                     .get(expr)
-                    .or_else(|| frame.type_bindings.get(normalized.as_str()))
-                    .or_else(|| frame.type_bindings.get(tail))
-                    .or_else(|| frame.type_bindings.get(self_tail.as_str()))
-                    .or_else(|| frame.type_bindings.get(this_tail.as_str()))
+                    .or_else(|| frame.types.get(normalized.as_str()))
+                    .or_else(|| frame.types.get(tail))
+                    .or_else(|| frame.types.get(self_tail.as_str()))
+                    .or_else(|| frame.types.get(this_tail.as_str()))
                     .cloned()
             })
             .or_else(|| {
@@ -1072,7 +1072,7 @@ fn constructor_type_tail(call: &str) -> Option<&str> {
         .then_some(bare)
 }
 
-fn type_bindings_from_decl(decl: &Decl) -> AHashMap<String, String> {
+fn types_from_decl(decl: &Decl) -> AHashMap<String, String> {
     decl.type_aliases
         .iter()
         .map(|alias| (alias.name.clone(), alias.type_name.clone()))

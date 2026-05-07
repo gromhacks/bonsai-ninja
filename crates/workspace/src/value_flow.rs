@@ -27,7 +27,7 @@ use std::{
 
 /// On-disk format version. Bump when the snapshot shape changes
 /// (new node kind, edge field, etc.) so old sidecars are rejected.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 1;
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 2;
 static VALUE_FLOW_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Cache of `ValueFlowGraph` per entry function.
