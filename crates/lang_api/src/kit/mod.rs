@@ -7190,6 +7190,84 @@ pub fn apply_module_path_semantic_identity(idx: &mut crate::DeclIndex, module_se
     }
 }
 
+/// Derive `self.<field> → Type` bindings from each class's
+/// constructor / setter `receiver_field_writes` and propagate them
+/// to every sibling method's `type_aliases`. Runs at index time so
+/// the resolver's per-call `type_alias_for_receiver` lookup is O(1)
+/// against the method's own `type_aliases` instead of re-walking the
+/// constructor every time a `self.<field>.method()` call needs to
+/// dispatch.
+///
+/// Adapters call this AFTER the per-method type_aliases have been
+/// populated (parameter types, etc.) — the helper consumes those to
+/// resolve each `receiver_field_write`'s source-parameter index to
+/// a type name. Idempotent: re-applying produces no new bindings.
+///
+/// Example: for Python `class Transaction: def __init__(self,
+/// runner: CommandRunner): self.runner = runner`, the helper records
+/// `{name: "self.runner", type_name: "CommandRunner"}` on every
+/// method of `Transaction`, including `__init__` itself. The
+/// resolver's `type_alias_for_receiver(perform_decl, "self.runner")`
+/// then returns `CommandRunner` directly.
+pub fn apply_class_field_type_aliases(idx: &mut crate::DeclIndex) {
+    use std::collections::{HashMap, HashSet};
+    let mut by_class: HashMap<bonsai_common::SymbolId, Vec<crate::TypeAliasBinding>> = HashMap::new();
+    let mut seen: HashMap<bonsai_common::SymbolId, HashSet<(String, String)>> = HashMap::new();
+    for decl in &idx.defs {
+        let Some(parent_sym) = decl.parent else { continue };
+        if !matches!(
+            decl.kind,
+            crate::DeclKind::Function | crate::DeclKind::Method | crate::DeclKind::Constructor
+        ) {
+            continue;
+        }
+        for field_write in &decl.receiver_field_writes {
+            for &param_idx in &field_write.source_param_indices {
+                let Some(param_name) = decl.params.get(param_idx) else {
+                    continue;
+                };
+                let Some(alias) = decl.type_aliases.iter().find(|a| a.name == *param_name) else {
+                    continue;
+                };
+                let key = (field_write.target.clone(), alias.type_name.clone());
+                if seen
+                    .entry(parent_sym)
+                    .or_default()
+                    .insert(key.clone())
+                {
+                    by_class
+                        .entry(parent_sym)
+                        .or_default()
+                        .push(crate::TypeAliasBinding {
+                            name: key.0,
+                            type_name: key.1,
+                        });
+                }
+            }
+        }
+    }
+    if by_class.is_empty() {
+        return;
+    }
+    for decl in &mut idx.defs {
+        let Some(parent_sym) = decl.parent else { continue };
+        if !matches!(
+            decl.kind,
+            crate::DeclKind::Function | crate::DeclKind::Method | crate::DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let Some(class_aliases) = by_class.get(&parent_sym) else {
+            continue;
+        };
+        for alias in class_aliases {
+            if !decl.type_aliases.contains(alias) {
+                decl.type_aliases.push(alias.clone());
+            }
+        }
+    }
+}
+
 /// Populate `FlowEvent::Call::receiver_types` from adapter-emitted
 /// semantic declaration facts. Adapters already attach
 /// `Decl.type_aliases` for typed parameters, locals, fields, and
