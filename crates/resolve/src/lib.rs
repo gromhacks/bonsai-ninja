@@ -188,7 +188,117 @@ pub fn resolve_callable_with_context(
             }
         }
     }
+    // Workspace-rooted qualified call: `crate::X::Y` (Rust),
+    // `\Foo\Bar::baz` (PHP global namespace), `::ns::fn` (C++) —
+    // strip the language-specific absolute-path prefix and treat
+    // the remainder as `<module_path>::<fn>` against workspace
+    // decls whose canonical `module_path` matches. This is the
+    // catch-all for languages where the path itself names the
+    // target without going through an `import` or `use` alias.
+    if out.is_empty() {
+        out = resolve_workspace_rooted_call(global, name, ctx);
+    }
     out
+}
+
+/// Final-fallback resolver for fully-qualified workspace paths
+/// that don't go through the alias map. Handles Rust `crate::`,
+/// PHP / C++ `\Foo\Bar` / `::ns::fn`, and bare `<mod>::<fn>` calls
+/// where the head segment IS a workspace module identifier.
+///
+/// The search is constrained by
+/// [`module_target_matches_decl_module_path`] so a workspace decl
+/// is only returned when its `module_path` actually suffix-matches
+/// the call's module head — no bare-name fan-out across unrelated
+/// workspace functions.
+fn resolve_workspace_rooted_call(
+    global: &GlobalIndex,
+    name: &str,
+    ctx: &ResolveContext<'_>,
+) -> Vec<bonsai_common::FuncId> {
+    use bonsai_lang_api::DeclKind;
+    let stripped = strip_absolute_path_prefix(name);
+    if stripped.is_empty() {
+        return Vec::new();
+    }
+    let Some((mod_path, fn_name)) = split_module_call_tail(stripped) else {
+        return Vec::new();
+    };
+    if mod_path.is_empty() || fn_name.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for sym in global.find_by_name(fn_name) {
+        let Some(decl) = global.decl_of(*sym) else {
+            continue;
+        };
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let Some(decl_file) = global.declaring_file(*sym) else {
+            continue;
+        };
+        if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
+            continue;
+        }
+        if !module_target_matches_decl_module_path(mod_path, &decl.module_path) {
+            continue;
+        }
+        out.push(bonsai_common::FuncId::new(decl.symbol.raw()));
+    }
+    dedup_func_ids(&mut out);
+    out
+}
+
+/// Strip language-specific "absolute path" prefixes so the
+/// remainder is a plain `<module>::<fn>` shape.
+///
+/// - Rust: `crate::`, repeated `super::`, `self::`.
+/// - PHP / C++: leading `\` / `::`.
+fn strip_absolute_path_prefix(name: &str) -> &str {
+    let trimmed = name.trim();
+    if let Some(rest) = trimmed.strip_prefix("crate::") {
+        return rest;
+    }
+    if let Some(rest) = trimmed.strip_prefix("self::") {
+        return rest;
+    }
+    let mut rest = trimmed;
+    let mut stripped_super = false;
+    while let Some(next) = rest.strip_prefix("super::") {
+        rest = next;
+        stripped_super = true;
+    }
+    if stripped_super {
+        return rest;
+    }
+    if let Some(rest) = trimmed.strip_prefix("::") {
+        return rest;
+    }
+    if let Some(rest) = trimmed.strip_prefix('\\') {
+        return rest;
+    }
+    trimmed
+}
+
+/// Split `<module_path>::<fn_name>` into its parts using the
+/// rightmost separator from the supported set.
+fn split_module_call_tail(name: &str) -> Option<(&str, &str)> {
+    if let Some((head, tail)) = name.rsplit_once("::") {
+        return Some((head, tail));
+    }
+    if let Some((head, tail)) = name.rsplit_once('\\') {
+        return Some((head, tail));
+    }
+    if let Some((head, tail)) = name.rsplit_once('.') {
+        if !head.is_empty() && !tail.is_empty() {
+            return Some((head, tail));
+        }
+    }
+    None
 }
 
 fn resolve_callable_member_with_context(

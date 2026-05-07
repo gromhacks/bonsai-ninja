@@ -512,6 +512,12 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "class_implementation",
         "interface_declaration",
         "trait_item",
+        // Scala singleton object — the contained functions
+        // dispatch as methods of the object. (Kotlin's
+        // `object Box { ... }` parses as `infix_expression` in
+        // tree-sitter-kotlin, not `object_declaration`, and is
+        // handled by a Kotlin-adapter post-process.)
+        "object_definition",
     ],
     constructor_method_kinds: &["constructor_declaration", "init_declaration"],
     constructor_names: &["__init__", "constructor", "__construct", "init", "new"],
