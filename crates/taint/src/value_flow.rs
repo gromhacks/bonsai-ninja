@@ -110,8 +110,8 @@ pub struct ValueFlowEdge {
 
 /// The unified seed-free value-flow graph for one entry function.
 ///
-/// Phase 1 lands the type. Phase 2 has the engine populate it. Phase
-/// 3 wraps the per-function graphs into a workspace cache.
+/// Populated from the interprocedural engine and wrapped by the
+/// workspace cache for command and security consumers.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ValueFlowGraph {
     /// Every node observed by the engine during this run.
@@ -202,7 +202,7 @@ impl ValueFlowGraph {
 
 /// Seed-free value-flow analysis for one entry function.
 ///
-/// Phase 2 deliverable. Builds a `ValueFlowGraph` by:
+/// Builds a `ValueFlowGraph` by:
 /// 1. Collecting every variable that's a candidate "self-source"
 ///    (entry's params + locally-bound assign targets in the body).
 /// 2. Running the engine in `TokenSet` mode with that union seed.
@@ -219,7 +219,7 @@ impl ValueFlowGraph {
 /// once per source group and walking its records.
 ///
 /// Caller responsibility: wrap in a per-FuncId cache (see
-/// `crates/workspace/src/value_flow.rs`, Phase 3).
+/// `crates/workspace/src/value_flow.rs`).
 #[must_use]
 pub fn value_flow_for_function(
     entry_func: FuncId,
@@ -418,8 +418,7 @@ fn build_graph_from_result(
             // the value. We don't have the param's exact span here
             // (it's in the callee's decl, not in this propagation
             // record), so anchor on the call span as the
-            // observation point. Phase 3 will resolve the precise
-            // callee-param span via the global index.
+            // observation point.
             let to_key = (propagation.callee, tainted.param_name.clone());
             let to_node = node_index.get(&to_key).cloned().unwrap_or_else(|| {
                 let synthesised = ValueFlowNode {

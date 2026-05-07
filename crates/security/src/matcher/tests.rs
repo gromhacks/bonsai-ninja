@@ -46,6 +46,33 @@ fn collect_calls_includes_assignment_source_call_metadata() {
 }
 
 #[test]
+fn assignment_source_call_facts_inherit_receiver_type_aliases() {
+    let events = vec![FlowEvent::Assign {
+        span: span(),
+        target: "value".to_string(),
+        source_name: None,
+        source_call: Some("cookie.getValue".to_string()),
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+    }];
+    let mut calls = collect_calls(&events);
+    enrich_call_fact_receiver_types(
+        &mut calls,
+        &[TypeAliasBinding {
+            name: "cookie".to_string(),
+            type_name: "jakarta.servlet.http.Cookie".to_string(),
+        }],
+    );
+
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].receiver_types,
+        vec!["jakarta.servlet.http.Cookie".to_string()],
+        "matcher-synthesized assignment source calls must retain semantic receiver type evidence"
+    );
+}
+
+#[test]
 fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
     let events = vec![
         FlowEvent::Call {
@@ -56,12 +83,14 @@ fn collect_calls_drops_assignment_source_call_shadowed_by_real_call() {
                     span: span(),
                     name: None,
                     place: None,
+                    source_names: Vec::new(),
                     value_text: "py_expr".to_string(),
                 },
                 CallArg {
                     span: span(),
                     name: None,
                     place: None,
+                    source_names: Vec::new(),
                     value_text: "{\"attributes\": attributes}".to_string(),
                 },
             ],
@@ -118,6 +147,115 @@ fn receiver_type_facts_match_type_method_rules_without_receiver_names() {
         Some(&attr),
         None,
     ));
+}
+
+#[test]
+fn package_gated_regex_accepts_semantic_receiver_type_context() {
+    let rule = rule_from_yaml(
+        r#"
+id: kotlin.sqli.connection_createstatement_execute
+enabled: true
+language: kotlin
+tag: sql-injection
+severity: high
+packages: [java.sql]
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.createStatement\\(\\)\\.executeQuery$"
+description: JDBC chained execute query.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let prepared = PreparedRule::new(&rule).expect("rule prepares");
+    let mut aliases = std::collections::HashMap::new();
+    aliases.insert(
+        "Connection".to_string(),
+        AliasTarget::Type {
+            type_name: "java.sql.Connection".to_string(),
+        },
+    );
+
+    assert!(
+        prepared.call_context_allows(
+            "conn.createStatement().executeQuery",
+            &["Connection".to_string()],
+            &aliases,
+            &AHashSet::new(),
+        ),
+        "receiver-type facts expand through imports before package matching"
+    );
+    let file_packages = AHashSet::from_iter(["java.sql".to_string()]);
+    assert!(
+        !prepared.call_context_allows(
+            "conn.createStatement().executeQuery",
+            &[],
+            &std::collections::HashMap::new(),
+            &file_packages,
+        ),
+        "sink rules need call-site receiver or alias evidence; file imports alone are too broad"
+    );
+    let source_rule = rule_from_yaml(
+        r#"
+id: python.source.request_args_get
+enabled: true
+language: python
+trust: remote
+packages: [flask]
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.args\\.get$"
+description: Flask request args source.
+"#,
+        crate::rule::RuleKind::Source,
+    );
+    let source_prepared = PreparedRule::new(&source_rule).expect("source rule prepares");
+    let source_file_packages = AHashSet::from_iter(["flask".to_string()]);
+    assert!(
+        source_prepared.call_context_allows(
+            "req.args.get",
+            &[],
+            &std::collections::HashMap::new(),
+            &source_file_packages,
+        ),
+        "source rules may use file-level package evidence for dynamic request receiver extraction"
+    );
+    let lifecycle_rule = rule_from_yaml(
+        r#"
+id: go.race.mutex_unlock
+enabled: true
+language: go
+tag: race
+packages: [sync]
+match:
+  kind: call
+  callee:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.Unlock$"
+description: Lifecycle audit-pair transition.
+"#,
+        crate::rule::RuleKind::Sink,
+    );
+    let lifecycle_prepared = PreparedRule::new(&lifecycle_rule).expect("lifecycle rule prepares");
+    let lifecycle_file_packages = AHashSet::from_iter(["sync".to_string()]);
+    assert!(
+        lifecycle_prepared.call_context_allows(
+            "mu.Unlock",
+            &[],
+            &std::collections::HashMap::new(),
+            &lifecycle_file_packages,
+        ),
+        "lifecycle audit-pair rules may use file-level package evidence for transition sites"
+    );
+    assert!(
+        !prepared.call_context_allows(
+            "client.createStatement().executeQuery",
+            &[],
+            &std::collections::HashMap::new(),
+            &AHashSet::new(),
+        ),
+        "without import, alias, or receiver-type evidence, package-gated regexes fail closed"
+    );
 }
 
 #[test]
@@ -387,6 +525,7 @@ fn arg_int_compare_threshold_semantics() {
         span: span(),
         name: None,
         place: None,
+        source_names: Vec::new(),
         value_text: "1024".to_string(),
     }];
     // arg_lt: 2048 should pass (1024 < 2048).
@@ -407,6 +546,7 @@ fn arg_int_compare_unknown_arg_fails_conservatively() {
         span: span(),
         name: None,
         place: None,
+        source_names: Vec::new(),
         value_text: "user_size".to_string(),
     }];
     // Variable arg → no literal → constraint fails. This is the
@@ -420,6 +560,7 @@ fn arg_int_compare_out_of_bounds_fails() {
         span: span(),
         name: None,
         place: None,
+        source_names: Vec::new(),
         value_text: "1024".to_string(),
     }];
     // index 1 is out of bounds — constraint fails.

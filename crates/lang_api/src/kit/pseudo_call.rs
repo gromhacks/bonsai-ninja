@@ -31,8 +31,8 @@ use bonsai_common::FileId;
 use tree_sitter::Node;
 
 use super::{
-    argument_place, first_named_child, looks_like_identifier, node_text, normalize_call_name_whitespace,
-    span_of, CallArg, CallKind, FlowEvent,
+    argument_place, extract_rhs_expr_operands, first_named_child, looks_like_identifier, node_text,
+    normalize_call_name_whitespace, span_of, CallArg, CallKind, FlowEvent,
 };
 
 pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<FlowEvent> {
@@ -66,12 +66,14 @@ pub(super) fn pseudo_call_event(node: &Node<'_>, file: FileId, src: &[u8]) -> Op
                     span: span_of(file, &channel),
                     name: None,
                     place: argument_place(&channel, src),
+                    source_names: extract_rhs_expr_operands(&channel, src),
                     value_text: normalize_call_name_whitespace(node_text(&channel, src)),
                 },
                 CallArg {
                     span: span_of(file, &value),
                     name: None,
                     place: argument_place(&value, src),
+                    source_names: extract_rhs_expr_operands(&value, src),
                     value_text: normalize_call_name_whitespace(node_text(&value, src)),
                 },
             ];
@@ -175,6 +177,14 @@ fn jsx_call_from_opening(node: &Node<'_>, file: FileId, src: &[u8]) -> Option<Fl
             place: value_node
                 .as_ref()
                 .and_then(|v| v.named_child(0).and_then(|inner| argument_place(&inner, src))),
+            source_names: value_node
+                .as_ref()
+                .map(|v| {
+                    v.named_child(0)
+                        .map(|inner| extract_rhs_expr_operands(&inner, src))
+                        .unwrap_or_else(|| extract_rhs_expr_operands(v, src))
+                })
+                .unwrap_or_else(Vec::new),
             value_text,
         });
     }
@@ -206,6 +216,7 @@ fn named_child_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallArg> {
             span: span_of(file, &child),
             name: None,
             place: argument_place(&child, src),
+            source_names: extract_rhs_expr_operands(&child, src),
             value_text: normalize_call_name_whitespace(node_text(&child, src)),
         });
     }
@@ -232,6 +243,7 @@ fn infix_expression_args(node: &Node<'_>, file: FileId, src: &[u8]) -> Vec<CallA
             span: span_of(file, &child),
             name: None,
             place: argument_place(&child, src),
+            source_names: extract_rhs_expr_operands(&child, src),
             value_text: argument_text,
         });
     }

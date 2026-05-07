@@ -216,6 +216,7 @@ impl LanguageAdapter for RubyAdapter {
                 parent: None,
                 body_span: Some(module_span),
                 flow_events: root_events,
+                has_implicit_returns: true,
                 params: Vec::new(),
                 param_annotations: Vec::new(),
                 type_aliases: Vec::new(),

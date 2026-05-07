@@ -107,6 +107,30 @@ impl LanguageAdapter for KotlinAdapter {
                     decl.type_aliases = aliases.clone();
                 }
             }
+            let class_aliases_by_span = collect_kotlin_class_type_aliases(&tree, file, src);
+            let class_spans_by_symbol: std::collections::HashMap<_, _> = idx
+                .defs
+                .iter()
+                .filter(|decl| is_class_like(decl.kind))
+                .map(|decl| (decl.symbol, decl.span))
+                .collect();
+            for decl in &mut idx.defs {
+                let Some(parent) = decl.parent else { continue };
+                let Some(parent_span) = class_spans_by_symbol.get(&parent) else {
+                    continue;
+                };
+                let Some(class_aliases) = class_aliases_by_span
+                    .iter()
+                    .find_map(|(span, aliases)| (*span == *parent_span).then_some(aliases))
+                else {
+                    continue;
+                };
+                for alias in class_aliases {
+                    if !decl.type_aliases.contains(alias) {
+                        decl.type_aliases.push(alias.clone());
+                    }
+                }
+            }
             // Per-class `bases`: `class Echo : WebSocketHandler(), Mixin {...}`
             // → ["WebSocketHandler", "Mixin"]. Kotlin lists every
             // parent (super-class call + interface types) as
@@ -193,7 +217,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         if text.is_empty() {
             continue;
         }
-        let (head, alias) = if let Some((module_part, alias_part)) = text.rsplit_once(" as ") {
+        let (head, explicit_alias) = if let Some((module_part, alias_part)) = text.rsplit_once(" as ") {
             (
                 module_part.trim().to_string(),
                 Some(alias_part.trim().to_string()),
@@ -211,13 +235,20 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         // unaliased shape preserves the full path as `module` to
         // keep query-by-module-path semantics for downstream rule
         // lookup.
-        let (module, original_name) = if alias.is_some() {
+        let (module, alias, original_name) = if explicit_alias.is_some() {
             match full_path.rsplit_once('.') {
-                Some((prefix, terminal_symbol)) => (prefix.to_string(), Some(terminal_symbol.to_string())),
-                None => (String::new(), Some(full_path.clone())),
+                Some((prefix, terminal_symbol)) => (
+                    prefix.to_string(),
+                    explicit_alias,
+                    Some(terminal_symbol.to_string()),
+                ),
+                None => (String::new(), explicit_alias, Some(full_path.clone())),
             }
+        } else if is_wildcard {
+            (full_path, None, None)
         } else {
-            (full_path, None)
+            let alias = import_tail_binding(&full_path);
+            (full_path, alias, None)
         };
         imports.push(ImportSpec {
             span: span_of(file, &import_node),
@@ -229,6 +260,15 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+fn import_tail_binding(module: &str) -> Option<String> {
+    let tail = module
+        .rsplit_once('.')
+        .map(|(_, tail)| tail)
+        .unwrap_or(module)
+        .trim();
+    (!tail.is_empty() && tail != module).then(|| tail.to_string())
 }
 
 /// Walk `decl.flow_events` recursively and populate
@@ -440,6 +480,44 @@ fn collect_kotlin_type_aliases(
         }
     }
     aliases_by_span
+}
+
+/// Collect receiver-visible type aliases declared by Kotlin class
+/// constructor properties / fields and attach them to methods through
+/// `Decl.parent`. Example: `class H(private val conn: Connection)` makes
+/// `conn: Connection` available inside every method of `H`.
+fn collect_kotlin_class_type_aliases(
+    tree: &Tree,
+    file: bonsai_common::FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
+    let mut out = Vec::new();
+    for class_node in collect_kinds(tree, &["class_declaration", "object_declaration"]) {
+        let mut aliases = Vec::new();
+        collect_kotlin_class_aliases_from_node(class_node, src, &mut aliases);
+        if !aliases.is_empty() {
+            out.push((span_of(file, &class_node), aliases));
+        }
+    }
+    out
+}
+
+fn collect_kotlin_class_aliases_from_node(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    match node.kind() {
+        "function_declaration" | "getter" | "setter" | "secondary_constructor" => return,
+        "class_parameter" | "property_declaration" => {
+            if let Some(binding) = kotlin_param_alias(node, src) {
+                if !aliases.contains(&binding) {
+                    aliases.push(binding);
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_kotlin_class_aliases_from_node(child, src, aliases);
+    }
 }
 
 /// Extract a single `name: Type` pair from a `parameter` /

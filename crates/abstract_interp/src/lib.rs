@@ -15,7 +15,6 @@ use bonsai_cfg::{Cfg, Terminator};
 use bonsai_common::{BasicBlockId, FuncId, Precision, Span, TraceStepId};
 use bonsai_lang_api::FlowEvent;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 /// Per-trace budget. Bounds `run_entry` so unknown loops or recursion
 /// can't blow up the host.
@@ -92,8 +91,9 @@ pub struct RawTrace {
 fn push_branch_successors(
     successors: &[BasicBlockId],
     parent_path: u32,
+    parent_state: &ExecState,
     next_path: &mut u32,
-    worklist: &mut SmallVec<[(BasicBlockId, u32); 8]>,
+    worklist: &mut Vec<(BasicBlockId, u32, ExecState)>,
     trace: &mut RawTrace,
 ) -> bool {
     for (idx, successor) in successors.iter().enumerate() {
@@ -107,7 +107,12 @@ fn push_branch_successors(
             *next_path = new_id;
             new_id
         };
-        worklist.push((*successor, successor_path));
+        let mut successor_state = parent_state.clone();
+        successor_state.current_bb = *successor;
+        successor_state.path_constraints.push(Constraint {
+            text: format!("branch successor {idx}"),
+        });
+        worklist.push((*successor, successor_path, successor_state));
     }
     true
 }
@@ -120,7 +125,6 @@ fn push_branch_successors(
 /// workspace-level [`bonsai_workspace::cross_module`] tracer's job.
 pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
     let mut trace = RawTrace::default();
-    let mut state = ExecState::new(func, cfg.entry);
     let mut next_step: u32 = 0;
     let mut next_path: u32 = 1;
 
@@ -161,20 +165,44 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
         return trace;
     }
 
-    let mut worklist: SmallVec<[(BasicBlockId, u32); 8]> = SmallVec::from_slice(&[(cfg.entry, 1)]);
-    let mut visited: ahash::AHashSet<BasicBlockId> = ahash::AHashSet::new();
+    let mut worklist: Vec<(BasicBlockId, u32, ExecState)> =
+        vec![(cfg.entry, 1, ExecState::new(func, cfg.entry))];
+    let mut visits: ahash::AHashMap<(BasicBlockId, u32), u16> = ahash::AHashMap::new();
+    let mut incoming_states: ahash::AHashMap<BasicBlockId, ExecState> = ahash::AHashMap::new();
     let mut branches_emitted: u32 = 0;
 
-    while let Some((block_id, path_id)) = worklist.pop() {
-        if !visited.insert(block_id) {
+    while let Some((block_id, path_id, mut state)) = worklist.pop() {
+        let visit_count = visits.entry((block_id, path_id)).or_insert(0);
+        if *visit_count >= limits.max_loop_iters {
+            trace.truncated = true;
             continue;
         }
+        *visit_count += 1;
         let Some(block) = cfg.block(block_id) else {
             continue;
         };
         state.current_bb = block_id;
+        if let Some(existing) = incoming_states.get_mut(&block_id) {
+            if existing.merge_from(&state) {
+                state = existing.clone();
+                if !emit(
+                    StepKind::Merge,
+                    path_id,
+                    block.span,
+                    Precision::OverApproximate,
+                    "merge abstract state".into(),
+                    &mut trace,
+                    &mut next_step,
+                ) {
+                    return trace;
+                }
+            }
+        } else {
+            incoming_states.insert(block_id, state.clone());
+        }
 
         for event in &block.events {
+            apply_event(&mut state, event);
             let (kind, precision, message) = classify_event(event);
             if !emit(
                 kind,
@@ -196,7 +224,9 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
         match block.terminator {
             Terminator::Fallthrough | Terminator::LoopHeader => {
                 for successor in &block.successors {
-                    worklist.push((*successor, path_id));
+                    let mut successor_state = state.clone();
+                    successor_state.current_bb = *successor;
+                    worklist.push((*successor, path_id, successor_state));
                 }
             }
             Terminator::TryFork => {
@@ -211,6 +241,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
                 if !push_branch_successors(
                     &block.successors,
                     path_id,
+                    &state,
                     &mut next_path,
                     &mut worklist,
                     &mut trace,
@@ -238,6 +269,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
                 if !push_branch_successors(
                     &block.successors,
                     path_id,
+                    &state,
                     &mut next_path,
                     &mut worklist,
                     &mut trace,
@@ -251,12 +283,16 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
             // before the path reaches function exit.
             Terminator::Return | Terminator::Throw => {
                 for successor in &block.successors {
-                    worklist.push((*successor, path_id));
+                    let mut successor_state = state.clone();
+                    successor_state.current_bb = *successor;
+                    worklist.push((*successor, path_id, successor_state));
                 }
             }
             Terminator::Break | Terminator::Continue => {
                 for successor in &block.successors {
-                    worklist.push((*successor, path_id));
+                    let mut successor_state = state.clone();
+                    successor_state.current_bb = *successor;
+                    worklist.push((*successor, path_id, successor_state));
                 }
             }
             Terminator::Unreachable => {}
@@ -264,6 +300,101 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
     }
 
     trace
+}
+
+fn apply_event(state: &mut ExecState, event: &FlowEvent) {
+    match event {
+        FlowEvent::Assign {
+            target,
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            ..
+        } => {
+            let value = assignment_value(
+                state,
+                source_name.as_deref(),
+                source_call.as_deref(),
+                source_call_args,
+                source_names,
+            );
+            state.locals.insert(target.clone(), value);
+        }
+        FlowEvent::Throw {
+            value_name: Some(name),
+            ..
+        }
+        | FlowEvent::Return {
+            value_name: Some(name),
+            ..
+        }
+        | FlowEvent::Await {
+            value_name: Some(name),
+            ..
+        } => {
+            let value = value_from_text(state, name);
+            state.locals.insert(name.clone(), value);
+        }
+        _ => {}
+    }
+}
+
+fn assignment_value(
+    state: &ExecState,
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+    source_call_args: &[String],
+    source_names: &[String],
+) -> AbstractValue {
+    if let Some(name) = source_name {
+        return value_from_text(state, name);
+    }
+    if !source_names.is_empty() {
+        return join_values(source_names.iter().map(|name| value_from_text(state, name)));
+    }
+    if !source_call_args.is_empty() {
+        return join_values(source_call_args.iter().map(|arg| value_from_text(state, arg)));
+    }
+    if let Some(call) = source_call {
+        return AbstractValue::Unknown.join(value_from_text(state, call));
+    }
+    AbstractValue::Unknown
+}
+
+fn join_values(values: impl IntoIterator<Item = AbstractValue>) -> AbstractValue {
+    values
+        .into_iter()
+        .reduce(AbstractValue::join)
+        .unwrap_or(AbstractValue::Unknown)
+}
+
+fn value_from_text(state: &ExecState, raw: &str) -> AbstractValue {
+    let text = raw.trim();
+    if text.is_empty() {
+        return AbstractValue::Unknown;
+    }
+    if let Some(value) = state.locals.get(text) {
+        return value.clone();
+    }
+    match text {
+        "true" | "True" => return AbstractValue::ConstBool(true),
+        "false" | "False" => return AbstractValue::ConstBool(false),
+        "null" | "nil" | "None" => return AbstractValue::Null,
+        _ => {}
+    }
+    if let Ok(value) = text.parse::<i64>() {
+        return AbstractValue::ConstInt(value);
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0] as char;
+        let last = bytes[bytes.len() - 1] as char;
+        if matches!(first, '"' | '\'' | '`') && first == last {
+            return AbstractValue::ConstString(text[1..text.len() - 1].to_string());
+        }
+    }
+    AbstractValue::Unknown
 }
 
 /// Map a [`FlowEvent`] variant onto the interpreter's step vocabulary.
@@ -312,5 +443,111 @@ fn flow_event_span(event: &FlowEvent) -> Span {
         | FlowEvent::Defer { span, .. }
         | FlowEvent::Using { span, .. }
         | FlowEvent::Lifecycle { span, .. } => *span,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bonsai_cfg::{BasicBlock, Cfg, Terminator};
+    use bonsai_common::{BasicBlockId, FileId};
+
+    fn span(start: u64, end: u64) -> Span {
+        Span::new(FileId::new(1), start, end)
+    }
+
+    fn assign(span: Span, target: &str, source_name: &str) -> FlowEvent {
+        FlowEvent::Assign {
+            span,
+            target: target.to_string(),
+            source_name: Some(source_name.to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+        }
+    }
+
+    fn block(
+        id: u32,
+        label: &str,
+        events: Vec<FlowEvent>,
+        successors: Vec<u32>,
+        terminator: Terminator,
+    ) -> BasicBlock {
+        BasicBlock {
+            id: BasicBlockId::new(id),
+            label: label.to_string(),
+            synthetic_kind: None,
+            events,
+            successors: successors.into_iter().map(BasicBlockId::new).collect(),
+            terminator,
+            span: span(u64::from(id), u64::from(id + 1)),
+        }
+    }
+
+    #[test]
+    fn run_entry_merges_branch_states_at_join_blocks() {
+        let cfg = Cfg {
+            function: "handle".to_string(),
+            entry: BasicBlockId::new(0),
+            exit: BasicBlockId::new(3),
+            blocks: vec![
+                block(0, "entry", Vec::new(), vec![1, 2], Terminator::Branch),
+                block(
+                    1,
+                    "then",
+                    vec![assign(span(10, 11), "x", "1")],
+                    vec![3],
+                    Terminator::Fallthrough,
+                ),
+                block(
+                    2,
+                    "else",
+                    vec![assign(span(20, 21), "x", "2")],
+                    vec![3],
+                    Terminator::Fallthrough,
+                ),
+                block(
+                    3,
+                    "join",
+                    vec![assign(span(30, 31), "y", "x")],
+                    Vec::new(),
+                    Terminator::Fallthrough,
+                ),
+            ],
+        };
+
+        let trace = run_entry(FuncId::new(7), &cfg, TraceLimits::default());
+
+        assert!(
+            trace.steps.iter().any(|step| step.kind == StepKind::Merge),
+            "abstract interpretation must join incoming branch states instead of dropping the second path"
+        );
+        assert!(
+            trace
+                .steps
+                .iter()
+                .filter(|step| step.kind == StepKind::Assign && step.message == "assign y")
+                .count()
+                >= 1,
+            "join block should still execute after state merge"
+        );
+    }
+
+    #[test]
+    fn exec_state_merge_uses_abstract_value_join() {
+        let mut left = ExecState::new(FuncId::new(1), BasicBlockId::new(0));
+        left.locals.insert("x".to_string(), AbstractValue::ConstInt(1));
+        let mut right = ExecState::new(FuncId::new(1), BasicBlockId::new(0));
+        right.locals.insert("x".to_string(), AbstractValue::ConstInt(2));
+
+        assert!(left.merge_from(&right));
+        assert_eq!(
+            left.locals.get("x"),
+            Some(&AbstractValue::Set(vec![
+                AbstractValue::ConstInt(1),
+                AbstractValue::ConstInt(2)
+            ]))
+        );
     }
 }

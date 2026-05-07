@@ -48,7 +48,7 @@
 //!     `extract_param_annotations`.
 //!
 //! Each section can become its own file (`kit/walker.rs`, `kit/branch_repair.rs`, ...)
-//! when the deeper Phase 8 work proceeds. Pure-data items (`GENERIC_HANDLER`,
+//! during normal maintenance. Pure-data items (`GENERIC_HANDLER`,
 //! `COMMON_CALL_KINDS`) and `pub` re-exports stay at the top level.
 
 mod branch_repair;
@@ -1846,6 +1846,42 @@ fn append_tail_expression_return(
     });
 }
 
+fn append_expression_body_return(events: &mut Vec<FlowEvent>, body: &Node<'_>, file: FileId, src: &[u8]) {
+    let text = node_text(body, src).trim().to_string();
+    if text.is_empty() || text.ends_with(';') {
+        return;
+    }
+    let span = span_of(file, body);
+    if events
+        .iter()
+        .any(|event| matches!(event, FlowEvent::Return { span: existing, .. } if *existing == span))
+    {
+        return;
+    }
+    events.push(FlowEvent::Return {
+        span,
+        value_text: Some(text),
+        value_name: tail_expression_value_name(body, src),
+    });
+}
+
+fn body_has_implicit_return(body: &Node<'_>, handler: &GrammarHandler) -> bool {
+    let kind = body.kind();
+    if handler.is_return(kind) || handler.is_throw(kind) || handler.is_assignment(kind) {
+        return false;
+    }
+    !matches!(
+        kind,
+        "block"
+            | "statement_block"
+            | "compound_statement"
+            | "function_body"
+            | "body_statement"
+            | "declaration_list"
+            | "program"
+    )
+}
+
 fn last_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).last()
@@ -2140,6 +2176,7 @@ fn build_call_event(
                 span: span_of(file, &arg),
                 name,
                 place: argument_place(&value_node, src),
+                source_names: extract_rhs_expr_operands(&value_node, src),
                 value_text,
             });
         }
@@ -2157,6 +2194,7 @@ fn build_call_event(
             span: span_of(file, arg),
             name: None,
             place: argument_place(&inner, src),
+            source_names: extract_rhs_expr_operands(&inner, src),
             value_text,
         });
     }
@@ -2176,6 +2214,7 @@ fn build_call_event(
                     span: span_of(file, &arg),
                     name: None,
                     place: argument_place(&arg, src),
+                    source_names: extract_rhs_expr_operands(&arg, src),
                     value_text,
                 });
             }
@@ -2208,6 +2247,7 @@ fn build_call_event(
                                 span: span_of(file, &child),
                                 name: None,
                                 place: argument_place(&child, src),
+                                source_names: extract_rhs_expr_operands(&child, src),
                                 value_text,
                             });
                         }
@@ -2262,7 +2302,6 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
     ];
     let mut out: Vec<String> = Vec::new();
     out.extend(qualified_accesses_from_text(node_text(node, src)));
-    let mut cursor = node.walk();
     let mut stack: Vec<Node<'_>> = vec![*node];
     while let Some(n) = stack.pop() {
         // Avoid descending into nested CALL sites — those are handled
@@ -2295,11 +2334,168 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
                 }
             }
         }
-        for child in n.named_children(&mut cursor) {
+        let mut child_cursor = n.walk();
+        for child in n.named_children(&mut child_cursor) {
             stack.push(child);
         }
     }
+    let value_bearing_text = strip_value_free_operator_operands(node_text(node, src));
+    out.retain(|operand| operand_occurs_in_value_bearing_text(&value_bearing_text, operand));
     out
+}
+
+fn strip_value_free_operator_operands(text: &str) -> String {
+    const PAREN_OPERATORS: &[&str] = &[
+        "sizeof",
+        "_Alignof",
+        "alignof",
+        "__alignof__",
+        "__typeof__",
+        "typeof",
+        "nameof",
+    ];
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        if let Some(operator) = value_free_operator_at(text, cursor, PAREN_OPERATORS) {
+            let mut after = cursor + operator.len();
+            if operator == "sizeof" && text[after..].starts_with("...") {
+                after += 3;
+            }
+            let after_ws = skip_ascii_ws(text, after);
+            if text[after_ws..].starts_with('(') {
+                out.push_str(operator);
+                out.push(' ');
+                cursor = skip_balanced_paren_text(text, after_ws);
+                continue;
+            }
+            if operator == "sizeof" || operator == "typeof" {
+                out.push_str(operator);
+                out.push(' ');
+                cursor = skip_unary_operand_text(text, after_ws);
+                continue;
+            }
+        }
+        let ch = text[cursor..].chars().next().expect("valid char boundary");
+        out.push(ch);
+        cursor += ch.len_utf8();
+    }
+    out
+}
+
+fn operand_occurs_in_value_bearing_text(text: &str, operand: &str) -> bool {
+    let operand = operand.trim();
+    if operand.is_empty() {
+        return false;
+    }
+    contains_identifier_operand(text, operand)
+        || operand.trim_start_matches(['$', '@', '%']).ne(operand)
+            && contains_identifier_operand(text, operand.trim_start_matches(['$', '@', '%']))
+}
+
+fn contains_identifier_operand(text: &str, operand: &str) -> bool {
+    if operand.is_empty() {
+        return false;
+    }
+    let mut search_from = 0usize;
+    while let Some(relative) = text[search_from..].find(operand) {
+        let start = search_from + relative;
+        let end = start + operand.len();
+        let before_ok =
+            start == 0 || is_identifier_operand_left_boundary(text.as_bytes()[start - 1], operand);
+        let after_ok = text
+            .as_bytes()
+            .get(end)
+            .is_none_or(|byte| !is_ident_continue_byte(*byte));
+        if before_ok && after_ok {
+            return true;
+        }
+        search_from = end;
+    }
+    false
+}
+
+fn is_identifier_operand_left_boundary(byte: u8, operand: &str) -> bool {
+    if !is_ident_continue_byte(byte) {
+        return true;
+    }
+    // Parser-surfaced interpolation operands in languages such as
+    // Kotlin appear in source as `$name`, while the AST child text is
+    // `name`. The sigil is expression punctuation, not part of the
+    // runtime identifier value. Keep this adapter fact without opening
+    // substring matches inside normal identifier text.
+    matches!(byte, b'$' | b'@' | b'%') && !operand.as_bytes().starts_with(&[byte])
+}
+
+fn value_free_operator_at<'a>(text: &str, offset: usize, operators: &'a [&'a str]) -> Option<&'a str> {
+    operators.iter().copied().find(|operator| {
+        text[offset..].starts_with(operator)
+            && (offset == 0 || !is_ident_continue_byte(text.as_bytes()[offset - 1]))
+            && text
+                .as_bytes()
+                .get(offset + operator.len())
+                .is_none_or(|byte| !is_ident_continue_byte(*byte))
+    })
+}
+
+fn skip_ascii_ws(text: &str, mut offset: usize) -> usize {
+    while let Some(byte) = text.as_bytes().get(offset) {
+        if !byte.is_ascii_whitespace() {
+            break;
+        }
+        offset += 1;
+    }
+    offset
+}
+
+fn skip_balanced_paren_text(text: &str, open_pos: usize) -> usize {
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    let mut depth = 0isize;
+    let bytes = text.as_bytes();
+    let mut idx = open_pos;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == q {
+                quote = None;
+            }
+            idx += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            quote = Some(byte);
+            idx += 1;
+            continue;
+        }
+        if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return idx + 1;
+            }
+        }
+        idx += 1;
+    }
+    text.len()
+}
+
+fn skip_unary_operand_text(text: &str, offset: usize) -> usize {
+    let mut idx = offset;
+    while idx < text.len() {
+        let byte = text.as_bytes()[idx];
+        if byte.is_ascii_whitespace() || matches!(byte, b',' | b')' | b']' | b'}' | b'+' | b'-' | b'*' | b'/')
+        {
+            break;
+        }
+        idx += 1;
+    }
+    idx
 }
 
 /// Pull every dotted/arrow qualified access out of an arbitrary text
@@ -2798,10 +2994,10 @@ fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) ->
 /// languages), `'...'` (Python/Ruby/PHP/Perl/Lua/etc.) and
 /// `` `...` `` (template literals in JS/TS/Scala, raw strings in
 /// Go). f-string / template-literal interpolation is intentionally
-/// NOT walked here — interpolated identifiers are the adapter's
-/// job to surface via dedicated AST handling, and the engine has
-/// `text_contains_interpolation` for f-string text-fallback that
-/// uses `${name}` / `#{name}` markers explicitly.
+/// NOT walked here — interpolated identifiers are surfaced from real
+/// AST children by `extract_rhs_expr_operands` and attached to
+/// assignment or call-argument `source_names`. The taint engine does
+/// not parse interpolation syntax out of raw string text.
 fn identifier_tokens_from_text(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
@@ -3196,6 +3392,7 @@ pub fn decl_index_with_handler(
     // Pass 2: function-like declarations.
     let fn_nodes = collect_kinds(&tree, handler.fn_kinds);
     let mut defs: Vec<crate::Decl> = Vec::new();
+    let mut function_parent_spans: Vec<(bonsai_common::SymbolId, bonsai_common::Span)> = Vec::new();
     let mut next: u32 = 0;
     for node in fn_nodes {
         // Elixir-specific: `def foo(x) do ... end` parses as a `call`
@@ -3303,9 +3500,12 @@ pub fn decl_index_with_handler(
                 let p_sib = parent.next_named_sibling()?;
                 matches!(p_sib.kind(), "function_body" | "block" | "body_statement").then_some(p_sib)
             });
+        let body_implicit_returns = body_node.is_some_and(|b| body_has_implicit_return(&b, handler));
         let mut flow_events = if let Some(b) = body_node {
             let mut events = walk_flow_events(b, file, src, handler, &class_names);
-            if handler.tail_expression_returns {
+            if body_implicit_returns {
+                append_expression_body_return(&mut events, &b, file, src);
+            } else if handler.tail_expression_returns {
                 append_tail_expression_return(&mut events, &b, file, src, handler);
             }
             events
@@ -3361,8 +3561,12 @@ pub fn decl_index_with_handler(
         let receiver_state_sources =
             collect_receiver_state_sources(&flow_events, &params, handler.implicit_receiver_names);
 
+        let parent_class_span = nearest_class_owner_span(&node, handler).map(|class| span_of(file, &class));
         let symbol = bonsai_common::SymbolId::new(next);
         next += 1;
+        if let Some(parent_span) = parent_class_span {
+            function_parent_spans.push((symbol, parent_span));
+        }
         defs.push(crate::Decl {
             symbol,
             kind: decl_kind,
@@ -3375,6 +3579,7 @@ pub fn decl_index_with_handler(
             parent: None,
             body_span: body_node.map_or_else(|| Some(span_of(file, &node)), |b| Some(span_of(file, &b))),
             flow_events,
+            has_implicit_returns: handler.tail_expression_returns || body_implicit_returns,
             params,
             param_annotations,
             type_aliases: Vec::new(),
@@ -3432,8 +3637,15 @@ pub fn decl_index_with_handler(
             .or_else(|| first_named_child_of_kind(&lambda, "block"))
             .or_else(|| first_named_child_of_kind(&lambda, "compound_statement"))
             .or_else(|| first_named_child_of_kind(&lambda, "statement_block"));
+        let body_implicit_returns = body_node.is_some_and(|b| body_has_implicit_return(&b, handler));
         let flow_events = if let Some(b) = body_node {
-            walk_flow_events(b, file, src, handler, &class_names)
+            let mut events = walk_flow_events(b, file, src, handler, &class_names);
+            if body_implicit_returns {
+                append_expression_body_return(&mut events, &b, file, src);
+            } else if handler.tail_expression_returns {
+                append_tail_expression_return(&mut events, &b, file, src, handler);
+            }
+            events
         } else {
             Vec::new()
         };
@@ -3454,6 +3666,7 @@ pub fn decl_index_with_handler(
             parent: None,
             body_span: body_node.map(|b| span_of(file, &b)),
             flow_events,
+            has_implicit_returns: handler.tail_expression_returns || body_implicit_returns,
             params,
             param_annotations: Vec::new(),
             type_aliases: Vec::new(),
@@ -3499,6 +3712,7 @@ pub fn decl_index_with_handler(
             parent: None,
             body_span: Some(span_of(file, cnode)),
             flow_events: Vec::new(),
+            has_implicit_returns: false,
             params: Vec::new(),
             param_annotations: Vec::new(),
             type_aliases: Vec::new(),
@@ -3510,19 +3724,14 @@ pub fn decl_index_with_handler(
         });
     }
 
-    for decl in &mut defs {
-        if !matches!(
-            decl.kind,
-            crate::DeclKind::Function | crate::DeclKind::Method | crate::DeclKind::Constructor
-        ) || decl.parent.is_some()
-        {
-            continue;
-        }
-        if let Some((_, class_symbol, _)) = class_infos
+    for (function_symbol, parent_span) in function_parent_spans {
+        let Some((_, class_symbol, _)) = class_infos
             .iter()
-            .filter(|(_, _, class_span)| span_contains(*class_span, decl.span))
-            .min_by_key(|(_, _, class_span)| class_span.end.saturating_sub(class_span.start))
-        {
+            .find(|(_, _, class_span)| *class_span == parent_span)
+        else {
+            continue;
+        };
+        if let Some(decl) = defs.iter_mut().find(|decl| decl.symbol == function_symbol) {
             decl.parent = Some(*class_symbol);
         }
     }
@@ -3561,6 +3770,7 @@ pub fn decl_index_with_handler(
             parent: None,
             body_span: Some(module_span),
             flow_events: root_events,
+            has_implicit_returns: false,
             params: Vec::new(),
             param_annotations: Vec::new(),
             type_aliases: Vec::new(),
@@ -6128,6 +6338,7 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
                         span: span_of(file, &arg),
                         name,
                         place: argument_place(&value_node, src),
+                        source_names: extract_rhs_expr_operands(&value_node, src),
                         value_text,
                     });
                     continue;
@@ -6140,6 +6351,7 @@ fn build_dart_selector_call_event(node: Node<'_>, file: FileId, src: &[u8]) -> O
                     span: span_of(file, &arg),
                     name: None,
                     place: argument_place(&arg, src),
+                    source_names: extract_rhs_expr_operands(&arg, src),
                     value_text,
                 });
             }
@@ -6378,6 +6590,21 @@ fn anonymous_struct_typedef_name<'tree>(node: &Node<'tree>) -> Option<Node<'tree
         if child.kind() == "type_identifier" || child.kind() == "identifier" {
             return Some(child);
         }
+    }
+    None
+}
+
+fn nearest_class_owner_span<'tree>(node: &Node<'tree>, handler: &GrammarHandler) -> Option<Node<'tree>> {
+    let mut parent = node.parent();
+    while let Some(candidate) = parent {
+        let kind = candidate.kind();
+        if handler.class_kinds.contains(&kind) {
+            return Some(candidate);
+        }
+        if handler.fn_kinds.contains(&kind) || handler.lambda_kinds.contains(&kind) {
+            return None;
+        }
+        parent = candidate.parent();
     }
     None
 }

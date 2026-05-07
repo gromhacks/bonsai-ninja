@@ -27,18 +27,17 @@ use super::{
     looks_like_identifier, node_text,
 };
 
-/// Extract the bare-identifier name of the value being returned.
-/// `return x` → `Some("x")`. `return f(y)` / `return x + y` /
-/// `return obj.field` → `None` (the interprocedural summary reads
-/// the preceding `Assign` / `Call` / `Ref` events in the function
-/// body to track compound-expression return flow). Used to
-/// compute ground-truth return taint instead of the reachability
-/// heuristic in `compute_function_summary`.
+/// Extract the single value-bearing identifier of the value being
+/// returned when the adapter can determine one precisely.
+/// `return x` and `return `${x}`` → `Some("x")`; multi-operand
+/// expressions such as `return x + y` remain `None`.
 pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
     // Try the textual fallback first — works on grammars that don't
     // expose a value field at all.
     if let Some(value_text) = return_statement_value_text(node, src) {
-        return looks_like_bare_identifier(&value_text).then_some(value_text);
+        if looks_like_bare_identifier(&value_text) {
+            return Some(value_text);
+        }
     }
     let value_node = return_value_node(node)?;
     let value_kind = value_node.kind();
@@ -54,6 +53,10 @@ pub fn extract_return_value_name(node: &Node<'_>, src: &[u8]) -> Option<String> 
     ) {
         let unwrapped = first_identifier_like_child(&value_node)?;
         return Some(node_text(&unwrapped, src).trim().to_string());
+    }
+    let operands = super::extract_rhs_expr_operands(&value_node, src);
+    if operands.len() == 1 {
+        return operands.into_iter().next();
     }
     None
 }

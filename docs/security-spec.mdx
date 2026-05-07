@@ -92,6 +92,8 @@ Recent capability promotions unblock several rule families:
 
 Scope qualifiers `in_class` and `in_method` consult `Decl.parent` and
 `Decl.bases`, so a class `WebSocketHandler` matches subclasses as well.
+`Decl.parent` is adapter-derived AST ownership; rule matching does not
+recover class membership from source-span containment.
 
 ## Constraints
 
@@ -157,10 +159,14 @@ Structured attribute rules match exact API paths or semantic receiver
 types. `[Eta, render]` matches `Eta.render(...)`; `engine.render(...)`
 matches only when adapter facts prove `engine` has receiver type `Eta`.
 
-Rules that intentionally use receiver-agnostic regexes for dynamic APIs
-must declare adapter-visible `packages:`, `imports:`, or `modules:`. The
-matcher gates those regexes with the adapter-emitted `ImportIndex`, not
-substring matching on file text.
+Receiver/class-shaped rules that declare adapter-visible `packages:`,
+`imports:`, or `modules:` are gated at the call site. This includes
+receiver-agnostic regexes, typed attributes, and constructor-name rules.
+The matcher expands callee text, import aliases, declared receiver types,
+and receiver-type import aliases before comparing package signals. A
+file-wide import alone is not enough for those shapes to match. Exact
+global builtins such as `exec()` stay package-independent even when a
+merged compatibility alias lists package metadata.
 
 ## Finding lifecycle
 
@@ -204,11 +210,12 @@ The finding ID is stable: same source/sink/group/language → same ID
 across runs. SARIF and JSON outputs use the same ID.
 
 Security taint analysis builds an exact graph per matched source seed.
-The seed set comes from the source rule match and nearby adapter
-`FlowEvent` facts, then the engine records tainted call edges and terminal
-tainted calls. The cached workspace dataflow graph is still used by
-navigation and export surfaces, but source-to-sink findings and their
-rendered flow IDs come from this source-specific taint evidence.
+The seed set is selected from the per-function value-flow graph and
+augmented by strict nearby adapter `FlowEvent` facts. The engine then
+records tainted call edges and terminal tainted calls. The cached
+workspace dataflow graph is still used by navigation and export surfaces,
+but source-to-sink findings and their rendered flow IDs come from this
+source-specific taint evidence.
 
 ## Sanitizer credit
 

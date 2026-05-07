@@ -185,7 +185,11 @@ impl AnalyzerDb {
             return Some(v);
         }
         let adapter = self.adapter_for(file)?;
-        let value = Arc::new(self.adapter_context_with(|ctx| adapter.extract_declarations(file, ctx)));
+        let value = Arc::new(self.adapter_context_with(|ctx| {
+            let mut index = adapter.extract_declarations(file, ctx);
+            bonsai_lang_api::apply_call_receiver_types(&mut index);
+            index
+        }));
         let mut cache = self.inner.cache.write();
         // Re-check inside the write lock — a concurrent caller may
         // have inserted between our read and the upgrade. Use

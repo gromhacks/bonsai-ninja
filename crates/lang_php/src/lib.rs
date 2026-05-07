@@ -172,12 +172,261 @@ impl LanguageAdapter for PhpAdapter {
             },
         ];
         for decl in &mut idx.defs {
+            augment_php_qualified_source_names(&mut decl.flow_events, &source);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PHP_LIFECYCLE_TRANSITIONS);
         }
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+fn augment_php_qualified_source_names(events: &mut [FlowEvent], source: &str) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span, source_names, ..
+            } => {
+                if let Some(rhs) = php_assignment_rhs_text(source, *span) {
+                    for access in php_qualified_accesses(&rhs) {
+                        push_unique_source(source_names, access.clone());
+                        let bare = access.trim_start_matches(['$', '@', '%']).to_string();
+                        push_unique_source(source_names, bare);
+                    }
+                }
+            }
+            FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    for access in php_qualified_accesses(&arg.value_text) {
+                        if arg.place.is_none() {
+                            arg.place = Some(access.clone());
+                        }
+                        push_unique_source(&mut arg.source_names, access.clone());
+                        let bare = access.trim_start_matches(['$', '@', '%']).to_string();
+                        push_unique_source(&mut arg.source_names, bare);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_php_qualified_source_names(then_events, source);
+                augment_php_qualified_source_names(else_events, source);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_php_qualified_source_names(body, source);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_php_qualified_source_names(body, source);
+                augment_php_qualified_source_names(catch_events, source);
+                augment_php_qualified_source_names(finally_events, source);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn php_assignment_rhs_text(source: &str, span: Span) -> Option<String> {
+    let start = usize::try_from(span.start).ok()?.min(source.len());
+    let end = usize::try_from(span.end).ok()?.min(source.len());
+    if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    let statement = &source[start..end];
+    let (idx, separator_len) = find_php_assignment_separator(statement)?;
+    let rhs = statement[idx + separator_len..]
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    (!rhs.is_empty()).then(|| rhs.to_string())
+}
+
+fn find_php_assignment_separator(text: &str) -> Option<(usize, usize)> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut chars = text.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '=' if depth == 0 => {
+                let next = chars.peek().map(|(_, next)| *next);
+                if matches!(next, Some('=' | '>')) {
+                    continue;
+                }
+                return Some((idx, ch.len_utf8()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn php_qualified_accesses(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        if !matches!(ch, '$' | '@' | '%') {
+            continue;
+        }
+        let ident_start = idx + ch.len_utf8();
+        let mut ident_end = ident_start;
+        while let Some((next_idx, next_ch)) = chars.peek().copied() {
+            if next_ch == '_' || next_ch.is_ascii_alphanumeric() {
+                ident_end = next_idx + next_ch.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if ident_end == ident_start {
+            continue;
+        }
+        let mut access = text[idx..ident_end].to_string();
+        let mut cursor = ident_end;
+        let mut saw_field = false;
+        loop {
+            let rest = text[cursor..].trim_start();
+            let skipped_ws = text[cursor..].len() - rest.len();
+            cursor += skipped_ws;
+            if let Some(after_arrow) = text[cursor..].strip_prefix("->") {
+                cursor += 2;
+                let Some((field, end)) = php_access_field(after_arrow) else {
+                    break;
+                };
+                access.push('.');
+                access.push_str(&field);
+                cursor += end;
+                saw_field = true;
+                continue;
+            }
+            if text[cursor..].starts_with('[') {
+                let Some(close) = find_php_bracket_close(text, cursor) else {
+                    break;
+                };
+                let Some(field) = php_access_field_name(&text[cursor + 1..close]) else {
+                    break;
+                };
+                access.push('.');
+                access.push_str(&field);
+                cursor = close + 1;
+                saw_field = true;
+                continue;
+            }
+            break;
+        }
+        if saw_field {
+            push_unique_source(&mut out, access);
+        }
+        while chars.peek().is_some_and(|(next_idx, _)| *next_idx < cursor) {
+            chars.next();
+        }
+    }
+    out
+}
+
+fn php_access_field(text: &str) -> Option<(String, usize)> {
+    if text.starts_with('{') {
+        let close = find_php_bracket_close(text, 0)?;
+        let field = php_access_field_name(&text[1..close])?;
+        return Some((field, close + 1));
+    }
+    let mut end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (end > 0).then(|| (text[..end].to_string(), end))
+}
+
+fn php_access_field_name(text: &str) -> Option<String> {
+    let trimmed = text.trim().trim_matches(['"', '\'']);
+    (!trimmed.is_empty() && trimmed.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
+        .then(|| trimmed.to_string())
+}
+
+fn find_php_bracket_close(text: &str, open: usize) -> Option<usize> {
+    let open_ch = text[open..].chars().next()?;
+    let close_ch = match open_ch {
+        '[' => ']',
+        '{' => '}',
+        _ => return None,
+    };
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open) {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == open_ch {
+            depth += 1;
+        } else if ch == close_ch {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn push_unique_source(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
     }
 }
 
@@ -369,6 +618,7 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
                                 name: None,
                                 value_text: text,
                                 place: None,
+                                source_names: Vec::new(),
                             });
                         }
                     }
@@ -387,6 +637,7 @@ fn synthesize_php_construct_events(tree: &Tree, src: &[u8], file: FileId) -> Vec
                             name: None,
                             value_text: text,
                             place: None,
+                            source_names: Vec::new(),
                         });
                         // include/require has exactly one argument.
                         break;

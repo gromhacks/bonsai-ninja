@@ -5,7 +5,7 @@
 //! fact-level tests would miss.
 
 use super::*;
-use bonsai_common::FileId;
+use bonsai_common::{FileId, SymbolId};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_resolve::resolve_callable;
@@ -76,8 +76,60 @@ fn arg(index: u64, text: &str, place: Option<&str>) -> bonsai_lang_api::CallArg 
         span: Span::new(FileId::new(0), index, index + 1),
         name: None,
         place: place.map(str::to_string),
+        source_names: Vec::new(),
         value_text: text.to_string(),
     }
+}
+
+fn summary_decl(flow_events: Vec<FlowEvent>, has_implicit_returns: bool) -> Decl {
+    let span = Span::new(FileId::new(0), 0, 10);
+    Decl {
+        symbol: SymbolId::new(1),
+        kind: DeclKind::Function,
+        name: "helper".to_string(),
+        qualified_name: None,
+        module_path: ModulePath::default(),
+        span,
+        name_span: span,
+        visibility: bonsai_lang_api::Visibility::Public,
+        parent: None,
+        body_span: Some(span),
+        flow_events,
+        has_implicit_returns,
+        params: vec!["input".to_string()],
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: Vec::new(),
+        receiver_state_sources: Vec::new(),
+    }
+}
+
+#[test]
+fn terminal_assign_return_taint_requires_adapter_implicit_return_fact() {
+    let flow_events = vec![FlowEvent::Assign {
+        span: Span::new(FileId::new(0), 1, 2),
+        target: "out".to_string(),
+        source_name: Some("input".to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+    }];
+
+    let explicit_only = compute_function_summary(&summary_decl(flow_events.clone(), false));
+    assert!(
+        explicit_only.returns_taint_of.is_empty(),
+        "ordinary languages must not treat a terminal assignment as an implicit return"
+    );
+
+    let implicit_tail = compute_function_summary(&summary_decl(flow_events, true));
+    assert_eq!(
+        implicit_tail.returns_taint_of,
+        vec![0],
+        "tail-expression languages can propagate taint through terminal expression evidence"
+    );
 }
 
 #[test]
@@ -117,19 +169,23 @@ fn clean_output_call_overwrite_only_clears_when_value_inputs_are_clean() {
 }
 
 #[test]
-fn dollar_interpolation_requires_identifier_boundary() {
+fn call_arg_taint_uses_adapter_source_names_for_interpolation_operands() {
     let state = seed(&["$c"]);
     assert!(arg_text_is_tainted("$c", &state));
-    assert!(arg_text_is_tainted("\"prefix $c suffix\"", &state));
-    assert!(arg_text_is_tainted("\"prefix ${c} suffix\"", &state));
+    assert!(
+        !arg_text_is_tainted("\"prefix $c suffix\"", &state),
+        "raw string text is not parsed for interpolation by the engine"
+    );
+    let mut interpolated = arg(0, "\"prefix $c suffix\"", None);
+    interpolated.source_names = vec!["$c".to_string()];
+    assert!(call_arg_is_tainted(&interpolated, &state));
     assert!(
         !arg_text_is_tainted("$cap", &state),
         "$c must not taint a distinct sigil variable whose name only shares a prefix"
     );
-    assert!(
-        !arg_text_is_tainted("\"prefix $cap suffix\"", &state),
-        "$c must not match an interpolation of $cap"
-    );
+    let mut different = arg(1, "\"prefix $cap suffix\"", None);
+    different.source_names = vec!["$cap".to_string()];
+    assert!(!call_arg_is_tainted(&different, &state));
 }
 
 #[test]
@@ -146,6 +202,7 @@ fn configured_sanitizer_call_does_not_clear_reference_prefixes_in_inter_transfer
             name: None,
             value_text: "&mut cmd".to_string(),
             place: Some("cmd".to_string()),
+            source_names: Vec::new(),
         }],
     };
     let mut state = seed(&["cmd"]);
@@ -567,6 +624,7 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
                 span: sink_span,
                 name: None,
                 place: None,
+                source_names: Vec::new(),
                 value_text: "full_cmd".to_string(),
             }],
         },

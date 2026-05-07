@@ -6,12 +6,12 @@ description: "Optional Decl fields populated by each language adapter and what p
 # Adapter Decl-field population
 
 Which **optional** `Decl` struct fields each language adapter
-populates. None of these fields are required for taint analysis to
-run — the engine works on every supported language without them.
-They're precision boosters: when an adapter fills the field, the
-resolver can narrow virtual edges, the taint engine can credit cross-
-method writes, etc., producing higher-confidence findings on a few
-specific rule shapes.
+populates. Core taint propagation runs on every supported language, but
+semantic receiver dispatch, inheritance, and class-scoped rules depend on
+these fields being present. They are not cosmetic: when an adapter fills
+the field, the resolver can narrow virtual edges, the taint engine can
+credit cross-method writes, and rule matching can avoid receiver-name
+heuristics.
 
 ## TL;DR
 
@@ -20,8 +20,8 @@ specific rule shapes.
 - The table below tracks **eight optional** fields. Most adapters
   fill some of them and leave the rest unpopulated.
 - A `—` cell means *the language has the construct, but the adapter
-  doesn't yet populate the field*. That's a precision-improvement
-  backlog item, not a bug.
+  doesn't yet populate the field*. Treat it as a real precision backlog
+  item.
 - An `n/a` cell means *the language has no equivalent construct*
   (e.g. Erlang has no class hierarchy → no `bases`). Filling it
   wouldn't make sense.
@@ -35,27 +35,27 @@ in `COVERAGE_BASELINE.md`.
 > **Reading this alongside [`TAINT_COVERAGE_MATRIX.md`](../TAINT_COVERAGE_MATRIX.md)?**
 > The taint matrix shows every applicable scenario × language cell as
 > `pass` — that's behavioural truth from real engine tests. A `—` in
-> the table below does NOT mean a taint scenario fails; it means the
-> adapter hasn't wired this *optional* field yet, so the engine falls
-> back to a slightly wider candidate set (more `OverApproximate`
-> findings, never wrong findings). Both views are correct
-> simultaneously.
+> the table below means receiver/class-specific rules may lose precision
+> for that language until the adapter emits the missing semantic fact.
 
 ## What each field powers
 
 | Field | What it enables | If empty |
 |---|---|---|
 | `Visibility` | Resolver filters out private callees from foreign modules. | All decls treated as `Public` — wider candidate set, more `OverApproximate` edges. |
-| `type_aliases` | Resolver matches `MyTypedef` to the underlying class for receiver dispatch. | Calls through typedefs degrade to `Narrowed` precision. |
-| `receiver_types` | Shared index pass copies semantic receiver type facts onto `FlowEvent::Call` so callgraph, taint, and rules consume the same evidence. | `[Type, method]` rules fall back to alias derivation or broader matching. |
-| `bases` | Cross-class virtual dispatch narrows when the receiver type is known. | Dispatch falls back to name-only resolution → wider candidate set. |
+| `type_aliases` | Resolver matches `MyTypedef` to the underlying class for receiver dispatch. | Calls through typedefs may not resolve to receiver-typed rules. |
+| `receiver_types` | Shared DB/index pass copies semantic receiver type facts onto `FlowEvent::Call` so callgraph, taint, rules, inspect, browse, and export consume the same evidence. | `[Type, method]` rules require another semantic fact or do not match. |
+| `bases` | Cross-class virtual dispatch narrows when the receiver type is known. | Parent/interface rules and inherited dispatch may not match. |
 | `receiver_field_writes` | G3 cross-method field-taint inheritance: `def m1(x): self.f = x` → `def m2(): use(self.f)` propagates taint. | Field-aliased flows aren't crossed; intra-method propagation still works. |
+| `has_implicit_returns` | Return summaries can use terminal-tail evidence only for real expression-return body forms. | Terminal assignments are never treated as returns; expression-bodied helpers may need explicit `Return` events. |
 | `param_annotations` | Synthetic-source inference: `@route("/api")` on a Flask handler treats the params as remote sources without an explicit YAML rule. | Inferred sources need explicit rules instead. |
 | `export_aliases` | CommonJS resolver credits `module.exports = X` to the module's public surface. | `require()` consumers don't see the assignments. |
 | `super_dispatch` | `super.foo()` resolves precisely to the parent class's `foo`. | Falls back to name-only resolution. |
 
-**None of these gate taint analysis.** They all affect *precision* of
-findings, not whether the engine can analyse the language.
+These fields do not gate basic taint propagation, but they do gate
+semantic receiver/class precision. `has_implicit_returns` gates return
+summary precision. Do not replace these fields with receiver-name,
+language-name, or span-containment workarounds.
 
 ## Capability matrix
 

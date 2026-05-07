@@ -2,9 +2,9 @@
 //! `security-patterns/` tree.
 
 use bonsai_security::{
-    load_rulepack, match_rule_against_facts, match_rules_against_facts,
+    load_rulepack, match_rule_against_facts,
     rule::{MatchKind, RuleKind},
-    run_taint_analysis, ConstraintKind, Rule, TaintAnalysisOptions,
+    run_taint_analysis, Rule, TaintAnalysisOptions,
 };
 use rayon::prelude::*;
 use std::collections::BTreeSet;
@@ -41,17 +41,6 @@ fn example_workspace(language: &str, path: Option<&str>, code: &str) -> bonsai_w
         let _ = ws.db().import_index(file);
     }
     ws
-}
-
-fn rule_uses_taint_dependent_constraint(rule: &Rule) -> bool {
-    rule.constraints.iter().any(|constraint| {
-        matches!(
-            constraint,
-            ConstraintKind::ArgTainted { .. }
-                | ConstraintKind::AnyArgTainted { .. }
-                | ConstraintKind::ReceiverTainted { .. }
-        )
-    })
 }
 
 fn documented_sink_tags() -> BTreeSet<&'static str> {
@@ -1206,106 +1195,31 @@ fn shipped_rules_do_not_use_receiver_name_constraints() {
 #[test]
 fn declared_rule_match_examples_fire() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    // Flatten the (rule, example) work upfront so rayon can balance
-    // across all examples, not just rules — some rules carry many
-    // examples while others carry one. Disabled rules' examples are
-    // aspirational documentation, not live contract; skip those.
-    let work: Vec<(&Rule, &bonsai_security::rule::RuleMatchExample)> = pack
-        .all_rules()
-        .into_iter()
-        .filter(|rule| rule.enabled)
-        .flat_map(|rule| rule.match_examples.iter().map(move |ex| (rule, ex)))
-        .collect();
-    let example_count = work.len();
-    let failures: Vec<String> = work
-        .par_iter()
-        .filter_map(|(rule, example)| {
-            if example.expect_no_match || rule_uses_taint_dependent_constraint(rule) {
-                return None;
-            }
-            let ws = example_workspace(&rule.language, example.path.as_deref(), &example.code);
-            let matches = match_rule_against_facts(&ws, rule);
-            if matches.is_empty() {
-                return Some(format!(
-                    "{} example `{}` produced no matches",
-                    rule.id,
-                    example.name.as_deref().unwrap_or("<unnamed>")
-                ));
-            }
-            for expected in &example.expect_match_text {
-                if !matches.iter().any(|m| m.match_text == *expected) {
-                    let got = matches
-                        .iter()
-                        .map(|m| m.match_text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Some(format!(
-                        "{} example `{}` expected match_text `{expected}`, got [{got}]",
-                        rule.id,
-                        example.name.as_deref().unwrap_or("<unnamed>")
-                    ));
-                }
-            }
-            None
-        })
-        .collect();
-
-    assert!(example_count > 0, "rulepack must include YAML match_examples");
-    assert!(
-        failures.is_empty(),
-        "rule match_examples drifted from adapter facts:\n{}",
-        failures.join("\n")
+    let report = bonsai_security::validate_pack(
+        &pack,
+        &bonsai_security::PackInventoryOptions::default(),
+        bonsai_adapters::all_languages_registry(),
     );
+    assert!(
+        report.enabled_example_count > 0,
+        "rulepack must include YAML match_examples"
+    );
+    assert_eq!(report.errors, 0, "validator errors: {:#?}", report.issues);
 }
 
 #[test]
 fn enabled_rule_match_examples_do_not_collide() {
     let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
-    let rules = pack.all_rules();
-    let enabled_rules: Vec<_> = rules.iter().copied().filter(|rule| rule.enabled).collect();
-    let mut collisions = Vec::new();
-    let mut example_count = 0usize;
-
-    for owner in &enabled_rules {
-        let peer_rules: Vec<_> = enabled_rules
-            .iter()
-            .copied()
-            .filter(|candidate| candidate.language == owner.language && candidate.kind == owner.kind)
-            .collect();
-        for example in &owner.match_examples {
-            example_count += 1;
-            if example.expect_no_match || rule_uses_taint_dependent_constraint(owner) {
-                continue;
-            }
-            let ws = example_workspace(&owner.language, example.path.as_deref(), &example.code);
-            let matches = match_rules_against_facts(&ws, &peer_rules);
-            for hit in matches {
-                if hit.rule_id == owner.id {
-                    continue;
-                }
-                collisions.push(format!(
-                    "{} example `{}` also matched {} ({:?}) at {}:{} text `{}`",
-                    owner.id,
-                    example.name.as_deref().unwrap_or("<unnamed>"),
-                    hit.rule_id,
-                    owner.kind,
-                    hit.file,
-                    hit.line,
-                    hit.match_text
-                ));
-            }
-        }
-    }
-
+    let report = bonsai_security::validate_pack(
+        &pack,
+        &bonsai_security::PackInventoryOptions::default(),
+        bonsai_adapters::all_languages_registry(),
+    );
     assert!(
-        example_count > 0,
+        report.enabled_example_count > 0,
         "enabled rulepack entries must include YAML match_examples"
     );
-    assert!(
-        collisions.is_empty(),
-        "enabled rule match_examples collide; merge duplicate rules or tighten their match clauses:\n{}",
-        collisions.join("\n")
-    );
+    assert_eq!(report.errors, 0, "validator errors: {:#?}", report.issues);
 }
 
 #[test]

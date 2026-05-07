@@ -1,14 +1,11 @@
 //! Workspace-level cache of per-entry seed-free value-flow graphs.
 //!
-//! Phase 3 deliverable. Wraps `bonsai_taint::value_flow_for_function`
-//! in a per-FuncId cache, mirroring the persistence + invalidation
-//! shape of [`super::dataflow::DataFlowCache`] but with one canonical
-//! seed strategy (self-provenance) so consumers don't have to choose
-//! between "param-seeded" and "rule-seeded" any more.
-//!
-//! Phase 3 lands the in-memory cache + query primitives. Sidecar
-//! persistence will land alongside the consumer cutover in Phase 5
-//! once the on-disk format is stable.
+//! Wraps `bonsai_taint::value_flow_for_function` in a per-FuncId
+//! cache, mirroring the persistence + invalidation shape of
+//! [`super::dataflow::DataFlowCache`] but with one canonical seed
+//! strategy (self-provenance). Security uses these graphs for
+//! source-node selection before it runs exact source-seeded taint
+//! paths.
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
@@ -35,10 +32,10 @@ static VALUE_FLOW_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Cache of `ValueFlowGraph` per entry function.
 ///
-/// Built lazily via `graph_for(func, db)` and persisted across
+/// Built lazily via `graph_for(func, db)` and shared across
 /// `inspect`/`trace`/`security` queries within a single CLI process.
-/// Phase 5 will move per-process state into a sidecar file alongside
-/// the existing `DataFlowCache`.
+/// Optional persistence uses a sidecar beside the existing
+/// `DataFlowCache`.
 #[derive(Default)]
 pub struct ValueFlowCache {
     inner: Arc<RwLock<Inner>>,
@@ -122,8 +119,8 @@ impl ValueFlowCache {
     }
 
     /// Select every node in the cached graph for `func` matching
-    /// `predicate`. Used by Phase 4's rule-match selectors to find
-    /// starting points for a security source rule.
+    /// `predicate`. Used by rule-match selectors to find starting
+    /// points for a security source rule.
     pub fn nodes_matching<F>(&self, func: FuncId, db: &AnalyzerDb, predicate: F) -> Vec<ValueFlowNode>
     where
         F: Fn(&ValueFlowNode) -> bool,

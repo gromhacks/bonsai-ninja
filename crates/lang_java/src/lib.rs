@@ -314,16 +314,30 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
         let is_wildcard = module_path_text.ends_with(".*");
         let module_path = module_path_text.trim_end_matches(".*").to_string();
+        let alias = if is_wildcard {
+            None
+        } else {
+            import_tail_binding(&module_path)
+        };
         imports.push(ImportSpec {
             span: span_of(file, &import_node),
             module: module_path,
-            alias: None,
+            alias,
             is_wildcard,
             original_name: None,
             scope: ImportScope::Module,
         });
     }
     imports
+}
+
+fn import_tail_binding(module: &str) -> Option<String> {
+    let tail = module
+        .rsplit_once('.')
+        .map(|(_, tail)| tail)
+        .unwrap_or(module)
+        .trim();
+    (!tail.is_empty() && tail != module).then(|| tail.to_string())
 }
 
 /// Walk the Java tree and map each function/class/method/constructor

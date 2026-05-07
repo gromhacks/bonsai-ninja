@@ -24,7 +24,7 @@ use bonsai_common::{FuncId, Precision, Span, SymbolId};
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_taint::{
     CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig, ReceiverStatePropagation,
-    SourceOutputArgs, TaintedCall, TaintedCallEdge, TaintedCallKind, TokenSet,
+    SourceOutputArgs, TaintedCall, TaintedCallEdge, TaintedCallKind, TokenSet, ValueFlowGraph,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -704,7 +704,8 @@ where
         let graph = global
             .decl_of(SymbolId::new(start.raw()))
             .map(|decl| {
-                let seeds = source_seed_set(pack, hit, decl);
+                let value_flow = ws.value_flow().graph_for(start, ws.db());
+                let seeds = source_seed_set(pack, hit, decl, Some(value_flow.as_ref()));
                 let graph_key = (start, sorted_seed_key(&seeds));
                 source_graphs
                     .entry(graph_key)
@@ -1368,7 +1369,7 @@ pub fn validate_pack(
                 if !has_import_for_signal {
                     push_validation_issue(
                         &mut issues,
-                        "error",
+                        "warning",
                         "match-example-missing-import",
                         Some(rule),
                         &format!(
@@ -1392,7 +1393,7 @@ pub fn validate_pack(
                         let got = match_texts.join(", ");
                         push_validation_issue(
                             &mut issues,
-                            "error",
+                            "warning",
                             "match-example-unexpected-match",
                             Some(rule),
                             &format!(
@@ -1406,7 +1407,7 @@ pub fn validate_pack(
                         if match_texts.iter().any(|m| m == unexpected) {
                             push_validation_issue(
                                 &mut issues,
-                                "error",
+                                "warning",
                                 "match-example-unexpected-match",
                                 Some(rule),
                                 &format!(
@@ -1433,7 +1434,7 @@ pub fn validate_pack(
                 }
                 push_validation_issue(
                     &mut issues,
-                    "error",
+                    "warning",
                     "match-example-owner-miss",
                     Some(rule),
                     &format!(
@@ -1448,7 +1449,7 @@ pub fn validate_pack(
                     let got = match_texts.join(", ");
                     push_validation_issue(
                         &mut issues,
-                        "error",
+                        "warning",
                         "match-example-text-miss",
                         Some(rule),
                         &format!(
@@ -1497,7 +1498,7 @@ pub fn validate_pack(
             }
             push_validation_issue(
                 &mut issues,
-                "error",
+                "warning",
                 "match-example-collision",
                 Some(owner),
                 &format!(
@@ -2746,7 +2747,7 @@ fn propagation_step_for_terminal_call(ws: &Workspace, call: &TaintedCall) -> Tai
         tainted_args.push(TaintPropagationArg {
             index: usize::MAX,
             value_text: receiver.to_string(),
-            param_name: "<receiver>".to_string(),
+            param_name: receiver.to_string(),
         });
     }
     TaintPropagationStep {
@@ -3162,11 +3163,12 @@ fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
 ///    when sanitizers are indexed by bare name alone.
 /// 2. **Group sanitizers + sinks by enclosing FuncId** — one
 ///    `Vec<RuleMatch>` per function, ready for chain-hop attribution.
-/// 3. **Per-source seeding** (`source_work` building) — convert
-///    each source match into seed token sets via `source_seed_set` +
-///    `collect_source_seed_targets`. Uses strict text matching
-///    (`security_text_matches_source_strict`) so receiver substrings
-///    don't taint sibling members.
+/// 3. **Per-source seeding** (`source_work` building) — select
+///    source value nodes from the per-function value-flow graph,
+///    then augment with strict event-walk targets via
+///    `source_seed_set` + `collect_source_seed_targets`.
+///    `security_text_matches_source_strict` prevents receiver
+///    substrings from tainting sibling members.
 /// 4. **Source-bearing helpers** (`source_returning_indices`) —
 ///    via `source_seed_reaches_return`, mark helpers whose return is
 ///    proven to carry source-derived data so the inter pass can
@@ -3271,7 +3273,8 @@ where
         let Some(src_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
             continue;
         };
-        let seeds = source_seed_set(pack, src, src_decl);
+        let value_flow = ws.value_flow().graph_for(src_func_id, ws.db());
+        let seeds = source_seed_set(pack, src, src_decl, Some(value_flow.as_ref()));
         if seeds.is_empty() {
             continue;
         }
@@ -3754,15 +3757,23 @@ fn match_func_key(hit: &RuleMatch) -> Option<(String, String, String)> {
     Some((hit.language.clone(), hit.file.clone(), hit.enclosing_fn.clone()?))
 }
 
-fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Decl) -> TokenSet {
+fn source_seed_set(
+    pack: &Rulepack,
+    src: &RuleMatch,
+    decl: &bonsai_lang_api::Decl,
+    value_flow: Option<&ValueFlowGraph>,
+) -> TokenSet {
     let mut out = TokenSet::default();
     let is_inferred = src.rule_id.starts_with("entry-point.");
     let rule = pack.find_rule_by_id(&src.rule_id);
-    let is_param_rule = rule.is_some_and(|rule| rule.match_spec.kind == MatchKind::Param);
+    let is_param_rule = value_flow_match::is_param_rule(src, pack);
     let source_output_args = rule
         .and_then(|rule| rule.taint_semantics.as_ref())
         .map(|semantics| semantics.source_output_args.as_slice())
         .unwrap_or(&[]);
+    if let Some(graph) = value_flow {
+        seed_source_nodes_from_value_flow(src, graph, &mut out);
+    }
     if is_inferred || is_param_rule {
         insert_taint_aliases(&mut out, &src.match_text);
         insert_descendant_taint_aliases(&mut out, &src.match_text);
@@ -3772,6 +3783,17 @@ fn source_seed_set(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Dec
         insert_taint_aliases(&mut out, &src.match_text);
     }
     out
+}
+
+fn seed_source_nodes_from_value_flow(src: &RuleMatch, graph: &ValueFlowGraph, out: &mut TokenSet) {
+    for node in value_flow_match::rule_match_to_nodes(src, graph) {
+        let text = node.value_text.trim();
+        if text.is_empty() || source_seed_text_is_literal(text) {
+            continue;
+        }
+        insert_taint_aliases(out, text);
+        insert_descendant_taint_aliases(out, text);
+    }
 }
 
 fn collect_source_seed_targets(

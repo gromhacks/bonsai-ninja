@@ -599,7 +599,7 @@ fn native_export(
                             DeclKind::Method | DeclKind::Constructor | DeclKind::Function
                         )
                     })
-                    .filter(|m| span_contains(d.span, m.span))
+                    .filter(|m| m.parent == Some(d.symbol))
                     .map(|m| m.name.clone())
                     .collect();
                 classes.push(ClassOut {
@@ -1053,10 +1053,7 @@ fn build_taint_graph(
                 ) {
                     continue;
                 }
-                let method_inside_class = decl.parent == Some(class.symbol) || {
-                    let body = class.body_span.unwrap_or(class.span);
-                    decl.name_span.start >= body.start && decl.name_span.end <= body.end
-                };
+                let method_inside_class = decl.parent == Some(class.symbol);
                 if !method_inside_class {
                     continue;
                 }
@@ -1297,26 +1294,7 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
                 }
             }
 
-            let class_symbol = decl.parent.or_else(|| {
-                let probe = decl.name_span;
-                global
-                    .decls_in(file)
-                    .iter()
-                    .find(|class| {
-                        matches!(
-                            class.kind,
-                            DeclKind::Class
-                                | DeclKind::Struct
-                                | DeclKind::Trait
-                                | DeclKind::Interface
-                                | DeclKind::Enum
-                        ) && {
-                            let body = class.body_span.unwrap_or(class.span);
-                            probe.start >= body.start && probe.end <= body.end
-                        }
-                    })
-                    .map(|class| class.symbol)
-            });
+            let class_symbol = decl.parent;
             let Some(class_symbol) = class_symbol else {
                 continue;
             };
@@ -1452,19 +1430,6 @@ fn collect_class_field_taints_for_entries(
         ahash::AHashMap::default();
     for file in global.all_files() {
         let decls = global.decls_in(file);
-        let classes: Vec<&bonsai_lang_api::Decl> = decls
-            .iter()
-            .filter(|decl| {
-                matches!(
-                    decl.kind,
-                    DeclKind::Class
-                        | DeclKind::Struct
-                        | DeclKind::Trait
-                        | DeclKind::Interface
-                        | DeclKind::Enum
-                )
-            })
-            .collect();
         for decl in decls {
             if !matches!(
                 decl.kind,
@@ -1472,16 +1437,7 @@ fn collect_class_field_taints_for_entries(
             ) {
                 continue;
             }
-            let class_symbol = decl.parent.or_else(|| {
-                let probe = decl.name_span;
-                classes
-                    .iter()
-                    .find(|class| {
-                        let body = class.body_span.unwrap_or(class.span);
-                        probe.start >= body.start && probe.end <= body.end
-                    })
-                    .map(|class| class.symbol)
-            });
+            let class_symbol = decl.parent;
             let Some(class_symbol) = class_symbol else {
                 continue;
             };
@@ -1859,11 +1815,4 @@ fn collect_call_edges_for_export(
             _ => {}
         }
     }
-}
-
-/// True when `inner` lives entirely inside `outer` (same file,
-/// same byte range). Used to attach methods to their containing
-/// class span.
-fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }

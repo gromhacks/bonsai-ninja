@@ -76,8 +76,9 @@ Value-free type/size operators get the same treatment. `sizeof(c)`,
 their runtime values. The engine strips those operands so
 `sizeof(c) * cap` only taints when `cap` is tainted.
 
-Sigil interpolation is boundary-aware: a seed `$c` matches `$c` and
-`${c}` but not `$cap`.
+String interpolation taint comes from adapter-emitted expression operands,
+not engine text parsing. A template/f-string argument should carry the
+interpolated variable in `source_names`; literal text stays inert.
 
 ## 4. Precision is a first-class fact
 
