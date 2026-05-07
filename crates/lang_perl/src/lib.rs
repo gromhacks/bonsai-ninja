@@ -190,6 +190,12 @@ impl LanguageAdapter for PerlAdapter {
         for decl in &mut idx.defs {
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PERL_LIFECYCLE_TRANSITIONS);
         }
+        // Precompute `self.<field> → Type` bindings from each
+        // class's constructor `receiver_field_writes` so receiver-
+        // typed dispatch through stable instance state is an O(1)
+        // lookup against the method's `type_aliases` instead of a
+        // per-call walk over sibling decls.
+        bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
