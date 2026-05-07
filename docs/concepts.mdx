@@ -29,6 +29,15 @@ A sanitizer that is correct for one sink family may be wrong for another. For ex
 
 Taint is tracked through assignments, arguments, returns, receiver methods, fields, containers, callbacks, and cross-file calls. The engine records which argument at a call site is tainted so the rendered flow explains why each hop is relevant.
 
+Receiver-method flow is semantic: adapters emit type aliases and parent
+links, the index path enriches receiver type facts, and resolver-backed
+passes use those facts instead of receiver-name allowlists or class-span
+guessing.
+
+Return flow is semantic too: expression-bodied functions and true
+tail-expression languages expose implicit returns as adapter facts.
+Ordinary terminal statements are not guessed to be return values.
+
 ```mermaid
 flowchart LR
   A[Source rule match] --> B[Exact seed]

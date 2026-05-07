@@ -78,9 +78,9 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                 if !name_match(&class.name) {
                     continue;
                 }
-                // Methods are any callable decl whose span sits
-                // inside the class's span. Cheap N*M scan; classes
-                // rarely have enough decls for this to matter.
+                // Methods are callable decls whose adapter-emitted
+                // parent points at this class. Browse uses the same
+                // semantic ownership fact as callgraph/security.
                 let methods: Vec<String> = decls
                     .iter()
                     .filter(|member| {
@@ -89,7 +89,7 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
                             DeclKind::Method | DeclKind::Constructor | DeclKind::Function
                         )
                     })
-                    .filter(|member| span_contains(class.span, member.span))
+                    .filter(|member| member.parent == Some(class.symbol))
                     .map(|member| member.name.clone())
                     .collect();
                 if let Some(needle) = f.has_method {
@@ -129,11 +129,4 @@ pub fn classes(ws: &Workspace, f: &ClassesFilters<'_>) -> Result<Vec<ClassOut>, 
             .then_with(|| a.line.cmp(&b.line))
     });
     Ok(out)
-}
-
-/// True when `inner` sits entirely inside `outer` and they belong
-/// to the same file. Used to test whether a method decl lives
-/// within its class's span.
-fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }

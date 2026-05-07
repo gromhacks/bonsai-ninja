@@ -68,10 +68,10 @@ struct Inner {
     /// need ids for only a small subset of functions.
     flow_ids: FlowIdCache,
     /// Workspace-wide cache of per-entry seed-free value-flow graphs.
-    /// Populated lazily on first `value_flow()` access — Phase 3 of
-    /// the value-flow migration (ADR 0003). Once Phase 5 cuts every
-    /// consumer over, this replaces `dataflow` as the single
-    /// canonical taint artifact.
+    /// Populated lazily on first `value_flow()` access. Security uses
+    /// it for source-node selection, while `dataflow` remains the
+    /// persisted whole-workspace sidecar for fast navigation/export
+    /// queries.
     value_flow: ValueFlowCache,
     reparse_counter: Mutex<u64>,
     root_label: Mutex<String>,
@@ -205,9 +205,9 @@ impl Workspace {
     }
 
     /// Workspace-wide cache of per-entry seed-free value-flow graphs.
-    /// See [`crate::value_flow::ValueFlowCache`] and ADR 0003. Phase
-    /// 3 of the value-flow migration; consumers (`inspect`, `trace`,
-    /// `security`) cut over in Phase 5.
+    /// See [`crate::value_flow::ValueFlowCache`]. Security consults
+    /// it for source-node selection; navigation/export consumers
+    /// continue to use the persisted dataflow sidecar.
     pub fn value_flow(&self) -> &ValueFlowCache {
         &self.inner.value_flow
     }
@@ -633,11 +633,13 @@ impl Workspace {
 
     fn find_constructor_symbol(&self, class_sym: SymbolId) -> Option<SymbolId> {
         let global = self.inner.db.global_index();
-        let class_decl = global.decl_of(class_sym)?;
         let class_file = global.declaring_file(class_sym)?;
-        // Prefer explicit DeclKind::Constructor inside the class span.
+        // Constructors must be owned by the class declaration through
+        // `Decl.parent`. Span containment is intentionally not used here:
+        // overlapping spans are a syntactic accident, not semantic
+        // ownership.
         for d in global.decls_in(class_file) {
-            if matches!(d.kind, DeclKind::Constructor) && span_contains_lib(class_decl.span, d.span) {
+            if matches!(d.kind, DeclKind::Constructor) && d.parent == Some(class_sym) {
                 return Some(d.symbol);
             }
         }
@@ -912,10 +914,6 @@ pub fn summarize_precision(trace: &TraceResult) -> PrecisionReport {
         }
     }
     report
-}
-
-fn span_contains_lib(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }
 
 // ---------------------------------------------------------------------------

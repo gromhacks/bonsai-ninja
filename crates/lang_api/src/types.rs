@@ -153,6 +153,12 @@ pub struct Decl {
     /// walker in `kit::walk_flow_events` (or hand-rolled).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flow_events: Vec<FlowEvent>,
+    /// True when this declaration belongs to a language/body form where
+    /// the final expression can be returned without an explicit return
+    /// keyword. Adapters set this from grammar semantics; analyses must
+    /// not infer it from declaration names or language strings.
+    #[serde(default)]
+    pub has_implicit_returns: bool,
     /// Parameter names, in order. Lets the tracer bind call-site arguments
     /// to parameter names for higher-order callback resolution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -325,14 +331,12 @@ pub enum FlowEvent {
         /// bare `value_name` exists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_text: Option<String>,
-        /// Bare-identifier name of the value being returned, when the
-        /// adapter can determine it. `return x` → `value_name:
-        /// Some("x")`; `return f(y)` is tracked via the call's
-        /// `source_call`/`source_call_args` event that precedes this
-        /// Return. `None` for compound return expressions (binary
-        /// ops, field access, literals). Used by the interprocedural
-        /// summary to compute ground-truth return taint instead of
-        /// the reachability heuristic.
+        /// Single value-bearing identifier returned, when the adapter
+        /// can determine it precisely. `return x` and
+        /// ``return `${x}``` both produce `Some("x")`; multi-source
+        /// expressions such as `return x + y` stay `None`. Used by
+        /// the interprocedural summary to compute return taint without
+        /// treating static literal text as a value read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_name: Option<String>,
     },
@@ -484,6 +488,14 @@ pub struct CallArg {
     /// from raw argument text or API names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub place: Option<String>,
+    /// Adapter-extracted value operands inside this argument expression.
+    /// This is the call-argument counterpart to `FlowEvent::Assign::source_names`:
+    /// a template/interpolated argument such as `` `${cmd}` `` or `f"{cmd}"`
+    /// should carry `["cmd"]` here because the parser surfaced a real
+    /// expression node. The taint engine must not parse language-specific
+    /// interpolation syntax out of `value_text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_names: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

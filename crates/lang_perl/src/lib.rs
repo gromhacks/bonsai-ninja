@@ -262,6 +262,26 @@ fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str
 fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &str) {
     for event in events.iter_mut() {
         match event {
+            FlowEvent::Assign {
+                span,
+                source_name,
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                if let Some(name) = source_name {
+                    *name = normalize_perl_hash_deref_text(name);
+                }
+                for arg in source_call_args {
+                    *arg = normalize_perl_hash_deref_text(arg);
+                }
+                for name in source_names.iter_mut() {
+                    *name = normalize_perl_hash_deref_text(name);
+                }
+                if let Some(rhs) = assignment_rhs_text(source, *span) {
+                    add_perl_hash_deref_sources(&rhs, source_names);
+                }
+            }
             FlowEvent::Call { args, .. } => {
                 for arg in args {
                     // Rewrite call arguments only — `value_text` and
@@ -488,6 +508,68 @@ fn assignment_lhs_rhs_text(source: &str, span: Span) -> Option<(String, String)>
 /// the trimmed input when the text isn't a deref.
 fn normalize_perl_hash_deref_text(text: &str) -> String {
     perl_hash_deref_access(text).unwrap_or_else(|| text.trim().to_string())
+}
+
+fn add_perl_hash_deref_sources(text: &str, source_names: &mut Vec<String>) {
+    for access in perl_hash_deref_accesses(text) {
+        push_unique_string(source_names, access.clone());
+        let bare = access.trim_start_matches(['$', '@', '%']).to_string();
+        push_unique_string(source_names, bare);
+    }
+}
+
+fn perl_hash_deref_accesses(text: &str) -> Vec<String> {
+    let mut accesses = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        if !matches!(ch, '$' | '@' | '%') {
+            continue;
+        }
+
+        let ident_start = idx + ch.len_utf8();
+        let mut ident_end = ident_start;
+        while let Some((next_idx, next_ch)) = chars.peek().copied() {
+            if next_ch == '_' || next_ch.is_ascii_alphanumeric() {
+                ident_end = next_idx + next_ch.len_utf8();
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if ident_end == ident_start {
+            continue;
+        }
+
+        let access_end = extend_perl_deref_end(text, ident_end);
+        if access_end <= ident_end {
+            continue;
+        }
+        if let Some(access) = perl_hash_deref_access(&text[idx..access_end]) {
+            push_unique_string(&mut accesses, access);
+        }
+        while chars.peek().is_some_and(|(next_idx, _)| *next_idx < access_end) {
+            chars.next();
+        }
+    }
+
+    accesses
 }
 
 /// Convert `$h->{k}` / `$h{k}` / `@arr->{k}` style hash-deref text
@@ -1134,6 +1216,7 @@ fn synthesize_qx_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Span
                         name: None,
                         value_text: text.clone(),
                         place: None,
+                        source_names: Vec::new(),
                     });
                 }
             }
@@ -1217,6 +1300,7 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
             name: None,
             value_text,
             place: None,
+            source_names: Vec::new(),
         }];
     }
 
@@ -1246,6 +1330,7 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
                     name: Some(node_text(&child, src).trim().to_string()),
                     value_text: text,
                     place: None,
+                    source_names: Vec::new(),
                 });
                 child_idx += 2;
                 continue;
@@ -1258,6 +1343,7 @@ fn perl_list_args(node: &tree_sitter::Node<'_>, src: &[u8], file: FileId) -> Vec
                 name: None,
                 value_text,
                 place: None,
+                source_names: Vec::new(),
             });
         }
         child_idx += 1;
@@ -1319,6 +1405,7 @@ fn synthesize_builtin_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<
                         name: None,
                         value_text,
                         place: None,
+                        source_names: Vec::new(),
                     });
                 }
             }
@@ -1388,6 +1475,7 @@ fn synthesize_builtin_expression_arg_call_events(
                     name: None,
                     value_text,
                     place: None,
+                    source_names: Vec::new(),
                 }],
             },
         ));
@@ -1418,6 +1506,7 @@ fn synthesize_match_regex_call_events(tree: &Tree, src: &[u8], file: FileId) -> 
                     name: None,
                     value_text,
                     place: None,
+                    source_names: Vec::new(),
                 }],
             },
         ));
@@ -1598,6 +1687,7 @@ fn perl_text_args(src: &[u8], start: usize, end: usize, file: FileId) -> Vec<Cal
                             .starts_with(['$', '@', '%'])
                             .then(|| value_text.clone()),
                         value_text,
+                        source_names: Vec::new(),
                     });
                 }
                 arg_start = idx + 1;

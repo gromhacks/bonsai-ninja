@@ -39,13 +39,11 @@
 //!
 //! ## Tainting predicates — when to use which
 //!
-//! Five predicates exist; their differences are load-bearing for
+//! Seven predicates exist; their differences are load-bearing for
 //! precision and easy to confuse. Use them by intent:
 //!
 //! - [`call_arg_is_directly_tainted`] — strict. True iff the arg's
-//!   value text is itself a tainted token. Used at call sites to
-//!   decide which args to record as `tainted_at_call` for diagnostic
-//!   bookkeeping and out-param side-effect modeling.
+//!   value text is itself a tainted token.
 //! - [`arg_text_has_mapped_descendant_taint`] — true iff the arg
 //!   carries a tainted descendant field (`obj.cmd` when `obj.cmd` is
 //!   tainted). Adds carrier args to
@@ -61,6 +59,13 @@
 //!   counterpart of `call_arg_is_directly_tainted`. No token-walk
 //!   fallback, so `x = "user"` does not taint `x` even when a token
 //!   named `user` is in state.
+//! - `call_arg_is_tainted` — call-argument wrapper. Checks the raw
+//!   argument text plus adapter-emitted operand facts such as
+//!   interpolation children. It does not parse interpolation syntax
+//!   from string text.
+//! - `call_arg_has_direct_value_taint` — diagnostic call-arg wrapper.
+//!   Uses strict direct value-text taint plus adapter-emitted operand
+//!   facts when deciding which args to record as `tainted_at_call`.
 //! - [`receiver_expr_is_tainted`] — receiver-only check. Allows
 //!   member access taint propagation into method calls
 //!   (`tainted_obj.method(...)` propagates through the receiver) but
@@ -110,7 +115,7 @@ use bonsai_common::{callable_reference_variants, FileId, FuncId, Precision, Span
 use bonsai_db::AnalyzerDb;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::ModulePath;
-use bonsai_lang_api::{AliasTarget, Decl, DeclKind, FlowEvent, TypeAliasBinding};
+use bonsai_lang_api::{AliasTarget, CallArg, Decl, DeclKind, FlowEvent, TypeAliasBinding};
 use bonsai_resolve::{
     alias_map_for_file, resolve_callable_with_context, resolve_class, short_tail, visibility_allows,
     ResolveContext,
@@ -876,10 +881,10 @@ fn propagate_taint_through_events(
         }
 
         if !return_tainted_assignment {
-            if split_call_assignment
-                .as_ref()
-                .is_some_and(|synthetic| split_call_assignment_consumes_all_tainted_sources(synthetic, state))
-            {
+            if split_call_assignment.as_ref().is_some_and(|synthetic| {
+                split_call_assignment_consumes_all_tainted_sources(synthetic, state)
+                    && !assignment_event_is_iteration_binding(event, ctx.db)
+            }) {
                 continue;
             }
             if resolved_source_call_assignment(
@@ -1047,6 +1052,13 @@ fn split_call_assignment_consumes_all_tainted_sources(event: &FlowEvent, state: 
             || allowed.contains(name.trim())
             || allowed.contains(&normalise_qualified_text(name))
     })
+}
+
+fn assignment_event_is_iteration_binding(event: &FlowEvent, db: &AnalyzerDb) -> bool {
+    let FlowEvent::Assign { target, span, .. } = event else {
+        return false;
+    };
+    assignment_span_is_iteration_binding(Some(db), *span, target)
 }
 
 fn call_names_match(left: &str, right: &str) -> bool {
@@ -1322,12 +1334,12 @@ fn propagate_call_event(
     summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
 ) {
     // Two arg sets, deliberately divergent:
-    //   * `tainted_at_call` records args whose direct value text is
-    //     tainted right now. Used for diagnostic bookkeeping (the
-    //     `TaintedCall` recorded below shows the user which arg was
-    //     observed tainted at this site) and for the unresolved-call
-    //     out-param convention, which only fires when prior args are
-    //     before a directly-tainted slot.
+    //   * `tainted_at_call` records args whose direct value is tainted
+    //     right now. The direct value can be the raw arg text or an
+    //     adapter-emitted operand inside that arg (for example a
+    //     parsed string-interpolation expression). Used for diagnostic
+    //     bookkeeping and for the unresolved-call out-param convention,
+    //     which only fires when prior args are before a directly-tainted slot.
     //   * `args_to_propagate_into_callee` is the superset that also
     //     includes carrier args whose specific field is tainted
     //     (`obj.cmd` when only `obj.cmd` is tainted). Field-of-carrier
@@ -1338,7 +1350,7 @@ fn propagate_call_event(
     let tainted_at_call: Vec<(usize, String)> = args
         .iter()
         .enumerate()
-        .filter(|(_, arg)| call_arg_is_directly_tainted(&arg.value_text, state))
+        .filter(|(_, arg)| call_arg_has_direct_value_taint(arg, state))
         .map(|(idx, arg)| (idx, arg.value_text.clone()))
         .collect();
     let mut args_to_propagate_into_callee = tainted_at_call.clone();
@@ -1459,10 +1471,16 @@ fn propagate_call_event(
                         value_text: receiver_value.to_string(),
                         param_name: callee_decl
                             .implicit_receiver_names
-                            .first()
+                            .iter()
+                            .find(|name| !name.trim().is_empty())
                             .cloned()
-                            .or_else(|| receiver_state_names.first().cloned())
-                            .unwrap_or_else(|| "<receiver>".to_string()),
+                            .or_else(|| {
+                                receiver_state_names
+                                    .iter()
+                                    .find(|name| !name.trim().is_empty())
+                                    .cloned()
+                            })
+                            .unwrap_or_else(|| receiver_value.to_string()),
                     });
                 }
             }
@@ -1782,7 +1800,7 @@ fn apply_clean_output_call_overwrite(
         .iter()
         .enumerate()
         .filter(|(idx, _)| *idx >= shape.value_start_arg_index)
-        .all(|(_, arg)| !arg_text_is_tainted(&arg.value_text, state));
+        .all(|(_, arg)| !call_arg_is_tainted(arg, state));
     if value_args_are_clean {
         remove_target_taint(state, output);
     }
@@ -2082,6 +2100,7 @@ fn walk_events_for_sink(
         if !return_tainted_assignment {
             if split_call_assignment.as_ref().is_some_and(|synthetic| {
                 split_call_assignment_consumes_all_tainted_sources(synthetic, &state)
+                    && !assignment_event_is_iteration_binding(event, ctx.db)
             }) {
                 continue;
             }
@@ -2099,7 +2118,7 @@ fn walk_events_for_sink(
                     let tainted_at_call: Vec<(usize, String)> = args
                         .iter()
                         .enumerate()
-                        .filter(|(_, arg)| arg_text_is_tainted(&arg.value_text, &state))
+                        .filter(|(_, arg)| call_arg_is_tainted(arg, &state))
                         .map(|(idx, arg)| (idx, arg.value_text.clone()))
                         .collect();
                     let _ = apply_unresolved_call_side_effects(args, &tainted_at_call, &mut state);
@@ -2477,6 +2496,11 @@ fn apply_return_taint(
             || effective_source_call_args
                 .iter()
                 .any(|arg| arg_text_is_tainted(arg, state));
+        let independent_rhs_operand_tainted = source_names_tainted
+            && effective_source_call_args.is_empty()
+            && source_names
+                .iter()
+                .all(|name| !call_names_match(name, callee_name));
         let receiver_tainted = call_receiver_from_name(callee_name)
             .as_deref()
             .is_some_and(|receiver| receiver_expr_is_tainted(receiver, state));
@@ -2495,6 +2519,7 @@ fn apply_return_taint(
                     .is_some_and(|receiver| receiver_expr_is_tainted(receiver, state))
         });
         let value_tainted_transits = source_call_name_is_seeded(callee_name, state)
+            || independent_rhs_operand_tainted
             || call_projection_tainted
             || implicit_receiver_return_tainted
             || implicit_receiver_param_return_tainted
@@ -2646,10 +2671,49 @@ fn apply_named_field_arg_taint(target: &str, args: &[String], state: &mut TokenS
     changed
 }
 
+fn named_field_update_copies_tainted_base(
+    source_names: &[String],
+    field_updates: &[(String, String)],
+    span: Span,
+    db: Option<&AnalyzerDb>,
+    caller: Option<FuncId>,
+    state: &TokenSet,
+) -> bool {
+    let qualified_bases = synthetic_qualified_source_bases(source_names, span, db);
+    source_names.iter().any(|source| {
+        let canonical = canonical_bare_name(source);
+        if canonical.is_empty() || named_field_update_mentions_source(field_updates, &canonical) {
+            return false;
+        }
+        assignment_source_name_is_value_tainted(source, &qualified_bases, db, caller, state)
+            || actual_has_descendant_taint(source, state)
+            || arg_text_has_mapped_descendant_taint(source, state)
+    })
+}
+
+fn named_field_update_mentions_source(field_updates: &[(String, String)], source: &str) -> bool {
+    field_updates.iter().any(|(field, value)| {
+        canonical_bare_name(field) == source || expression_mentions_source(value, source)
+    })
+}
+
+fn expression_mentions_source(value: &str, source: &str) -> bool {
+    let value_norm = normalise_target_text(value);
+    let source_norm = normalise_target_text(source);
+    if source_norm.is_empty() {
+        return false;
+    }
+    value_norm == source_norm
+        || value_norm
+            .strip_prefix(&source_norm)
+            .is_some_and(|tail| tail.starts_with('.') || tail.starts_with('['))
+        || identifier_value_occurs(value, source)
+}
+
 fn named_field_initializers(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let trimmed = text.trim();
-    let (body, allow_shorthand) = if let Some(body) = strip_erlang_map_outer(trimmed) {
+    let (body, allow_shorthand) = if let Some(body) = strip_prefixed_brace_literal_outer(trimmed) {
         (body, true)
     } else if let Some(body) = strip_balanced_outer(trimmed, '{', '}') {
         (body, true)
@@ -2783,7 +2847,7 @@ fn field_name_from_initializer_lhs(lhs: &str) -> Option<String> {
     Some(candidate.to_string())
 }
 
-fn strip_erlang_map_outer(text: &str) -> Option<&str> {
+fn strip_prefixed_brace_literal_outer(text: &str) -> Option<&str> {
     text.strip_prefix("#{")
         .or_else(|| text.strip_prefix("%{"))?
         .strip_suffix('}')
@@ -2979,7 +3043,7 @@ fn event_at_sink_receives_taint(event: &FlowEvent, sink_span: Span, state: &Toke
             args,
             ..
         } if spans_same_site(*span, sink_span) => {
-            args.iter().any(|arg| arg_text_is_tainted(&arg.value_text, state))
+            args.iter().any(|arg| call_arg_is_tainted(arg, state))
                 || arg_text_is_tainted(name, state)
                 || receiver
                     .as_deref()
@@ -3008,10 +3072,6 @@ fn spans_same_site(a: Span, b: Span) -> bool {
 
 fn spans_overlap(a: Span, b: Span) -> bool {
     a.file == b.file && a.start < b.end && b.start < a.end
-}
-
-fn span_contains(outer: Span, inner: Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
 }
 
 fn receiver_place_is_tainted(receiver: &str, state: &TokenSet) -> bool {
@@ -3084,6 +3144,13 @@ fn assignment_source_names_any_tainted(
     caller: Option<FuncId>,
     state: &TokenSet,
 ) -> bool {
+    if assignment_rhs_text(db, span).is_some_and(|rhs| {
+        qualified_accesses(&rhs)
+            .iter()
+            .any(|access| rhs_operand_is_tainted(access, state))
+    }) {
+        return true;
+    }
     let qualified_bases = synthetic_qualified_source_bases(source_names, span, db);
     source_names
         .iter()
@@ -3191,12 +3258,6 @@ fn rhs_operand_is_tainted(text: &str, state: &TokenSet) -> bool {
     if state.contains(trimmed) {
         return true;
     }
-    // Interpolated strings: a literal `"hi $name"` whose marker
-    // names a tainted seed must propagate. Run before the quoted
-    // literal short-circuit so this case is recognized.
-    if text_contains_interpolation(trimmed, state) {
-        return true;
-    }
     if is_quoted_literal(trimmed) {
         return false;
     }
@@ -3239,6 +3300,34 @@ fn rhs_operand_is_tainted(text: &str, state: &TokenSet) -> bool {
     false
 }
 
+fn call_arg_is_tainted(arg: &CallArg, state: &TokenSet) -> bool {
+    arg_text_is_tainted(&arg.value_text, state)
+        || arg
+            .source_names
+            .iter()
+            .any(|operand| call_arg_source_operand_is_tainted(&arg.value_text, operand, state))
+}
+
+fn call_arg_has_direct_value_taint(arg: &CallArg, state: &TokenSet) -> bool {
+    call_arg_is_directly_tainted(&arg.value_text, state)
+        || arg
+            .source_names
+            .iter()
+            .any(|operand| call_arg_source_operand_is_tainted(&arg.value_text, operand, state))
+}
+
+fn call_arg_source_operand_is_tainted(value_text: &str, operand: &str, state: &TokenSet) -> bool {
+    let operand_key = canonical_bare_name(operand);
+    if operand_key.is_empty() {
+        return false;
+    }
+    let value_text = value_bearing_identifier_text(value_text);
+    let structural_base_only = qualified_access_bases(&value_text).iter().any(|base| {
+        canonical_bare_name(base) == operand_key && !identifier_value_occurs(&value_text, operand)
+    });
+    !structural_base_only && rhs_operand_is_tainted(operand, state)
+}
+
 /// Decide whether `text` is tainted given the current state.
 ///
 /// The matching strategy is structural-first, with one carefully-
@@ -3266,15 +3355,6 @@ pub(super) fn arg_text_is_tainted(text: &str, state: &TokenSet) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return false;
-    }
-    // Interpolation must run before the quoted-literal short-circuit:
-    // `"SELECT … '$userId'"` IS a quoted literal but the interpolation
-    // marker `$userId` references a tainted name. The check looks for
-    // explicit `$x` / `${x}` / `#{x}` / f-string `{x}` markers from the
-    // adapter-emitted text, so it does not extract identifiers from
-    // arbitrary literal contents.
-    if text_contains_interpolation(trimmed, state) {
-        return true;
     }
     if is_quoted_literal(trimmed) {
         return false;
@@ -3432,12 +3512,17 @@ fn resolve_call_candidates_with_caller_at(
                 )
             };
             if !targets.is_empty() {
+                let (kind, precision) = if targets.len() == 1 {
+                    (EdgeKind::Direct, Precision::Narrowed)
+                } else {
+                    (EdgeKind::Virtual, Precision::OverApproximate)
+                };
                 return targets
                     .into_iter()
                     .map(|func| ResolvedCallee {
                         func,
-                        kind: EdgeKind::Direct,
-                        precision: Precision::Narrowed,
+                        kind,
+                        precision,
                     })
                     .collect();
             }
@@ -3691,9 +3776,7 @@ fn collect_method_candidates_for_class_inner(
         if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
             continue;
         }
-        if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
-            && seen_methods.insert(decl.symbol)
-        {
+        if decl.parent == Some(class_sym) && seen_methods.insert(decl.symbol) {
             matched_local_method = true;
             out.push(FuncId::new(decl.symbol.raw()));
         }
@@ -3727,16 +3810,7 @@ fn enclosing_class_for_decl<'a>(global: &'a GlobalIndex, decl: &Decl) -> Option<
             }
         }
     }
-    global
-        .decls_in(decl.span.file)
-        .iter()
-        .filter(|candidate| {
-            matches!(
-                candidate.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-            ) && span_contains(candidate.span, decl.span)
-        })
-        .min_by_key(|candidate| candidate.span.end.saturating_sub(candidate.span.start))
+    None
 }
 
 fn inferred_receiver_type_names(
@@ -4110,6 +4184,7 @@ fn resolve_call_candidates(
     }
     let tail = short_tail(lookup_name);
     let resolved_name = aliases.get(tail).map(String::as_str).unwrap_or(tail);
+    let used_tail_fallback = resolved_name != lookup_name;
     candidates = lookup(resolved_name);
     if candidates.is_empty() && resolved_name != lookup_name {
         candidates = lookup(lookup_name);
@@ -4120,7 +4195,7 @@ fn resolve_call_candidates(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let (kind, precision) = if candidates.len() == 1 {
+    let (kind, precision) = if candidates.len() == 1 && !used_tail_fallback {
         (EdgeKind::Direct, Precision::Narrowed)
     } else {
         (EdgeKind::Virtual, Precision::OverApproximate)
@@ -4325,7 +4400,20 @@ pub(super) fn apply_event_transfer(
                 if assignment_span_lhs_matches_target(db, *span, target)
                     && !named_field_initializers(&rhs).is_empty()
                 {
-                    if apply_named_field_arg_taint(target, &[rhs], state) {
+                    let field_updates = named_field_initializers(&rhs);
+                    let mut changed = apply_named_field_arg_taint(target, &[rhs.clone()], state);
+                    if named_field_update_copies_tainted_base(
+                        source_names,
+                        &field_updates,
+                        *span,
+                        db,
+                        caller,
+                        state,
+                    ) {
+                        insert_descendant_target_taint(state, target);
+                        changed = true;
+                    }
+                    if changed {
                         return;
                     }
                     remove_target_taint(state, target);
@@ -4488,10 +4576,15 @@ fn assignment_span_is_iteration_binding(db: Option<&AnalyzerDb>, span: Span, tar
     }
     let statement = &text[start..end];
     let lowered = statement.trim_start();
-    if !(lowered.starts_with("for ") || lowered.starts_with("async for ")) {
+    if !(lowered.starts_with("for ")
+        || lowered.starts_with("for(")
+        || lowered.starts_with("async for ")
+        || lowered.starts_with("foreach ")
+        || lowered.starts_with("foreach("))
+    {
         return false;
     }
-    let Some((binding, _iterable)) = lowered.split_once(" in ") else {
+    let Some((binding, _iterable)) = lowered.split_once(" in ").or_else(|| lowered.split_once(" of ")) else {
         return false;
     };
     identifier_tokens_outside_strings(binding)
@@ -4745,7 +4838,27 @@ fn synthetic_qualified_source_bases(
             bases.insert(base);
         }
     }
+    if let Some(db) = db {
+        if let Some(text) = source_span_text(db, span) {
+            for base in qualified_access_bases(&text) {
+                if !identifier_value_occurs(&text, &base) {
+                    bases.insert(base);
+                }
+            }
+        }
+    }
     bases
+}
+
+fn source_span_text(db: &AnalyzerDb, span: Span) -> Option<String> {
+    let snapshot = db.vfs().snapshot(span.file).ok()?;
+    let text = snapshot.text.as_ref();
+    let start = usize::try_from(span.start).ok()?.min(text.len());
+    let end = usize::try_from(span.end).ok()?.min(text.len());
+    if start >= end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+    Some(text[start..end].to_string())
 }
 
 fn source_span_has_standalone_identifier(db: &AnalyzerDb, span: Span, ident: &str) -> bool {
@@ -4753,20 +4866,7 @@ fn source_span_has_standalone_identifier(db: &AnalyzerDb, span: Span, ident: &st
     if ident.is_empty() {
         return false;
     }
-    let Ok(snapshot) = db.vfs().snapshot(span.file) else {
-        return false;
-    };
-    let text = snapshot.text.as_ref();
-    let start = usize::try_from(span.start).ok().unwrap_or(0).min(text.len());
-    let end = usize::try_from(span.end)
-        .ok()
-        .unwrap_or(text.len())
-        .min(text.len());
-    if start >= end || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-        return false;
-    }
-    let haystack = &text[start..end];
-    identifier_value_occurs(haystack, ident)
+    source_span_text(db, span).is_some_and(|haystack| identifier_value_occurs(&haystack, ident))
 }
 
 pub(super) fn identifier_value_occurs(haystack: &str, ident: &str) -> bool {
@@ -5049,53 +5149,6 @@ fn trim_outer_parens(mut text: &str) -> &str {
         }
         text = &trimmed[1..trimmed.len() - 1];
     }
-}
-
-fn text_contains_interpolation(text: &str, state: &TokenSet) -> bool {
-    let dollar_interpolation_context = is_quoted_literal(text) || text.contains(['"', '\'', '`']);
-    let has_interpolation_syntax = (dollar_interpolation_context && text.contains('$'))
-        || text.contains("#{")
-        || (text.trim_start().starts_with(['f', 'F']) && text.contains('{'))
-        || text.contains("$\"");
-    if !has_interpolation_syntax {
-        return false;
-    }
-    state.iter().any(|seed| {
-        if seed.is_empty() {
-            return false;
-        }
-        let bare = seed.trim_start_matches('$');
-        text.contains(&format!("${{{bare}}}"))
-            || contains_dollar_var(text, bare)
-            || text.contains(&format!("#{{{bare}}}"))
-            || (text.trim_start().starts_with(['f', 'F']) && text.contains(&format!("{{{bare}}}")))
-            || (text.contains("$\"") && text.contains(&format!("{{{bare}}}")))
-    })
-}
-
-fn contains_dollar_var(text: &str, bare: &str) -> bool {
-    if bare.is_empty() {
-        return false;
-    }
-    let needle = format!("${bare}");
-    let mut search_from = 0;
-    while let Some(relative) = text[search_from..].find(&needle) {
-        let start = search_from + relative;
-        let end = start + needle.len();
-        let has_boundary = match text.as_bytes().get(end) {
-            Some(next) => !is_interpolation_ident_byte(*next),
-            None => true,
-        };
-        if has_boundary {
-            return true;
-        }
-        search_from = end;
-    }
-    false
-}
-
-fn is_interpolation_ident_byte(byte: u8) -> bool {
-    byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
 }
 
 fn identifier_tokens_outside_strings(text: &str) -> Vec<String> {

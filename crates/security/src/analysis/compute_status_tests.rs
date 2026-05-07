@@ -108,9 +108,9 @@ description: VelocityEngine.evaluate(tainted template) reaches server-side templ
         &PackInventoryOptions::default(),
         bonsai_adapters::all_languages_registry(),
     );
-    assert!(
-        report.errors >= 1,
-        "expected validator errors for non-visible regex package gate, got {:#?}",
+    assert_eq!(
+        report.errors, 0,
+        "package/import visibility drift in match examples is warning-level; got errors: {:#?}",
         report.issues
     );
     assert!(
@@ -118,8 +118,9 @@ description: VelocityEngine.evaluate(tainted template) reaches server-side templ
             .issues
             .iter()
             .any(|issue| issue.code == "match-example-missing-import"
+                && issue.level == "warning"
                 && issue.message.contains("org.example.velocity.engine.core")),
-        "expected missing-import error, got {:#?}",
+        "expected missing-import warning, got {:#?}",
         report.issues
     );
     assert!(
@@ -127,6 +128,7 @@ description: VelocityEngine.evaluate(tainted template) reaches server-side templ
             .issues
             .iter()
             .any(|issue| issue.code == "package-signal-not-adapter-visible"
+                && issue.level == "warning"
                 && issue.message.contains("org.example.velocity.engine.core")),
         "expected adapter-visible package warning, got {:#?}",
         report.issues

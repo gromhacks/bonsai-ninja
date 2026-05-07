@@ -779,9 +779,7 @@ impl<'a> TraceBuilder<'a> {
             if !visibility_allows(decl, class_file, &decl.module_path, ctx) {
                 continue;
             }
-            if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
-                && seen_methods.insert(decl.symbol)
-            {
+            if decl.parent == Some(class_sym) && seen_methods.insert(decl.symbol) {
                 matched_local_method = true;
                 out.push(decl.symbol);
             }
@@ -973,10 +971,9 @@ impl<'a> TraceBuilder<'a> {
     /// idiomatic name (`__init__`, `init`, `new`, …).
     fn find_constructor_for_class(&self, class_sym: SymbolId) -> Option<SymbolId> {
         let global = self.db.global_index();
-        let class_decl = global.decl_of(class_sym)?;
         let class_file = global.declaring_file(class_sym)?;
         for decl in global.decls_in(class_file) {
-            if matches!(decl.kind, DeclKind::Constructor) && span_contains(class_decl.span, decl.span) {
+            if matches!(decl.kind, DeclKind::Constructor) && decl.parent == Some(class_sym) {
                 return Some(decl.symbol);
             }
         }
@@ -984,7 +981,7 @@ impl<'a> TraceBuilder<'a> {
             if matches!(
                 decl.name.as_str(),
                 "__init__" | "constructor" | "__construct" | "init" | "new"
-            ) && span_contains(class_decl.span, decl.span)
+            ) && decl.parent == Some(class_sym)
             {
                 return Some(decl.symbol);
             }
@@ -1013,10 +1010,6 @@ impl<'a> TraceBuilder<'a> {
     }
 }
 
-fn span_contains(outer: Span, inner: Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
-}
-
 fn is_super_receiver(receiver: &str) -> bool {
     let receiver = receiver.trim().trim_start_matches(['&', '*']);
     let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
@@ -1034,16 +1027,7 @@ fn enclosing_class_for_decl<'a>(global: &'a bonsai_index::GlobalIndex, decl: &De
             }
         }
     }
-    global
-        .decls_in(decl.span.file)
-        .iter()
-        .filter(|candidate| {
-            matches!(
-                candidate.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-            ) && span_contains(candidate.span, decl.span)
-        })
-        .min_by_key(|candidate| candidate.span.end.saturating_sub(candidate.span.start))
+    None
 }
 
 fn callable_name_variants(raw: &str) -> Vec<String> {

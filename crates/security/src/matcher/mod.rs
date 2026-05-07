@@ -509,7 +509,7 @@ struct PreparedRule<'a> {
     name: Option<&'a str>,
     attribute: Option<&'a Vec<String>>,
     regex: Option<Regex>,
-    regex_requires_package_signal: bool,
+    requires_call_package_signal: bool,
     constraint_regexes: Vec<Option<Regex>>,
     /// The rule's `packages` ∪ `imports` ∪ `modules`, in the
     /// canonical ecosystem-name form the rule pack uses. Borrowed
@@ -538,7 +538,7 @@ impl<'a> PreparedRule<'a> {
                 package_signals.push(signal.as_str());
             }
         }
-        let regex_requires_package_signal = rule_regex_requires_package_signal(rule);
+        let requires_call_package_signal = rule_requires_call_package_signal(rule);
         let regex = match target.regex.as_deref() {
             Some(pattern) => match Regex::new(pattern) {
                 Ok(regex) => Some(regex),
@@ -565,19 +565,89 @@ impl<'a> PreparedRule<'a> {
             name: target.name.as_deref(),
             attribute: target.attribute.as_ref(),
             regex,
-            regex_requires_package_signal,
+            requires_call_package_signal,
             constraint_regexes,
             package_signals,
         })
     }
 
-    fn file_context_allows(&self, file_packages: &AHashSet<String>) -> bool {
-        if !self.regex_requires_package_signal {
+    fn file_context_allows(&self, _file_packages: &AHashSet<String>) -> bool {
+        true
+    }
+
+    fn call_context_allows(
+        &self,
+        callee: &str,
+        receiver_types: &[String],
+        alias_map: &std::collections::HashMap<String, AliasTarget>,
+        file_packages: &AHashSet<String>,
+    ) -> bool {
+        if !self.requires_call_package_signal {
             return true;
         }
-        self.package_signals
-            .iter()
-            .any(|signal| file_packages.contains(*signal))
+        let mut candidates = Vec::new();
+        push_unique_package_candidate(&mut candidates, callee);
+        for receiver_type in receiver_types {
+            push_unique_package_candidate(&mut candidates, receiver_type);
+            if let Some(target) = alias_map.get(receiver_type) {
+                push_alias_target_package_candidate(&mut candidates, target);
+            }
+            if let Some(receiver_tail) = receiver_path_tail(receiver_type).strip_prefix("new ") {
+                if let Some(target) = alias_map.get(receiver_tail) {
+                    push_alias_target_package_candidate(&mut candidates, target);
+                }
+            } else if let Some(target) = alias_map.get(receiver_path_tail(receiver_type)) {
+                push_alias_target_package_candidate(&mut candidates, target);
+            }
+        }
+        if let Some(target) = alias_map.get(callee) {
+            push_alias_target_package_candidate(&mut candidates, target);
+        }
+        if let Some((head, _)) = split_call_head_tail(callee) {
+            if let Some(target) = alias_map.get(head) {
+                push_alias_target_package_candidate(&mut candidates, target);
+            }
+        }
+        let file_level_package_evidence_allowed = self.rule.kind == crate::rule::RuleKind::Source
+            || (self.rule.kind == crate::rule::RuleKind::Sink
+                && self
+                    .rule
+                    .tag
+                    .as_deref()
+                    .is_some_and(|tag| matches!(tag, "memory-safety" | "race")));
+        self.package_signals.iter().any(|signal| {
+            (file_level_package_evidence_allowed && file_packages.contains(*signal))
+                || candidates
+                    .iter()
+                    .any(|candidate| crate::pkg::import_matches_package(candidate, signal))
+        })
+    }
+}
+
+fn split_call_head_tail(callee: &str) -> Option<(&str, &str)> {
+    let trimmed = callee.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed
+        .split_once("::")
+        .or_else(|| trimmed.split_once('.'))
+        .or_else(|| trimmed.split_once(':'))
+}
+
+fn push_alias_target_package_candidate(out: &mut Vec<String>, target: &AliasTarget) {
+    match target {
+        AliasTarget::Member { module, .. } | AliasTarget::Namespace { module } => {
+            push_unique_package_candidate(out, module);
+        }
+        AliasTarget::Type { type_name } => push_unique_package_candidate(out, type_name),
+    }
+}
+
+fn push_unique_package_candidate(out: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+        out.push(value.to_string());
     }
 }
 
@@ -796,6 +866,7 @@ fn scan_calls_batch(
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
+    let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let decls = global.decls_in(file);
@@ -806,7 +877,8 @@ fn scan_calls_batch(
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
-        let calls = collect_calls(&decl.flow_events);
+        let mut calls = collect_calls(&decl.flow_events);
+        enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
         let receiver_counts = receiver_method_call_counts(&calls);
         let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
         // Per-decl context: decorators on the decl, must-alias map
@@ -831,6 +903,14 @@ fn scan_calls_batch(
                 ) else {
                     continue;
                 };
+                if !prepared.call_context_allows(
+                    &call.callee,
+                    &call.receiver_types,
+                    &alias_map,
+                    file_packages.as_ref(),
+                ) {
+                    continue;
+                }
                 let receiver_call_count =
                     receiver_method_key(&call.callee).and_then(|key| receiver_counts.get(&key).copied());
                 if !constraints_pass(ConstraintEval {
@@ -902,6 +982,9 @@ fn scan_calls_batch(
             ) else {
                 continue;
             };
+            if !prepared.call_context_allows(&r.name, &[], &import_aliases, file_packages.as_ref()) {
+                continue;
+            }
             if !constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: &matched_callee,
@@ -954,6 +1037,7 @@ fn scan_missing_batch(
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
+    let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
 
@@ -967,7 +1051,8 @@ fn scan_missing_batch(
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
-        let calls = collect_calls(&decl.flow_events);
+        let mut calls = collect_calls(&decl.flow_events);
+        enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
         let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
         let decl_decorators = collect_decl_decorator_names(ws, file, decl.span);
         let alias_chains = collect_must_alias_pairs(&decl.flow_events);
@@ -1020,6 +1105,12 @@ fn scan_missing_batch(
                         &alias_map,
                     )
                     .is_some()
+                        && prepared.call_context_allows(
+                            &call.callee,
+                            &call.receiver_types,
+                            &alias_map,
+                            file_packages.as_ref(),
+                        )
                 }) || missing_target_in_reachable_callees(ws, file, decl, prepared, &import_aliases);
             if target_present {
                 continue;
@@ -1086,10 +1177,13 @@ fn missing_target_in_reachable_callees(
             // Per-callee aliases / packages so child resolutions
             // use the callee's own imports, not the entry's.
             let callee_file = global.declaring_file(callee_decl.symbol).unwrap_or(file);
+            let callee_file_packages = file_package_set(ws, callee_file);
             let mut callee_alias = file_alias_map(ws, callee_file);
             extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
             bonsai_lang_api::extend_alias_map_with_flow_events(&mut callee_alias, &callee_decl.flow_events);
-            for call in collect_calls(&callee_decl.flow_events) {
+            let mut calls = collect_calls(&callee_decl.flow_events);
+            enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
+            for call in calls {
                 if callee_or_alias_matches(
                     &call.callee,
                     &call.receiver_types,
@@ -1099,6 +1193,12 @@ fn missing_target_in_reachable_callees(
                     &callee_alias,
                 )
                 .is_some()
+                    && prepared.call_context_allows(
+                        &call.callee,
+                        &call.receiver_types,
+                        &callee_alias,
+                        callee_file_packages.as_ref(),
+                    )
                 {
                     return true;
                 }
@@ -1124,12 +1224,15 @@ fn matching_call_has_arg_index(
     wanted_index: usize,
 ) -> bool {
     let global = ws.db().global_index();
+    let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         let mut alias_map = import_aliases.clone();
         extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
-        for call in collect_calls(&decl.flow_events) {
+        let mut calls = collect_calls(&decl.flow_events);
+        enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
+        for call in calls {
             if call.origin != CallFactOrigin::RealCall || call.args.get(wanted_index).is_none() {
                 continue;
             }
@@ -1143,6 +1246,14 @@ fn matching_call_has_arg_index(
             )
             .is_none()
             {
+                continue;
+            }
+            if !prepared.call_context_allows(
+                &call.callee,
+                &call.receiver_types,
+                &alias_map,
+                file_packages.as_ref(),
+            ) {
                 continue;
             }
             if prepared.rule.match_spec.kind == MatchKind::New
@@ -1277,6 +1388,26 @@ pub(crate) fn rule_regex_requires_package_signal(rule: &Rule) -> bool {
         .and_then(|target| target.regex.as_deref())
         .is_some_and(regex_prefix_is_receiver_agnostic)
         && (!rule.packages.is_empty() || !rule.imports.is_empty() || !rule.modules.is_empty())
+}
+
+fn rule_requires_call_package_signal(rule: &Rule) -> bool {
+    if rule.packages.is_empty() && rule.imports.is_empty() && rule.modules.is_empty() {
+        return false;
+    }
+    let target = match rule.match_spec.kind {
+        MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
+        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+            rule.match_spec.target.as_ref()
+        }
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    target
+        .regex
+        .as_deref()
+        .is_some_and(regex_prefix_is_receiver_agnostic)
+        || (rule.match_spec.kind == MatchKind::New && target.name.is_some())
 }
 
 fn regex_prefix_is_receiver_agnostic(regex: &str) -> bool {
@@ -1784,6 +1915,7 @@ fn arg_regex_texts(
             span: arg.span,
             name: arg.name.clone(),
             place: arg.place.clone(),
+            source_names: arg.source_names.clone(),
             value_text: assignment.clone(),
         },
         Some(assignment_texts),
@@ -1849,6 +1981,7 @@ fn scan_writes_batch(
                         span,
                         name: None,
                         place: None,
+                        source_names: Vec::new(),
                         value_text: value_text.to_string(),
                     }]
                 })
@@ -1924,6 +2057,7 @@ fn scan_ref_writes_batch(
                     span: r.span,
                     name: None,
                     place: None,
+                    source_names: Vec::new(),
                     value_text: value_text.to_string(),
                 }]
             })
@@ -2432,6 +2566,56 @@ fn collect_calls(events: &[FlowEvent]) -> Vec<CallFact> {
     calls
 }
 
+fn enrich_call_fact_receiver_types(calls: &mut [CallFact], aliases: &[TypeAliasBinding]) {
+    if aliases.is_empty() {
+        return;
+    }
+    for call in calls {
+        let Some(receiver) = call_receiver_text(&call.callee) else {
+            continue;
+        };
+        for alias in aliases {
+            if alias.name == receiver || receiver_root_name(receiver).as_deref() == Some(alias.name.as_str())
+            {
+                push_unique_string(&mut call.receiver_types, alias.type_name.clone());
+            }
+        }
+    }
+}
+
+fn call_receiver_text(callee: &str) -> Option<&str> {
+    let callee = callee.trim();
+    for sep in bonsai_common::QUALIFIED_NAME_SEPARATORS {
+        let Some((receiver, _)) = callee.rsplit_once(sep) else {
+            continue;
+        };
+        let receiver = receiver.trim();
+        if !receiver.is_empty() {
+            return Some(receiver);
+        }
+    }
+    None
+}
+
+fn receiver_root_name(receiver: &str) -> Option<String> {
+    let receiver = receiver.trim().trim_start_matches(['&', '*', '$', '@', '%']);
+    let root = receiver
+        .split(['.', ':', '\\', '[', '('])
+        .next()
+        .unwrap_or(receiver)
+        .trim();
+    if root.is_empty() || root == receiver {
+        return None;
+    }
+    Some(root.to_string())
+}
+
+fn push_unique_string(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
+}
+
 /// Tally how often each `receiver\0method` pair appears in the call
 /// list, ignoring assignment-source duplicates. Drives the
 /// `SameReceiverCallCountAtLeast` constraint (e.g. "this rule only
@@ -2506,6 +2690,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                 span,
                 source_call: Some(name),
                 source_call_args,
+                source_names,
                 ..
             } => {
                 out.push(CallFact {
@@ -2518,6 +2703,7 @@ fn collect_calls_into(events: &[FlowEvent], out: &mut Vec<CallFact>) {
                             name: None,
                             value_text: value_text.clone(),
                             place: None,
+                            source_names: source_names.clone(),
                         })
                         .collect(),
                     receiver_types: Vec::new(),
@@ -2604,6 +2790,7 @@ fn receiver_call_with_args(receiver: &str, span: Span) -> Option<(String, Vec<Ca
                 name: None,
                 value_text,
                 place: None,
+                source_names: Vec::new(),
             })
             .collect();
         return Some((callee.to_string(), args));
@@ -3740,32 +3927,10 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
             // G3 cross-method: if this method's class has any field
             // writes sourced from a param (recorded in
             // class_field_writes), emit a synthetic source for the
-            // qualified field name inside this method. Class-
-            // containment is resolved via adapter-provided
-            // `decl.parent` when present, falling back to span-
-            // containment when the adapter omits parent (Python /
-            // Ruby / Lua / others that don't set it). Tree-sitter-
-            // derived in both paths — no name-based matching.
-            let class_symbol = decl.parent.or_else(|| {
-                let probe = decl.name_span;
-                global
-                    .decls_in(file)
-                    .iter()
-                    .find(|c| {
-                        matches!(
-                            c.kind,
-                            DeclKind::Class
-                                | DeclKind::Struct
-                                | DeclKind::Trait
-                                | DeclKind::Interface
-                                | DeclKind::Enum
-                        ) && {
-                            let body = c.body_span.unwrap_or(c.span);
-                            probe.start >= body.start && probe.end <= body.end
-                        }
-                    })
-                    .map(|c| c.symbol)
-            });
+            // qualified field name inside this method. Class membership
+            // must come from adapter-emitted `Decl.parent`; the matcher
+            // does not recover ownership from source-span containment.
+            let class_symbol = decl.parent;
             if let Some(cs) = class_symbol {
                 if let Some(fields) = class_field_writes.get(&cs) {
                     // Sort the field set deterministically — the
@@ -3880,13 +4045,11 @@ fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
 /// `class_symbol → set of qualified field names` so sibling methods
 /// can inherit field taint (G3 cross-method field-taint).
 ///
-/// Class→method relationship: not every adapter populates
-/// `decl.parent` (Python / Ruby / Lua are known omitters), so we
-/// derive it from span containment — the class decl's span covers
-/// its methods' spans, which is how tree-sitter produces the AST
-/// structure. A method is a class member when its name_span lies
-/// inside the class's body span (or full span). Keyed on the
-/// class's SymbolId, so the map is symbol-stable across reloads.
+/// Class→method relationship is semantic: adapters populate
+/// `Decl.parent` from AST ownership before the matcher runs. The
+/// matcher does not infer membership from source-span containment,
+/// because nested/local functions can live inside the same spans but
+/// are not class methods.
 fn collect_class_field_taints(
     global: &bonsai_index::GlobalIndex,
 ) -> ahash::AHashMap<bonsai_common::SymbolId, ahash::AHashSet<String>> {
@@ -3894,22 +4057,6 @@ fn collect_class_field_taints(
         ahash::AHashMap::default();
     for file in global.all_files() {
         let decls = global.decls_in(file);
-        // Build per-file class list once so the containment check is
-        // O(methods × classes_in_same_file) rather than
-        // O(methods × all_classes).
-        let classes: Vec<&bonsai_lang_api::Decl> = decls
-            .iter()
-            .filter(|d| {
-                matches!(
-                    d.kind,
-                    DeclKind::Class
-                        | DeclKind::Struct
-                        | DeclKind::Trait
-                        | DeclKind::Interface
-                        | DeclKind::Enum
-                )
-            })
-            .collect();
         for decl in decls.iter() {
             if !matches!(
                 decl.kind,
@@ -3917,19 +4064,7 @@ fn collect_class_field_taints(
             ) {
                 continue;
             }
-            // Find the enclosing class by span containment. First try
-            // adapter-provided `parent`; fall back to body_span or
-            // span containment search over the file's classes.
-            let class_symbol = decl.parent.or_else(|| {
-                let probe = decl.name_span;
-                classes
-                    .iter()
-                    .find(|c| {
-                        let body = c.body_span.unwrap_or(c.span);
-                        probe.start >= body.start && probe.end <= body.end
-                    })
-                    .map(|c| c.symbol)
-            });
+            let class_symbol = decl.parent;
             let Some(class_symbol) = class_symbol else {
                 continue;
             };

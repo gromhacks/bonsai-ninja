@@ -56,6 +56,7 @@ fn call(name: &str, args: &[&str]) -> FlowEvent {
                 span: span(),
                 name: None,
                 place: None,
+                source_names: Vec::new(),
                 value_text: (*text).to_string(),
             })
             .collect(),

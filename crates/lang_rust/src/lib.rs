@@ -4,8 +4,9 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CapabilityLevel, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, CapabilityLevel, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary,
+    Visibility,
 };
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -189,6 +190,7 @@ impl LanguageAdapter for RustAdapter {
             for decl in &mut idx.defs {
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
                 isolate_rust_spawn_bodies(&mut decl.flow_events, &spawn_body_spans);
+                enrich_rust_format_macro_operands(&mut decl.flow_events);
             }
         }
         // Rust module_path: relative file path under workspace root,
@@ -235,6 +237,140 @@ impl LanguageAdapter for RustAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    for capture in rust_format_named_captures(&arg.value_text) {
+                        if !arg.source_names.iter().any(|existing| existing == &capture) {
+                            arg.source_names.push(capture);
+                        }
+                    }
+                }
+            }
+            FlowEvent::Assign {
+                source_names,
+                source_call_args,
+                ..
+            } => {
+                for arg in source_call_args {
+                    for capture in rust_format_named_captures(arg) {
+                        if !source_names.iter().any(|existing| existing == &capture) {
+                            source_names.push(capture);
+                        }
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_rust_format_macro_operands(then_events);
+                enrich_rust_format_macro_operands(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_rust_format_macro_operands(body)
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_rust_format_macro_operands(body);
+                enrich_rust_format_macro_operands(catch_events);
+                enrich_rust_format_macro_operands(finally_events);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rust_format_named_captures(text: &str) -> Vec<String> {
+    let trimmed = text.trim_start();
+    let Some(after_macro) = trimmed
+        .strip_prefix("format!")
+        .or_else(|| trimmed.strip_prefix("format_args!"))
+    else {
+        return Vec::new();
+    };
+    let Some(open) = after_macro.find('(') else {
+        return Vec::new();
+    };
+    let args = &after_macro[open + 1..];
+    let Some((literal, _)) = first_rust_string_literal(args) else {
+        return Vec::new();
+    };
+    rust_format_named_captures_from_literal(literal)
+}
+
+fn first_rust_string_literal(text: &str) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == b'"' {
+            let start = idx + 1;
+            idx += 1;
+            let mut escaped = false;
+            while idx < bytes.len() {
+                let byte = bytes[idx];
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    return Some((&text[start..idx], idx + 1));
+                }
+                idx += 1;
+            }
+            return None;
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn rust_format_named_captures_from_literal(literal: &str) -> Vec<String> {
+    let bytes = literal.as_bytes();
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'{' {
+            idx += 1;
+            continue;
+        }
+        if bytes.get(idx + 1) == Some(&b'{') {
+            idx += 2;
+            continue;
+        }
+        let start = idx + 1;
+        if start >= bytes.len() || !is_rust_ident_start(bytes[start]) {
+            idx += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < bytes.len() && is_rust_ident_continue(bytes[end]) {
+            end += 1;
+        }
+        let name = &literal[start..end];
+        if !out.iter().any(|existing| existing == name) {
+            out.push(name.to_string());
+        }
+        idx = end;
+    }
+    out
+}
+
+fn is_rust_ident_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_rust_ident_continue(byte: u8) -> bool {
+    is_rust_ident_start(byte) || byte.is_ascii_digit()
 }
 
 /// Per-arm body spans for every `match_expression` in the file.
@@ -844,5 +980,32 @@ mod tests {
         let func = ws.lookup_function("main").expect("find main");
         let cfg = ws.db().cfg(func);
         assert!(!cfg.blocks.is_empty());
+    }
+
+    #[test]
+    fn format_macro_named_capture_becomes_call_arg_source_name() {
+        let ws = workspace_with(
+            vec![Arc::new(RustAdapter::new())],
+            &[(
+                "lib.rs",
+                r#"fn run(cmd: &str) {
+    sink(format!("ping {cmd}"));
+}"#,
+            )],
+        );
+        let file = ws.vfs().all_files()[0];
+        let idx = ws.db().decl_index(file).unwrap();
+        let run = idx.defs.iter().find(|decl| decl.name == "run").unwrap();
+        let mut found = false;
+        for event in &run.flow_events {
+            if let FlowEvent::Call { name, args, .. } = event {
+                if name == "sink" {
+                    found = args
+                        .first()
+                        .is_some_and(|arg| arg.source_names.iter().any(|source| source == "cmd"));
+                }
+            }
+        }
+        assert!(found, "format! named capture should be adapter-emitted operand");
     }
 }

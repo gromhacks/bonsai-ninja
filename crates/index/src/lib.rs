@@ -391,6 +391,7 @@ mod tests {
             parent: None,
             body_span: Some(span),
             flow_events: Vec::new(),
+            has_implicit_returns: false,
             params: Vec::new(),
             param_annotations: Vec::new(),
             type_aliases: Vec::new(),

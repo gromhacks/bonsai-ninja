@@ -13,7 +13,6 @@ bonsai_cfg = { workspace = true }
 bonsai_lang_api = { workspace = true }
 ahash = { workspace = true }
 serde = { workspace = true }
-smallvec = { workspace = true }
 
 [lints]
 workspace = true

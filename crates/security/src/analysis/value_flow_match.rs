@@ -1,23 +1,9 @@
-// Phase 4 deliverable — wired into the security pipeline in Phase 5
-// (consumer cutover). Until then, dead-code warnings are expected;
-// the tests below exercise the public surface so the logic is
-// validated even before integration.
-#![allow(dead_code)]
-
 //! Rule-match → value-flow node selectors.
 //!
-//! Phase 4 deliverable. Replaces the seed-derivation logic in
-//! `source_seed_set` with a node-selector that picks specific
-//! `ValueFlowNode`s in a precomputed `ValueFlowGraph` matching the
-//! source rule, then forwards-closes from those nodes to find sink
-//! reachability.
-//!
-//! Today's `source_seed_set` (in `analysis/mod.rs`) walks the
-//! decl's flow events to build a `TokenSet` seed for the engine.
-//! With value-flow, the engine has already run; the security pass
-//! filters the resulting graph instead. The Task #279 carve-out
-//! (don't taint `os` for `os.getenv` source) lives here as a
-//! node-filter, not as a seed restriction.
+//! The security pipeline uses these selectors before legacy
+//! event-walk seed derivation. That keeps source selection tied to
+//! the semantic value-flow graph while retaining the existing seeded
+//! interprocedural engine for path construction.
 
 use crate::matcher::RuleMatch;
 use crate::rule::MatchKind;

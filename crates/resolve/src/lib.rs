@@ -160,6 +160,11 @@ pub fn resolve_callable_with_context(
             out = collect(no_bang);
         }
     }
+    if out.is_empty() {
+        if let Some((receiver, method)) = split_member_head_tail(name) {
+            out = resolve_callable_member_with_context(global, receiver, method, ctx);
+        }
+    }
     // Walk the alias map: `cp.exec` where `cp = require("child_process")`
     // should resolve to `child_process.exec`. Without this rewrite,
     // in-workspace aliased calls miss and entry-point inference
@@ -177,6 +182,55 @@ pub fn resolve_callable_with_context(
         }
     }
     out
+}
+
+fn resolve_callable_member_with_context(
+    global: &GlobalIndex,
+    receiver: &str,
+    method: &str,
+    ctx: &ResolveContext<'_>,
+) -> Vec<bonsai_common::FuncId> {
+    use bonsai_lang_api::DeclKind;
+    if receiver.trim().is_empty() || method.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for class_sym in resolve_class(global, receiver, ctx) {
+        let Some(class_file) = global.declaring_file(class_sym) else {
+            continue;
+        };
+        for decl in global.decls_in(class_file) {
+            if decl.parent != Some(class_sym) {
+                continue;
+            }
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
+                continue;
+            }
+            if decl.name != method && short_qualified_tail(&decl.name) != method {
+                continue;
+            }
+            let Some(decl_file) = global.declaring_file(decl.symbol) else {
+                continue;
+            };
+            if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
+                continue;
+            }
+            out.push(bonsai_common::FuncId::new(decl.symbol.raw()));
+        }
+    }
+    dedup_func_ids(&mut out);
+    out
+}
+
+fn split_member_head_tail(name: &str) -> Option<(&str, &str)> {
+    let name = name.trim();
+    name.rsplit_once("::")
+        .or_else(|| name.rsplit_once('.'))
+        .or_else(|| name.rsplit_once(':'))
+        .or_else(|| name.rsplit_once('\\'))
 }
 
 fn method_parent_matches_receiver_type(
@@ -271,18 +325,91 @@ pub fn resolve_class(
             .map(|(decl, _)| decl.symbol)
             .collect::<Vec<_>>()
     };
-    let mut out = collect(name);
+    let mut out = Vec::new();
+    for lookup in type_lookup_variants(name) {
+        out.extend(collect(&lookup));
+        if !out.is_empty() {
+            dedup_symbols(&mut out);
+            return out;
+        }
+    }
     if out.is_empty() {
         if let Some(rewritten) = rewrite_through_alias_map(name, ctx) {
-            out = collect(&rewritten);
-            if out.is_empty() {
-                if let Some((_, tail)) = rewritten.rsplit_once(['.', ':']) {
-                    out = collect(tail);
+            for lookup in type_lookup_variants(&rewritten) {
+                out.extend(collect(&lookup));
+                if !out.is_empty() {
+                    dedup_symbols(&mut out);
+                    return out;
+                }
+                if let Some((_, tail)) = lookup.rsplit_once(['.', ':']) {
+                    out.extend(collect(tail));
+                    if !out.is_empty() {
+                        dedup_symbols(&mut out);
+                        return out;
+                    }
                 }
             }
         }
     }
+    dedup_symbols(&mut out);
     out
+}
+
+fn type_lookup_variants(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    push_unique(&mut out, trimmed.to_string());
+    let without_array = strip_trailing_array_suffixes(trimmed);
+    push_unique(&mut out, without_array.to_string());
+    let without_nullable = without_array.trim_end_matches('?').trim();
+    push_unique(&mut out, without_nullable.to_string());
+    let erased = erase_angle_generics(without_nullable);
+    push_unique(&mut out, erased.trim().to_string());
+    out
+}
+
+fn strip_trailing_array_suffixes(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim_end();
+        if let Some(rest) = trimmed.strip_suffix("[]") {
+            text = rest.trim_end();
+            continue;
+        }
+        return trimmed;
+    }
+}
+
+fn erase_angle_generics(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '<' => depth = depth.saturating_add(1),
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn push_unique(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
+}
+
+fn dedup_symbols(out: &mut Vec<SymbolId>) {
+    let mut seen = AHashSet::new();
+    out.retain(|symbol| seen.insert(*symbol));
+}
+
+fn dedup_func_ids(out: &mut Vec<bonsai_common::FuncId>) {
+    let mut seen = AHashSet::new();
+    out.retain(|func| seen.insert(func.raw()));
 }
 
 /// Legacy bare-name resolver.
@@ -500,6 +627,7 @@ mod tests {
             parent: None,
             body_span: None,
             flow_events: Vec::new(),
+            has_implicit_returns: false,
             params: Vec::new(),
             param_annotations: Vec::new(),
             type_aliases: Vec::new(),

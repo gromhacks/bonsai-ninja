@@ -330,7 +330,7 @@ fn add_resolved_call_edges(
                     }
                 }
                 if candidates.is_empty() {
-                    if is_erlang_remote_call(name) || qualified_module_alias_call(name, aliases) {
+                    if colon_remote_call(name) || qualified_module_alias_call(name, aliases) {
                         continue;
                     }
                     let resolved_name = aliases.get(short).map(String::as_str).unwrap_or(short);
@@ -374,17 +374,7 @@ fn add_resolved_call_edges(
                         });
                     }
                 }
-                add_receiver_callback_edges(
-                    receiver.as_deref(),
-                    *call_kind,
-                    args,
-                    from,
-                    caller_decl,
-                    global,
-                    alias_targets,
-                    local_bindings,
-                    cg,
-                );
+                add_callback_arg_edges(args, from, caller_decl, global, alias_targets, local_bindings, cg);
             }
             FlowEvent::Branch {
                 then_events,
@@ -493,9 +483,7 @@ fn add_resolved_call_edges(
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
-fn add_receiver_callback_edges(
-    receiver: Option<&str>,
-    call_kind: CallKind,
+fn add_callback_arg_edges(
     args: &[CallArg],
     from: FuncId,
     caller_decl: &Decl,
@@ -504,9 +492,6 @@ fn add_receiver_callback_edges(
     local_bindings: &AHashMap<String, FuncId>,
     cg: &mut CallGraph,
 ) {
-    if receiver.is_none() || call_kind != CallKind::Method {
-        return;
-    }
     let mut seen = AHashSet::new();
     for arg in args {
         for to in resolve_callable_arg(
@@ -881,12 +866,7 @@ fn collect_method_candidates_for_class_inner(
         if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
             continue;
         }
-        // A method's parent link is the canonical signal; the
-        // span-containment fallback covers adapters that haven't
-        // yet populated `parent`.
-        if (decl.parent == Some(class_sym) || span_contains(class_decl.span, decl.span))
-            && seen_methods.insert(decl.symbol)
-        {
+        if decl.parent == Some(class_sym) && seen_methods.insert(decl.symbol) {
             matched_local_method = true;
             out.push(FuncId::new(decl.symbol.raw()));
         }
@@ -926,16 +906,7 @@ fn enclosing_class_for_decl<'a>(global: &'a GlobalIndex, decl: &Decl) -> Option<
             }
         }
     }
-    global
-        .decls_in(decl.span.file)
-        .iter()
-        .filter(|candidate| {
-            matches!(
-                candidate.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-            ) && span_contains(candidate.span, decl.span)
-        })
-        .min_by_key(|candidate| candidate.span.end.saturating_sub(candidate.span.start))
+    None
 }
 
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
@@ -1030,11 +1001,7 @@ fn caller_decl_file(global: &GlobalIndex, caller_decl: &Decl) -> Option<FileId> 
     global.declaring_file(caller_decl.symbol)
 }
 
-fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
-}
-
-fn is_erlang_remote_call(name: &str) -> bool {
+fn colon_remote_call(name: &str) -> bool {
     name.contains(':') && !name.contains("::")
 }
 

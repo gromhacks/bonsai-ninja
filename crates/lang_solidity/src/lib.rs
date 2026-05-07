@@ -264,6 +264,7 @@ fn synthesize_yul_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Spa
                         name: None,
                         value_text: text,
                         place: None,
+                        source_names: Vec::new(),
                     });
                 }
                 let event = FlowEvent::Call {
@@ -315,6 +316,7 @@ fn synthesize_emit_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Sp
                 name: None,
                 place: simple_identifier_place(&value_node, src),
                 value_text,
+                source_names: Vec::new(),
             });
         }
         synthesized.push((

@@ -157,7 +157,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
         lang: "java",
         file_suffix: "App.java",
         module: "jakarta.servlet.http.HttpServletRequest",
-        alias: None,
+        alias: Some("HttpServletRequest"),
         original_name: None,
         is_wildcard: false,
     },
@@ -173,7 +173,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
         lang: "kotlin",
         file_suffix: "App.kt",
         module: "jakarta.servlet.http.HttpServletRequest",
-        alias: None,
+        alias: Some("HttpServletRequest"),
         original_name: None,
         is_wildcard: false,
     },
@@ -1804,6 +1804,49 @@ fn receiver_method_dispatch_narrows_by_type() {
         !body.contains("find_by_name"),
         "collect_receiver_method_targets must not contain `find_by_name`; bare lookup re-introduces \
          the cross-TU receiver-method collision"
+    );
+}
+
+/// Method ownership must come from adapter-emitted semantic parent
+/// links. Span containment was a temporary fallback that can bind
+/// nested/local declarations to the wrong class in large workspaces.
+#[test]
+fn method_dispatch_does_not_use_span_containment_as_parent_fallback() {
+    let root = repo_root();
+    for rel in [
+        "crates/callgraph/src/lib.rs",
+        "crates/workspace/src/cross_module.rs",
+        "crates/taint/src/inter/mod.rs",
+        "crates/security/src/matcher/mod.rs",
+        "crates/browse/src/classes.rs",
+        "crates/browse/src/native_export.rs",
+        "crates/cli/src/commands/inspect.rs",
+    ] {
+        let text = read(&root.join(rel));
+        assert!(
+            !text.contains("span_contains(class_decl.span, decl.span)"),
+            "{rel}: method dispatch must require Decl.parent == class_sym, not span containment"
+        );
+        assert!(
+            !text.contains("span_contains(candidate.span, decl.span)"),
+            "{rel}: declaring-class inference must not recover ownership by source span"
+        );
+    }
+}
+
+/// Receiver type enrichment must run after each adapter has finished
+/// language-specific type_alias / base-class extraction. The DB cache
+/// is the single shared indexing chokepoint used by inspect, trace,
+/// source-analysis, security-analysis, export, and browse.
+#[test]
+fn db_applies_receiver_type_enrichment_centrally() {
+    let root = repo_root();
+    let db_lib = read(&root.join("crates/db/src/lib.rs"));
+    let body = function_body(&db_lib, "decl_index");
+    assert!(
+        body.contains("adapter.extract_declarations(file, ctx)")
+            && body.contains("apply_call_receiver_types"),
+        "AnalyzerDb::decl_index must enrich FlowEvent::Call::receiver_types after adapter extraction"
     );
 }
 

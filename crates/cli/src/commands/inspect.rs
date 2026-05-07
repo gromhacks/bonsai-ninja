@@ -3469,7 +3469,6 @@ fn owner_context_for_decl(
     span_map: &bonsai_common::SpanMap,
 ) -> Vec<InspectOwnerRendered> {
     let global = ws.db().global_index();
-    let file = decl.span.file;
     let mut owners: Vec<&bonsai_lang_api::Decl> = Vec::new();
 
     let mut parent = decl.parent;
@@ -3481,14 +3480,6 @@ fn owner_context_for_decl(
             owners.push(parent_decl);
         }
         parent = parent_decl.parent;
-    }
-
-    if owners.is_empty() {
-        owners.extend(global.decls_in(file).iter().filter(|candidate| {
-            candidate.symbol != decl.symbol
-                && is_renderable_owner(candidate.kind)
-                && span_contains(candidate.body_span.unwrap_or(candidate.span), decl.name_span)
-        }));
     }
 
     owners.sort_by(|a, b| {
@@ -3536,10 +3527,6 @@ fn owner_kind_label(kind: DeclKind) -> &'static str {
         DeclKind::Enum => "enum",
         _ => "owner",
     }
-}
-
-fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
-    outer.file == inner.file && outer.start <= inner.start && outer.end >= inner.end
 }
 
 /// Compress runs of >3 consecutive unannotated lines into a single "..." row,

@@ -55,6 +55,18 @@ fn csharp_ws(source: &str) -> Workspace {
     ws
 }
 
+fn kotlin_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs()
+        .write("Handlers.kt".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
 fn php_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
@@ -218,6 +230,39 @@ fn call_name_rule(id: &str, name: &str) -> Rule {
 }
 
 #[test]
+fn package_gated_kotlin_chain_uses_constructor_property_receiver_type() {
+    let ws = kotlin_ws(
+        r#"
+package demo
+import java.sql.Connection
+
+class Handlers(private val conn: Connection) {
+    fun sqlRaw(userId: String) =
+        conn.createStatement().executeQuery("SELECT * FROM users WHERE id = '$userId'")
+}
+"#,
+    );
+    let mut rule = base_rule(
+        "kotlin.test.connection_createstatement_execute",
+        RuleKind::Sink,
+        MatchKind::Call,
+    );
+    rule.language = "kotlin".to_string();
+    rule.packages = vec!["java.sql".to_string()];
+    rule.match_spec.callee = Some(RuleTarget {
+        regex: Some(r"^[A-Za-z_$][A-Za-z0-9_$]*\.createStatement\(\)\.executeQuery$".to_string()),
+        ..Default::default()
+    });
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        hits.len(),
+        1,
+        "constructor-property receiver type should satisfy package-gated chained JDBC rule: {hits:?}"
+    );
+}
+
+#[test]
 fn receiver_agnostic_regex_rules_are_gated_by_import_context() {
     let mut rule = base_rule("python.test.gql_execute", RuleKind::Sink, MatchKind::Call);
     rule.packages = vec!["gql".to_string()];
@@ -238,7 +283,7 @@ def handler(client, payload):
         "receiver-agnostic regex must not fire without adapter-surfaced package context"
     );
 
-    let with_import = python_ws(
+    let imported_but_unrelated_receiver = python_ws(
         r#"
 import gql
 
@@ -246,10 +291,23 @@ def handler(client, payload):
     return client.execute(payload)
 "#,
     );
-    let matches = match_rule_against_facts(&with_import, &rule);
     assert!(
-        matches.iter().any(|m| m.match_text == "client.execute"),
-        "receiver-agnostic regex should fire when import context supplies the package signal: {matches:?}"
+        match_rule_against_facts(&imported_but_unrelated_receiver, &rule).is_empty(),
+        "file-level imports must not make an unrelated receiver satisfy a package-scoped regex"
+    );
+
+    let direct_package_call = python_ws(
+        r#"
+import gql
+
+def handler(payload):
+    return gql.execute(payload)
+"#,
+    );
+    let matches = match_rule_against_facts(&direct_package_call, &rule);
+    assert!(
+        matches.iter().any(|m| m.match_text == "gql.execute"),
+        "receiver-agnostic regex should fire when the call site itself names the imported package: {matches:?}"
     );
 }
 

@@ -95,12 +95,14 @@ through receiver-type dispatch instead. Don't add results of
 constructor-shaped calls (`repo = Repository.wrap(raw)`) to the callable
 binding map.
 
-Receiver-type facts are produced from adapter-emitted type aliases and
-constructor syntax, then finalized in the workspace `GlobalIndex`. The
-global pass extends direct receiver types through indexed base classes so
-security, inspect, trace, export, and taint consumers all see the same
-`Child` plus `Base` receiver context. Ambiguous type names fail closed;
-the engine must not merge unrelated class hierarchies by bare name.
+Receiver-type facts are produced from adapter-emitted type aliases,
+constructor syntax, and AST-derived `Decl.parent` ownership. The DB/index
+path enriches `FlowEvent::Call::receiver_types` before callgraph, taint,
+security, inspect, browse, and export consume the facts. The global pass
+extends direct receiver types through indexed base classes so every
+consumer sees the same `Child` plus `Base` receiver context. Ambiguous
+type names fail closed; the engine must not merge unrelated class
+hierarchies by bare name.
 
 ### 5. Data-flow graph
 
@@ -187,9 +189,11 @@ post-spawn continuation.
   `join(dst, ..., src)` writes `src` into `dst`).
 
 Caller's `apply_return_taint` consults the summary when processing
-`var = callee(args)`. Languages with implicit final-expression returns
-(Ruby, Rust tail) surface that terminal expression as a normal
-`FlowEvent::Return`.
+`var = callee(args)`. Adapters set `Decl.has_implicit_returns` only for
+language or body forms where a final expression really returns a value
+(Rust/Ruby tail expressions, expression-bodied lambdas/functions). The
+summary pass only uses terminal-tail evidence when that adapter fact is
+present; ordinary terminal assignments are not treated as returns.
 
 When an adapter emits `Assign.source_call` without `source_call_args` but
 also emits the sibling `FlowEvent::Call`, the inter walker borrows the
@@ -267,13 +271,14 @@ at call-arg / sink-arg sites:
     value occurrence.
 
 **`rhs_operand_is_tainted(text, state) -> bool`** — the strict check used
-at assignment-RHS source names. Same as the relaxed form minus steps 8
-and 9 (no bare-name promotion, no token-walk fallback). This is what
-keeps `out = data['other']` from inheriting `data.value`'s taint.
+at assignment-RHS and call-argument `source_names`. Same as the relaxed
+form minus steps 8 and 9 (no bare-name promotion, no token-walk
+fallback). This is what keeps `out = data['other']` from inheriting
+`data.value`'s taint.
 
-Sigil interpolation is boundary-aware: a seed `$c` matches `$c` and
-`${c}` but not `$cap`. `$` interpolation is only recognised in
-string-like text; raw `$obj->field` is a member access.
+Interpolated string taint is adapter-derived. The parser surfaces real
+interpolation expression children as `source_names`; the taint engine
+does not parse `$x`, `${x}`, `#{x}`, or f-string syntax out of raw text.
 
 ## Branch conditions and constant facts
 

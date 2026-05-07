@@ -99,6 +99,7 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
     // this grammar).
     let return_names = collect_return_value_names(&decl.flow_events);
     let has_precise_returns = !return_names.is_empty();
+    let allow_terminal_tail_return = decl.has_implicit_returns;
     // Methods that return `self`-style state need an extra check:
     // any growth of the taint set past the seed implies the receiver state changed.
     let returns_implicit_receiver = decl.parent.is_some()
@@ -121,7 +122,8 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         } else {
             // No precise return names — fall back to explicit / terminal-tail evidence.
             contains_tainted_return(&decl.flow_events, &value_tainted_at_end)
-                || terminal_event_returns_taint(&decl.flow_events, &value_tainted_at_end)
+                || (allow_terminal_tail_return
+                    && terminal_event_returns_taint(&decl.flow_events, &value_tainted_at_end))
         };
         if value_contributes {
             returns_taint_of.push(param_idx);
@@ -135,11 +137,13 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
             return_names.iter().any(|name| {
                 descendant_tainted_at_end.contains(name)
                     || arg_text_is_tainted(name, &descendant_tainted_at_end)
+                    || return_name_has_descendant_taint(name, &descendant_tainted_at_end)
             }) || contains_tainted_return(&decl.flow_events, &descendant_tainted_at_end)
                 || (returns_implicit_receiver && descendant_tainted_at_end.len() > descendant_seed.len())
         } else {
             contains_tainted_return(&decl.flow_events, &descendant_tainted_at_end)
-                || terminal_event_returns_taint(&decl.flow_events, &descendant_tainted_at_end)
+                || (allow_terminal_tail_return
+                    && terminal_event_returns_taint(&decl.flow_events, &descendant_tainted_at_end))
         };
         if descendant_contributes {
             returns_descendant_taint_of.push(param_idx);
@@ -157,6 +161,16 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         returns_access_paths: compute_return_access_paths(decl),
         taints_params_from: compute_param_side_effects(decl),
     }
+}
+
+/// True when `name` itself is not tainted as a whole value, but the
+/// assignment pass recorded it as a scalar alias derived from a tainted
+/// descendant (`carrier.*` -> `tmp.*` -> `return tmp`). Return summaries
+/// need this distinction so callers receive descendant-derived scalar
+/// taint without forcing every carrier sibling to become tainted.
+fn return_name_has_descendant_taint(name: &str, tainted: &TokenSet) -> bool {
+    let normalised = normalise_qualified_text(name.trim());
+    !normalised.is_empty() && qualified_wildcard_seed_matches(&normalised, tainted)
 }
 
 /// Walk the decl once per parameter, tracking every aliased access
@@ -928,7 +942,7 @@ fn contains_tainted_return(events: &[FlowEvent], tainted: &TokenSet) -> bool {
             | FlowEvent::Yield {
                 value_text: Some(text),
                 ..
-            } if arg_text_is_tainted(text, tainted) => return true,
+            } if return_value_text_is_tainted(text, tainted) => return true,
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -959,6 +973,52 @@ fn contains_tainted_return(events: &[FlowEvent], tainted: &TokenSet) -> bool {
         }
     }
     false
+}
+
+fn return_value_text_is_tainted(text: &str, tainted: &TokenSet) -> bool {
+    arg_text_is_tainted(terminal_return_expression_text(text), tainted)
+}
+
+fn terminal_return_expression_text(text: &str) -> &str {
+    let trimmed = text.trim();
+    let without_do = trimmed
+        .strip_prefix("do ")
+        .and_then(|inner| inner.strip_suffix(" end"))
+        .unwrap_or(trimmed)
+        .trim();
+    let without_arrow = without_do.strip_prefix("->").unwrap_or(without_do).trim();
+    split_terminal_return_segment(without_arrow).trim()
+}
+
+fn split_terminal_return_segment(text: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut last_split = 0usize;
+    let mut chars = text.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ';' | ',' if depth == 0 => last_split = idx + ch.len_utf8(),
+            _ => {}
+        }
+    }
+    &text[last_split..]
 }
 
 /// True when any `Return`/`Yield` in `events` builds a fresh
