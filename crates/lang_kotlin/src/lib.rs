@@ -537,6 +537,20 @@ fn kotlin_param_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
                 "simple_identifier" | "identifier" if name_node.is_none() => {
                     name_node = Some(child);
                 }
+                // `property_declaration` wraps the binding identifier
+                // inside a `variable_declaration` node — descend so
+                // type-inferred fields like `private val x = Y()` get
+                // a name. Without this, every type-inferred property
+                // is silently dropped from the class alias map.
+                "variable_declaration" if name_node.is_none() => {
+                    let mut inner = child.walk();
+                    for grandchild in child.named_children(&mut inner) {
+                        if matches!(grandchild.kind(), "simple_identifier" | "identifier") {
+                            name_node = Some(grandchild);
+                            break;
+                        }
+                    }
+                }
                 "user_type" | "type_identifier" | "function_type" | "nullable_type"
                     if type_node.is_none() =>
                 {
@@ -546,17 +560,80 @@ fn kotlin_param_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
             }
         }
     }
-    let name = node_text(&name_node?, src).trim().to_string();
-    let type_text = node_text(&type_node?, src);
-    let type_short = canonical_short_type(type_text)?;
-    // `name == type` adds no narrowing power for the resolver.
-    if name.is_empty() || name == type_short {
+    let name_node = name_node?;
+    let name = node_text(&name_node, src).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let type_short = if let Some(type_node) = type_node {
+        canonical_short_type(node_text(&type_node, src))?
+    } else {
+        // Type-inferred property (`val x = Y()`): tree-sitter does not
+        // resolve types, so fall back to constructor-shape inference
+        // when the RHS is a `call_expression` whose callee is a
+        // PascalCase identifier — that's a constructor call by Kotlin
+        // convention and binds the property's type for receiver
+        // dispatch. Without this, classes that use idiomatic
+        // type-inferred field initialization (`private val authService
+        // = AuthService()`) lose receiver-type info downstream.
+        kotlin_property_constructor_type(node, src)?
+    };
+    if name == type_short {
         return None;
     }
     Some(TypeAliasBinding {
         name,
         type_name: type_short,
     })
+}
+
+/// When a `property_declaration` lacks an explicit type annotation,
+/// look at its `expression` (RHS) for a `call_expression` whose
+/// callee is a PascalCase identifier — that's a constructor call by
+/// Kotlin convention, so the property's static type is the callee
+/// name. Returns the canonical short type, or `None` when the RHS
+/// isn't a constructor-shaped expression.
+fn kotlin_property_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let rhs = node.child_by_field_name("expression").or_else(|| {
+        let mut cursor = node.walk();
+        let mut found = None;
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "call_expression" {
+                found = Some(child);
+                break;
+            }
+        }
+        found
+    })?;
+    if rhs.kind() != "call_expression" {
+        return None;
+    }
+    let callee = rhs.child_by_field_name("function").or_else(|| {
+        let mut cursor = rhs.walk();
+        let mut found = None;
+        for child in rhs.named_children(&mut cursor) {
+            if matches!(
+                child.kind(),
+                "simple_identifier" | "identifier" | "navigation_expression" | "user_type"
+            ) {
+                found = Some(child);
+                break;
+            }
+        }
+        found
+    })?;
+    let callee_text = node_text(&callee, src);
+    let canonical = canonical_short_type(callee_text)?;
+    // Pascal-case head identifies a constructor — Kotlin requires
+    // class names to be capitalized, while regular function names are
+    // lowercase by convention. Without the capital-letter check we'd
+    // bind every typed local to the function it was initialized from,
+    // which is not the same fact at all.
+    canonical
+        .chars()
+        .next()
+        .filter(|first| first.is_ascii_uppercase())?;
+    Some(canonical)
 }
 
 /// Strip a Kotlin type literal down to its bare class name. Drops

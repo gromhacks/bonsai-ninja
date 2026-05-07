@@ -7,8 +7,9 @@ use bonsai_lang_api::{
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
+use tree_sitter::Node;
 
 const SCALA_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_definition", "function_declaration"],
@@ -28,6 +29,7 @@ const SCALA_DECL_KINDS: &[&str] = &[
     "var_definition",
 ];
 use tree_sitter::{Language, Tree};
+// (`Node` brought into scope above so class-scoped helpers can pass nodes around.)
 
 pub const LANG_ID: LanguageId = LanguageId::new("scala");
 const PACK_NAME: &str = "scala";
@@ -98,13 +100,18 @@ impl LanguageAdapter for ScalaAdapter {
                 .filter(|decl| is_class_like(decl.kind))
                 .map(|decl| (decl.span, decl.symbol))
                 .collect();
+            // Class-level field type bindings — `private val
+            // authService = new AuthService()` makes
+            // `authService: AuthService` visible inside every method
+            // of the enclosing class. Without this, the engine cannot
+            // dispatch `authService.runAdminCommand(...)` to the real
+            // `AuthService` decl.
+            let class_field_aliases = collect_scala_class_field_aliases(&tree, file, src);
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
                 }
-                if let Some(aliases) = alias_map.get(&decl.span) {
-                    decl.type_aliases = aliases.clone();
-                }
+                let mut aliases = alias_map.get(&decl.span).cloned().unwrap_or_default();
                 if let Some((_, owner_span, owner_kind)) =
                     method_owners.iter().find(|(span, _, _)| *span == decl.span)
                 {
@@ -118,6 +125,19 @@ impl LanguageAdapter for ScalaAdapter {
                                 vec!["this".to_string(), "super".to_string()];
                         }
                     }
+                    if let Some(field_aliases) = class_field_aliases
+                        .iter()
+                        .find_map(|(span, list)| (*span == *owner_span).then_some(list))
+                    {
+                        for alias in field_aliases {
+                            if !aliases.contains(alias) {
+                                aliases.push(alias.clone());
+                            }
+                        }
+                    }
+                }
+                if !aliases.is_empty() {
+                    decl.type_aliases = aliases;
                 }
             }
             // Per-class `bases`: `class C extends Base with Mixin` →
@@ -179,6 +199,156 @@ impl LanguageAdapter for ScalaAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Walk every Scala class-like declaration and pull `(name, type)`
+/// bindings from `val_definition` and `var_definition` children
+/// (class fields). Returns `(class_span, [TypeAliasBinding])` so the
+/// per-method merge can attach a class's bindings to every method
+/// nested inside it.
+fn collect_scala_class_field_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<TypeAliasBinding>)> {
+    let class_kinds = &["class_definition", "trait_definition", "object_definition"];
+    let mut out = Vec::new();
+    for class_node in collect_kinds(tree, class_kinds) {
+        let mut aliases: Vec<TypeAliasBinding> = Vec::new();
+        let mut work = vec![class_node];
+        while let Some(node) = work.pop() {
+            // Don't descend into nested classes; their methods get
+            // their own scope.
+            if node != class_node && class_kinds.contains(&node.kind()) {
+                continue;
+            }
+            // Don't descend into method bodies — local vals are
+            // covered by the per-method `collect_param_type_aliases`
+            // pass and would pollute the class-scope set.
+            if node != class_node
+                && matches!(node.kind(), "function_definition" | "function_declaration")
+            {
+                continue;
+            }
+            if matches!(node.kind(), "val_definition" | "var_definition") {
+                if let Some(binding) = scala_field_alias(node, src) {
+                    if !aliases.contains(&binding) {
+                        aliases.push(binding);
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                work.push(child);
+            }
+        }
+        if !aliases.is_empty() {
+            out.push((span_of(file, &class_node), aliases));
+        }
+    }
+    out
+}
+
+/// Extract a `name: Type` binding from one Scala `val_definition` /
+/// `var_definition`. Handles both explicit annotations
+/// (`val x: Foo = ...`) and constructor-shaped initializers
+/// (`val x = new Foo()`), since Scala source frequently relies on
+/// type inference for class fields.
+fn scala_field_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
+    let pattern = node
+        .child_by_field_name("pattern")
+        .or_else(|| node.child_by_field_name("name"))?;
+    let name = node_text(&pattern, src).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let type_short = node
+        .child_by_field_name("type")
+        .map(|t| node_text(&t, src).to_string())
+        .and_then(|t| canonical_simple_type_name(&t))
+        .or_else(|| scala_value_constructor_type(node, src))?;
+    if type_short.is_empty() || name == type_short {
+        return None;
+    }
+    Some(TypeAliasBinding {
+        name,
+        type_name: type_short,
+    })
+}
+
+fn scala_value_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let value = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("expression"))?;
+    let candidate = match value.kind() {
+        // `new Foo(...)` shape across grammar versions.
+        "instance_expression" | "creator" | "new_expression" => {
+            let mut found = None;
+            let mut cursor = value.walk();
+            for child in value.named_children(&mut cursor) {
+                if matches!(child.kind(), "type_identifier" | "simple_type" | "user_type") {
+                    found = Some(node_text(&child, src).to_string());
+                    break;
+                }
+                if child.kind() == "call_expression" {
+                    let mut inner = child.walk();
+                    for sub in child.named_children(&mut inner) {
+                        if matches!(sub.kind(), "type_identifier" | "simple_type" | "identifier") {
+                            found = Some(node_text(&sub, src).to_string());
+                            break;
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            found?
+        }
+        // `val x = Foo()` (apply method) — Scala convention treats
+        // PascalCase callees as constructor-shaped.
+        "call_expression" => {
+            let func = value.child_by_field_name("function").or_else(|| {
+                let mut cursor = value.walk();
+                let mut found = None;
+                for child in value.named_children(&mut cursor) {
+                    if matches!(child.kind(), "identifier" | "type_identifier") {
+                        found = Some(child);
+                        break;
+                    }
+                }
+                found
+            })?;
+            node_text(&func, src).to_string()
+        }
+        _ => return None,
+    };
+    let canonical = canonical_simple_type_name(&candidate)?;
+    canonical
+        .chars()
+        .next()
+        .filter(|first| first.is_ascii_uppercase())?;
+    Some(canonical)
+}
+
+fn canonical_simple_type_name(raw: &str) -> Option<String> {
+    let no_generics = raw.split('[').next().unwrap_or(raw);
+    let no_generics = no_generics.split('<').next().unwrap_or(no_generics);
+    let trimmed = no_generics
+        .trim()
+        .trim_start_matches("new ")
+        .trim()
+        .trim_end_matches('?');
+    let short = trimmed.rsplit('.').next().unwrap_or(trimmed).trim();
+    if short.is_empty()
+        || !short
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
+    Some(short.to_string())
 }
 
 fn collect_scala_method_owners(tree: &Tree, file: FileId) -> Vec<(Span, Span, &'static str)> {

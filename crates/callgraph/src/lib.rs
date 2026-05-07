@@ -1545,19 +1545,61 @@ fn collect_workspace_module_targets(
         let Some(file) = global.declaring_file(sym) else {
             continue;
         };
-        let in_target_file =
-            path_for_file(file).is_some_and(|path| module_target_matches_path(alias_target, &path));
-        if !in_target_file {
-            continue;
-        }
         let Some(decl) = global.decl_of(sym) else {
             continue;
         };
+        // Module-namespace match: prefer the decl's canonical
+        // `module_path` (the adapter's semantic-identity fact) before
+        // falling back to file-path heuristics. Required for
+        // languages whose modules and files use different
+        // conventions — Elixir's `MyApp.AuthService` vs.
+        // `my_app/auth_service.ex` is the canonical example: the
+        // file-path match would silently miss the cross-module
+        // edge. The semantic match is always sufficient when
+        // adapters populate `module_path`.
+        let semantic_match = module_target_matches_decl_module_path(alias_target, &decl.module_path);
+        let in_target_file = semantic_match
+            || path_for_file(file).is_some_and(|path| module_target_matches_path(alias_target, &path));
+        if !in_target_file {
+            continue;
+        }
         if seen_spans.insert((file, decl.span.start, decl.span.end)) {
             targets.push(func);
         }
     }
     targets
+}
+
+/// Suffix-aware match between a module-namespace alias text (e.g.
+/// `MyApp.AuthService` or `pipeline`) and the canonical
+/// `Decl.module_path` for a workspace decl. Returns true when the
+/// alias's segments match the trailing segments of the decl's
+/// module_path so a leaf alias (`AuthService`) hits a decl declared
+/// inside `MyApp.AuthService`.
+fn module_target_matches_decl_module_path(
+    alias_target: &str,
+    decl_module: &bonsai_lang_api::ModulePath,
+) -> bool {
+    if alias_target.is_empty() || decl_module.is_empty() {
+        return false;
+    }
+    let target_segments: Vec<&str> = alias_target
+        .split('.')
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+        .collect();
+    if target_segments.is_empty() {
+        return false;
+    }
+    let decl_segments = &decl_module.segments;
+    if target_segments.len() > decl_segments.len() {
+        return false;
+    }
+    let suffix_start = decl_segments.len() - target_segments.len();
+    decl_segments[suffix_start..]
+        .iter()
+        .zip(target_segments.iter())
+        .all(|(decl_seg, target_seg)| decl_seg == target_seg)
 }
 
 fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]) -> Vec<String> {

@@ -1790,11 +1790,13 @@ fn walk_into(
                 if child.id() == body_id {
                     continue;
                 }
+                emit_using_as_pattern_assigns(child, file, src, out);
                 walk_into(child, file, src, handler, class_names, out, false);
             }
         } else {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
+                emit_using_as_pattern_assigns(child, file, src, &mut body);
                 walk_into(child, file, src, handler, class_names, &mut body, false);
             }
         }
@@ -1809,6 +1811,167 @@ fn walk_into(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         walk_into(child, file, src, handler, class_names, out, false);
+    }
+}
+
+/// Walk a using-clause subtree (`with_clause`/`using_declaration` and
+/// their `with_item`/`using_variable_declaration` children) and emit
+/// a synthetic `FlowEvent::Assign` for every `as`-bound name found.
+///
+/// `with Transaction(runner, tag) as tx:` looks like
+/// `with_statement > with_clause > with_item { value: <call>, alias:
+/// <ident "tx"> }` (newer grammars) or wraps the binding in an
+/// `as_pattern { value, alias }` node (older grammars). Without this
+/// emission the binding `tx` has no assignment record, so the alias
+/// map cannot bind `tx → Type{Transaction}` and the receiver-typed
+/// dispatch for `tx.perform(...)` fails. The synthetic Assign feeds
+/// into [`extend_alias_map_with_flow_events`] just like a regular
+/// `tx = Transaction(runner, tag)` would.
+fn emit_using_as_pattern_assigns(
+    node: tree_sitter::Node<'_>,
+    file: bonsai_common::FileId,
+    src: &[u8],
+    out: &mut Vec<crate::FlowEvent>,
+) {
+    fn extract_alias_target<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+        let alias = node
+            .child_by_field_name("alias")
+            .or_else(|| node.child_by_field_name("name"))?;
+        match alias.kind() {
+            "identifier" | "simple_identifier" | "variable_name" | "name" | "type_identifier" => {
+                Some(alias)
+            }
+            _ => first_identifier_descendant(alias).or(Some(alias)),
+        }
+    }
+
+    fn extract_alias_value<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+        if let Some(value_field) = node
+            .child_by_field_name("value")
+            .or_else(|| node.child_by_field_name("expression"))
+            .or_else(|| node.child_by_field_name("init"))
+            .or_else(|| node.child_by_field_name("initializer"))
+        {
+            return Some(value_field);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if matches!(
+                child.kind(),
+                "call" | "call_expression" | "object_creation_expression" | "instance_expression" | "new_expression"
+            ) {
+                return Some(child);
+            }
+        }
+        None
+    }
+
+    let mut work = vec![node];
+    let mut emitted_spans: std::collections::HashSet<bonsai_common::Span> =
+        std::collections::HashSet::new();
+    while let Some(current) = work.pop() {
+        if matches!(
+            current.kind(),
+            "with_item"
+                | "with_variable_assignment"
+                | "with_declarator"
+                | "as_pattern"
+                | "using_variable_declaration"
+                | "using_declarator"
+                | "variable_declarator"
+                | "init_declarator"
+        ) {
+            if let (Some(name_node), Some(value_node)) =
+                (extract_alias_target(current), extract_alias_value(current))
+            {
+                let target = node_text(&name_node, src).trim().to_string();
+                let value_text = node_text(&value_node, src).trim().to_string();
+                let span = span_of(file, &current);
+                if !target.is_empty() && !value_text.is_empty() && emitted_spans.insert(span) {
+                    let (source_call, source_call_args, source_names) =
+                        synthesize_assign_components_from_value(value_node, src, &value_text);
+                    out.push(crate::FlowEvent::Assign {
+                        span,
+                        target,
+                        source_name: None,
+                        source_call,
+                        source_call_args,
+                        source_names,
+                    });
+                }
+            }
+        }
+        // Always descend: an outer container (`with_item`) may not
+        // expose alias/value fields directly but its inner
+        // `as_pattern` does, and vice versa. The `emitted_spans`
+        // set prevents duplicate emission when both levels match.
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            work.push(child);
+        }
+    }
+}
+
+fn synthesize_assign_components_from_value(
+    value_node: tree_sitter::Node<'_>,
+    src: &[u8],
+    value_text: &str,
+) -> (Option<String>, Vec<String>, Vec<String>) {
+    if matches!(
+        value_node.kind(),
+        "call" | "call_expression" | "object_creation_expression" | "instance_expression" | "new_expression"
+    ) {
+        // Constructor or call: pull out the callee tail so
+        // `extend_alias_map_with_flow_events` recognises the
+        // PascalCase constructor convention and binds the target as
+        // a Type alias. Argument operands feed source_call_args so
+        // the engine sees what data flowed into the call.
+        let callee_node = value_node
+            .child_by_field_name("function")
+            .or_else(|| value_node.child_by_field_name("type"))
+            .or_else(|| value_node.child_by_field_name("name"))
+            .or_else(|| {
+                let mut cursor = value_node.walk();
+                let mut found = None;
+                for child in value_node.named_children(&mut cursor) {
+                    if matches!(
+                        child.kind(),
+                        "identifier" | "simple_identifier" | "type_identifier" | "navigation_expression"
+                    ) {
+                        found = Some(child);
+                        break;
+                    }
+                }
+                found
+            });
+        let callee = callee_node
+            .map(|n| node_text(&n, src).trim().to_string())
+            .unwrap_or_else(|| value_text.to_string());
+        let arguments = value_node
+            .child_by_field_name("arguments")
+            .or_else(|| value_node.child_by_field_name("argument_list"));
+        let mut args: Vec<String> = Vec::new();
+        if let Some(args_node) = arguments {
+            let mut cursor = args_node.walk();
+            for child in args_node.named_children(&mut cursor) {
+                let text = node_text(&child, src).trim().to_string();
+                if !text.is_empty() {
+                    args.push(text);
+                }
+            }
+        }
+        let mut source_names = vec![callee.clone()];
+        if let Some((_, tail)) = callee.rsplit_once(['.', ':']) {
+            let tail = tail.trim().to_string();
+            if !tail.is_empty() && !source_names.contains(&tail) {
+                source_names.push(tail);
+            }
+        }
+        (Some(callee), args, source_names)
+    } else {
+        // Bare identifier or expression: surface as source_names so
+        // engine taint propagation picks up any tainted operand.
+        (None, Vec::new(), vec![value_text.to_string()])
     }
 }
 

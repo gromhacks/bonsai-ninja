@@ -3,11 +3,11 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, language_from_pack, node_text, parse_with, span_of,
+        canonical_simple_type_name, collect_kinds, language_from_pack, node_text, parse_with, span_of,
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 
 const CSHARP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -124,12 +124,54 @@ impl LanguageAdapter for CSharpAdapter {
             let src = snapshot.text.as_bytes();
             let vis_map = collect_csharp_visibility(tree.root_node(), file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &CSHARP_TYPE_ALIASES);
+            // Class-level field/property type bindings extend each
+            // method's `type_aliases`. A field declared as `private
+            // readonly AuthService _authService = new AuthService();`
+            // must be visible inside the class's methods so receiver
+            // calls like `_authService.RunAdminCommand(...)` resolve
+            // through the workspace's `AuthService` decl. The
+            // class-scoped collection mirrors Java's pattern in
+            // `lang_java` and applies symmetrically to property
+            // declarations (`public Foo Bar { get; set; }` carries
+            // the same `Bar : Foo` binding).
+            let class_field_aliases = collect_csharp_class_field_aliases(&tree, file, src);
+            // Pre-compute the parent class span for each method-like
+            // decl so the per-decl pass below can patch `type_aliases`
+            // without re-borrowing `idx.defs` while it's already
+            // mutably borrowed.
+            let class_span_for_parent: std::collections::HashMap<bonsai_common::SymbolId, Span> = idx
+                .defs
+                .iter()
+                .filter(|candidate| is_class_like(candidate.kind))
+                .map(|candidate| (candidate.symbol, candidate.span))
+                .collect();
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
                 }
-                if let Some(aliases) = alias_map.get(&decl.span) {
-                    decl.type_aliases = aliases.clone();
+                let mut aliases = alias_map.get(&decl.span).cloned().unwrap_or_default();
+                if matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    if let Some(class_span) = decl
+                        .parent
+                        .and_then(|parent_sym| class_span_for_parent.get(&parent_sym).copied())
+                    {
+                        if let Some(field_aliases) = class_field_aliases
+                            .iter()
+                            .find_map(|(span, list)| (*span == class_span).then_some(list))
+                        {
+                            for alias in field_aliases {
+                                if !aliases.contains(alias) {
+                                    aliases.push(alias.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                if !aliases.is_empty() {
+                    decl.type_aliases = aliases;
                 }
             }
             // Per-class `bases`: `class Echo : Base, IFoo` → ["Base", "IFoo"].
@@ -234,6 +276,141 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+/// Walk every C# class-like declaration and pull `(name, type)`
+/// bindings from its `field_declaration` and `property_declaration`
+/// children. Returns `(class_span, [TypeAliasBinding])` so the
+/// per-method merge can attach a class's bindings to every method
+/// nested inside it, matching the resolver's caller-decl
+/// `type_aliases` lookup contract.
+fn collect_csharp_class_field_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, Vec<TypeAliasBinding>)> {
+    let class_kinds = &[
+        "class_declaration",
+        "struct_declaration",
+        "record_declaration",
+        "record_struct_declaration",
+        "interface_declaration",
+    ];
+    let mut out = Vec::new();
+    for class_node in collect_kinds(tree, class_kinds) {
+        let mut aliases: Vec<TypeAliasBinding> = Vec::new();
+        let mut work = vec![class_node];
+        while let Some(node) = work.pop() {
+            // Don't descend into nested classes — their own iteration
+            // produces the right scope for their methods. A nested
+            // class's fields are visible only to its own methods, not
+            // the outer class's methods.
+            if node != class_node && class_kinds.contains(&node.kind()) {
+                continue;
+            }
+            match node.kind() {
+                "field_declaration" | "event_field_declaration" => {
+                    extend_aliases_from_field_or_event(node, src, &mut aliases);
+                }
+                "property_declaration" => {
+                    if let Some(binding) = property_alias_from_node(node, src) {
+                        if !aliases.contains(&binding) {
+                            aliases.push(binding);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                work.push(child);
+            }
+        }
+        if !aliases.is_empty() {
+            out.push((span_of(file, &class_node), aliases));
+        }
+    }
+    out
+}
+
+fn extend_aliases_from_field_or_event(
+    node: tree_sitter::Node<'_>,
+    src: &[u8],
+    aliases: &mut Vec<TypeAliasBinding>,
+) {
+    // C# `field_declaration` wraps a `variable_declaration` whose
+    // `type` field carries the field type and whose
+    // `variable_declarator` children name each binding. Multi-name
+    // forms (`Foo a, b, c;`) are valid for value-type fields.
+    let var_decl = node.child_by_field_name("declaration").or_else(|| {
+        let mut cursor = node.walk();
+        let mut found = None;
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "variable_declaration" {
+                found = Some(child);
+                break;
+            }
+        }
+        found
+    });
+    let Some(var_decl) = var_decl else {
+        return;
+    };
+    let Some(type_node) = var_decl.child_by_field_name("type") else {
+        return;
+    };
+    let canonical = canonical_simple_type_name(node_text(&type_node, src));
+    if canonical.is_empty() {
+        return;
+    }
+    let mut cursor = var_decl.walk();
+    for declarator in var_decl.named_children(&mut cursor) {
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let name_node = declarator.child_by_field_name("name").or_else(|| {
+            let mut inner = declarator.walk();
+            let mut found = None;
+            for child in declarator.named_children(&mut inner) {
+                if child.kind() == "identifier" {
+                    found = Some(child);
+                    break;
+                }
+            }
+            found
+        });
+        let Some(name_node) = name_node else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim().to_string();
+        if name.is_empty() || name == canonical {
+            continue;
+        }
+        let binding = TypeAliasBinding {
+            name,
+            type_name: canonical.clone(),
+        };
+        if !aliases.contains(&binding) {
+            aliases.push(binding);
+        }
+    }
+}
+
+fn property_alias_from_node(node: tree_sitter::Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
+    let type_node = node.child_by_field_name("type")?;
+    let canonical = canonical_simple_type_name(node_text(&type_node, src));
+    if canonical.is_empty() {
+        return None;
+    }
+    let name_node = node.child_by_field_name("name")?;
+    let name = node_text(&name_node, src).trim().to_string();
+    if name.is_empty() || name == canonical {
+        return None;
+    }
+    Some(TypeAliasBinding {
+        name,
+        type_name: canonical,
+    })
 }
 
 /// C#-aware visibility collector.
