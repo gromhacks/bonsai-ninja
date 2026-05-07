@@ -998,16 +998,17 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             if module_name.is_empty() {
                 continue;
             }
-            // Bare `import X` and `import X.Y` bind the leaf segment
-            // (`X`, then the leaf `Y`) as the local namespace alias —
-            // Python's binding semantics. Without a self-binding alias
-            // here, the resolver cannot rewrite `service.load_file(...)`
-            // through the workspace `service` module, so cross-module
-            // edges from `import`-form callers stay invisible. The
-            // `import X.Y as Z` form already supplied an alias and
-            // skips this fallback; wildcard imports never apply
-            // because `import *` isn't a Python `import_statement`
-            // shape (only `from X import *` is).
+            // Bare `import X` and `import X.Y` bind the FIRST segment
+            // as the local name (`X` in both forms) — Python imports
+            // a module by binding its head, not its leaf. Without a
+            // self-binding alias here, the resolver cannot rewrite
+            // `service.load_file(...)` through the workspace
+            // `service` module, so cross-module edges from
+            // `import`-form callers stay invisible. The `import X.Y
+            // as Z` form already supplied an alias and skips this
+            // fallback; wildcard imports never apply because
+            // `import *` isn't a Python `import_statement` shape
+            // (only `from X import *` is).
             let alias = alias_text.or_else(|| {
                 module_name
                     .split('.')
