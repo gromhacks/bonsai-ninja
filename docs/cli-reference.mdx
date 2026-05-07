@@ -95,7 +95,7 @@ argument propagation, receiver evidence where relevant, and sink operand.
 | `--inferred-sources` | false | Add synthetic entry-point parameter sources. |
 | `--exclude-tests` | false | Drop findings whose source or sink is in a test path. |
 | `--show-sanitized` | Compatibility | Sanitized reachable paths are already included with sanitizer evidence. |
-| `--taint-budget <N>` | 256 | Interprocedural function/seed analysis budget. |
+| `--taint-budget <N>` | 512 | Interprocedural function/seed chunk size; analysis resumes chunks to completion. |
 | `--intra-worklist-cap <N>` | CFG-derived | Intraprocedural worklist cap per function. |
 | `--precision <LEVEL>` | None | Keep only `exact`, `narrowed`, `over-approximate`, or `unknown` precision. |
 | `--strict-flow` | false | Equivalent to keeping exact and narrowed paths. |

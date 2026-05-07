@@ -116,9 +116,10 @@ tooling.
 
 CLI and SDK consumers drive the engine through
 `interprocedural_taint_to_completion_with_caches`, which manages the
-fixed-point worklist, caching of `InterTaintCaches`, and budget
-exhaustion. The standalone form documented above is the contract that
-the cache-driven driver respects on every iteration.
+fixed-point worklist and caching of `InterTaintCaches`. The configured
+budget is a resumable chunk size, not a completeness cap. The
+standalone form documented above is the contract that the cache-driven
+driver respects on every iteration.
 
 ## 5. Precision contract
 

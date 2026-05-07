@@ -1,6 +1,6 @@
 //! `bonsai-ninja dump-taint` data layer.
 //!
-//! Wraps `bonsai_taint::interprocedural_taint` with the same
+//! Wraps `bonsai_taint::interprocedural_taint_to_completion_with_caches` with the same
 //! filtering / sorting / id-stamping the CLI applies, returning a
 //! [`TaintReport`] consumers can render or further process.
 
@@ -23,7 +23,9 @@ pub struct TaintFilters<'a> {
     pub sanitizers: Vec<String>,
     /// `--sink X` — keep only records whose callee contains `X`.
     pub sink: Option<&'a str>,
-    /// `--budget N` — interprocedural pair cap. Default 512.
+    /// `--budget N` — interprocedural worklist chunk size. Default
+    /// 512. The CLI can resume chunks when it needs complete flow
+    /// evidence.
     pub budget: Option<u32>,
     /// `--intra-worklist-cap N` — per-function worklist cap inside
     /// the intraprocedural CFG pass.
@@ -141,7 +143,14 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         ..Default::default()
     };
 
-    let result = bonsai_taint::interprocedural_taint(source_func, &effective_seed, &config, db);
+    let mut caches = bonsai_taint::InterTaintCaches::default();
+    let result = bonsai_taint::interprocedural_taint_to_completion_with_caches(
+        source_func,
+        &effective_seed,
+        &config,
+        db,
+        &mut caches,
+    );
 
     let mut records: Vec<TaintRecord> = result
         .call_records
