@@ -104,6 +104,14 @@ consumer sees the same `Child` plus `Base` receiver context. Ambiguous
 type names fail closed; the engine must not merge unrelated class
 hierarchies by bare name.
 
+When the receiver is `self.<field>` / `this.<field>`, the resolver
+also consults the enclosing class's constructor `receiver_field_writes`
+and reads the source-parameter type from the constructor's
+`type_aliases`. `def __init__(self, runner: CommandRunner): self.runner
+= runner` makes every other method's `self.runner.X(...)` call
+dispatch through `CommandRunner.X` — without the engine having to
+re-walk `__init__`'s body at every receiver call.
+
 ### 5. Data-flow graph
 
 Per-function `FlowEvent::Assign` events carry `target`, `source_name`,
