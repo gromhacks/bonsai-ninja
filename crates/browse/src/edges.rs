@@ -6,9 +6,9 @@
 //! jump to the exact `FlowEvent::Call` that produced the edge.
 
 use crate::common::format_span;
-use bonsai_callgraph::{collect_callable_targets, short_callee};
+use bonsai_callgraph::collect_call_event_targets_with_context_and_aliases;
 use bonsai_hash::fnv1a_names_low32;
-use bonsai_lang_api::{CallArg, FlowEvent};
+use bonsai_lang_api::{AliasTarget, CallArg, Decl, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 
@@ -117,16 +117,17 @@ pub fn dump_edges(ws: &Workspace, f: &EdgesFilters<'_>) -> Vec<EdgeRecord> {
     let mut records: Vec<EdgeRecord> = files
         .par_iter()
         .fold(Vec::new, |mut acc, &file| {
-            // One alias map per file (imported-name → resolved
-            // module export). Built once and shared across all
-            // decls in the file so we don't re-scan imports per
-            // call site.
-            let alias_map = bonsai_resolve::alias_map_for_file(&ws.db().imports_for(file));
             for decl in global.decls_in(file) {
+                let mut alias_map: ahash::AHashMap<String, AliasTarget> =
+                    bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(file))
+                        .into_iter()
+                        .collect();
+                bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
                 let caller_name = decl.name.clone();
                 let (caller_file, caller_line, _) = format_span(&decl.name_span, ws);
                 collect_edges_in_events(
                     &decl.flow_events,
+                    decl,
                     &caller_name,
                     &caller_file,
                     caller_line,
@@ -179,30 +180,47 @@ impl PrecisionClass {
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 fn collect_edges_in_events(
     events: &[FlowEvent],
+    caller_decl: &Decl,
     caller_name: &str,
     caller_file: &str,
     caller_line: u32,
-    aliases: &ahash::AHashMap<String, String>,
+    aliases: &ahash::AHashMap<String, AliasTarget>,
     ws: &Workspace,
     global: &bonsai_index::GlobalIndex,
     out: &mut Vec<EdgeRecord>,
 ) {
     for event in events {
         match event {
-            FlowEvent::Call { name, span, args, .. } => {
-                let short = short_callee(name);
-                // Apply the file's import aliases first so
-                // `import { exec } from "child_process"` resolves
-                // `exec(...)` to `child_process.exec`.
-                let resolved_name = aliases.get(short).map(String::as_str).unwrap_or(short);
-                let mut candidates = collect_callable_targets(global, resolved_name);
-                // Fallback: try the original (qualified) name when
-                // alias rewriting produced nothing. Catches calls
-                // like `Foo.bar(...)` where `bar` alone has no
-                // workspace target but `Foo.bar` does.
-                if candidates.is_empty() && resolved_name != name.as_str() {
-                    candidates = collect_callable_targets(global, name);
-                }
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                span,
+                args,
+                ..
+            } => {
+                let candidates = collect_call_event_targets_with_context_and_aliases(
+                    global,
+                    name,
+                    receiver.as_deref(),
+                    receiver_types,
+                    *call_kind,
+                    *span,
+                    caller_decl,
+                    aliases,
+                    &|file| {
+                        ws.db()
+                            .vfs()
+                            .path(file)
+                            .ok()
+                            .map(|path| path.to_string_lossy().into_owned())
+                    },
+                    ws.db()
+                        .adapter_for(span.file)
+                        .map(|adapter| adapter.capabilities().module_export_aliases)
+                        .unwrap_or(&[]),
+                );
                 if candidates.is_empty() {
                     continue;
                 }
@@ -224,8 +242,7 @@ fn collect_edges_in_events(
                     } else {
                         ("<unknown>".to_string(), 0)
                     };
-                    let callee_name =
-                        callee_decl.map_or_else(|| resolved_name.to_string(), |decl| decl.name.clone());
+                    let callee_name = callee_decl.map_or_else(|| name.to_string(), |decl| decl.name.clone());
                     let edge_id =
                         compute_edge_id(caller_name, &callee_name, &call_file, call_line, call_column);
                     out.push(EdgeRecord {
@@ -252,6 +269,7 @@ fn collect_edges_in_events(
             } => {
                 collect_edges_in_events(
                     then_events,
+                    caller_decl,
                     caller_name,
                     caller_file,
                     caller_line,
@@ -262,6 +280,7 @@ fn collect_edges_in_events(
                 );
                 collect_edges_in_events(
                     else_events,
+                    caller_decl,
                     caller_name,
                     caller_file,
                     caller_line,
@@ -274,6 +293,7 @@ fn collect_edges_in_events(
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_edges_in_events(
                     body,
+                    caller_decl,
                     caller_name,
                     caller_file,
                     caller_line,
@@ -291,6 +311,7 @@ fn collect_edges_in_events(
             } => {
                 collect_edges_in_events(
                     body,
+                    caller_decl,
                     caller_name,
                     caller_file,
                     caller_line,
@@ -301,6 +322,7 @@ fn collect_edges_in_events(
                 );
                 collect_edges_in_events(
                     catch_events,
+                    caller_decl,
                     caller_name,
                     caller_file,
                     caller_line,
@@ -311,6 +333,7 @@ fn collect_edges_in_events(
                 );
                 collect_edges_in_events(
                     finally_events,
+                    caller_decl,
                     caller_name,
                     caller_file,
                     caller_line,

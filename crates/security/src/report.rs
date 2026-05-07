@@ -599,55 +599,12 @@ fn finding_to_sarif_result(
         finding.sink.text,
     );
     let sink_location = match_to_sarif_location(&finding.sink, "sink", workspace_root);
-    // S4: tag every codeFlow step with `kinds` so IDE step-through
-    // can render the chain semantically. The middle hops come from
-    // `finding.taint_path`, which preserves the concrete call site
-    // and argument propagation evidence the taint engine used.
-    let mut thread_flow_locations: Vec<serde_json::Value> = Vec::new();
-    thread_flow_locations.push(thread_flow_location(
-        match_to_sarif_location(&finding.source, "source", workspace_root),
-        &["source", "taint"],
-        "essential",
-    ));
-    for step in &finding.taint_path {
-        if taint_step_matches_match(step, &finding.sink) {
-            continue;
-        }
-        thread_flow_locations.push(thread_flow_location(
-            taint_step_to_sarif_location(step, workspace_root),
-            &["taint", "call"],
-            "important",
-        ));
-    }
-    for sanitizer in &finding.sanitizers_seen {
-        thread_flow_locations.push(thread_flow_location(
-            match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
-            &["sanitizer"],
-            "important",
-        ));
-    }
-    thread_flow_locations.push(thread_flow_location(
-        match_to_sarif_location(&finding.sink, "sink", workspace_root),
-        &["sink"],
-        "essential",
-    ));
-    let flow_summary = if finding.taint_path.is_empty() {
-        format!("{} -> {}", finding.source.rule_id, finding.sink.rule_id)
+    let is_pattern_finding = finding.source.category.as_deref() == Some("pattern");
+    let code_flows = if is_pattern_finding {
+        None
     } else {
-        let hops: Vec<String> = finding
-            .taint_path
-            .iter()
-            .map(|step| format!("{} -> {}", step.caller, step.callee))
-            .collect();
-        hops.join("; ")
+        Some(build_sarif_code_flows(finding, workspace_root))
     };
-    let code_flows = serde_json::json!([{
-        "message": { "text": flow_summary },
-        "threadFlows": [{
-            "id": "primary",
-            "locations": thread_flow_locations,
-        }],
-    }]);
 
     // S6: link this finding to every CWE it carries via SARIF's
     // reportingDescriptorReference shape. CVEBench also uses this
@@ -708,7 +665,6 @@ fn finding_to_sarif_result(
             "text": message,
         },
         "locations": [sink_location],
-        "codeFlows": code_flows,
         "fingerprints": {
             "bonsai/finding/v1": primary_fingerprint,
         },
@@ -742,10 +698,107 @@ fn finding_to_sarif_result(
             }
         }
     });
+    if let Some(code_flows) = code_flows {
+        result["codeFlows"] = code_flows;
+    }
     if !cwe_taxa.is_empty() {
         result["taxa"] = serde_json::json!(cwe_taxa);
     }
     result
+}
+
+fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> serde_json::Value {
+    // S4: tag every codeFlow step with `kinds` so IDE step-through
+    // can render the chain semantically. The middle hops come from
+    // `finding.taint_path`, which preserves the concrete call site
+    // and argument propagation evidence the taint engine used.
+    let mut thread_flow_locations: Vec<serde_json::Value> = Vec::new();
+    thread_flow_locations.push(thread_flow_location(
+        match_to_sarif_location(&finding.source, "source", workspace_root),
+        &["source", "taint"],
+        "essential",
+    ));
+
+    let mut sanitizers_by_step: Vec<Vec<&crate::finding::FindingMatch>> =
+        vec![Vec::new(); finding.taint_path.len()];
+    let mut unmatched_sanitizers = Vec::new();
+    for sanitizer in &finding.sanitizers_seen {
+        if let Some(idx) = sanitizer_taint_step_index(sanitizer, &finding.taint_path) {
+            sanitizers_by_step[idx].push(sanitizer);
+        } else {
+            unmatched_sanitizers.push(sanitizer);
+        }
+    }
+
+    for (idx, step) in finding.taint_path.iter().enumerate() {
+        if !taint_step_matches_match(step, &finding.sink) {
+            thread_flow_locations.push(thread_flow_location(
+                taint_step_to_sarif_location(step, workspace_root),
+                &["taint", "call"],
+                "important",
+            ));
+        }
+        for sanitizer in &sanitizers_by_step[idx] {
+            thread_flow_locations.push(thread_flow_location(
+                match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
+                &["sanitizer"],
+                "important",
+            ));
+        }
+    }
+    unmatched_sanitizers.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
+            .then_with(|| a.rule_id.cmp(&b.rule_id))
+    });
+    for sanitizer in unmatched_sanitizers {
+        thread_flow_locations.push(thread_flow_location(
+            match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
+            &["sanitizer"],
+            "important",
+        ));
+    }
+
+    thread_flow_locations.push(thread_flow_location(
+        match_to_sarif_location(&finding.sink, "sink", workspace_root),
+        &["sink"],
+        "essential",
+    ));
+    let flow_summary = if finding.taint_path.is_empty() {
+        format!("{} -> {}", finding.source.rule_id, finding.sink.rule_id)
+    } else {
+        let hops: Vec<String> = finding
+            .taint_path
+            .iter()
+            .map(|step| format!("{} -> {}", step.caller, step.callee))
+            .collect();
+        hops.join("; ")
+    };
+    serde_json::json!([{
+        "message": { "text": flow_summary },
+        "threadFlows": [{
+            "id": "primary",
+            "locations": thread_flow_locations,
+        }],
+    }])
+}
+
+fn sanitizer_taint_step_index(
+    sanitizer: &crate::finding::FindingMatch,
+    taint_path: &[crate::finding::TaintPropagationStep],
+) -> Option<usize> {
+    taint_path
+        .iter()
+        .position(|step| {
+            step.file == sanitizer.file && step.line == sanitizer.line && step.column == sanitizer.column
+        })
+        .or_else(|| {
+            taint_path
+                .iter()
+                .position(|step| step.file == sanitizer.file && step.line == sanitizer.line)
+        })
 }
 
 fn thread_flow_location(location: serde_json::Value, kinds: &[&str], importance: &str) -> serde_json::Value {
@@ -1114,16 +1167,66 @@ mod sarif_tests {
     #[test]
     fn sarif_codeflows_includes_sanitizer_hops_in_path_order() {
         let mut f = sample_finding();
+        f.taint_path = vec![
+            TaintPropagationStep {
+                caller: "handle_request".to_string(),
+                callee: "normalize".to_string(),
+                file: "app.py".to_string(),
+                line: 20,
+                column: 9,
+                tainted_args: Vec::new(),
+            },
+            TaintPropagationStep {
+                caller: "normalize".to_string(),
+                callee: "run_admin_command".to_string(),
+                file: "lib.py".to_string(),
+                line: 8,
+                column: 5,
+                tainted_args: Vec::new(),
+            },
+            TaintPropagationStep {
+                caller: "run_admin_command".to_string(),
+                callee: "os.system".to_string(),
+                file: "auth.py".to_string(),
+                line: 42,
+                column: 5,
+                tainted_args: Vec::new(),
+            },
+        ];
         f.sanitizers_seen = vec![sample_match("python.sanitizers.shlex_quote", "lib.py", 8)];
         let report = SecurityReport::new(vec![f]);
         let s = render_sarif_json(&report);
         let v: Value = serde_json::from_str(&s).unwrap();
         let tflows = &v["runs"][0]["results"][0]["codeFlows"][0]["threadFlows"][0]["locations"];
         let arr = tflows.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 5);
         assert_eq!(arr[0]["kinds"][0], "source");
-        assert_eq!(arr[1]["kinds"][0], "sanitizer");
-        assert_eq!(arr[2]["kinds"][0], "sink");
+        assert_eq!(arr[1]["kinds"][0], "taint");
+        assert_eq!(arr[2]["kinds"][0], "taint");
+        assert_eq!(arr[3]["kinds"][0], "sanitizer");
+        assert_eq!(
+            arr[3]["location"]["physicalLocation"]["artifactLocation"]["uri"],
+            "lib.py"
+        );
+        assert_eq!(arr[4]["kinds"][0], "sink");
+    }
+
+    #[test]
+    fn sarif_pattern_findings_skip_codeflows() {
+        let mut f = sample_finding();
+        f.source.category = Some("pattern".to_string());
+        f.source.rule_id = "pattern:python.weakrand.random".to_string();
+        f.source.file = f.sink.file.clone();
+        f.source.line = f.sink.line;
+        f.source.column = f.sink.column;
+        f.taint_path = Vec::new();
+        let report = SecurityReport::new(vec![f]);
+        let s = render_sarif_json(&report);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert!(
+            v["runs"][0]["results"][0]["codeFlows"].is_null(),
+            "pattern-only results should not fabricate source==sink codeFlows"
+        );
     }
 
     #[test]

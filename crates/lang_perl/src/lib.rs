@@ -4,7 +4,8 @@ use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, Ref, RefKind,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath,
+    Ref, RefKind,
 };
 use tree_sitter::{Language, Tree};
 
@@ -140,6 +141,7 @@ impl LanguageAdapter for PerlAdapter {
             augment_perl_collection_flow_events(&mut decl.flow_events, &source);
         }
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
+        apply_perl_package_semantic_identity(&mut idx);
         // Perl convention: subroutines starting with `_` are
         // module-private. Mark those Visibility::Module so the
         // resolver refuses cross-package calls to internal helpers.
@@ -192,6 +194,43 @@ impl LanguageAdapter for PerlAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+fn apply_perl_package_semantic_identity(idx: &mut DeclIndex) {
+    let mut packages: Vec<(Span, String, bonsai_common::SymbolId)> = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.name.clone(), decl.symbol))
+        .collect();
+    packages.sort_by_key(|(span, _, _)| span.start);
+    if packages.is_empty() {
+        return;
+    }
+    for decl in &mut idx.defs {
+        if is_class_like(decl.kind) {
+            let module_path = ModulePath::from_segments([decl.name.clone()]);
+            decl.module_path = module_path;
+            decl.qualified_name = Some(decl.name.clone());
+            continue;
+        }
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let Some((_, package_name, package_symbol)) = packages
+            .iter()
+            .filter(|(span, _, _)| span.start <= decl.span.start)
+            .max_by_key(|(span, _, _)| span.start)
+        else {
+            continue;
+        };
+        decl.parent = Some(*package_symbol);
+        decl.module_path = ModulePath::from_segments([package_name.clone()]);
+        decl.qualified_name = Some(format!("{package_name}::{}", decl.name));
     }
 }
 

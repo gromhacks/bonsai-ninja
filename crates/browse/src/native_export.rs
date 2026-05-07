@@ -9,7 +9,7 @@ use crate::common::collect_callees;
 use crate::ClassOut;
 use bonsai_common::{FileId, Span, SpanMap};
 use bonsai_inspect::{chain_to_names, func_display_name, ChainCache};
-use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
+use bonsai_lang_api::{AliasTarget, Decl, DeclKind, FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 use std::path::Path;
@@ -1256,7 +1256,18 @@ fn infer_entry_points_for_export(ws: &Workspace, spans: &ExportSpanCache) -> Vec
     let mut callees_seen: ahash::AHashSet<bonsai_common::SymbolId> = ahash::AHashSet::default();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
-            collect_callee_symbols(&decl.flow_events, global.as_ref(), &mut callees_seen);
+            let mut alias_map: ahash::AHashMap<String, AliasTarget> =
+                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(file))
+                    .into_iter()
+                    .collect();
+            bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
+            collect_callee_symbols(
+                &decl.flow_events,
+                global.as_ref(),
+                decl,
+                &alias_map,
+                &mut callees_seen,
+            );
         }
     }
 
@@ -1594,11 +1605,15 @@ fn decorator_is_attached_to_decl(
 fn collect_callee_symbols(
     events: &[FlowEvent],
     global: &bonsai_index::GlobalIndex,
+    caller: &Decl,
+    alias_map: &ahash::AHashMap<String, AliasTarget>,
     out: &mut ahash::AHashSet<bonsai_common::SymbolId>,
 ) {
     for event in events {
         match event {
-            FlowEvent::Call { name, .. } => collect_callable_name_symbols(name, global, out),
+            FlowEvent::Call { name, .. } => {
+                collect_callable_name_symbols(name, global, caller, alias_map, out)
+            }
             FlowEvent::Assign {
                 source_name,
                 source_call,
@@ -1606,13 +1621,13 @@ fn collect_callee_symbols(
                 ..
             } => {
                 if let Some(name) = source_name.as_deref() {
-                    collect_callable_name_symbols(name, global, out);
+                    collect_callable_name_symbols(name, global, caller, alias_map, out);
                 }
                 if let Some(name) = source_call.as_deref() {
-                    collect_callable_name_symbols(name, global, out);
+                    collect_callable_name_symbols(name, global, caller, alias_map, out);
                 }
                 for name in source_names {
-                    collect_callable_name_symbols(name, global, out);
+                    collect_callable_name_symbols(name, global, caller, alias_map, out);
                 }
             }
             FlowEvent::Branch {
@@ -1620,22 +1635,22 @@ fn collect_callee_symbols(
                 else_events,
                 ..
             } => {
-                collect_callee_symbols(then_events, global, out);
-                collect_callee_symbols(else_events, global, out);
+                collect_callee_symbols(then_events, global, caller, alias_map, out);
+                collect_callee_symbols(else_events, global, caller, alias_map, out);
             }
-            FlowEvent::Loop { body, .. } => collect_callee_symbols(body, global, out),
+            FlowEvent::Loop { body, .. } => collect_callee_symbols(body, global, caller, alias_map, out),
             FlowEvent::Try {
                 body,
                 catch_events,
                 finally_events,
                 ..
             } => {
-                collect_callee_symbols(body, global, out);
-                collect_callee_symbols(catch_events, global, out);
-                collect_callee_symbols(finally_events, global, out);
+                collect_callee_symbols(body, global, caller, alias_map, out);
+                collect_callee_symbols(catch_events, global, caller, alias_map, out);
+                collect_callee_symbols(finally_events, global, caller, alias_map, out);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_callee_symbols(body, global, out);
+                collect_callee_symbols(body, global, caller, alias_map, out);
             }
             _ => {}
         }
@@ -1649,6 +1664,8 @@ fn collect_callee_symbols(
 fn collect_callable_name_symbols(
     name: &str,
     global: &bonsai_index::GlobalIndex,
+    caller: &Decl,
+    alias_map: &ahash::AHashMap<String, AliasTarget>,
     out: &mut ahash::AHashSet<bonsai_common::SymbolId>,
 ) {
     let trimmed = name.trim().trim_start_matches('&').trim_start_matches('*');
@@ -1657,15 +1674,10 @@ fn collect_callable_name_symbols(
     }
     let tail = trimmed.rsplit(&['.', ':'][..]).next().unwrap_or(trimmed).trim();
     for candidate in [trimmed, tail] {
-        for symbol in global.find_by_name(candidate) {
-            if global.decl_of(*symbol).is_some_and(|decl| {
-                matches!(
-                    decl.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                )
-            }) {
-                out.insert(*symbol);
-            }
+        for func in bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
+            global, candidate, caller, alias_map,
+        ) {
+            out.insert(bonsai_common::SymbolId::new(func.raw()));
         }
     }
 }

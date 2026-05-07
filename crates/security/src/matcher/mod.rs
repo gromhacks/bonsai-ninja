@@ -831,20 +831,74 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                 if !matched {
                     continue;
                 }
-                let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
+                let (file_path, line, col, span) = first_param_read_site(ws, file, decl, param)
+                    .unwrap_or_else(|| {
+                        let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
+                        (file_path, line, col, decl.name_span)
+                    });
                 out.push(RuleMatch {
                     rule_id: prepared.rule.id.clone(),
                     language: prepared.rule.language.clone(),
                     file: file_path,
                     line,
                     column: col,
-                    span: decl.name_span,
+                    span,
                     match_text: param.clone(),
                     enclosing_fn: Some(decl.name.clone()),
                 });
             }
         }
     }
+}
+
+fn first_param_read_site(
+    ws: &Workspace,
+    file: FileId,
+    decl: &bonsai_lang_api::Decl,
+    param: &str,
+) -> Option<(String, u32, u32, Span)> {
+    let idx = ws.db().decl_index(file)?;
+    let body = decl.body_span.unwrap_or(decl.span);
+    let min_start = body.start.max(decl.name_span.end);
+    let read = idx
+        .refs
+        .iter()
+        .filter(|reference| reference.kind == RefKind::Read)
+        .filter(|reference| reference.span.start >= min_start && reference.span.start < body.end)
+        .filter(|reference| {
+            reference.scope.is_none_or(|scope| scope == decl.symbol)
+                && read_name_mentions_param(&reference.name, param)
+        })
+        .min_by_key(|reference| (reference.span.start, reference.span.end));
+    if let Some(reference) = read {
+        let (file_path, line, col) = resolve_span(ws, file, reference.span);
+        return Some((file_path, line, col, reference.span));
+    }
+
+    let mut reads = Vec::new();
+    collect_flow_read_sites(&decl.flow_events, &mut reads);
+    reads
+        .into_iter()
+        .filter(|(span, tokens)| {
+            span.start >= min_start && span.start < body.end && tokens_read_param(tokens, param)
+        })
+        .min_by_key(|(span, _)| (span.start, span.end))
+        .map(|(span, _)| {
+            let (file_path, line, col) = resolve_span(ws, file, span);
+            (file_path, line, col, span)
+        })
+}
+
+fn read_name_mentions_param(name: &str, param: &str) -> bool {
+    split_read_token(name)
+        .iter()
+        .any(|token| normalize_param_name(token) == normalize_param_name(param))
+}
+
+fn tokens_read_param(tokens: &[String], param: &str) -> bool {
+    tokens
+        .iter()
+        .any(|token| normalize_param_name(token) == normalize_param_name(param))
 }
 
 fn scan_calls_batch(

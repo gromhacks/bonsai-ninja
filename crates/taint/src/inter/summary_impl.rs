@@ -1095,6 +1095,24 @@ fn return_text_constructs_container(text: &str) -> bool {
         || trimmed.starts_with('[')
         // Tuples may wrap a dict / list literal — `({"x": y})`.
         || trimmed.starts_with('(') && (trimmed.contains('{') || trimmed.contains('['))
+        || return_text_starts_with_type_constructor(trimmed)
+}
+
+fn return_text_starts_with_type_constructor(text: &str) -> bool {
+    let text = terminal_return_expression_text(text).trim();
+    let Some(open_idx) = text.find(['(', '{']) else {
+        return false;
+    };
+    let candidate = text[..open_idx].trim();
+    if candidate.is_empty() || candidate.contains(char::is_whitespace) {
+        return false;
+    }
+    candidate == "Self"
+        || candidate
+            .rsplit("::")
+            .next()
+            .and_then(|tail| tail.chars().next())
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
 }
 
 /// True when any return / yield in `events` builds a container

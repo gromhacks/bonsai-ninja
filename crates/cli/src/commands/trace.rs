@@ -333,6 +333,11 @@ fn format_step_loc(file: &str, line: u32, col: u32, ws_root: &std::path::Path) -
 fn augment_not_found(e: bonsai_sdk::WorkspaceError, ws: &Workspace, symbol: &str) -> anyhow::Error {
     if matches!(e, bonsai_sdk::WorkspaceError::SymbolNotFound(_)) {
         not_found_with_suggestions(ws, symbol)
+    } else if let bonsai_sdk::WorkspaceError::AmbiguousSymbol {
+        count, candidates, ..
+    } = &e
+    {
+        ambiguous_symbol_error(symbol, *count, candidates)
     } else {
         anyhow::Error::from(e)
     }
@@ -353,8 +358,26 @@ fn augment_source_or_sink_not_found(
             let which = name.clone();
             not_found_with_suggestions(ws, &which)
         }
+        bonsai_sdk::WorkspaceError::AmbiguousSymbol {
+            query,
+            count,
+            candidates,
+        } => ambiguous_symbol_error(query, *count, candidates),
         _ => anyhow::Error::from(e),
     }
+}
+
+fn ambiguous_symbol_error(symbol: &str, count: usize, candidates: &[String]) -> anyhow::Error {
+    let preview = candidates
+        .iter()
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    anyhow::anyhow!(
+        "trace: symbol `{symbol}` is ambiguous ({count} callable decls). \
+         Use a more-qualified name.\n  {preview}"
+    )
 }
 
 pub(crate) fn not_found_with_suggestions(ws: &Workspace, symbol: &str) -> anyhow::Error {

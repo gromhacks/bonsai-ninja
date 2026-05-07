@@ -1,5 +1,5 @@
 //! Go language adapter.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
@@ -132,12 +132,37 @@ impl LanguageAdapter for GoAdapter {
         if let Some((snapshot, tree)) = parsed {
             let src = snapshot.text.as_bytes();
             let aliases_by_span = collect_go_method_type_aliases(&tree, file, src);
+            let method_receivers_by_span = collect_go_method_receiver_types(&tree, file, src);
+            let bases_by_span = collect_go_class_bases(&tree, file, src);
+            let class_symbols: Vec<(String, SymbolId)> = idx
+                .defs
+                .iter()
+                .filter(|decl| matches!(decl.kind, bonsai_lang_api::DeclKind::Class))
+                .map(|decl| (decl.name.clone(), decl.symbol))
+                .collect();
             for decl in &mut idx.defs {
                 if let Some(aliases) = aliases_by_span
                     .iter()
                     .find_map(|(span, aliases)| (*span == decl.span).then_some(aliases))
                 {
                     decl.type_aliases = aliases.clone();
+                }
+                if let Some(receiver_type) = method_receivers_by_span
+                    .iter()
+                    .find_map(|(span, ty)| (*span == decl.span).then_some(ty))
+                {
+                    if let Some((_, class_symbol)) = class_symbols
+                        .iter()
+                        .find(|(class_name, _)| class_name == receiver_type)
+                    {
+                        decl.parent = Some(*class_symbol);
+                    }
+                }
+                if let Some(bases) = bases_by_span
+                    .iter()
+                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
+                {
+                    decl.bases = bases.clone();
                 }
             }
         }
@@ -277,12 +302,172 @@ fn collect_go_method_type_aliases(
         if let Some(params) = fn_node.child_by_field_name("parameters") {
             collect_go_parameter_aliases(params, src, &mut aliases);
         }
+        collect_go_local_type_aliases(fn_node, src, &mut aliases);
         dedup_go_type_aliases(&mut aliases);
         if !aliases.is_empty() {
             aliases_by_fn.push((span_of(file, &fn_node), aliases));
         }
     }
     aliases_by_fn
+}
+
+fn collect_go_method_receiver_types(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String)> {
+    let mut out = Vec::new();
+    for method in collect_kinds(tree, &["method_declaration"]) {
+        let Some(receiver) = method.child_by_field_name("receiver") else {
+            continue;
+        };
+        let Some(receiver_type) = first_go_parameter_type(receiver, src) else {
+            continue;
+        };
+        out.push((span_of(file, &method), receiver_type));
+    }
+    out
+}
+
+fn first_go_parameter_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "parameter_declaration"
+            && child.kind() != "variadic_parameter_declaration"
+        {
+            continue;
+        }
+        let Some(type_node) = child.child_by_field_name("type") else {
+            continue;
+        };
+        if let Some(type_name) = canonical_go_type_name(node_text(&type_node, src)) {
+            return Some(type_name);
+        }
+    }
+    None
+}
+
+fn collect_go_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, Vec<String>)> {
+    let mut out = Vec::new();
+    for type_spec in collect_kinds(tree, &["type_spec"]) {
+        let Some(type_node) = type_spec.child_by_field_name("type") else {
+            continue;
+        };
+        if !matches!(type_node.kind(), "struct_type" | "interface_type") {
+            continue;
+        }
+        let mut bases = Vec::new();
+        collect_go_embedded_type_names(type_node, src, &mut bases);
+        if !bases.is_empty() {
+            out.push((span_of(file, &type_spec), bases));
+        }
+    }
+    out
+}
+
+fn collect_go_embedded_type_names(node: Node<'_>, src: &[u8], bases: &mut Vec<String>) {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "field_declaration" {
+            let named_field = current.child_by_field_name("name").is_some();
+            if !named_field {
+                if let Some(type_node) = current.child_by_field_name("type") {
+                    if let Some(base) = canonical_go_type_name(node_text(&type_node, src)) {
+                        push_unique_string(bases, base);
+                    }
+                } else if let Some(base) = first_type_identifier_text(current, src) {
+                    push_unique_string(bases, base);
+                }
+            }
+        }
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    for var_spec in collect_kinds_under(&node, &["var_spec"]) {
+        let names = go_var_spec_names(var_spec, src);
+        if names.is_empty() {
+            continue;
+        }
+        let declared_type = var_spec
+            .child_by_field_name("type")
+            .and_then(|type_node| canonical_go_type_name(node_text(&type_node, src)));
+        let concrete_type = var_spec
+            .child_by_field_name("value")
+            .and_then(|value_node| first_go_composite_literal_type(value_node, src));
+        for name in names {
+            if let Some(ty) = declared_type.as_deref() {
+                push_go_type_alias(aliases, &name, ty);
+            }
+            if let Some(ty) = concrete_type.as_deref() {
+                push_go_type_alias(aliases, &name, ty);
+            }
+        }
+    }
+}
+
+fn go_var_spec_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    let type_start = node
+        .child_by_field_name("type")
+        .map(|type_node| type_node.start_byte())
+        .unwrap_or(usize::MAX);
+    let mut names = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.start_byte() >= type_start {
+            continue;
+        }
+        if child.kind() == "identifier" {
+            let name = node_text(&child, src).trim();
+            if !name.is_empty() {
+                push_unique_string(&mut names, name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn first_go_composite_literal_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "composite_literal" {
+            if let Some(type_node) = current.child_by_field_name("type") {
+                if let Some(type_name) = canonical_go_type_name(node_text(&type_node, src)) {
+                    return Some(type_name);
+                }
+            }
+        }
+        let mut cursor = current.walk();
+        let children: Vec<_> = current.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+fn first_type_identifier_text(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if matches!(current.kind(), "type_identifier" | "qualified_type") {
+            if let Some(type_name) = canonical_go_type_name(node_text(&current, src)) {
+                return Some(type_name);
+            }
+        }
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    let value = value.trim();
+    if value.is_empty() || values.iter().any(|existing| existing == value) {
+        return;
+    }
+    values.push(value.to_string());
 }
 
 /// Visit a `parameter_list` node and forward each parameter

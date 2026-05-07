@@ -543,6 +543,50 @@ fn taint_analysis_does_not_stop_after_scan_wide_pair_budget() {
 }
 
 #[test]
+fn call_argument_lambda_body_has_single_finding_owner() {
+    let ws = workspace(&[(
+        "/app/app.js",
+        r#"
+function source() { return ""; }
+function sink(value) {}
+
+function main(app) {
+  app.post("/eval", function(ctx) {
+    const body = source();
+    sink(body);
+  });
+}
+"#,
+    )]);
+    let report = run_taint_analysis(
+        &ws,
+        &rulepack("javascript", "source", "sink"),
+        TaintAnalysisOptions::default(),
+    )
+    .expect("taint analysis");
+    let matching: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.finding.sink.file.contains("app.js"))
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "call-argument lambda bodies must not be owned by both outer function and synthetic lambda decl; findings={:#?}",
+        report.findings
+    );
+    assert!(
+        matching[0]
+            .finding
+            .chain_display
+            .iter()
+            .all(|name| !name.starts_with("<lambda@")),
+        "call-argument lambda body should be attributed through the enclosing function, got {:#?}",
+        matching[0].finding.chain_display
+    );
+}
+
+#[test]
 fn taint_fixture_matrix_exists_for_every_supported_language() {
     let mut missing = Vec::new();
     for lang in ALL_LANGS {

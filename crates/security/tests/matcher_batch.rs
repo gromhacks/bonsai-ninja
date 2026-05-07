@@ -329,6 +329,28 @@ fn target_attr_rule(id: &str, kind: MatchKind, attr: &[&str]) -> Rule {
     rule
 }
 
+#[test]
+fn param_rule_location_uses_first_body_read() {
+    let ws = python_ws(
+        r#"
+def handler(user_input):
+    clean = 0
+    sink(user_input)
+"#,
+    );
+    let rule = target_name_rule("python.test.param_user_input", MatchKind::Param, "user_input");
+    let hits = match_rule_against_facts(&ws, &rule);
+    let hit = hits
+        .iter()
+        .find(|hit| hit.rule_id == "python.test.param_user_input")
+        .unwrap_or_else(|| panic!("expected param match, got {hits:?}"));
+    assert_eq!(hit.match_text, "user_input");
+    assert_eq!(
+        hit.line, 4,
+        "param source should point at first body read, not function declaration"
+    );
+}
+
 fn signature(rows: &[bonsai_security::RuleMatch]) -> BTreeSet<(String, String, u32, String, Option<String>)> {
     rows.iter()
         .map(|m| {

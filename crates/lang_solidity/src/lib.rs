@@ -5,7 +5,7 @@ use bonsai_lang_api::{
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
     ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, TypeAliasVocabulary, Visibility,
+    ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 
 const SOLIDITY_VOCAB: ModifierVocabulary = ModifierVocabulary {
@@ -169,6 +169,21 @@ impl LanguageAdapter for SolidityAdapter {
                     decl.type_aliases = aliases.clone();
                 }
             }
+            let state_aliases_by_class = collect_solidity_state_variable_type_aliases(&tree, file, src);
+            for decl in &mut idx.defs {
+                if !is_callable_decl(decl.kind) {
+                    continue;
+                }
+                for (class_span, aliases) in &state_aliases_by_class {
+                    if span_contains(*class_span, decl.span) {
+                        for alias in aliases {
+                            if !decl.type_aliases.contains(alias) {
+                                decl.type_aliases.push(alias.clone());
+                            }
+                        }
+                    }
+                }
+            }
             // Per-contract `bases`: `contract A is B, C { … }` →
             // ["B", "C"]. Solidity wraps each parent in a separate
             // `inheritance_specifier` direct child of the contract,
@@ -189,6 +204,7 @@ impl LanguageAdapter for SolidityAdapter {
                 synthesize_try_return_assigns(&mut decl.flow_events, src);
             }
         }
+        attach_solidity_method_owners(&mut idx);
         // Recognised Solidity lifecycle transitions. `selfdestruct`
         // wipes contract code/state (freed). `transfer` moves ETH
         // ownership (modeled as `moved`); the matcher treats this
@@ -572,6 +588,95 @@ fn is_class_like(kind: DeclKind) -> bool {
     )
 }
 
+fn is_callable_decl(kind: DeclKind) -> bool {
+    matches!(kind, DeclKind::Function | DeclKind::Method | DeclKind::Constructor)
+}
+
+fn span_contains(outer: Span, inner: Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn attach_solidity_method_owners(idx: &mut DeclIndex) {
+    let classes: Vec<(Span, bonsai_common::SymbolId)> = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.symbol))
+        .collect();
+    for decl in &mut idx.defs {
+        if !is_callable_decl(decl.kind) || decl.parent.is_some() {
+            continue;
+        }
+        decl.parent = classes
+            .iter()
+            .filter(|(span, _)| span_contains(*span, decl.span))
+            .min_by_key(|(span, _)| span.end.saturating_sub(span.start))
+            .map(|(_, symbol)| *symbol);
+    }
+}
+
+fn collect_solidity_state_variable_type_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<TypeAliasBinding>)> {
+    let class_kinds = &[
+        "contract_declaration",
+        "interface_declaration",
+        "library_declaration",
+    ];
+    let mut out = Vec::new();
+    for class_node in collect_kinds(tree, class_kinds) {
+        let mut aliases = Vec::new();
+        let Some(body) = class_node.child_by_field_name("body") else {
+            continue;
+        };
+        let mut body_cursor = body.walk();
+        for child in body.named_children(&mut body_cursor) {
+            if child.kind() != "state_variable_declaration" {
+                continue;
+            }
+            let Some(name_node) = child.child_by_field_name("name") else {
+                continue;
+            };
+            let Some(type_node) = child.child_by_field_name("type") else {
+                continue;
+            };
+            let name = node_text(&name_node, src).trim().to_string();
+            let type_name = canonical_solidity_type_name(node_text(&type_node, src));
+            if name.is_empty() || type_name.is_empty() {
+                continue;
+            }
+            let alias = TypeAliasBinding { name, type_name };
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+        if !aliases.is_empty() {
+            out.push((span_of(file, &class_node), aliases));
+        }
+    }
+    out
+}
+
+fn canonical_solidity_type_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let before_storage = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    before_storage
+        .split('[')
+        .next()
+        .unwrap_or(before_storage)
+        .rsplit('.')
+        .next()
+        .unwrap_or(before_storage)
+        .trim()
+        .to_string()
+}
+
 /// Walk Solidity contract / interface / library declarations and
 /// collect bare base contract names from `inheritance_specifier`
 /// children. Grammar shape (verified):
@@ -672,6 +777,29 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         let module_alias = import_node
             .child_by_field_name("alias")
             .map(|alias_node| node_text(&alias_node, src).to_string());
+        // Current tree-sitter-solidity releases expose
+        // `import {A as B} from "X"` as direct fields on the
+        // import_directive (`import_name: identifier`, `alias:
+        // identifier`) rather than wrapping them in an `import_name`
+        // node. Preserve that as a member binding so typed receiver
+        // resolution rewrites `B` to the imported contract `A`, not
+        // to the module namespace.
+        if let (Some(imported_node), Some(symbol_alias)) =
+            (import_node.child_by_field_name("import_name"), module_alias.as_ref())
+        {
+            let original_name = node_text(&imported_node, src).trim().to_string();
+            if !original_name.is_empty() && !symbol_alias.is_empty() {
+                imports.push(ImportSpec {
+                    span: span_of(file, &import_node),
+                    module,
+                    alias: Some(symbol_alias.clone()),
+                    is_wildcard: false,
+                    original_name: Some(original_name),
+                    scope: ImportScope::Module,
+                });
+                continue;
+            }
+        }
         let mut child_cursor = import_node.walk();
         let import_name_nodes: Vec<tree_sitter::Node<'_>> = import_node
             .named_children(&mut child_cursor)

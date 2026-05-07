@@ -42,6 +42,12 @@ pub enum WorkspaceError {
     NoAdapter(String),
     #[error("symbol not found: {0}")]
     SymbolNotFound(String),
+    #[error("symbol is ambiguous: {query} ({count} candidates)")]
+    AmbiguousSymbol {
+        query: String,
+        count: usize,
+        candidates: Vec<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -534,20 +540,18 @@ impl Workspace {
     }
 
     pub fn lookup_function(&self, qualified: &str) -> Option<FuncId> {
-        self.lookup_function_symbol(qualified)
+        self.resolve_function_symbol(qualified)
+            .ok()
             .map(|s| FuncId::new(s.raw()))
     }
 
-    fn lookup_function_symbol(&self, qualified: &str) -> Option<SymbolId> {
+    fn resolve_function_symbol(&self, qualified: &str) -> Result<SymbolId, WorkspaceError> {
         // Bare-name lookups can match multiple symbols when names
         // collide across translation units (the canonical regression
         // is `static fn error()` defined in multiple files).
-        // `find_by_name` returns hits in insertion order, which is
-        // adapter-dependent and non-deterministic across runs.
-        // Collect every match, then pick a deterministic winner by
-        // sorting on (file path, name span start, symbol id) so the
-        // behavior is at least stable — callers that need a specific
-        // collision-free hit must pass a more-qualified name.
+        // Collect every match in deterministic order, then require a
+        // single semantic candidate. The caller must disambiguate
+        // instead of letting trace pick a workspace-order winner.
         let global = self.inner.db.global_index();
         let mut candidates: Vec<(SymbolId, Decl)> = global
             // CONTEXTLESS_LOOKUP_JUSTIFICATION: CLI/user-supplied
@@ -578,57 +582,76 @@ impl Workspace {
                 .then_with(|| a.name_span.start.cmp(&b.name_span.start))
                 .then_with(|| a_sym.raw().cmp(&b_sym.raw()))
         });
-        for (sym, d) in &candidates {
-            if matches!(
-                d.kind,
-                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-            ) {
-                return Some(*sym);
+        let mut callable_hits: Vec<(SymbolId, Decl)> = candidates
+            .iter()
+            .filter(|(_, d)| {
+                matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                )
+            })
+            .cloned()
+            .collect();
+        collect_unindexed_named_decls(
+            self,
+            qualified,
+            |d| {
+                matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                )
+            },
+            &mut callable_hits,
+        );
+        sort_symbol_decl_candidates(self, &mut callable_hits);
+        dedup_symbol_decl_candidates(&mut callable_hits);
+        match callable_hits.as_slice() {
+            [(sym, _)] => return Ok(*sym),
+            [] => {}
+            hits => {
+                return Err(WorkspaceError::AmbiguousSymbol {
+                    query: qualified.to_string(),
+                    count: hits.len(),
+                    candidates: hits
+                        .iter()
+                        .map(|(sym, decl)| self.symbol_candidate_label(*sym, decl))
+                        .collect(),
+                });
             }
         }
-        // Class / Struct → constructor, deterministic by the same sort.
-        for (sym, d) in &candidates {
-            if matches!(d.kind, DeclKind::Class | DeclKind::Struct) {
-                if let Some(ctor) = self.find_constructor_symbol(*sym) {
-                    return Some(ctor);
-                }
-            }
+        let mut ctor_hits: Vec<(SymbolId, Decl)> = candidates
+            .iter()
+            .filter(|(_, d)| matches!(d.kind, DeclKind::Class | DeclKind::Struct))
+            .filter_map(|(sym, _)| {
+                let ctor = self.find_constructor_symbol(*sym)?;
+                self.decl_for_symbol(ctor).map(|decl| (ctor, decl))
+            })
+            .collect();
+        let mut class_hits = Vec::new();
+        collect_unindexed_named_decls(
+            self,
+            qualified,
+            |d| matches!(d.kind, DeclKind::Class | DeclKind::Struct),
+            &mut class_hits,
+        );
+        ctor_hits.extend(class_hits.into_iter().filter_map(|(class_sym, _)| {
+            let ctor = self.find_constructor_symbol(class_sym)?;
+            self.decl_for_symbol(ctor).map(|decl| (ctor, decl))
+        }));
+        sort_symbol_decl_candidates(self, &mut ctor_hits);
+        dedup_symbol_decl_candidates(&mut ctor_hits);
+        match ctor_hits.as_slice() {
+            [(sym, _)] => Ok(*sym),
+            [] => Err(WorkspaceError::SymbolNotFound(qualified.into())),
+            hits => Err(WorkspaceError::AmbiguousSymbol {
+                query: qualified.to_string(),
+                count: hits.len(),
+                candidates: hits
+                    .iter()
+                    .map(|(sym, decl)| self.symbol_candidate_label(*sym, decl))
+                    .collect(),
+            }),
         }
-        // Fallback: scan every file's decls (sorted) when
-        // `find_by_name` missed the qualified lookup entirely.
-        // Walk files in path order so the fallback is also stable.
-        let mut all_files: Vec<_> = global.all_files().collect();
-        all_files.sort_by_key(|f| {
-            self.inner
-                .db
-                .vfs()
-                .path(*f)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
-        for file in &all_files {
-            for d in global.decls_in(*file) {
-                if d.name == qualified
-                    && matches!(
-                        d.kind,
-                        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                    )
-                {
-                    return Some(d.symbol);
-                }
-            }
-        }
-        // Second fallback: class -> ctor.
-        for file in &all_files {
-            for d in global.decls_in(*file) {
-                if d.name == qualified && matches!(d.kind, DeclKind::Class | DeclKind::Struct) {
-                    if let Some(ctor) = self.find_constructor_symbol(d.symbol) {
-                        return Some(ctor);
-                    }
-                }
-            }
-        }
-        None
     }
 
     fn find_constructor_symbol(&self, class_sym: SymbolId) -> Option<SymbolId> {
@@ -648,6 +671,17 @@ impl Workspace {
 
     fn decl_for_symbol(&self, symbol: SymbolId) -> Option<Decl> {
         self.inner.db.global_index().decl_of(symbol).cloned()
+    }
+
+    fn symbol_candidate_label(&self, symbol: SymbolId, decl: &Decl) -> String {
+        let path = self
+            .inner
+            .db
+            .vfs()
+            .path(decl.span.file)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        format!("{path}:{}:{}", decl.name_span.start, symbol.raw())
     }
 
     fn language_of(&self, symbol: SymbolId) -> String {
@@ -670,9 +704,7 @@ impl Workspace {
         qualified: &str,
         opts: CrossModuleOptions,
     ) -> Result<TraceResult, WorkspaceError> {
-        let symbol = self
-            .lookup_function_symbol(qualified)
-            .ok_or_else(|| WorkspaceError::SymbolNotFound(qualified.into()))?;
+        let symbol = self.resolve_function_symbol(qualified)?;
         let raw = CrossModuleTracer::new(&self.inner.db, opts).trace(symbol);
         Ok(self.finalize_trace(
             raw,
@@ -703,9 +735,7 @@ impl Workspace {
         sink: &str,
         opts: CrossModuleOptions,
     ) -> Result<TraceResult, WorkspaceError> {
-        let src = self
-            .lookup_function_symbol(source)
-            .ok_or_else(|| WorkspaceError::SymbolNotFound(source.into()))?;
+        let src = self.resolve_function_symbol(source)?;
         // The sink may legitimately be an external / framework call (like
         // `os.system`, `exec`, `Runtime.getRuntime().exec`) that isn't a
         // declared function in the workspace. Only pre-compute a
@@ -790,6 +820,52 @@ impl Workspace {
         };
         finalize(raw, ctx, self.inner.vfs.as_ref())
     }
+}
+
+fn collect_unindexed_named_decls<F>(
+    ws: &Workspace,
+    qualified: &str,
+    kind_matches: F,
+    out: &mut Vec<(SymbolId, Decl)>,
+) where
+    F: Fn(&Decl) -> bool,
+{
+    let global = ws.inner.db.global_index();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == qualified && kind_matches(decl) {
+                out.push((decl.symbol, decl.clone()));
+            }
+        }
+    }
+}
+
+fn sort_symbol_decl_candidates(ws: &Workspace, candidates: &mut [(SymbolId, Decl)]) {
+    candidates.sort_by(|(a_sym, a), (b_sym, b)| {
+        let a_path = ws
+            .inner
+            .db
+            .vfs()
+            .path(a.span.file)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let b_path = ws
+            .inner
+            .db
+            .vfs()
+            .path(b.span.file)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        a_path
+            .cmp(&b_path)
+            .then_with(|| a.name_span.start.cmp(&b.name_span.start))
+            .then_with(|| a_sym.raw().cmp(&b_sym.raw()))
+    });
+}
+
+fn dedup_symbol_decl_candidates(candidates: &mut Vec<(SymbolId, Decl)>) {
+    let mut seen = ahash::AHashSet::new();
+    candidates.retain(|(sym, _)| seen.insert(*sym));
 }
 
 fn db_options_from_open_options(options: WorkspaceOpenOptions) -> AnalyzerDbOptions {

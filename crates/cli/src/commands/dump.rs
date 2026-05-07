@@ -647,6 +647,25 @@ pub(crate) fn cmd_dump_taint(
             "dump-taint: no callable decl named `{source_name}` in the workspace. \
              Try `bonsai-ninja defs <ws> --name {source_name}` to list available names."
         ),
+        bonsai_sdk::TaintOutcome::SourceAmbiguous { candidates, .. } => {
+            let preview = candidates
+                .iter()
+                .take(8)
+                .map(|candidate| {
+                    format!(
+                        "{}:{}:{} {}",
+                        candidate.file, candidate.line, candidate.column, candidate.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            anyhow::bail!(
+                "dump-taint: source `{source_name}` is ambiguous ({} callable decls). \
+                 Use a more-qualified source name.\n  {}",
+                candidates.len(),
+                preview
+            )
+        }
         bonsai_sdk::TaintOutcome::TaintIdNotFound => anyhow::bail!(
             "no propagation matching `{}` in this workspace + seed combination. \
              Taint ids are shown in the leftmost column of `dump-taint` text output and \

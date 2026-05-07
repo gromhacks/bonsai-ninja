@@ -240,8 +240,8 @@ pub struct Finding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub representative_flow_id: Option<String>,
     /// Function-level chain (entry → … → sink-enclosing-fn) for this
-    /// finding's representative flow. Empty when there's no resolved
-    /// chain (same-file fallback).
+    /// finding's representative flow. Empty for pattern-only findings
+    /// and direct cases without a multi-hop resolved lineage.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain_display: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

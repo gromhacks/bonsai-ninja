@@ -6,7 +6,7 @@
 //! function's CFG plus the summaries of every target it calls.
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, SymbolId};
+use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, TypeAliasBinding};
 use bonsai_resolve::{resolve_callable_with_context, resolve_class, visibility_allows, ResolveContext};
@@ -287,10 +287,14 @@ fn add_resolved_call_edges(
                 receiver,
                 receiver_types,
                 call_kind,
+                span,
                 args,
                 ..
             } => {
                 let short = short_callee(name);
+                let folded_receiver = receiver_name_from_call_name(name)
+                    .filter(|candidate| folded_call_name_receiver_is_instance(name, candidate));
+                let semantic_receiver = receiver.as_deref().or(folded_receiver);
                 let mut candidates = local_bindings
                     .get(name.as_str())
                     .or_else(|| local_bindings.get(short))
@@ -302,12 +306,30 @@ fn add_resolved_call_edges(
                         global,
                         caller_decl,
                         alias_targets,
-                        receiver.as_deref(),
+                        semantic_receiver,
                         receiver_types,
                         *call_kind,
                         name,
+                        *span,
                     );
                 }
+                if candidates.is_empty() {
+                    if let Some((alias_target, alias_tail)) =
+                        namespace_alias_target_tail(name, alias_targets)
+                    {
+                        candidates = collect_workspace_module_targets(
+                            global,
+                            alias_target,
+                            alias_tail,
+                            path_for_file,
+                            caller_export_aliases,
+                            caller_decl,
+                            alias_targets,
+                        );
+                    }
+                }
+                let unresolved_method_receiver =
+                    candidates.is_empty() && *call_kind == CallKind::Method && semantic_receiver.is_some();
                 if candidates.is_empty() {
                     candidates = collect_callable_targets_with_context_and_aliases(
                         global,
@@ -329,7 +351,7 @@ fn add_resolved_call_edges(
                         );
                     }
                 }
-                if candidates.is_empty() {
+                if candidates.is_empty() && !unresolved_method_receiver {
                     if colon_remote_call(name) || qualified_module_alias_call(name, aliases) {
                         continue;
                     }
@@ -703,8 +725,8 @@ fn resolve_callable_symbol(
         let short = short_callee(trimmed);
         for candidate in [trimmed, short] {
             let resolved = resolve_callable_with_context(global, candidate, &ctx);
-            if let Some(func) = resolved.into_iter().next() {
-                return Some(func);
+            if let [func] = resolved.as_slice() {
+                return Some(*func);
             }
         }
     }
@@ -726,6 +748,7 @@ fn collect_receiver_method_targets(
     receiver_types: &[String],
     call_kind: CallKind,
     call_name: &str,
+    call_span: Span,
 ) -> Vec<FuncId> {
     if call_kind != CallKind::Method {
         return Vec::new();
@@ -740,6 +763,24 @@ fn collect_receiver_method_targets(
     let mut receiver_type_names = receiver_types.to_vec();
     if receiver_type_names.is_empty() {
         receiver_type_names = receiver_type_names_for_expr(caller_decl, alias_targets, receiver);
+        for type_name in assigned_receiver_type_names(
+            global,
+            caller_decl,
+            alias_targets,
+            receiver,
+            Some(call_span),
+        ) {
+            push_unique_string(&mut receiver_type_names, type_name);
+        }
+        for type_name in receiver_call_return_type_names(
+            global,
+            caller_decl,
+            alias_targets,
+            receiver,
+            Some(call_span),
+        ) {
+            push_unique_string(&mut receiver_type_names, type_name);
+        }
     }
     if receiver_type_names.is_empty() {
         return Vec::new();
@@ -751,6 +792,7 @@ fn collect_receiver_method_targets(
     let (class_candidates, ctx): (Vec<SymbolId>, Option<ResolveContext<'_>>) =
         if let Some(caller_file) = caller_decl_file(global, caller_decl) {
             let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
+            receiver_type_names = prune_receiver_type_names_for_dispatch(receiver_type_names, global, &ctx);
             let mut seen = AHashSet::new();
             let mut classes = Vec::new();
             for receiver_type in receiver_type_names {
@@ -889,6 +931,278 @@ fn collect_method_candidates_for_class_inner(
     }
 }
 
+fn receiver_call_return_type_names(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    receiver: &str,
+    _call_span: Option<Span>,
+) -> Vec<String> {
+    let Some(inner_call) = receiver_inner_call_name(receiver) else {
+        return Vec::new();
+    };
+    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+        return Vec::new();
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    let mut funcs = Vec::new();
+    let mut late_static_type: Option<String> = None;
+    if let Some(receiver_name) = receiver_name_from_call_name(&inner_call) {
+        let receiver_type = short_callee(receiver_name).trim_end_matches("()");
+        if !receiver_type.is_empty() {
+            late_static_type = Some(receiver_type.to_string());
+        }
+        let method_name = callee_without_call_args(short_callee(&inner_call));
+        if !receiver_type.is_empty() && !resolve_class(global, receiver_type, &ctx).is_empty() {
+            let mut seen = AHashSet::new();
+            for class_sym in resolve_class(global, receiver_type, &ctx) {
+                collect_method_candidates_for_class(
+                    global,
+                    class_sym,
+                    method_name,
+                    &ctx,
+                    &mut seen,
+                    &mut funcs,
+                );
+            }
+        }
+    } else {
+        for func in resolve_callable_with_context(global, &inner_call, &ctx) {
+            push_unique_func(&mut funcs, func);
+        }
+    }
+    let mut out = Vec::new();
+    for func in funcs {
+        let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+            continue;
+        };
+        collect_constructed_return_type_names(
+            global,
+            caller_decl,
+            alias_targets,
+            decl,
+            late_static_type.as_deref(),
+            &mut out,
+        );
+    }
+    out
+}
+
+fn receiver_inner_call_name(receiver: &str) -> Option<String> {
+    let receiver = normalize_receiver_alias_text(receiver);
+    let receiver = receiver.trim();
+    if !receiver.ends_with(')') {
+        return None;
+    }
+    let open = receiver.find('(')?;
+    let callee = receiver[..open].trim();
+    if callee.is_empty() || callee.contains('"') || callee.contains('\'') || callee.contains('`') {
+        return None;
+    }
+    Some(callee.to_string())
+}
+
+fn callee_without_call_args(callee: &str) -> &str {
+    callee.split('(').next().unwrap_or(callee).trim()
+}
+
+fn receiver_name_from_call_name(call_name: &str) -> Option<&str> {
+    call_name
+        .rsplit_once('.')
+        .or_else(|| call_name.rsplit_once("::"))
+        .or_else(|| call_name.rsplit_once("->"))
+        .map(|(receiver, _)| receiver.trim())
+        .filter(|receiver| !receiver.is_empty())
+}
+
+fn folded_call_name_receiver_is_instance(call_name: &str, receiver: &str) -> bool {
+    let receiver = normalize_receiver_alias_text(receiver);
+    let bare = short_callee(&receiver);
+    matches!(bare, "super" | "parent" | "base")
+        || (!call_name.contains("::") && matches!(bare, "self" | "this"))
+        || (!call_name.contains("::")
+            && (receiver.starts_with("self.")
+                || receiver.starts_with("this.")
+                || receiver.starts_with("super.")
+                || receiver.starts_with("parent.")
+                || receiver.starts_with("base.")))
+}
+
+fn collect_constructed_return_type_names(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    decl: &Decl,
+    late_static_type: Option<&str>,
+    out: &mut Vec<String>,
+) {
+    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+        return;
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    collect_constructed_return_type_names_from_events(
+        global,
+        &ctx,
+        decl,
+        late_static_type,
+        &decl.flow_events,
+        out,
+    );
+}
+
+fn collect_constructed_return_type_names_from_events(
+    global: &GlobalIndex,
+    ctx: &ResolveContext<'_>,
+    decl: &Decl,
+    late_static_type: Option<&str>,
+    events: &[FlowEvent],
+    out: &mut Vec<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_text: Some(value_text),
+                ..
+            } => {
+                if let Some(type_name) = constructed_return_type_from_text(global, ctx, value_text) {
+                    push_unique_string(out, type_name);
+                } else if static_constructor_return(value_text) {
+                    if let Some(type_name) = late_static_type {
+                        push_unique_string(out, type_name.to_string());
+                    } else if let Some(parent) = decl.parent.and_then(|symbol| global.decl_of(symbol)) {
+                        push_unique_string(out, parent.name.clone());
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, then_events, out);
+                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, body, out);
+                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, catch_events, out);
+                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn constructed_return_type_from_text(
+    global: &GlobalIndex,
+    ctx: &ResolveContext<'_>,
+    value_text: &str,
+) -> Option<String> {
+    let mut text = value_text.trim();
+    text = text.strip_prefix("return ").unwrap_or(text).trim();
+    text = text.strip_prefix("new ").unwrap_or(text).trim();
+    let candidate = text
+        .split(['(', '{', '[', ' ', '\t', '\r', '\n'])
+        .next()
+        .unwrap_or(text)
+        .trim();
+    if candidate.is_empty()
+        || !short_callee(candidate)
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+    {
+        return None;
+    }
+    (!resolve_class(global, candidate, ctx).is_empty()).then(|| short_callee(candidate).to_string())
+}
+
+fn static_constructor_return(value_text: &str) -> bool {
+    let mut text = value_text.trim();
+    text = text.strip_prefix("return ").unwrap_or(text).trim();
+    if text.starts_with("Self(") || text.starts_with("Self {") || text.starts_with("self(") {
+        return true;
+    }
+    matches!(
+        text.strip_prefix("new ").map(str::trim),
+        Some(rest) if rest.starts_with("static(") || rest.starts_with("self(")
+    )
+}
+
+fn prune_receiver_type_names_for_dispatch(
+    type_names: Vec<String>,
+    global: &GlobalIndex,
+    ctx: &ResolveContext<'_>,
+) -> Vec<String> {
+    if type_names.len() < 2 {
+        return type_names;
+    }
+    let canonical_types: Vec<String> = type_names
+        .iter()
+        .map(|name| canonical_dispatch_type_name(name))
+        .collect();
+    let mut inherited = AHashSet::new();
+    for type_name in &type_names {
+        for class_sym in resolve_class(global, type_name, ctx) {
+            collect_transitive_base_type_names(global, class_sym, ctx, &mut inherited);
+        }
+    }
+    let mut out = Vec::new();
+    for (idx, type_name) in type_names.into_iter().enumerate() {
+        if inherited.contains(&canonical_types[idx])
+            && canonical_types
+                .iter()
+                .enumerate()
+                .any(|(other_idx, other)| other_idx != idx && other != &canonical_types[idx])
+        {
+            continue;
+        }
+        push_unique_string(&mut out, type_name);
+    }
+    out
+}
+
+fn collect_transitive_base_type_names(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    ctx: &ResolveContext<'_>,
+    out: &mut AHashSet<String>,
+) {
+    let Some(class_decl) = global.decl_of(class_sym) else {
+        return;
+    };
+    for base in &class_decl.bases {
+        let canonical = canonical_dispatch_type_name(base);
+        if !out.insert(canonical) {
+            continue;
+        }
+        for base_sym in resolve_class(global, base, ctx) {
+            collect_transitive_base_type_names(global, base_sym, ctx, out);
+        }
+    }
+}
+
+fn canonical_dispatch_type_name(name: &str) -> String {
+    short_callee(name)
+        .trim_start_matches(['&', '*', '$', '@', '%'])
+        .trim_end_matches("()")
+        .trim()
+        .to_string()
+}
+
+fn push_unique_func(out: &mut Vec<FuncId>, func: FuncId) {
+    if !out.contains(&func) {
+        out.push(func);
+    }
+}
+
 fn is_super_receiver(receiver: &str) -> bool {
     let receiver = receiver.trim().trim_start_matches(['&', '*']);
     let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
@@ -951,6 +1265,174 @@ fn receiver_type_names_for_expr(
         }
     }
     out
+}
+
+fn assigned_receiver_type_names(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    receiver: &str,
+    call_span: Option<Span>,
+) -> Vec<String> {
+    let receiver = normalize_receiver_alias_text(receiver);
+    let mut out = Vec::new();
+    collect_assigned_receiver_type_names(
+        global,
+        caller_decl,
+        alias_targets,
+        &caller_decl.flow_events,
+        &receiver,
+        call_span,
+        &mut out,
+    );
+    out
+}
+
+fn collect_assigned_receiver_type_names(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    events: &[FlowEvent],
+    receiver: &str,
+    call_span: Option<Span>,
+    out: &mut Vec<String>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target,
+                source_call,
+                source_name,
+                source_names,
+                span,
+                ..
+            } => {
+                if call_span.is_some_and(|call_span| span.start > call_span.start) {
+                    continue;
+                }
+                if normalize_receiver_alias_text(target) != receiver {
+                    continue;
+                }
+                if let Some(source_call) = source_call {
+                    for type_name in receiver_call_return_type_names(
+                        global,
+                        caller_decl,
+                        alias_targets,
+                        &format!("{source_call}()"),
+                        Some(*span),
+                    ) {
+                        push_unique_string(out, type_name);
+                    }
+                }
+                for candidate in source_call
+                    .iter()
+                    .chain(source_name.iter())
+                    .chain(source_names.iter())
+                {
+                    let candidate = normalize_receiver_alias_text(candidate);
+                    if call_name_looks_type_constructor(&candidate)
+                        && class_like_constructor_call(global, caller_decl, alias_targets, &candidate)
+                    {
+                        push_unique_string(out, short_callee(&candidate).to_string());
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_assigned_receiver_type_names(
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    then_events,
+                    receiver,
+                    call_span,
+                    out,
+                );
+                collect_assigned_receiver_type_names(
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    else_events,
+                    receiver,
+                    call_span,
+                    out,
+                );
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_assigned_receiver_type_names(
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    body,
+                    receiver,
+                    call_span,
+                    out,
+                );
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_assigned_receiver_type_names(
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    body,
+                    receiver,
+                    call_span,
+                    out,
+                );
+                collect_assigned_receiver_type_names(
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    catch_events,
+                    receiver,
+                    call_span,
+                    out,
+                );
+                collect_assigned_receiver_type_names(
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    finally_events,
+                    receiver,
+                    call_span,
+                    out,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn call_name_looks_type_constructor(name: &str) -> bool {
+    short_callee(name)
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+}
+
+fn class_like_constructor_call(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    callee_name: &str,
+) -> bool {
+    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+        return false;
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    if !resolve_class(global, callee_name, &ctx).is_empty() {
+        return true;
+    }
+    let tail = short_callee(callee_name);
+    tail != callee_name && !resolve_class(global, tail, &ctx).is_empty()
 }
 
 fn alias_targets_for_decl(
@@ -1018,6 +1500,19 @@ fn qualified_alias_target_tail<'a>(
 ) -> Option<(&'a str, &'a str)> {
     let (head, tail) = name.split_once(&['.', ':'][..])?;
     aliases.get(head).map(String::as_str).map(|target| (target, tail))
+}
+
+fn namespace_alias_target_tail<'a>(
+    name: &'a str,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+) -> Option<(&'a str, &'a str)> {
+    let (head, tail) = name.split_once(&['.', ':'][..])?;
+    match alias_targets.get(head)? {
+        AliasTarget::Namespace { module } if !module.is_empty() && !tail.is_empty() => {
+            Some((module.as_str(), tail))
+        }
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
@@ -1189,6 +1684,69 @@ pub fn collect_callable_targets_with_context_and_aliases(
     if targets.is_empty() {
         if let Some(no_bang) = name.strip_suffix('!') {
             targets = resolve_callable_with_context(global, no_bang, &ctx);
+        }
+    }
+    targets
+}
+
+pub fn collect_call_event_targets_with_context_and_aliases(
+    global: &GlobalIndex,
+    name: &str,
+    receiver: Option<&str>,
+    receiver_types: &[String],
+    call_kind: CallKind,
+    call_span: Span,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
+    caller_export_aliases: &[&'static str],
+) -> Vec<FuncId> {
+    let exact_targets =
+        collect_callable_targets_with_context_and_aliases(global, name, caller_decl, alias_targets);
+    if !exact_targets.is_empty() {
+        return exact_targets;
+    }
+    let folded_receiver =
+        receiver_name_from_call_name(name).filter(|candidate| folded_call_name_receiver_is_instance(name, candidate));
+    let semantic_receiver = receiver.or(folded_receiver);
+    let mut targets = collect_receiver_method_targets(
+        global,
+        caller_decl,
+        alias_targets,
+        semantic_receiver,
+        receiver_types,
+        call_kind,
+        name,
+        call_span,
+    );
+    if targets.is_empty() {
+        if let Some((alias_target, alias_tail)) = namespace_alias_target_tail(name, alias_targets) {
+            targets = collect_workspace_module_targets(
+                global,
+                alias_target,
+                alias_tail,
+                path_for_file,
+                caller_export_aliases,
+                caller_decl,
+                alias_targets,
+            );
+        }
+    }
+    if targets.is_empty() && !(call_kind == CallKind::Method && semantic_receiver.is_some()) {
+        targets = collect_callable_targets_with_context_and_aliases(
+            global,
+            name,
+            caller_decl,
+            alias_targets,
+        );
+        let short = short_callee(name);
+        if targets.is_empty() && short != name {
+            targets = collect_callable_targets_with_context_and_aliases(
+                global,
+                short,
+                caller_decl,
+                alias_targets,
+            );
         }
     }
     targets

@@ -931,6 +931,15 @@ impl<'a> TraceBuilder<'a> {
         let caller_file = global
             .declaring_file(caller_decl.symbol)
             .unwrap_or(caller_decl.span.file);
+        let rank = |sym: SymbolId| {
+            let decl = global.decl_of(sym);
+            let file = global.declaring_file(sym).or_else(|| decl.map(|d| d.span.file));
+            let same_file = file == Some(caller_file);
+            let same_module = decl.is_some_and(|decl| {
+                !decl.module_path.is_empty() && decl.module_path.matches(&caller_decl.module_path)
+            });
+            (same_file, same_module)
+        };
         hits.sort_by(|a_sym, b_sym| {
             let a = global.decl_of(*a_sym);
             let b = global.decl_of(*b_sym);
@@ -963,7 +972,11 @@ impl<'a> TraceBuilder<'a> {
                 })
                 .then_with(|| a_sym.raw().cmp(&b_sym.raw()))
         });
-        hits.into_iter().next()
+        let first = hits[0];
+        if hits.get(1).is_some_and(|second| rank(first) == rank(*second)) {
+            return None;
+        }
+        Some(first)
     }
 
     /// Locate a class's constructor, preferring an explicit

@@ -1370,6 +1370,65 @@ fn engine_resolves_via_context_not_bare_name() {
     );
 }
 
+#[test]
+fn flow_surfaces_do_not_reintroduce_loose_resolution_or_fabricated_paths() {
+    let root = repo_root();
+    let checks = [
+        (
+            "crates/security/src/analysis/mod.rs",
+            &[
+                "enumerate_tainted_source_paths",
+                "tainted_call_adjacency",
+                "indexed_tainted_path_between",
+                "taint_path_for_chain",
+                "chain_precision(",
+            ][..],
+        ),
+        (
+            "crates/taint/src/inter/mod.rs",
+            &["candidates.first().map(|c| c.func)"][..],
+        ),
+        (
+            "crates/browse/src/edges.rs",
+            &[
+                "collect_callable_targets(",
+                "bonsai_resolve::resolve_callable(",
+                ".find_by_name(",
+            ][..],
+        ),
+        (
+            "crates/browse/src/native_export.rs",
+            &[
+                "collect_callable_targets(",
+                "bonsai_resolve::resolve_callable(",
+                ".find_by_name(",
+            ][..],
+        ),
+        (
+            "crates/inspect/src/call_edges.rs",
+            &[
+                "collect_callable_targets(",
+                "bonsai_resolve::resolve_callable(",
+                ".find_by_name(",
+            ][..],
+        ),
+    ];
+    let mut violations = Vec::new();
+    for (rel, forbidden) in checks {
+        let text = read(&root.join(rel));
+        for pattern in forbidden {
+            if text.contains(pattern) {
+                violations.push(format!("{rel} contains forbidden loose-flow pattern `{pattern}`"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "flow-facing surfaces must use caller-context resolution and lineage evidence only:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
 /// Drift guard for T-5 in docs/contributing/review-checklist.mdx::§4: `TaintedArg.index` must be
 /// the call-site argument slot, NOT the callee parameter index.
 ///
