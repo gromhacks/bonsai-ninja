@@ -255,13 +255,33 @@ impl<'a> ChainCache<'a> {
         }
         let mut merged = bonsai_taint::KindedTokens::default();
         for &func in chain {
-            // `taint_facts_for_entry` is already the empty-seed,
-            // per-entry fact set this method needs for every hop.
-            // Route all hops through the invocation cache; otherwise
-            // filtered inspect queries recompute downstream taint
-            // facts once per rendered chain.
+            // Interprocedural facts capture propagation from the
+            // chosen entry; per-function tokens preserve structural
+            // browse facts (args, calls, reads, writes) for every hop
+            // on this exact rendered path. Kind filters depend on
+            // both: `--from-kind arg token` should match a call-site
+            // argument in an intermediate function even when the
+            // empty-seed taint pass has no reason to seed that local.
             let facts = self.taint_facts_for_entry(func);
             bonsai_taint::merge_into(&mut merged, &facts);
+            let tokens = self.per_func_tokens(func);
+            bonsai_taint::merge_into(&mut merged, &tokens);
+        }
+        Arc::new(merged)
+    }
+
+    /// Structural browse facts for exactly the functions on `chain`.
+    /// Unlike [`Self::chain_taint_facts`], this does not include
+    /// interprocedural entry facts, so it cannot pull in sibling
+    /// branches outside the rendered call path.
+    pub fn chain_structural_tokens(&self, chain: &[FuncId]) -> Arc<bonsai_taint::KindedTokens> {
+        if chain.is_empty() {
+            return Arc::new(bonsai_taint::KindedTokens::default());
+        }
+        let mut merged = bonsai_taint::KindedTokens::default();
+        for &func in chain {
+            let tokens = self.per_func_tokens(func);
+            bonsai_taint::merge_into(&mut merged, &tokens);
         }
         Arc::new(merged)
     }

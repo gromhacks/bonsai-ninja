@@ -390,7 +390,6 @@ fn java_callgraph_receiver_type_from_constructor_prefers_caller_package() {
     let process_in = |suffix: &str| {
         global
             .all_files()
-            .into_iter()
             .flat_map(|file| global.decls_in(file).iter().cloned())
             .find(|decl| {
                 decl.name == "process"

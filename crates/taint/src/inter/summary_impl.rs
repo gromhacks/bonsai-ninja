@@ -995,8 +995,7 @@ fn split_terminal_return_segment(text: &str) -> &str {
     let mut escaped = false;
     let mut depth = 0usize;
     let mut last_split = 0usize;
-    let mut chars = text.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
+    for (idx, ch) in text.char_indices() {
         if let Some(open_quote) = quote {
             if escaped {
                 escaped = false;

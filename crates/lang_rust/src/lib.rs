@@ -273,7 +273,7 @@ fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
                 enrich_rust_format_macro_operands(else_events);
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                enrich_rust_format_macro_operands(body)
+                enrich_rust_format_macro_operands(body);
             }
             FlowEvent::Try {
                 body,

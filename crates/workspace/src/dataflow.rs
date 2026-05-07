@@ -32,7 +32,7 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
-pub const DATAFLOW_CACHE_VERSION: u32 = 20;
+pub const DATAFLOW_CACHE_VERSION: u32 = 21;
 static SIDECAR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
