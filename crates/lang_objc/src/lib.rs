@@ -4,11 +4,11 @@
 //! detection assigns `.m` to Objective-C by default (same convention
 //! `tree-sitter-language-pack` uses). If a project mixes the two, the
 //! user can scope `--include` / `--exclude` to disambiguate.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding,
 };
 use tree_sitter::{Language, Node, Tree};
@@ -137,6 +137,29 @@ impl LanguageAdapter for ObjCAdapter {
                     decl.type_aliases = aliases.clone();
                 }
             }
+            // Per-class `bases`: `@interface AuditedRepository :
+            // Repository` → ["Repository"]. The engine's
+            // `resolve_super_method_candidates` reads `Decl.bases`
+            // when the receiver is `super`/`self.super` so
+            // `[super run]` dispatches into the parent class's
+            // `run` method instead of falling back to a name-only
+            // candidate enumeration. Without populated bases,
+            // every super dispatch is invisible.
+            let bases_by_class = collect_objc_class_bases(&tree, file, src);
+            for decl in &mut decl_index.defs {
+                if !matches!(
+                    decl.kind,
+                    DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct
+                ) {
+                    continue;
+                }
+                if let Some(bases) = bases_by_class
+                    .iter()
+                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
+                {
+                    decl.bases = bases.clone();
+                }
+            }
         }
         // Recognised Objective-C lifecycle transitions. Manual
         // retain/release (`release`, `autorelease`), explicit
@@ -224,6 +247,94 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+/// Walk Objective-C class / category / interface / implementation
+/// nodes and pull bare base type names from the
+/// `superclass`/`superclass_reference` field plus any
+/// protocol-qualifier identifiers. Both `@interface
+/// AuditedRepository : Repository` and `@interface Foo (Cat) :
+/// Bar` shapes surface here so super dispatch + protocol
+/// conformance both inform the resolver.
+fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, Vec<String>)> {
+    let class_kinds = &[
+        "class_interface",
+        "class_implementation",
+        "category_interface",
+        "category_implementation",
+    ];
+    let mut out: Vec<(Span, Vec<String>)> = Vec::new();
+    for class_node in collect_kinds(tree, class_kinds) {
+        let mut bases: Vec<String> = Vec::new();
+        if let Some(superclass) = class_node
+            .child_by_field_name("superclass")
+            .or_else(|| class_node.child_by_field_name("superclass_reference"))
+            .or_else(|| class_node.child_by_field_name("base"))
+        {
+            let raw = node_text(&superclass, src).trim().to_string();
+            if let Some(name) = canonical_objc_base_name(&raw) {
+                if !bases.iter().any(|existing| existing == &name) {
+                    bases.push(name);
+                }
+            }
+        }
+        // Fallback: a few grammar revisions expose the superclass as
+        // a `superclass_reference` named child rather than a field.
+        let mut cursor = class_node.walk();
+        for child in class_node.named_children(&mut cursor) {
+            if matches!(
+                child.kind(),
+                "superclass_reference" | "superclass" | "protocol_reference_list" | "protocol_qualifiers"
+            ) {
+                let raw = node_text(&child, src).trim().to_string();
+                for piece in raw.split(',') {
+                    let cleaned = piece.trim().trim_matches(|c: char| matches!(c, '<' | '>' | ':' | '*'));
+                    if let Some(name) = canonical_objc_base_name(cleaned) {
+                        if !bases.iter().any(|existing| existing == &name) {
+                            bases.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        let class_span = span_of(file, &class_node);
+        if !bases.is_empty() {
+            // Merge into an existing entry for the same span if the
+            // adapter already collected partial info.
+            if let Some((_, existing)) =
+                out.iter_mut().find(|(span, _)| *span == class_span)
+            {
+                for base in bases {
+                    if !existing.iter().any(|already| already == &base) {
+                        existing.push(base);
+                    }
+                }
+            } else {
+                out.push((class_span, bases));
+            }
+        }
+    }
+    out
+}
+
+/// Strip a base entry to the bare type name. Drops trailing
+/// generics/typed-pointer chrome (`NSDictionary<NSString *, id> *`
+/// → `NSDictionary`) and trims protocol-qualifier brackets.
+fn canonical_objc_base_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches(':').trim();
+    let head = trimmed.split('<').next().unwrap_or(trimmed).trim();
+    let head = head.split('*').next().unwrap_or(head).trim();
+    let bare = head.rsplit("::").next().unwrap_or(head).trim();
+    let bare = bare.trim_start_matches('@').trim();
+    if bare.is_empty()
+        || !bare
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
+    Some(bare.to_string())
 }
 
 /// Walk every Objective-C method / function declaration once and

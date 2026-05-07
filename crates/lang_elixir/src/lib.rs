@@ -261,7 +261,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         };
         let module = node_text(&module_node, src).to_string();
         // `as: F` rename appears as a keyword list: `keywords > pair { key, value }`.
-        let alias = first_named_child_of_kind(&args_node, "keywords")
+        let explicit_alias = first_named_child_of_kind(&args_node, "keywords")
             .and_then(|keywords| first_named_child_of_kind(&keywords, "pair"))
             .and_then(|pair| {
                 let key_node = pair.child_by_field_name("key")?;
@@ -273,6 +273,21 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
                     None
                 }
             });
+        // Elixir's `alias MyApp.AuthService` (no `as:` rename) binds
+        // the leaf segment as the local name — `AuthService` becomes
+        // a path head usable as `AuthService.run(x)`. When no
+        // explicit `as:` is provided, mirror Elixir's binding rule
+        // so the resolver knows `AuthService` resolves into the
+        // workspace's `MyApp.AuthService` module.
+        let alias = explicit_alias.or_else(|| match target_text {
+            "alias" => module
+                .rsplit('.')
+                .next()
+                .map(str::trim)
+                .filter(|leaf| !leaf.is_empty())
+                .map(str::to_string),
+            _ => None,
+        });
         imports.push(ImportSpec {
             span: span_of(file, &call_node),
             module,

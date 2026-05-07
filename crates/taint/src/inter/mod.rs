@@ -3875,6 +3875,11 @@ fn resolve_receiver_method_candidates(
         ) {
             push_unique_string(&mut type_names, type_name);
         }
+        for type_name in
+            class_field_receiver_type_names(&global, caller_decl, receiver)
+        {
+            push_unique_string(&mut type_names, type_name);
+        }
     }
     let normalized_receiver = normalise_qualified_text(receiver);
     let receiver_tail = short_tail(&normalized_receiver);
@@ -4169,6 +4174,77 @@ fn enclosing_class_for_decl<'a>(global: &'a GlobalIndex, decl: &Decl) -> Option<
         }
     }
     None
+}
+
+/// Infer receiver-types for a `self.field` (or implicit-receiver
+/// equivalent) reference by consulting the enclosing class's
+/// constructor field-write facts. When the constructor binds a
+/// field from a typed parameter (e.g. `def __init__(self, runner:
+/// CommandRunner): self.runner = runner`), every method of the
+/// class can dispatch `self.runner.X(...)` to `CommandRunner.X`.
+///
+/// This is the class-level field-type inference path the resolver
+/// reaches when the caller's own flow events don't carry an
+/// assignment for the receiver. Without it, receiver-typed
+/// dispatch through stable instance state is blind.
+fn class_field_receiver_type_names(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    receiver: &str,
+) -> Vec<String> {
+    let receiver_norm = normalise_target_text(receiver)
+        .trim()
+        .trim_matches('.')
+        .to_string();
+    if receiver_norm.is_empty() {
+        return Vec::new();
+    }
+    // Only `self.X` / `this.X` shapes — bare names hit other
+    // resolution paths.
+    let Some((head, _)) = receiver_norm.rsplit_once('.') else {
+        return Vec::new();
+    };
+    if !receiver_state_name_is_implicit_marker(head) {
+        return Vec::new();
+    }
+    let Some(class_decl) = enclosing_class_for_decl(global, caller_decl) else {
+        return Vec::new();
+    };
+    let Some(class_file) = global.declaring_file(class_decl.symbol) else {
+        return Vec::new();
+    };
+    let class_sym = class_decl.symbol;
+    let mut out = Vec::new();
+    for sibling in global.decls_in(class_file) {
+        if sibling.parent != Some(class_sym) {
+            continue;
+        }
+        if !matches!(
+            sibling.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        for field_write in &sibling.receiver_field_writes {
+            let target_norm = normalise_target_text(&field_write.target)
+                .trim()
+                .trim_matches('.')
+                .to_string();
+            if target_norm != receiver_norm {
+                continue;
+            }
+            for &param_idx in &field_write.source_param_indices {
+                let Some(param_name) = sibling.params.get(param_idx) else {
+                    continue;
+                };
+                let Some(type_name) = type_alias_for_receiver(sibling, param_name) else {
+                    continue;
+                };
+                push_unique_string(&mut out, type_name);
+            }
+        }
+    }
+    out
 }
 
 fn inferred_receiver_type_names(
@@ -5003,8 +5079,22 @@ fn resolve_workspace_module_targets(
         let Some(file) = global.declaring_file(sym) else {
             continue;
         };
-        let in_target_file =
-            db.vfs()
+        let Some(decl) = global.decl_of(sym) else {
+            continue;
+        };
+        // Match via the decl's semantic module_path first — for
+        // languages like Elixir whose modules are PascalCase but
+        // files are snake_case (`MyApp.AuthService` ↔
+        // `my_app/auth_service.ex`), the file-path heuristic in
+        // `module_target_matches_path` cannot recover the
+        // workspace-module identity. The adapter populates
+        // `Decl.module_path` with the canonical module segments,
+        // and a dotted-form match against `alias_target` is the
+        // semantic-identity test the resolver should prefer.
+        let semantic_match = module_target_matches_decl_module_path(alias_target, &decl.module_path);
+        let in_target_file = semantic_match
+            || db
+                .vfs()
                 .path(file)
                 .ok()
                 .is_some_and(|path: std::sync::Arc<std::path::PathBuf>| {
@@ -5013,14 +5103,42 @@ fn resolve_workspace_module_targets(
         if !in_target_file {
             continue;
         }
-        let Some(decl) = global.decl_of(sym) else {
-            continue;
-        };
         if seen_spans.insert((file, decl.span.start, decl.span.end)) {
             out.push(func);
         }
     }
     out
+}
+
+/// True when the module-namespace alias text (e.g. `MyApp.AuthService`
+/// or `pipeline`) matches the canonical `Decl.module_path` of a
+/// workspace decl. Compares dotted segments to `module_path.segments`,
+/// using either equality or a suffix match so a fully-qualified alias
+/// (`MyApp.AuthService`) hits a decl whose module_path is exactly
+/// that, AND a leaf alias (`AuthService`) hits a decl declared inside
+/// `MyApp.AuthService` so the local-name binding produced by
+/// `parse_imports` resolves the cross-module call.
+fn module_target_matches_decl_module_path(alias_target: &str, decl_module: &ModulePath) -> bool {
+    if alias_target.is_empty() || decl_module.is_empty() {
+        return false;
+    }
+    let target_segments: Vec<&str> = alias_target
+        .split('.')
+        .map(str::trim)
+        .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
+        .collect();
+    if target_segments.is_empty() {
+        return false;
+    }
+    let decl_segments = &decl_module.segments;
+    if target_segments.len() > decl_segments.len() {
+        return false;
+    }
+    let suffix_start = decl_segments.len() - target_segments.len();
+    decl_segments[suffix_start..]
+        .iter()
+        .zip(target_segments.iter())
+        .all(|(decl_seg, target_seg)| decl_seg == target_seg)
 }
 
 fn export_name_variants(alias_tail: &str) -> Vec<String> {

@@ -1,5 +1,5 @@
 //! Swift language adapter.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
@@ -7,8 +7,10 @@ use bonsai_lang_api::{
         with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasVocabulary, Visibility,
+    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility,
 };
+use tree_sitter::Node;
 
 const SWIFT_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_declaration", "init_declaration"],
@@ -100,12 +102,45 @@ impl LanguageAdapter for SwiftAdapter {
             let src = snapshot.text.as_bytes();
             let vis_map = collect_modifier_visibility(tree.root_node(), file, src, &SWIFT_VOCAB);
             let alias_map = collect_param_type_aliases(&tree, file, src, &SWIFT_TYPE_ALIASES);
+            // Class-level property type bindings — `let
+            // authService = AuthService()` makes `authService :
+            // AuthService` available inside every method of the
+            // enclosing class so receiver dispatch reaches the real
+            // method decl.
+            let class_field_aliases = collect_swift_class_field_aliases(&tree, file, src);
+            let class_span_for_parent: std::collections::HashMap<bonsai_common::SymbolId, Span> = idx
+                .defs
+                .iter()
+                .filter(|candidate| is_class_like(candidate.kind))
+                .map(|candidate| (candidate.symbol, candidate.span))
+                .collect();
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
                 }
-                if let Some(aliases) = alias_map.get(&decl.span) {
-                    decl.type_aliases = aliases.clone();
+                let mut aliases = alias_map.get(&decl.span).cloned().unwrap_or_default();
+                if matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    if let Some(class_span) = decl
+                        .parent
+                        .and_then(|parent_sym| class_span_for_parent.get(&parent_sym).copied())
+                    {
+                        if let Some(field_aliases) = class_field_aliases
+                            .iter()
+                            .find_map(|(span, list)| (*span == class_span).then_some(list))
+                        {
+                            for alias in field_aliases {
+                                if !aliases.contains(alias) {
+                                    aliases.push(alias.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                if !aliases.is_empty() {
+                    decl.type_aliases = aliases;
                 }
             }
             // Per-class `bases`: `class Echo: WebSocketHandler, Mixin`
@@ -166,6 +201,162 @@ impl LanguageAdapter for SwiftAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Walk every Swift class-like declaration and pull `(name, type)`
+/// bindings from its `property_declaration` children. Returns
+/// `(class_span, [TypeAliasBinding])` so the per-method merge can
+/// attach a class's bindings to every method nested inside it.
+fn collect_swift_class_field_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<TypeAliasBinding>)> {
+    let class_kinds = &[
+        "class_declaration",
+        "struct_declaration",
+        "protocol_declaration",
+        "enum_declaration",
+        "extension_declaration",
+    ];
+    let mut out = Vec::new();
+    for class_node in collect_kinds(tree, class_kinds) {
+        let mut aliases: Vec<TypeAliasBinding> = Vec::new();
+        let mut work = vec![class_node];
+        while let Some(node) = work.pop() {
+            if node != class_node && class_kinds.contains(&node.kind()) {
+                continue;
+            }
+            // Don't descend into method bodies — that scope is owned
+            // by the per-method param-alias pass.
+            if node != class_node
+                && matches!(
+                    node.kind(),
+                    "function_declaration" | "init_declaration" | "deinit_declaration"
+                )
+            {
+                continue;
+            }
+            if node.kind() == "property_declaration" {
+                if let Some(binding) = swift_property_alias(node, src) {
+                    if !aliases.contains(&binding) {
+                        aliases.push(binding);
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                work.push(child);
+            }
+        }
+        if !aliases.is_empty() {
+            out.push((span_of(file, &class_node), aliases));
+        }
+    }
+    out
+}
+
+/// Extract a `name: Type` binding from a Swift `property_declaration`.
+/// Handles both `let x: T = ...` (explicit type) and `let x = T()`
+/// (type-inferred from a PascalCase constructor-style initializer).
+fn swift_property_alias(node: Node<'_>, src: &[u8]) -> Option<TypeAliasBinding> {
+    let pattern = node.child_by_field_name("name").or_else(|| {
+        let mut cursor = node.walk();
+        let mut found = None;
+        for child in node.named_children(&mut cursor) {
+            if matches!(child.kind(), "pattern" | "simple_identifier" | "identifier") {
+                found = Some(child);
+                break;
+            }
+        }
+        found
+    })?;
+    let name = node_text(&pattern, src).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let type_short = node
+        .child_by_field_name("type")
+        .map(|t| node_text(&t, src).to_string())
+        .and_then(|t| swift_canonical_type(&t))
+        .or_else(|| swift_property_constructor_type(node, src))?;
+    if name == type_short {
+        return None;
+    }
+    Some(TypeAliasBinding {
+        name,
+        type_name: type_short,
+    })
+}
+
+/// Find a constructor-shaped initializer (`= Foo()` / `= Foo.bar()`)
+/// inside a Swift property_declaration whose static type is
+/// `Foo`. Returns the canonical short type, or `None` when the
+/// initializer isn't a PascalCase call.
+fn swift_property_constructor_type(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let mut value: Option<Node<'_>> = node.child_by_field_name("value");
+    if value.is_none() {
+        // Newer Swift grammar emits `value:` directly; older shapes
+        // wrap the initializer under a `pattern_initializer` child.
+        for child in node.named_children(&mut cursor) {
+            if matches!(child.kind(), "call_expression") {
+                value = Some(child);
+                break;
+            }
+            if matches!(child.kind(), "pattern_initializer") {
+                let mut inner = child.walk();
+                for sub in child.named_children(&mut inner) {
+                    if matches!(sub.kind(), "call_expression") {
+                        value = Some(sub);
+                        break;
+                    }
+                }
+                if value.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+    let call = value?;
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let callee = call.child_by_field_name("function").or_else(|| {
+        let mut inner = call.walk();
+        let mut found = None;
+        for child in call.named_children(&mut inner) {
+            if matches!(
+                child.kind(),
+                "simple_identifier" | "identifier" | "navigation_expression" | "type_identifier"
+            ) {
+                found = Some(child);
+                break;
+            }
+        }
+        found
+    })?;
+    let canonical = swift_canonical_type(node_text(&callee, src))?;
+    canonical
+        .chars()
+        .next()
+        .filter(|first| first.is_ascii_uppercase())?;
+    Some(canonical)
+}
+
+fn swift_canonical_type(raw: &str) -> Option<String> {
+    let no_generics = raw.split('<').next().unwrap_or(raw);
+    let trimmed = no_generics.trim().trim_end_matches('?').trim_end_matches('!');
+    let short = trimmed.rsplit('.').next().unwrap_or(trimmed).trim();
+    if short.is_empty()
+        || !short
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
+    Some(short.to_string())
 }
 
 /// True when the decl is a type-defining container that can carry `bases`.

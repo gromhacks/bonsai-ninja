@@ -809,6 +809,31 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
                 original_name: None,
                 scope: ImportScope::Module,
             });
+            // Self-binding namespace alias for workspace-internal
+            // module imports (`use crate::executor;`, `use self::x;`,
+            // `use super::y;`). Without this, calls like
+            // `executor::execute(c)` cannot be resolved to the
+            // workspace `executor` module — `mod_item` declarations
+            // already bind their own name, but plain `use` imports
+            // don't, leaving cross-module call edges unresolved.
+            //
+            // Limited to lowercase leaves (Rust's module convention)
+            // so type imports (`use crate::Envelope;`) don't get a
+            // bogus namespace alias that would let
+            // `Envelope::method` rewrite to a spurious workspace
+            // function via the resolver's bare-name fallback.
+            if !text.contains(" as ") && !text.ends_with('*') {
+                if let Some(leaf) = workspace_use_leaf(text.as_str()) {
+                    out.push(ImportSpec {
+                        span: span_of(file, &node),
+                        module: leaf.to_string(),
+                        alias: Some(leaf.to_string()),
+                        is_wildcard: false,
+                        original_name: None,
+                        scope: ImportScope::Module,
+                    });
+                }
+            }
         }
         // Additional entries for `as`-renamed bindings. Handles:
         //   `use X::Y as Z;`               (single rename)
@@ -1010,6 +1035,40 @@ fn strip_use_tree_comments(input: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Last `::`-separated segment of a `use` path, but only when the
+/// path is rooted at a workspace prefix (`crate::`, `super::`,
+/// `self::`) and the leaf segment looks like a Rust module
+/// (lowercase first character — module names follow snake_case while
+/// types and constants are PascalCase / SCREAMING_SNAKE).
+///
+/// Returning `Some(leaf)` is the signal to bind that name as a
+/// workspace-namespace alias; everything else returns `None` so
+/// external imports (`use std::process::Command;`) and type-only
+/// imports (`use crate::Envelope;`) don't get a spurious namespace
+/// rewrite that the resolver's bare-name fallback could expand
+/// into an unrelated workspace function.
+fn workspace_use_leaf(text: &str) -> Option<&str> {
+    let body = text.trim_end_matches(';').trim();
+    if body.is_empty() || body.contains('{') || body.contains(" as ") {
+        return None;
+    }
+    let stripped = body
+        .strip_prefix("crate::")
+        .or_else(|| body.strip_prefix("self::"))
+        .or_else(|| {
+            let mut rest = body;
+            let mut stripped_any = false;
+            while let Some(next) = rest.strip_prefix("super::") {
+                rest = next;
+                stripped_any = true;
+            }
+            stripped_any.then_some(rest)
+        })?;
+    let leaf = stripped.rsplit("::").next()?.trim();
+    let first = leaf.chars().next()?;
+    (first.is_ascii_lowercase() || first == '_').then_some(leaf)
 }
 
 /// Split a brace-list body on top-level (depth-0) commas only.
