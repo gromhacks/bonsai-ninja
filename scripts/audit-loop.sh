@@ -100,9 +100,9 @@ fi
 echo
 echo "=== summary ==="
 echo "passed: ${#passes[@]}"
-for s in "${passes[@]}"; do echo "  ok    $s"; done
+for s in "${passes[@]+"${passes[@]}"}"; do echo "  ok    $s"; done
 echo "failed: ${#fails[@]}"
-for s in "${fails[@]}"; do echo "  FAIL  $s"; done
+for s in "${fails[@]+"${fails[@]}"}"; do echo "  FAIL  $s"; done
 
 if (( ${#fails[@]} > 0 )); then
     exit 1

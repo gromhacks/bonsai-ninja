@@ -1604,6 +1604,8 @@ fn scan_refs_batch(
     };
     let global = ws.db().global_index();
     let decls = global.decls_in(file);
+    let file_packages = file_package_set(ws, file);
+    let alias_map = file_alias_map(ws, file);
     for r in &idx.refs {
         if r.kind != want_kind {
             continue;
@@ -1615,6 +1617,15 @@ fn scan_refs_batch(
                 prepared.attribute,
                 prepared.regex.as_ref(),
             ) {
+                continue;
+            }
+            // Receiver-agnostic read regexes (`^[A-Za-z_]\w*\.body$`)
+            // would otherwise fire on any `<ident>.body` shape across
+            // every workspace file — koa's request_body matching
+            // every aws-lambda example is the canonical regression.
+            // The package-signal gate is the same one that
+            // call-shaped rules use; reads need it just as much.
+            if !prepared.call_context_allows(&r.name, &[], &alias_map, file_packages.as_ref()) {
                 continue;
             }
             let (file_path, line, col) = resolve_span(ws, file, r.span);
@@ -1646,6 +1657,8 @@ fn scan_flow_reads_batch(
     out: &mut Vec<RuleMatch>,
 ) {
     let global = ws.db().global_index();
+    let file_packages = file_package_set(ws, file);
+    let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         let mut reads = Vec::new();
         collect_flow_read_sites(&decl.flow_events, &mut reads);
@@ -1654,6 +1667,13 @@ fn scan_flow_reads_batch(
                 let Some(match_text) = flow_read_rule_match(prepared, &tokens) else {
                     continue;
                 };
+                // Same package-signal gate that `scan_refs_batch`
+                // applies; without it a receiver-agnostic read
+                // regex would fire on any file regardless of the
+                // imports it actually pulls in.
+                if !prepared.call_context_allows(&match_text, &[], &alias_map, file_packages.as_ref()) {
+                    continue;
+                }
                 if out
                     .iter()
                     .any(|existing| existing.rule_id == prepared.rule.id && existing.span == span)
