@@ -564,6 +564,104 @@ fn candidate_in_alias_target(
     module_target_matches_decl_module_path(target_module, &decl.module_path)
 }
 
+/// Trim the call-argument list off a callee text. `Foo(arg)` →
+/// `Foo`, `pkg::Bar(x, y)` → `pkg::Bar`. Used at sites that want to
+/// compare the callee identifier to a workspace symbol without
+/// being thrown off by inline arguments.
+#[must_use]
+pub fn callee_without_call_args(callee: &str) -> &str {
+    callee.split('(').next().unwrap_or(callee).trim()
+}
+
+/// Append `func` to `out` only when it isn't already present. Tiny
+/// helper but called from enough hot loops that hand-inlining the
+/// `contains` check obscures intent at every call site.
+pub fn push_unique_func(out: &mut Vec<bonsai_common::FuncId>, func: bonsai_common::FuncId) {
+    if !out.contains(&func) {
+        out.push(func);
+    }
+}
+
+/// True when `alias_target` (a dotted / slashed module reference
+/// from an import alias) plausibly identifies the file `file_path`.
+/// Used by both the taint engine and the callgraph as a backstop
+/// when [`module_target_matches_decl_module_path`] doesn't resolve —
+/// e.g. workspace files that haven't yet had their module path
+/// populated. Compares dotted-form parts to slash-form parts with
+/// extension stripping, supporting Java-style `com.example.Utils`
+/// matching `com/example/Utils.java`.
+#[must_use]
+pub fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
+    let target = alias_target.replace('\\', "/");
+    let path = file_path.replace('\\', "/");
+    let target_parts = module_import_parts(&target);
+    let path_parts = module_path_parts(&path);
+    let Some(target_leaf) = target_parts.last() else {
+        return false;
+    };
+    if path_parts
+        .last()
+        .is_some_and(|file| strip_extension(file) == target_leaf.as_str())
+    {
+        return true;
+    }
+    if path_parts
+        .iter()
+        .rev()
+        .nth(1)
+        .is_some_and(|parent| parent == target_leaf)
+    {
+        return true;
+    }
+    if target_parts.len() > path_parts.len() {
+        return false;
+    }
+    path_parts
+        .windows(target_parts.len())
+        .any(|window| window == target_parts)
+}
+
+/// Split a module import target (`com.example.Utils`,
+/// `mod/path/file.dart`) into its identifier segments. Files with
+/// dotted shape are split on `.`, slash-shaped paths on `/`.
+/// Trailing extensions and `.` / `..` segments are dropped.
+#[must_use]
+pub fn module_import_parts(text: &str) -> Vec<String> {
+    let parts: Vec<&str> = if text.contains('/') {
+        text.split('/').collect()
+    } else {
+        text.split('.').collect()
+    };
+    parts
+        .into_iter()
+        .filter_map(|part| {
+            let part = part.trim();
+            (!part.is_empty() && part != "." && part != "..").then(|| strip_extension(part).to_string())
+        })
+        .collect()
+}
+
+/// Split an absolute or relative file path (`/abs/dir/file.py`,
+/// `dir/file.py`) into its identifier segments. Each segment is
+/// extension-stripped so `module_target_matches_path` can compare
+/// dotted module form against slash-formed file path.
+#[must_use]
+pub fn module_path_parts(text: &str) -> Vec<String> {
+    text.split('/')
+        .filter_map(|part| {
+            let part = part.trim();
+            (!part.is_empty() && part != "." && part != "..").then(|| strip_extension(part).to_string())
+        })
+        .collect()
+}
+
+/// Drop the last `.<ext>` from a path part. Idempotent on bare
+/// segments (`Utils` → `Utils`).
+#[must_use]
+pub fn strip_extension(part: &str) -> &str {
+    part.rsplit_once('.').map_or(part, |(stem, _)| stem)
+}
+
 /// Resolve a class / type identifier to every matching class-like
 /// decl reachable from the caller's context. Used by callgraph and
 /// matcher when locating receiver classes for `[Type, method]`

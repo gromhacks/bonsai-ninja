@@ -1006,9 +1006,7 @@ fn receiver_inner_call_name(receiver: &str) -> Option<String> {
     Some(callee.to_string())
 }
 
-fn callee_without_call_args(callee: &str) -> &str {
-    callee.split('(').next().unwrap_or(callee).trim()
-}
+use bonsai_resolve::callee_without_call_args;
 
 fn receiver_name_from_call_name(call_name: &str) -> Option<&str> {
     call_name
@@ -1195,11 +1193,7 @@ fn canonical_dispatch_type_name(name: &str) -> String {
         .to_string()
 }
 
-fn push_unique_func(out: &mut Vec<FuncId>, func: FuncId) {
-    if !out.contains(&func) {
-        out.push(func);
-    }
-}
+use bonsai_resolve::push_unique_func;
 
 fn is_super_receiver(receiver: &str) -> bool {
     let receiver = receiver
@@ -1592,67 +1586,9 @@ fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]
     variants
 }
 
-fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
-    let target = alias_target.replace('\\', "/");
-    let path = file_path.replace('\\', "/");
-    let target_parts = module_import_parts(&target);
-    let path_parts = module_path_parts(&path);
-    let Some(target_leaf) = target_parts.last() else {
-        return false;
-    };
-    if path_parts
-        .last()
-        .is_some_and(|file| strip_extension(file) == target_leaf.as_str())
-    {
-        return true;
-    }
-    if path_parts
-        .iter()
-        .rev()
-        .nth(1)
-        .is_some_and(|parent| parent == target_leaf)
-    {
-        return true;
-    }
-    path_has_module_suffix(&path_parts, &target_parts)
-}
-
-fn module_import_parts(text: &str) -> Vec<String> {
-    let parts: Vec<&str> = if text.contains('/') {
-        text.split('/').collect()
-    } else {
-        text.split('.').collect()
-    };
-    parts
-        .into_iter()
-        .filter_map(|part| {
-            let part = part.trim();
-            (!part.is_empty() && part != "." && part != "..").then(|| strip_extension(part).to_string())
-        })
-        .collect()
-}
-
-fn module_path_parts(text: &str) -> Vec<String> {
-    text.split('/')
-        .filter_map(|part| {
-            let part = part.trim();
-            (!part.is_empty() && part != "." && part != "..").then(|| strip_extension(part).to_string())
-        })
-        .collect()
-}
-
-fn strip_extension(part: &str) -> &str {
-    part.rsplit_once('.').map_or(part, |(stem, _)| stem)
-}
-
-fn path_has_module_suffix(path_parts: &[String], target_parts: &[String]) -> bool {
-    if target_parts.is_empty() || target_parts.len() > path_parts.len() {
-        return false;
-    }
-    path_parts
-        .windows(target_parts.len())
-        .any(|window| window == target_parts)
-}
+// Path / module-shape helpers live in `bonsai_resolve` so the
+// callgraph and taint engine share one source of truth.
+use bonsai_resolve::module_target_matches_path;
 
 /// Resolve `name` against the global index and return every matching
 /// callable (function, method, constructor) as a [`FuncId`]. Empty
