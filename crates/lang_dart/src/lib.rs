@@ -89,6 +89,8 @@ impl LanguageAdapter for DartAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

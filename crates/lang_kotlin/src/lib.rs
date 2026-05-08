@@ -77,6 +77,8 @@ impl LanguageAdapter for KotlinAdapter {
         LanguageCapabilities {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

@@ -79,7 +79,15 @@ impl ValueFlowCache {
         db: &AnalyzerDb,
         caches: &InterTaintCaches,
     ) -> Arc<ValueFlowGraph> {
-        if let Some(hit) = self.inner.read().graphs.get(&func).cloned() {
+        // Bind the read-lock probe to a `let` so the guard's
+        // temporary ends at the `;` before we acquire the write
+        // lock below. parking_lot::RwLock is non-reentrant; the
+        // if-let-scrutinee form would extend the read guard's
+        // lifetime through the rest of the function and deadlock
+        // on the upgrade. Same hazard B1 hit; documented in
+        // design-patterns.mdx §13a.
+        let cached = self.inner.read().graphs.get(&func).cloned();
+        if let Some(hit) = cached {
             return hit;
         }
         let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), caches);
@@ -103,7 +111,8 @@ impl ValueFlowCache {
         db: &AnalyzerDb,
         caches: &InterTaintCaches,
     ) -> Arc<AHashSet<String>> {
-        if let Some(hit) = self.inner.read().returning_seeds.get(&func).cloned() {
+        let cached = self.inner.read().returning_seeds.get(&func).cloned();
+        if let Some(hit) = cached {
             return hit;
         }
         // Force the graph to build, which populates `returning_seeds`

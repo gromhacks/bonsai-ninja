@@ -39,12 +39,29 @@ use std::path::{Path, PathBuf};
 
 /// Open the workspace and attach the already-loaded rulepack so every
 /// security subcommand sees the same rules without reloading.
+///
+/// Light subcommands (`sources`, `sinks`, `sanitizers`, `deps`) only
+/// need source/sink/sanitizer matching, which doesn't touch the
+/// per-function dataflow / value-flow caches. They skip prewarm via
+/// `OpenOptions::query_only()`.
+///
+/// Heavy subcommands (`taint-analysis`, `source-analysis`) drive the
+/// engine over thousands of source-seeded passes; lazy-faulting
+/// per-function dataflow under a single `RwLock` serialises that
+/// work behind the engine's per-source rayon loop. Pass
+/// `prewarm = true` so the workspace prewarms dataflow + value-flow
+/// + flow-ids in parallel during open instead.
 fn open_security_project(
     workspace: &Path,
     pack: &Rulepack,
     rules_dir: &Path,
+    prewarm: bool,
 ) -> Result<(bonsai_sdk::Project, crate::footer::WorkspaceFooter)> {
-    let (project, footer) = open_project_index_only(workspace)?;
+    let (project, footer) = if prewarm {
+        crate::commands::open_project_full(workspace)?
+    } else {
+        open_project_index_only(workspace)?
+    };
     Ok((project.with_loaded_rulepack(rules_dir, pack.clone()), footer))
 }
 
@@ -523,7 +540,7 @@ fn cmd_sources(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
     let options = SecurityInventoryOptions {
         rule: rule.clone(),
         rule_regex: rule_regex.clone(),
@@ -572,7 +589,7 @@ fn cmd_sinks(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let matches = project.security().sinks(SecurityInventoryOptions {
         rule: rule.clone(),
@@ -621,7 +638,7 @@ fn cmd_sanitizers(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let matches = project.security().sanitizers(SecurityInventoryOptions {
         rule: rule.clone(),
@@ -667,7 +684,7 @@ fn cmd_deps(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
     let inv = project.security().deps(DependencyInventoryOptions {
         framework: framework.clone(),
         severity: parse_severity_flag(severity.as_deref())?,
@@ -764,7 +781,7 @@ fn cmd_flows(
     no_compact: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir, true)?;
     let ws = project.workspace();
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let max_precision = max_precision_from_cli(precision, strict_flow);
@@ -1103,7 +1120,7 @@ fn cmd_source_analysis(
     no_compact: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir, true)?;
     let ws = project.workspace();
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let report = project.security().source_analysis_with_phase_progress(

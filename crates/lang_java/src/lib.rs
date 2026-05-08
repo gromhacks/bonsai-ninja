@@ -99,6 +99,11 @@ impl LanguageAdapter for JavaAdapter {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            // Java constructors are class-named, so the kind-based
+            // `DeclKind::Constructor` lookup is authoritative; the
+            // name-list fallback is intentionally empty.
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

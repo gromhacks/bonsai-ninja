@@ -104,6 +104,9 @@ impl LanguageAdapter for ObjCAdapter {
         LanguageCapabilities {
             macros: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: &["init"],
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["self"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

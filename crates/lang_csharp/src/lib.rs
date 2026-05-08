@@ -101,6 +101,8 @@ impl LanguageAdapter for CSharpAdapter {
         LanguageCapabilities {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            super_receiver_tokens: &["base"],
+            implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

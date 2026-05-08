@@ -95,8 +95,11 @@ struct Inner {
     /// alias maps per file, function summaries, local bindings). Every
     /// per-source / per-query run shares the same instance, so the
     /// resolver memo lands once per call site instead of per
-    /// `InterTaintCaches::default()`. Cleared on file edits.
-    inter_taint: InterTaintCaches,
+    /// `InterTaintCaches::default()`. Held in an `Arc` so the dataflow
+    /// cache can take a sharing reference at workspace open. Cleared
+    /// on file edits via `InterTaintCaches::clear()` (interior
+    /// mutability through `parking_lot::RwLock`).
+    inter_taint: Arc<InterTaintCaches>,
     /// Memoised workspace-wide resolved call graph. The graph is a
     /// pure function of the indexed decls + import maps + adapter
     /// alias rules, so caching it for the lifetime of one CLI
@@ -271,7 +274,7 @@ impl Workspace {
                 dataflow: DataFlowCache::new(),
                 flow_ids: FlowIdCache::new(),
                 value_flow: ValueFlowCache::new(),
-                inter_taint: InterTaintCaches::default(),
+                inter_taint: Arc::new(InterTaintCaches::default()),
                 resolved_call_graph: parking_lot::RwLock::new(None),
                 taint_index: TaintGraphIndex::new(),
                 transitive_callers: TransitiveCallersIndex::new(),
@@ -315,7 +318,15 @@ impl Workspace {
     /// the caches are interior-mutable (`parking_lot::RwLock`) and
     /// safe to share across rayon worker threads.
     pub fn inter_taint_caches(&self) -> &InterTaintCaches {
-        &self.inner.inter_taint
+        self.inner.inter_taint.as_ref()
+    }
+
+    /// Cloneable `Arc<InterTaintCaches>` for sub-caches that need
+    /// sharing ownership (DataFlowCache seeds itself with this so
+    /// its prewarm + lazy-fault paths thread the workspace
+    /// singleton through the engine).
+    pub fn shared_inter_taint_caches(&self) -> Arc<InterTaintCaches> {
+        self.inner.inter_taint.clone()
     }
 
     /// Workspace-wide cache of source-seeded entry taint graphs
@@ -394,7 +405,12 @@ impl Workspace {
     /// command all share one allocation. Cleared on file edit via
     /// [`Self::ingest_dir`].
     pub fn cached_resolved_call_graph(&self) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
-        if let Some(hit) = self.inner.resolved_call_graph.read().as_ref().cloned() {
+        // Drop the read guard's temporary at the `;` so the
+        // subsequent `.write()` below can't deadlock on a
+        // same-thread read→write upgrade. (parking_lot RwLock is
+        // non-reentrant; documented hazard B1.)
+        let cached = self.inner.resolved_call_graph.read().as_ref().cloned();
+        if let Some(hit) = cached {
             return hit;
         }
         let built = self.build_resolved_call_graph();
@@ -510,6 +526,14 @@ impl Workspace {
             let cg = ws.cached_resolved_call_graph();
             ws.inner.dataflow.seed_call_graph(cg.clone());
             ws.inner.flow_ids.seed_call_graph(cg);
+            // Seed the dataflow cache with the workspace's
+            // InterTaintCaches singleton so the engine's resolver
+            // memo / alias maps / function summaries built during
+            // prewarm survive into security-analysis / value-flow /
+            // inspect runs.
+            ws.inner
+                .dataflow
+                .seed_inter_taint_caches(ws.shared_inter_taint_caches());
             ws.inner.dataflow.prewarm_all(ws.db());
             // Write back so next open gets an even hotter cache.
             if options.save_dataflow_sidecar {

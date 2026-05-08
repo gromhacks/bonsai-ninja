@@ -73,7 +73,9 @@ impl EnclosingIndex {
 
     /// Per-file sorted entry list.
     pub fn entries_for(&self, db: &AnalyzerDb, file: FileId) -> Arc<Vec<EnclosingEntry>> {
-        if let Some(hit) = self.inner.read().get(&file).cloned() {
+        // Drop the read guard's temporary before the write upgrade.
+        let cached = self.inner.read().get(&file).cloned();
+        if let Some(hit) = cached {
             return hit;
         }
         let entries = build_entries(db, file);

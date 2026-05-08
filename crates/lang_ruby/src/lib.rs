@@ -52,7 +52,12 @@ impl LanguageAdapter for RubyAdapter {
         language_from_pack(PACK_NAME)
     }
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::partial_baseline()
+        LanguageCapabilities {
+            constructor_method_names: &["initialize", "new"],
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["self"],
+            ..LanguageCapabilities::partial_baseline()
+        }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         // Pure Ruby files take the standard pipeline.

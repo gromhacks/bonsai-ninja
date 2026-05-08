@@ -15,7 +15,10 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FileId, FuncId, SymbolId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
-use bonsai_taint::{taint_facts_and_graph_for_entry, EntryTaintGraph, KindedTokens, TokenSet};
+use bonsai_taint::{
+    taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches,
+    EntryTaintGraph, InterTaintCaches, KindedTokens, TokenSet,
+};
 use parking_lot::RwLock;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -109,6 +112,12 @@ pub struct DataFlowCache {
     /// graph is constructed at most once per cache lifetime instead
     /// of three times. Cleared on `invalidate_file`.
     cached_call_graph: RwLock<Option<Arc<bonsai_callgraph::ResolvedCallGraph>>>,
+    /// Optional shared `InterTaintCaches` seeded by the workspace at
+    /// open time. When present, prewarm + lazy-fault paths thread
+    /// it into `taint_facts_and_graph_for_entry_with_caches` so the
+    /// engine's resolver memo / alias maps / function summaries
+    /// accumulate across runs.
+    seeded_inter_taint: RwLock<Option<Arc<InterTaintCaches>>>,
 }
 
 #[derive(Default, Debug)]
@@ -151,7 +160,11 @@ impl DataFlowCache {
     /// internal prewarm / snapshot / dependency-walk paths so the
     /// graph is constructed at most once per cache lifetime.
     fn call_graph_for(&self, db: &AnalyzerDb) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
-        if let Some(hit) = self.cached_call_graph.read().as_ref().cloned() {
+        // Drop the read guard before any potential write upgrade —
+        // parking_lot RwLocks are non-reentrant. (See B1 hazard +
+        // design-patterns.mdx §13a.)
+        let cached = self.cached_call_graph.read().as_ref().cloned();
+        if let Some(hit) = cached {
             return hit;
         }
         let built = Arc::new(snapshot_call_graph(db));
@@ -171,6 +184,36 @@ impl DataFlowCache {
         *self.cached_call_graph.write() = Some(graph);
     }
 
+    /// Inject the workspace-wide `InterTaintCaches` singleton so the
+    /// dataflow prewarm + lazy faults share the engine's resolver
+    /// memo, alias maps, and function summaries with subsequent
+    /// security-analysis / value-flow / inspect runs. The workspace
+    /// calls this once at open time.
+    pub fn seed_inter_taint_caches(&self, caches: Arc<InterTaintCaches>) {
+        *self.seeded_inter_taint.write() = Some(caches);
+    }
+
+    /// Compute taint facts + graph for `func`, threading the seeded
+    /// `InterTaintCaches` when present. Falls through to a fresh
+    /// per-call `InterTaintCaches::default()` for standalone
+    /// callers (tests, one-shot SDK consumers).
+    fn compute_facts_and_graph(
+        &self,
+        func: FuncId,
+        db: &AnalyzerDb,
+    ) -> (KindedTokens, EntryTaintGraph) {
+        let seeded = self.seeded_inter_taint.read().clone();
+        match seeded {
+            Some(caches) => taint_facts_and_graph_for_entry_with_caches(
+                func,
+                db,
+                &TokenSet::default(),
+                &caches,
+            ),
+            None => taint_facts_and_graph_for_entry(func, db, &TokenSet::default()),
+        }
+    }
+
     /// Get the cached taint facts for a function, computing them on
     /// demand if not cached. Returns `Arc<KindedTokens>` so multiple
     /// concurrent readers share one allocation.
@@ -187,10 +230,11 @@ impl DataFlowCache {
         db: &AnalyzerDb,
         _sanitizers: &TokenSet,
     ) -> Arc<KindedTokens> {
-        if let Some(hit) = self.inner.read().facts.get(&func).cloned() {
+        let cached = self.inner.read().facts.get(&func).cloned();
+        if let Some(hit) = cached {
             return hit;
         }
-        let (facts, graph) = taint_facts_and_graph_for_entry(func, db, &TokenSet::default());
+        let (facts, graph) = self.compute_facts_and_graph(func, db);
         let dependencies = self.dependency_files_via_cache(func, db);
         let computed = Arc::new(facts);
         let graph = Arc::new(graph);
@@ -220,10 +264,11 @@ impl DataFlowCache {
         db: &AnalyzerDb,
         _sanitizers: &TokenSet,
     ) -> Arc<EntryTaintGraph> {
-        if let Some(hit) = self.inner.read().graphs.get(&func).cloned() {
+        let cached = self.inner.read().graphs.get(&func).cloned();
+        if let Some(hit) = cached {
             return hit;
         }
-        let (facts, graph) = taint_facts_and_graph_for_entry(func, db, &TokenSet::default());
+        let (facts, graph) = self.compute_facts_and_graph(func, db);
         let dependencies = self.dependency_files_via_cache(func, db);
         let facts = Arc::new(facts);
         let graph = Arc::new(graph);
@@ -327,7 +372,7 @@ impl DataFlowCache {
         let computed: Vec<(FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>)> = todo
             .par_iter()
             .map(|&f| {
-                let (facts, graph) = taint_facts_and_graph_for_entry(f, db, &TokenSet::default());
+                let (facts, graph) = self.compute_facts_and_graph(f, db);
                 on_each_done(f);
                 (f, Arc::new(facts), Arc::new(graph))
             })

@@ -181,7 +181,11 @@ impl AnalyzerDb {
     pub fn decl_index(&self, file: FileId) -> Option<Arc<DeclIndex>> {
         let snap = self.inner.vfs.snapshot(file).ok()?;
         let key = (file, snap.version);
-        if let Some(v) = self.inner.cache.read().decl_index.get(&key).cloned() {
+        // Drop the read guard's temporary before any subsequent
+        // `cache.write()` further down. parking_lot RwLock is
+        // non-reentrant; this is the same hazard B1 hit.
+        let cached = self.inner.cache.read().decl_index.get(&key).cloned();
+        if let Some(v) = cached {
             return Some(v);
         }
         let adapter = self.adapter_for(file)?;
@@ -221,7 +225,8 @@ impl AnalyzerDb {
     pub fn import_index(&self, file: FileId) -> Option<Arc<ImportIndex>> {
         let snap = self.inner.vfs.snapshot(file).ok()?;
         let key = (file, snap.version);
-        if let Some(v) = self.inner.cache.read().import_index.get(&key).cloned() {
+        let cached = self.inner.cache.read().import_index.get(&key).cloned();
+        if let Some(v) = cached {
             return Some(v);
         }
         let adapter = self.adapter_for(file)?;
@@ -266,7 +271,8 @@ impl AnalyzerDb {
     /// Workspace-wide global declaration index. Built lazily on first
     /// access; invalidated when any per-file decl index is replaced.
     pub fn global_index(&self) -> Arc<GlobalIndex> {
-        if let Some(v) = self.inner.cache.read().global_index.clone() {
+        let cached = self.inner.cache.read().global_index.clone();
+        if let Some(v) = cached {
             return v;
         }
         let mut gi = GlobalIndex::new();
@@ -303,7 +309,8 @@ impl AnalyzerDb {
             .and_then(|d| self.inner.vfs.snapshot(d.span.file).ok())
             .map_or(0, |snap| snap.version);
         let key = (func, version);
-        if let Some(v) = self.inner.cache.read().cfgs.get(&key).cloned() {
+        let cached = self.inner.cache.read().cfgs.get(&key).cloned();
+        if let Some(v) = cached {
             return v;
         }
         let cfg = decl

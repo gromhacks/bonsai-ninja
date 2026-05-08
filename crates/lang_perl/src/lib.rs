@@ -79,7 +79,15 @@ impl LanguageAdapter for PerlAdapter {
         language_from_pack(PACK_NAME)
     }
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::partial_baseline()
+        LanguageCapabilities {
+            constructor_method_names: &["new"],
+            // Perl uses `SUPER::` (case-sensitive) for super-class
+            // dispatch, but the syntactic receiver token preceding
+            // `::method` is `SUPER`.
+            super_receiver_tokens: &["SUPER"],
+            implicit_receiver_tokens: &["$self"],
+            ..LanguageCapabilities::partial_baseline()
+        }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
