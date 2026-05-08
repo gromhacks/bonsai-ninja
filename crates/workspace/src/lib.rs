@@ -13,6 +13,7 @@
 pub(crate) mod cross_module;
 pub mod dataflow;
 pub mod flow_ids;
+pub mod taint_index;
 pub mod value_flow;
 
 use bonsai_abstract_interp::TraceLimits;
@@ -21,11 +22,13 @@ use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::fnv1a_bytes64;
 use bonsai_lang_api::{Decl, DeclKind, LanguageRegistry};
+use bonsai_taint::InterTaintCaches;
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
 use bonsai_vfs::Vfs;
 use cross_module::CrossModuleTracer;
 use dataflow::DataFlowCache;
 use flow_ids::FlowIdCache;
+use taint_index::TaintGraphIndex;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
@@ -79,6 +82,27 @@ struct Inner {
     /// persisted whole-workspace sidecar for fast navigation/export
     /// queries.
     value_flow: ValueFlowCache,
+    /// Workspace-wide singleton for the interprocedural taint engine's
+    /// internal caches (resolver answers per `(caller_func, call_span)`,
+    /// alias maps per file, function summaries, local bindings). Every
+    /// per-source / per-query run shares the same instance, so the
+    /// resolver memo lands once per call site instead of per
+    /// `InterTaintCaches::default()`. Cleared on file edits.
+    inter_taint: InterTaintCaches,
+    /// Memoised workspace-wide resolved call graph. The graph is a
+    /// pure function of the indexed decls + import maps + adapter
+    /// alias rules, so caching it for the lifetime of one CLI
+    /// invocation lets `inspect`, `security taint-analysis`, and
+    /// `dump callgraph` share the same instance instead of each
+    /// rebuilding from scratch. Cleared on file edits.
+    resolved_call_graph: parking_lot::RwLock<Option<Arc<bonsai_callgraph::ResolvedCallGraph>>>,
+    /// Workspace-wide cache of `(source_func, seed_set) →
+    /// EntryTaintGraph`. Lifted out of the per-invocation
+    /// `build_findings_chain_aware` map so a second
+    /// `taint-analysis`/`source-analysis` against the same workspace
+    /// (within one CLI process or one SDK session) is a lookup
+    /// instead of a full per-source interprocedural pass.
+    taint_index: TaintGraphIndex,
     reparse_counter: Mutex<u64>,
     root_label: Mutex<String>,
 }
@@ -127,6 +151,20 @@ pub struct WorkspaceOpenOptions {
     pub prewarm_dataflow: bool,
     /// Persist the dataflow sidecar after prewarm.
     pub save_dataflow_sidecar: bool,
+    /// Load `<workspace>/.bonsai/value_flow.v2.bin` before queries run.
+    pub load_value_flow_sidecar: bool,
+    /// Compute every missing value-flow entry during open. Mirrors
+    /// `prewarm_dataflow` but for the seed-free per-entry value-flow
+    /// graph that security source-analysis and source seeding consume.
+    /// Without this, the first security query lazily faults the
+    /// per-source value-flow graph one source at a time — a major
+    /// cliff on workspaces with thousands of source matches (OWASP).
+    pub prewarm_value_flow: bool,
+    /// Persist the value-flow sidecar after prewarm.
+    pub save_value_flow_sidecar: bool,
+    /// Compute the workspace-wide flow-id cache during open so every
+    /// browse-row flow-id lookup is O(1).
+    pub prewarm_flow_ids: bool,
     /// Optional per-file tree-sitter parse timeout in milliseconds.
     /// `None` uses the parser default (`BONSAI_PARSE_TIMEOUT_MS` or
     /// 30 seconds); `Some(0)` disables the timeout guard.
@@ -139,6 +177,10 @@ impl Default for WorkspaceOpenOptions {
             load_dataflow_sidecar: true,
             prewarm_dataflow: true,
             save_dataflow_sidecar: true,
+            load_value_flow_sidecar: true,
+            prewarm_value_flow: true,
+            save_value_flow_sidecar: true,
+            prewarm_flow_ids: true,
             parse_timeout_ms: None,
         }
     }
@@ -155,6 +197,10 @@ impl WorkspaceOpenOptions {
             load_dataflow_sidecar: true,
             prewarm_dataflow: false,
             save_dataflow_sidecar: false,
+            load_value_flow_sidecar: true,
+            prewarm_value_flow: false,
+            save_value_flow_sidecar: false,
+            prewarm_flow_ids: false,
             parse_timeout_ms: None,
         }
     }
@@ -168,6 +214,10 @@ impl WorkspaceOpenOptions {
             load_dataflow_sidecar: false,
             prewarm_dataflow: false,
             save_dataflow_sidecar: false,
+            load_value_flow_sidecar: false,
+            prewarm_value_flow: false,
+            save_value_flow_sidecar: false,
+            prewarm_flow_ids: false,
             parse_timeout_ms: None,
         }
     }
@@ -195,6 +245,9 @@ impl Workspace {
                 dataflow: DataFlowCache::new(),
                 flow_ids: FlowIdCache::new(),
                 value_flow: ValueFlowCache::new(),
+                inter_taint: InterTaintCaches::default(),
+                resolved_call_graph: parking_lot::RwLock::new(None),
+                taint_index: TaintGraphIndex::new(),
                 reparse_counter: Mutex::new(0),
                 root_label: Mutex::new(String::new()),
             }),
@@ -225,6 +278,27 @@ impl Workspace {
         &self.inner.flow_ids
     }
 
+    /// Workspace-wide singleton `InterTaintCaches`. Sharing one
+    /// instance across security/value-flow/inspect runs lets the
+    /// resolver memo, file alias maps, and function summaries
+    /// survive between commands. Each consumer borrows by reference;
+    /// the caches are interior-mutable (`parking_lot::RwLock`) and
+    /// safe to share across rayon worker threads.
+    pub fn inter_taint_caches(&self) -> &InterTaintCaches {
+        &self.inner.inter_taint
+    }
+
+    /// Workspace-wide cache of source-seeded entry taint graphs
+    /// keyed on `(source_func, sorted_seed_key)`. The security
+    /// analysis pipeline consults it before kicking off the
+    /// per-source interprocedural pass, so a second
+    /// `taint-analysis`/`source-analysis` query against the same
+    /// workspace + rulepack reuses the cached graph instead of
+    /// re-running the engine. Cleared on file edits.
+    pub fn taint_index(&self) -> &TaintGraphIndex {
+        &self.inner.taint_index
+    }
+
     pub fn db(&self) -> &AnalyzerDb {
         &self.inner.db
     }
@@ -243,10 +317,38 @@ impl Workspace {
     /// index — same alias semantics the `inspect` filter uses, and
     /// the spine `bonsai_inspect` walks for chain enumeration.
     ///
-    /// O(total flow events × candidates per call) per build. Callers
-    /// that build many graphs in a tight loop should cache the result;
-    /// `bonsai_inspect::ChainCache` does this with `OnceCell`.
+    /// Returns a clone of the workspace-cached graph when the
+    /// singleton is populated; otherwise builds, caches, and clones.
+    /// Callers that don't need ownership should prefer
+    /// [`Self::cached_resolved_call_graph`] which hands back a shared
+    /// `Arc` instead of paying the per-call clone.
     pub fn resolved_call_graph(&self) -> bonsai_callgraph::ResolvedCallGraph {
+        (*self.cached_resolved_call_graph()).clone()
+    }
+
+    /// Lifetime-shared workspace-wide resolved call graph. Built on
+    /// first access and reused across every subsequent caller —
+    /// security/analysis, inspect, browse-export, and the dump-callgraph
+    /// command all share one allocation. Cleared on file edit via
+    /// [`Self::ingest_dir`].
+    pub fn cached_resolved_call_graph(&self) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
+        if let Some(hit) = self.inner.resolved_call_graph.read().as_ref().cloned() {
+            return hit;
+        }
+        let built = self.build_resolved_call_graph();
+        let arc = Arc::new(built);
+        let mut slot = self.inner.resolved_call_graph.write();
+        if let Some(existing) = slot.as_ref().cloned() {
+            // Another thread populated the cache while we built —
+            // discard our copy and return the established singleton
+            // so downstream pointer-equality checks remain stable.
+            return existing;
+        }
+        *slot = Some(arc.clone());
+        arc
+    }
+
+    fn build_resolved_call_graph(&self) -> bonsai_callgraph::ResolvedCallGraph {
         let db = &self.inner.db;
         let global = db.global_index();
         bonsai_callgraph::ResolvedCallGraph::build_with_file_info(
@@ -346,6 +448,35 @@ impl Workspace {
                 let _ = ws.inner.dataflow.save_to_disk(&sidecar, ws.db());
             }
         }
+        // Pass 3: workspace-wide value-flow cache. Same shape as the
+        // dataflow prewarm but for the seed-free per-entry value-flow
+        // graph that `security source-analysis`, the source-seed
+        // selection in `build_findings_chain_aware`, and inspect's
+        // value-flow renderers consume. Without this, every
+        // `taint-analysis` invocation lazily faults the per-source
+        // graph one source at a time — a major cliff on workspaces
+        // with thousands of source matches.
+        let skip_value_flow = std::env::var("BONSAI_NO_VALUE_FLOW")
+            .ok()
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        if options.load_value_flow_sidecar && !skip_value_flow {
+            let sidecar = ValueFlowCache::sidecar_path(root);
+            let _ = ws.inner.value_flow.load_from_disk(&sidecar);
+        }
+        if options.prewarm_value_flow && !skip_value_flow {
+            ws.inner
+                .value_flow
+                .prewarm_all_with_caches(ws.db(), &ws.inner.inter_taint);
+            if options.save_value_flow_sidecar {
+                let sidecar = ValueFlowCache::sidecar_path(root);
+                let _ = ws.inner.value_flow.save_to_disk(&sidecar);
+            }
+        }
+        // Pass 4: flow-id cache. Mirrors the dataflow shape — every
+        // browse-row flow-id lookup is O(1) once warmed.
+        if options.prewarm_flow_ids && !skip_prewarm {
+            ws.inner.flow_ids.prewarm_all(ws.db(), ws.vfs());
+        }
         Ok(ws)
     }
 
@@ -366,6 +497,22 @@ impl Workspace {
             .save_to_disk(&DataFlowCache::sidecar_path(root), self.db())
     }
 
+    /// Load the conventional value-flow sidecar for `root`. Returns
+    /// the number of per-entry graphs the snapshot restored.
+    pub fn load_value_flow_sidecar(&self, root: &Path) -> std::io::Result<usize> {
+        self.inner
+            .value_flow
+            .load_from_disk(&ValueFlowCache::sidecar_path(root))
+    }
+
+    /// Save the current value-flow cache to the conventional sidecar
+    /// path for `root`.
+    pub fn save_value_flow_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        self.inner
+            .value_flow
+            .save_to_disk(&ValueFlowCache::sidecar_path(root))
+    }
+
     pub fn ingest_dir(&self, root: &Path) -> Result<Vec<FileId>, WorkspaceError> {
         *self.inner.root_label.lock() = root.display().to_string();
         let canonical_root = canonical_workspace_root(root);
@@ -380,6 +527,25 @@ impl Workspace {
                 self.inner.db.invalidate_file(prev);
                 self.inner.dataflow.invalidate_file(prev);
                 self.inner.flow_ids.invalidate_all();
+                // Value-flow graphs are keyed by FuncId and contain
+                // calls into other functions; any source change can
+                // invalidate cross-file edges, so flush the whole
+                // cache on edit. Cheaper than per-graph dependency
+                // tracking and matches the FlowIdCache strategy.
+                self.inner.value_flow.clear();
+                // The workspace-wide inter-taint caches memoize
+                // resolver answers, alias maps, and function summaries
+                // — every entry is keyed off static AST state that
+                // an edit may have changed.
+                self.inner.inter_taint.clear();
+                // Drop the cached resolved call graph: an edit can
+                // add/remove/rename callees, which would silently
+                // poison every chain enumeration that consumed the
+                // stale graph.
+                *self.inner.resolved_call_graph.write() = None;
+                // Drop every source-seeded entry-taint graph for the
+                // same reason — call edges may have shifted.
+                self.inner.taint_index.clear();
             }
             *self.inner.reparse_counter.lock() += 1;
             ingested.push(id);

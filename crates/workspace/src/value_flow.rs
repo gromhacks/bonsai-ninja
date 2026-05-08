@@ -54,13 +54,29 @@ impl ValueFlowCache {
 
     /// Get the value-flow graph for `func`, computing on-demand if
     /// not cached. Always returns an `Arc` so concurrent readers
-    /// share one allocation.
+    /// share one allocation. Uses an ephemeral `InterTaintCaches`
+    /// for one-off callers; workspace consumers should prefer
+    /// [`Self::graph_for_with_caches`] so the resolver memo + alias
+    /// maps survive across calls.
     pub fn graph_for(&self, func: FuncId, db: &AnalyzerDb) -> Arc<ValueFlowGraph> {
+        let caches = InterTaintCaches::default();
+        self.graph_for_with_caches(func, db, &caches)
+    }
+
+    /// Variant of [`Self::graph_for`] that shares the caller's
+    /// `InterTaintCaches` so resolver answers, alias maps, and
+    /// function summaries persist across invocations. The workspace
+    /// passes its singleton from [`super::Workspace::inter_taint_caches`].
+    pub fn graph_for_with_caches(
+        &self,
+        func: FuncId,
+        db: &AnalyzerDb,
+        caches: &InterTaintCaches,
+    ) -> Arc<ValueFlowGraph> {
         if let Some(hit) = self.inner.read().graphs.get(&func).cloned() {
             return hit;
         }
-        let caches = InterTaintCaches::default();
-        let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), &caches);
+        let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), caches);
         let arc = Arc::new(graph);
         self.inner.write().graphs.insert(func, arc.clone());
         arc
@@ -68,7 +84,20 @@ impl ValueFlowCache {
 
     /// Eagerly compute graphs for every callable function. Reuses
     /// rayon to parallelise (mirrors `DataFlowCache::prewarm_all`).
+    /// Provisions a fresh `InterTaintCaches` per worker — fine for
+    /// one-off callers; workspace prewarm uses
+    /// [`Self::prewarm_all_with_caches`] so the singleton accumulates.
     pub fn prewarm_all(&self, db: &AnalyzerDb) {
+        let caches = InterTaintCaches::default();
+        self.prewarm_all_with_caches(db, &caches);
+    }
+
+    /// Variant of [`Self::prewarm_all`] that fans out across the
+    /// workspace using the caller's shared `InterTaintCaches`.
+    /// Accumulating resolver answers across the prewarm fold means
+    /// the post-prewarm singleton is already hot for security's
+    /// per-source taint runs.
+    pub fn prewarm_all_with_caches(&self, db: &AnalyzerDb, caches: &InterTaintCaches) {
         use rayon::prelude::*;
         let global = db.global_index();
         let mut funcs: Vec<FuncId> = Vec::new();
@@ -90,9 +119,8 @@ impl ValueFlowCache {
         let computed: Vec<(FuncId, Arc<ValueFlowGraph>)> = todo
             .par_iter()
             .map(|&f| {
-                let caches = InterTaintCaches::default();
                 let graph =
-                    value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), &caches);
+                    value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), caches);
                 (f, Arc::new(graph))
             })
             .collect();

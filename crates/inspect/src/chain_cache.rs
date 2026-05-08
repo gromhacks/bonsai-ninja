@@ -137,9 +137,12 @@ impl<'a> ChainCache<'a> {
 
     /// Lazy-built workspace-wide resolved call graph. Walks every
     /// function's flow events once and resolves call names through
-    /// the alias map + global decl index.
+    /// the alias map + global decl index. Falls through to the
+    /// workspace-cached singleton so `inspect`/`security`/`browse`
+    /// all share the same allocation.
     pub fn resolved_graph(&self) -> &ResolvedCallGraph {
-        self.resolved.get_or_init(|| self.ws.resolved_call_graph())
+        self.resolved
+            .get_or_init(|| (*self.ws.cached_resolved_call_graph()).clone())
     }
 
     /// Resolved-graph chain enumeration. Eliminates the

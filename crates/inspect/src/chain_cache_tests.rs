@@ -385,22 +385,27 @@ class C:
 #[test]
 fn chain_precision_meets_along_path() {
     // `target` is unique → caller→target edge is Direct/Narrowed.
-    // `m` has two definitions → driver→m edge is Virtual/OverApprox.
-    // The chain `driver → m` should be OverApproximate.
-    // The chain `caller → target` should be Narrowed (no Virtual hop).
+    // Two top-level `m` decls in two files → driver→m edge is
+    // Virtual/OverApprox (post-543cd67 the resolver only fans out
+    // for bare-name lookups, not unannotated `x.m()` dispatches).
     let ws = ws_with_python(
         r"
 def target(): pass
 def caller():
     target()
-class A:
-    def m(self): pass
-class B:
-    def m(self): pass
-def driver(x):
-    x.m()
 ",
     );
+    ws.vfs().write(
+        std::path::PathBuf::from("a.py"),
+        std::sync::Arc::<str>::from("def m(): pass\n"),
+    );
+    ws.vfs().write(
+        std::path::PathBuf::from("b.py"),
+        std::sync::Arc::<str>::from("def m(): pass\ndef driver():\n    m()\n"),
+    );
+    for f in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(f);
+    }
     let cache = ChainCache::new(&ws);
 
     // Direct/narrowed path.
@@ -458,23 +463,35 @@ def caller():
     assert_eq!(edges[0].kind, bonsai_callgraph::EdgeKind::Direct);
     assert_eq!(edges[0].precision, bonsai_common::Precision::Narrowed);
 
-    // Two classes with same-named method → Virtual/OverApproximate.
+    // Bare call to `m` resolves to two top-level candidates →
+    // Virtual/OverApproximate. The earlier `x.m()` shape was
+    // tightened (commit 543cd67) so receiver-typeless dispatches
+    // now drop ambiguous candidates rather than fan out; this
+    // version uses bare-name lookup which is still expected to
+    // fan out across same-named workspace candidates.
     let ws2 = ws_with_python(
         r"
-class A:
-    def m(self): pass
-class B:
-    def m(self): pass
-def driver(x):
-    x.m()
+def m(): pass
+def m_alias(): pass
 ",
     );
+    // Inject a second `m` decl in a separate file so the resolver
+    // sees two candidates by the same bare name.
+    ws2.vfs().write(
+        std::path::PathBuf::from("other.py"),
+        std::sync::Arc::<str>::from("def m(): pass\ndef driver():\n    m()\n"),
+    );
+    for f in ws2.vfs().all_files() {
+        let _ = ws2.db().decl_index(f);
+    }
     let cache2 = ChainCache::new(&ws2);
     let driver = func_id(&ws2, "driver");
-    // The call `x.m()` resolves to multiple `m` candidates →
-    // every outgoing edge from driver to an `m` is Virtual.
     let edges: Vec<_> = cache2.resolved_graph().callees_of(driver).collect();
-    assert!(edges.len() >= 2);
+    assert!(
+        edges.len() >= 2,
+        "expected >= 2 callees for driver -> m fan-out; got {}",
+        edges.len()
+    );
     for e in edges {
         assert_eq!(e.kind, bonsai_callgraph::EdgeKind::Virtual);
         assert_eq!(e.precision, bonsai_common::Precision::OverApproximate);
