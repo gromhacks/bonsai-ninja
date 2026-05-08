@@ -205,6 +205,12 @@ impl LanguageAdapter for ObjCAdapter {
         ];
         for decl in &mut decl_index.defs {
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, OBJC_LIFECYCLE_TRANSITIONS);
+            // Tag `[[Class alloc] init...]` / `[[Class new] ...]`
+            // chains with the constructed class so the engine's
+            // receiver-type dispatch recognises the alloc-init
+            // pattern without re-implementing the ObjC message-
+            // syntax shape.
+            tag_objc_alloc_receiver_types(&mut decl.flow_events);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -253,6 +259,122 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+/// Walk a decl's flow events and populate
+/// `FlowEvent::Call::receiver_types` for ObjC chain calls of the
+/// shape `[[Class alloc] init...]` or `[[Class new] init...]`. The
+/// `[Class alloc]` / `[Class new]` inner message returns
+/// `instancetype` (per ObjC convention), so the outer message's
+/// receiver type is `Class`.
+///
+/// Tagging at index time means the engine's receiver-type dispatch
+/// reads the pre-populated `receiver_types` directly instead of
+/// reparsing the ObjC `[receiver selector]` syntax at every call
+/// resolution.
+fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                receiver,
+                receiver_types,
+                ..
+            } => {
+                if !receiver_types.is_empty() {
+                    continue;
+                }
+                // Adapter-emitted `receiver` field takes precedence;
+                // when absent (tree-sitter-objc doesn't use field
+                // names on message expressions, so the kit walker
+                // can't always recover the receiver), parse the
+                // call name's leading `[Class alloc]` segment.
+                let class_name = receiver
+                    .as_deref()
+                    .and_then(objc_alloc_class_name)
+                    .or_else(|| objc_alloc_class_name_from_call_name(name));
+                if let Some(class_name) = class_name {
+                    receiver_types.push(class_name);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                tag_objc_alloc_receiver_types(then_events);
+                tag_objc_alloc_receiver_types(else_events);
+            }
+            FlowEvent::Loop { body, .. }
+            | FlowEvent::Defer { body, .. }
+            | FlowEvent::Using { body, .. } => {
+                tag_objc_alloc_receiver_types(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                tag_objc_alloc_receiver_types(body);
+                tag_objc_alloc_receiver_types(catch_events);
+                tag_objc_alloc_receiver_types(finally_events);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Pull the leading `[Class alloc]` / `[Class new]` segment out of
+/// a chained call name like `[Box alloc].initWithP` so the outer
+/// message's receiver type can be recovered when the kit's
+/// receiver-field extraction came up empty (tree-sitter-objc
+/// doesn't expose receiver as a named field).
+fn objc_alloc_class_name_from_call_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    for (idx, ch) in trimmed.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let segment = &trimmed[..=idx];
+                    return objc_alloc_class_name(segment);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Match `[<Class> alloc]` / `[<Class> new]` (with optional
+/// surrounding whitespace) and return `Class`. Returns `None` for
+/// any other receiver shape so non-constructor message receivers
+/// don't get a bogus type.
+fn objc_alloc_class_name(receiver: &str) -> Option<String> {
+    let trimmed = receiver.trim();
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
+    let (class, selector) = inner.rsplit_once(char::is_whitespace)?;
+    let class = class.trim();
+    let selector = selector.trim();
+    if !matches!(selector, "alloc" | "new") {
+        return None;
+    }
+    let class = class.split_whitespace().last()?.trim();
+    if class.is_empty() {
+        return None;
+    }
+    let first = class.chars().next()?;
+    if !(first.is_ascii_uppercase() || first == '_') {
+        return None;
+    }
+    Some(class.to_string())
 }
 
 /// Walk Objective-C class / category / interface / implementation

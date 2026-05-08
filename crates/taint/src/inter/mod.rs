@@ -3890,14 +3890,23 @@ fn resolve_receiver_method_candidates(
             }
         }
     }
+    let caller_module = caller_decl.module_path.clone();
+    let class_ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
     if type_names.is_empty() {
-        return Vec::new();
+        // Receiver type is unknown — typical for dynamically-typed
+        // languages (JS / Python / Ruby / Perl / PHP) where
+        // `args.method()` is resolved at runtime via the actual
+        // class of `args`. The static analyzer's faithful model is
+        // virtual dispatch over every workspace class that defines
+        // `method_name`. The caller marks the result
+        // `Precision::OverApproximate` (multi-candidate) so
+        // downstream consumers can distinguish from
+        // statically-narrowed dispatch.
+        return collect_virtual_dispatch_candidates(&global, method_name, &class_ctx);
     }
     // Class lookup via the semantic-identity resolver: filters by
     // caller visibility and (when adapters populate it) module_path.
     // Per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
-    let caller_module = caller_decl.module_path.clone();
-    let class_ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
     let type_names = prune_receiver_type_names_for_dispatch(type_names, &global, &class_ctx);
     let mut out = Vec::new();
     let mut seen = AHashSet::new();
@@ -3912,6 +3921,58 @@ fn resolve_receiver_method_candidates(
                 &mut out,
             );
         }
+    }
+    out
+}
+
+/// Virtual dispatch when the receiver type isn't statically known —
+/// the language runtime selects a class at call time, so the static
+/// analyzer's faithful answer is "every class method by that name
+/// the caller's visibility / module context can reach". The caller
+/// applies `Precision::OverApproximate` because the dispatch
+/// covers more than one candidate; consumers can filter by
+/// precision when they want a narrower reading.
+fn collect_virtual_dispatch_candidates(
+    global: &GlobalIndex,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+) -> Vec<FuncId> {
+    if method_name.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for sym in global.find_by_name(method_name) {
+        let Some(decl) = global.decl_of(*sym) else {
+            continue;
+        };
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        // Only methods of class-like decls participate in receiver-
+        // type dispatch — free functions can't be the target of
+        // `obj.method()` at runtime.
+        let Some(parent) = decl.parent else {
+            continue;
+        };
+        let Some(parent_decl) = global.decl_of(parent) else {
+            continue;
+        };
+        if !matches!(
+            parent_decl.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        ) {
+            continue;
+        }
+        let Some(decl_file) = global.declaring_file(*sym) else {
+            continue;
+        };
+        if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
+            continue;
+        }
+        out.push(FuncId::new(decl.symbol.raw()));
     }
     out
 }

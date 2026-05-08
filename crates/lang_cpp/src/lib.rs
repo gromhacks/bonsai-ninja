@@ -15,9 +15,14 @@ use bonsai_lang_api::{
 /// reference wrapper around the binding identifier). The kit
 /// helper drops back to `child_by_field_name("declarator")` when
 /// `name` isn't present, then walks down to the inner identifier.
+// `parameter_declaration` covers the function's formal parameters;
+// `declaration` covers local stack-allocated bindings inside the
+// body (`Box obj;`, `Logger log = ...;`). Both shapes carry a
+// `type` field and a `declarator` field, so the kit's generic
+// param-alias extractor pulls a `name : Type` binding from either.
 const CPP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     fn_kinds: &["function_definition"],
-    param_kinds: &["parameter_declaration"],
+    param_kinds: &["parameter_declaration", "declaration"],
     name_field: "declarator",
     type_field: "type",
 };
@@ -422,6 +427,62 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             module: module.trim_end_matches("::*").to_string(),
             alias: None,
             is_wildcard,
+            original_name: None,
+            scope: ImportScope::Module,
+        });
+    }
+    // C++ `namespace h = util;` — explicit namespace alias. The
+    // `name` field is the local alias (`h`); the `aliased` /
+    // `value` field is the original namespace identifier (`util`).
+    // Bind `h` as a `Namespace` target so `h::helper(...)` resolves
+    // to `util::helper(...)`.
+    for alias_node in collect_kinds(tree, &["namespace_alias_definition"]) {
+        let alias_name_node = alias_node.child_by_field_name("name").or_else(|| {
+            let mut cursor = alias_node.walk();
+            let mut found = None;
+            for child in alias_node.named_children(&mut cursor) {
+                if matches!(child.kind(), "identifier" | "namespace_identifier") {
+                    found = Some(child);
+                    break;
+                }
+            }
+            found
+        });
+        let module_name_node = alias_node
+            .child_by_field_name("aliased")
+            .or_else(|| alias_node.child_by_field_name("value"))
+            .or_else(|| {
+                let mut cursor = alias_node.walk();
+                let mut seen_first = false;
+                let mut found = None;
+                for child in alias_node.named_children(&mut cursor) {
+                    if matches!(
+                        child.kind(),
+                        "identifier" | "qualified_identifier" | "namespace_identifier"
+                    ) {
+                        if seen_first {
+                            found = Some(child);
+                            break;
+                        }
+                        seen_first = true;
+                    }
+                }
+                found
+            });
+        let (Some(alias_name_node), Some(module_name_node)) = (alias_name_node, module_name_node)
+        else {
+            continue;
+        };
+        let alias_name = node_text(&alias_name_node, src).trim().to_string();
+        let module = node_text(&module_name_node, src).trim().to_string();
+        if alias_name.is_empty() || module.is_empty() || alias_name == module {
+            continue;
+        }
+        imports.push(ImportSpec {
+            span: span_of(file, &alias_node),
+            module,
+            alias: Some(alias_name),
+            is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });

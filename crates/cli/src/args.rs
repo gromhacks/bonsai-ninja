@@ -719,7 +719,11 @@ pub(crate) enum Cmd {
     DumpTaint {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Entry function whose scope is initially tainted.
+        /// Entry function whose scope is initially tainted. Accepts
+        /// a bare name (`update_user`), a file-qualified name
+        /// (`src/handlers.py:update_user`), or a fully qualified form
+        /// (`src/handlers.py:42:update_user`) for disambiguating when
+        /// several decls in the workspace share the same name.
         #[arg(long)]
         source: String,
         /// Seed identifier names (repeatable). Each is treated as

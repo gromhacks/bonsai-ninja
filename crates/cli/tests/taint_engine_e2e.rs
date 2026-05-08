@@ -648,11 +648,27 @@ macro_rules! complex_e2e_tests {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     if func.is_empty() { return; }
+                    // Multi-file fixtures often share callable names
+                    // (multiple `__module__` synthetics, several
+                    // `__init__`s per Python file, four C `main`s),
+                    // so qualify the source with `file:line:name` to
+                    // disambiguate. Plain names still resolve when
+                    // unique.
+                    let file = entry
+                        .get("file")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let line = entry.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let source = match (file.is_empty(), line) {
+                        (true, _) => func.to_string(),
+                        (false, 0) => format!("{file}:{func}"),
+                        (false, l) => format!("{file}:{l}:{func}"),
+                    };
                     let Some((out, _, code)) = run(&[
                         "dump-taint",
                         &w,
                         "--source",
-                        func,
+                        &source,
                         "--format",
                         "json",
                     ]) else {

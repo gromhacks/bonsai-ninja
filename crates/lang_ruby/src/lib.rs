@@ -121,6 +121,12 @@ impl LanguageAdapter for RubyAdapter {
             for decl in &mut idx.defs {
                 bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
             }
+            // Lift `@field = ParamType` writes captured during decl
+            // collection into per-method `type_aliases`, so the
+            // resolver's `type_alias_for_receiver(method, "self.field")`
+            // returns the constructor-supplied type without re-walking
+            // sibling decls per call site.
+            bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
             return idx;
         }
         // ERB files: pre-process the source so the HTML wrapper
