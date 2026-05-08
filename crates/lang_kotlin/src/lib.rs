@@ -82,6 +82,13 @@ impl LanguageAdapter for KotlinAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        // Kotlin's `object Foo { fun bar() { ... } }` parses as
+        // `infix_expression` (with `object` as the operator) in
+        // tree-sitter-kotlin, so the kit's class-kind detection
+        // doesn't see a class node. Synthesize a class decl for
+        // each such pattern and re-parent the contained methods so
+        // `Foo.bar(...)` dispatches correctly.
+        synthesize_kotlin_object_decls(&mut idx, file, ctx);
         // Module path from `package com.foo.bar` declaration; falls
         // back to file-stem when absent.
         let segments = parse_with(PACK_NAME, file, ctx)
@@ -486,6 +493,104 @@ fn collect_kotlin_type_aliases(
         }
     }
     aliases_by_span
+}
+
+/// Synthesize class decls for Kotlin's `object Foo { ... }` pattern
+/// because tree-sitter-kotlin parses it as `infix_expression` (with
+/// `object` as the operator-literal, the name as a `simple_identifier`,
+/// and the body as a `lambda_literal`) rather than a dedicated
+/// `object_declaration` kind. Without a class decl there's no parent
+/// for the contained methods, so `Foo.bar(args)` calls have nothing
+/// to dispatch into. The synthesized class carries the
+/// infix_expression span so any subsequent post-process keyed on
+/// span (e.g. `apply_class_field_type_aliases`) lines up.
+fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, ctx: &AdapterContext<'_>) {
+    let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
+        return;
+    };
+    let src = snapshot.text.as_bytes();
+    let mut next_symbol_raw = idx
+        .defs
+        .iter()
+        .map(|d| d.symbol.raw())
+        .max()
+        .map_or(0, |m| m + 1);
+    for infix in collect_kinds(&tree, &["infix_expression"]) {
+        let mut cursor = infix.walk();
+        let mut object_keyword = false;
+        let mut name_node: Option<Node<'_>> = None;
+        let mut lambda_node: Option<Node<'_>> = None;
+        for child in infix.named_children(&mut cursor) {
+            match child.kind() {
+                "object_literal" => object_keyword = true,
+                "simple_identifier" if name_node.is_none() => name_node = Some(child),
+                "lambda_literal" => lambda_node = Some(child),
+                _ => {}
+            }
+        }
+        if !object_keyword {
+            continue;
+        }
+        let (Some(name_node), Some(lambda_node)) = (name_node, lambda_node) else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let class_span = span_of(file, &infix);
+        if idx.defs.iter().any(|d| d.span == class_span) {
+            continue;
+        }
+        let class_symbol = bonsai_common::SymbolId::new(next_symbol_raw);
+        next_symbol_raw += 1;
+        let class_module_path = idx
+            .defs
+            .iter()
+            .find(|d| !d.module_path.is_empty())
+            .map(|d| d.module_path.clone())
+            .unwrap_or_default();
+        idx.defs.push(bonsai_lang_api::Decl {
+            symbol: class_symbol,
+            kind: DeclKind::Class,
+            name: name.clone(),
+            qualified_name: None,
+            module_path: class_module_path,
+            span: class_span,
+            name_span: span_of(file, &name_node),
+            visibility: bonsai_lang_api::Visibility::Public,
+            parent: None,
+            body_span: Some(span_of(file, &lambda_node)),
+            flow_events: Vec::new(),
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: Vec::new(),
+            receiver_state_sources: Vec::new(),
+        });
+        // Re-parent every method-like decl whose span is contained
+        // by the lambda body to the synthesized class.
+        let lambda_span = span_of(file, &lambda_node);
+        for decl in &mut idx.defs {
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
+                continue;
+            }
+            if decl.parent.is_some() {
+                continue;
+            }
+            if decl.span.start >= lambda_span.start && decl.span.end <= lambda_span.end {
+                decl.parent = Some(class_symbol);
+                decl.kind = DeclKind::Method;
+            }
+        }
+    }
 }
 
 /// Collect receiver-visible type aliases declared by Kotlin class

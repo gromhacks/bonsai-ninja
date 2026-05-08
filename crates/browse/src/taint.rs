@@ -112,6 +112,76 @@ pub enum TaintOutcome {
     TaintIdNotFound,
 }
 
+/// True when `decl_file` matches the user-supplied `qualifier` from a
+/// `path:name` `--source` spec. We accept three shapes so callers can
+/// pass whatever they have on hand:
+///
+/// * exact equality (absolute path === absolute path)
+/// * `decl_file` ends with `qualifier` as a path suffix (handles
+///   relative-vs-absolute mismatches)
+/// * basename equality (`main.c` matches `/abs/dir/main.c`)
+fn file_matches_qualifier(decl_file: &str, qualifier: &str) -> bool {
+    if decl_file == qualifier {
+        return true;
+    }
+    if decl_file.ends_with(qualifier)
+        && decl_file
+            .as_bytes()
+            .get(decl_file.len() - qualifier.len() - 1)
+            .is_some_and(|b| *b == b'/' || *b == b'\\')
+    {
+        return true;
+    }
+    let decl_basename = decl_file
+        .rsplit_once(|c: char| c == '/' || c == '\\')
+        .map(|(_, tail)| tail)
+        .unwrap_or(decl_file);
+    decl_basename == qualifier
+}
+
+/// Parsed `--source` spec — bare callable name with optional path /
+/// line qualifiers used to disambiguate when several decls share a
+/// name (multiple `__module__` synthetics, multiple `__init__`s in
+/// one Python file, four C `main`s, etc.).
+#[derive(Debug, Default)]
+struct SourceSpec<'a> {
+    file: Option<&'a str>,
+    line: Option<u32>,
+    name: &'a str,
+}
+
+/// Split a `--source` spec. Accepted shapes:
+///
+/// * `"foo"`                     — bare name
+/// * `"path/to/file.py:foo"`     — file-qualified
+/// * `"path/to/file.py:32:foo"`  — file + line-qualified
+///
+/// The trailing `:`-segment is always the bare name. If the segment
+/// before it parses as `u32`, it's the line; the rest is the path.
+/// File paths may themselves contain colons (Windows drive letters),
+/// so we walk segments from the right rather than splitting on every
+/// `:`.
+fn split_source_spec(spec: &str) -> SourceSpec<'_> {
+    let Some(name_idx) = spec.rfind(':') else {
+        return SourceSpec { name: spec, ..Default::default() };
+    };
+    let (head, name) = (&spec[..name_idx], &spec[name_idx + 1..]);
+    if name.is_empty() || head.is_empty() {
+        return SourceSpec { name: spec, ..Default::default() };
+    }
+    if name.contains('/') || name.contains('\\') {
+        return SourceSpec { name: spec, ..Default::default() };
+    }
+    let (file, line) = match head.rsplit_once(':') {
+        Some((path, maybe_line)) if !path.is_empty() => match maybe_line.parse::<u32>() {
+            Ok(n) => (Some(path), Some(n)),
+            Err(_) => (Some(head), None),
+        },
+        _ => (Some(head), None),
+    };
+    SourceSpec { file, line, name }
+}
+
 /// Run the intraprocedural + interprocedural taint passes from
 /// `filters.source` with the given seeds / sanitizers, applying the
 /// configured filters to the result.
@@ -119,13 +189,24 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let db = ws.db();
     let global = db.global_index();
 
-    let candidates = bonsai_resolve::resolve_callable(&global, f.source);
+    let spec = split_source_spec(f.source);
+    let candidates = bonsai_resolve::resolve_callable(&global, spec.name);
     let mut source_candidates: Vec<(bonsai_common::FuncId, TaintSourceCandidate)> = candidates
         .into_iter()
         .filter_map(|func| {
             let symbol = bonsai_common::SymbolId::new(func.raw());
             let decl = global.decl_of(symbol)?;
             let (file, line, column) = format_span(&decl.name_span, ws);
+            if let Some(qualifier) = spec.file {
+                if !file_matches_qualifier(&file, qualifier) {
+                    return None;
+                }
+            }
+            if let Some(want_line) = spec.line {
+                if line != want_line {
+                    return None;
+                }
+            }
             Some((
                 func,
                 TaintSourceCandidate {
