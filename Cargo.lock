@@ -712,6 +712,7 @@ dependencies = [
  "bonsai_resolve",
  "bonsai_taint",
  "bonsai_workspace",
+ "parking_lot",
  "rayon",
  "regex",
  "serde",
