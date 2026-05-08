@@ -216,14 +216,51 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             .named_children(&mut spec_cursor)
             .find(|child| child.kind() == "identifier")
             .map(|alias_node| node_text(&alias_node, src).to_string());
+        // Dart's `show A, B` combinators bind specific symbols from
+        // the imported library to the file scope. Each becomes its own
+        // member-style ImportSpec so the rule matcher can chase
+        // `A` / `B` back through the alias map to the package.
+        let mut combinator_names: Vec<String> = Vec::new();
+        let mut combinator_cursor = import_spec.walk();
+        for child in import_spec.named_children(&mut combinator_cursor) {
+            if child.kind() != "combinator" {
+                continue;
+            }
+            // `show` and `hide` both appear as `combinator` nodes;
+            // only `show` introduces a binding (hide *removes* names),
+            // so skip non-`show` keywords.
+            let combinator_text = node_text(&child, src);
+            if !combinator_text.trim_start().starts_with("show") {
+                continue;
+            }
+            let mut child_cursor = child.walk();
+            for ident in child.named_children(&mut child_cursor) {
+                if ident.kind() == "identifier" {
+                    let name = node_text(&ident, src).to_string();
+                    if !name.is_empty() {
+                        combinator_names.push(name);
+                    }
+                }
+            }
+        }
         imports.push(ImportSpec {
             span: span_of(file, &import_node),
-            module,
+            module: module.clone(),
             alias,
             is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });
+        for name in combinator_names {
+            imports.push(ImportSpec {
+                span: span_of(file, &import_node),
+                module: module.clone(),
+                alias: None,
+                is_wildcard: false,
+                original_name: Some(name),
+                scope: ImportScope::Module,
+            });
+        }
     }
     imports
 }

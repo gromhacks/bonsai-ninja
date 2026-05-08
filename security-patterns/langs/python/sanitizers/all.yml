@@ -308,8 +308,9 @@
   match_examples:
   - name: sanitizer pathlib relative to
     code: |
-      import pathlib
-      def example(candidate, root):
+      from pathlib import PurePath
+      def example(raw, root):
+          candidate = PurePath(raw)
           return candidate.relative_to(root)
     expect_match_text: [candidate.relative_to]
   description: pathlib Path.relative_to(root) — raises unless candidate is contained by the trusted root path.
@@ -329,8 +330,9 @@
   match_examples:
   - name: sanitizer pathlib is relative to
     code: |
-      import pathlib
-      def example(candidate, root):
+      from pathlib import PurePath
+      def example(raw, root):
+          candidate = PurePath(raw)
           return candidate.is_relative_to(root)
     expect_match_text: [candidate.is_relative_to]
   description: pathlib Path.is_relative_to(root) — boolean containment check for path traversal defenses.
@@ -1172,12 +1174,13 @@
   match_examples:
   - name: dbapi execute with params
     code: |
-      import sqlite3
-      def by_id(cursor, user_id):
-          return cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
-    expect_match_text: [cursor.execute]
+      from sqlite3 import Connection
+      def by_id(user_id):
+          conn = Connection("db.sqlite")
+          return conn.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+    expect_match_text: [conn.execute]
   - name: dbapi execute with params negative constraint boundary
-    code: "import sqlite3\ndef by_id(cursor, user_id):\n    return cursor.execute()\n"
+    code: "from sqlite3 import Connection\ndef by_id(user_id):\n    conn = Connection('db.sqlite')\n    return conn.execute()\n"
     expect_no_match: true
   description: "Python DB-API execute(sql, params) with a literal placeholder SQL string and separate parameter argument.
     Receiver-agnostic; package context gate on canonical DB-API drivers prevents over-matching."
@@ -1202,12 +1205,13 @@
   match_examples:
   - name: dbapi executemany with params
     code: |
-      import sqlite3
-      def insert_many(cursor, rows):
-          return cursor.executemany("INSERT INTO users(name) VALUES (%s)", rows)
-    expect_match_text: [cursor.executemany]
+      from sqlite3 import Connection
+      def insert_many(rows):
+          conn = Connection("db.sqlite")
+          return conn.executemany("INSERT INTO users(name) VALUES (%s)", rows)
+    expect_match_text: [conn.executemany]
   - name: dbapi executemany with params negative constraint boundary
-    code: "import sqlite3\ndef insert_many(cursor, rows):\n    return cursor.executemany()\n"
+    code: "from sqlite3 import Connection\ndef insert_many(rows):\n    conn = Connection('db.sqlite')\n    return conn.executemany()\n"
     expect_no_match: true
   description: "Python DB-API executemany(sql, seq_of_params) with a literal placeholder SQL string and separate parameter
     rows. Receiver-agnostic; package context gate on canonical DB-API drivers prevents over-matching."
@@ -1232,12 +1236,13 @@
   match_examples:
   - name: asyncpg execute with params
     code: |
-      import asyncpg
-      async def by_id(conn, user_id):
+      from asyncpg import Connection
+      async def by_id(user_id):
+          conn = Connection()
           return await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
     expect_match_text: [conn.fetchrow]
   - name: asyncpg execute with params negative constraint boundary
-    code: "import asyncpg\nasync def by_id(conn, user_id):\n    return await conn.fetchrow()\n"
+    code: "from asyncpg import Connection\nasync def by_id(user_id):\n    conn = Connection()\n    return await conn.fetchrow()\n"
     expect_no_match: true
   description: "asyncpg execute/fetch with $1 placeholders and separate arguments — parameterized query shape."
 
@@ -1305,8 +1310,9 @@
   match_examples:
   - name: sanitizer itsdangerous unsign
     code: |
-      import itsdangerous
+      from itsdangerous import Signer
       def example(user_input):
+          signer = Signer("secret")
           return signer.unsign(user_input)
     expect_match_text: [signer.unsign]
   description: "itsdangerous Signer/TimestampSigner.unsign - raises BadSignature on tampering; downstream value is signed-by-this-key."
@@ -1323,10 +1329,11 @@
   match_examples:
   - name: sanitizer itsdangerous loads
     code: |
-      import itsdangerous
+      from itsdangerous import URLSafeSerializer
       def example(user_input):
-          return signer.loads(user_input)
-    expect_match_text: [signer.loads]
+          serializer = URLSafeSerializer("secret")
+          return serializer.loads(user_input)
+    expect_match_text: [serializer.loads]
   description: "itsdangerous Serializer/URLSafeSerializer/TimedSerializer.loads - signature-verifying deserialization (NOT
     pickle - safe by default)."
 

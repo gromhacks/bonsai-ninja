@@ -502,6 +502,13 @@ fn go_parameter_decl_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeA
     let Some(canonical) = canonical_go_type_name(node_text(&type_node, src)) else {
         return;
     };
+    // Also keep the package-qualified form when present (`gin.Context`
+    // alongside `Context`). The unqualified canonical drives method
+    // dispatch lookup; the qualified form is what the rule-matcher
+    // chases through the alias map for the package gate
+    // (`alias_map.get("gin")` → `Namespace{github.com/gin-gonic/gin}`).
+    let qualified = qualified_go_type_name(node_text(&type_node, src))
+        .filter(|qualified| qualified != &canonical);
     // A single `parameter_declaration` may bind multiple identifiers
     // sharing one type (`a, b string`). Iterate every identifier
     // child rather than just `child_by_field_name("name")`.
@@ -512,6 +519,9 @@ fn go_parameter_decl_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeA
             let name = node_text(&child, src).trim().to_string();
             if !name.is_empty() {
                 push_go_type_alias(aliases, &name, &canonical);
+                if let Some(q) = qualified.as_deref() {
+                    push_go_type_alias(aliases, &name, q);
+                }
                 bound_any = true;
             }
         }
@@ -523,8 +533,40 @@ fn go_parameter_decl_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeA
             let name = node_text(&name_node, src).trim().to_string();
             if !name.is_empty() {
                 push_go_type_alias(aliases, &name, &canonical);
+                if let Some(q) = qualified.as_deref() {
+                    push_go_type_alias(aliases, &name, q);
+                }
             }
         }
+    }
+}
+
+/// Strip pointer / array / map / generic wrappers but keep the
+/// package qualifier when present. `*gin.Context` → `gin.Context`,
+/// `*http.Request` → `http.Request`, `[]string` → `string`,
+/// `Foo[T]` → `Foo`. Returns `None` when no qualifier survives the
+/// strip (so callers can skip the redundant push).
+fn qualified_go_type_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_start_matches('*').trim_start_matches('&').trim();
+    let after_brackets = if let Some(rest) = trimmed.strip_prefix("[]") {
+        rest.trim()
+    } else if let Some(rest) = trimmed.strip_prefix("map[") {
+        rest.split_once(']')
+            .map_or(rest, |(_, value_type)| value_type)
+            .trim()
+    } else if trimmed.starts_with('[') {
+        trimmed
+            .split_once(']')
+            .map_or(trimmed, |(_, value_type)| value_type)
+            .trim()
+    } else {
+        trimmed
+    };
+    let without_generic = after_brackets.split('[').next().unwrap_or(after_brackets).trim();
+    if without_generic.contains('.') && !without_generic.is_empty() {
+        Some(without_generic.to_string())
+    } else {
+        None
     }
 }
 

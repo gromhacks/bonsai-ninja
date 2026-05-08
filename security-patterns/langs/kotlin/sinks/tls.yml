@@ -148,6 +148,7 @@
           NoopHostnameVerifier(input)
         }
       }
+      class NoopHostnameVerifier(vararg args: Any?)
   description: Apache HttpClient new NoopHostnameVerifier().
 - id: kotlin.tls.apache_httpclient_trustself
   enabled: true

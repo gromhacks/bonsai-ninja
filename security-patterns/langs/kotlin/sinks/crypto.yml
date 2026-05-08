@@ -120,6 +120,11 @@
           DESEngine(input)
         }
       }
+      // Shadow declaration so the Kotlin adapter tags `DESEngine(...)`
+      // as a constructor call (Kotlin has no `new` keyword) and the
+      // `kind: new` rule fires; the import binding above is what
+      // satisfies the package gate at match time.
+      class DESEngine(vararg args: Any?)
   description: BouncyCastle DESEngine.
 - id: kotlin.crypto.keyfactory_dh_512
   enabled: false

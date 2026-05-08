@@ -79,15 +79,17 @@
   match_examples:
   - name: uploadedFile mv
     code: |
-      const _u = require("express-fileupload");
-      function save(uploadedFile: any, dest: string) {
+      const { UploadedFile } = require("express-fileupload");
+      function save(dest: string) {
+        const uploadedFile = new UploadedFile();
         return uploadedFile.mv(dest);
       }
     expect_match_text: [uploadedFile.mv]
   - name: file mv
     code: |
-      const _u = require("express-fileupload");
-      function save(file: any, dest: string) {
+      const { UploadedFile } = require("express-fileupload");
+      function save(dest: string) {
+        const file = new UploadedFile();
         return file.mv(dest);
       }
     expect_match_text: [file.mv]
