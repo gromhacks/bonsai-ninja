@@ -468,13 +468,13 @@ pub fn taint_facts_and_graph_for_entry(
             intra_worklist_cap: None,
             ..Default::default()
         };
-        let mut caches = crate::inter::InterTaintCaches::default();
+        let caches = crate::inter::InterTaintCaches::default();
         let graph_result = crate::inter::interprocedural_taint_to_completion_with_caches(
             entry_func,
             &graph_seed,
             &config,
             db,
-            &mut caches,
+            &caches,
         );
         graph.call_records = graph_result
             .call_records
@@ -505,7 +505,7 @@ pub fn taint_facts_and_graph_for_entry(
                 &seed,
                 &config,
                 db,
-                &mut caches,
+                &caches,
             );
             &fact_result
         };

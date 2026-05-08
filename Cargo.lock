@@ -757,6 +757,7 @@ dependencies = [
  "bonsai_lang_typescript",
  "bonsai_resolve",
  "bonsai_vfs",
+ "parking_lot",
  "rayon",
  "serde",
 ]

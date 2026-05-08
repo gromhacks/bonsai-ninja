@@ -211,12 +211,21 @@ pub struct ReceiverStatePropagation {
 /// by seed, but parsing a file and rebuilding its import alias map does
 /// not. Callers that batch runs should keep one cache and pass it to
 /// [`interprocedural_taint_with_caches`].
-#[derive(Clone, Debug, Default)]
+///
+/// All fields are interior-mutable behind `parking_lot::RwLock` so
+/// the entire cache surface can be shared across threads via `&self`
+/// — the per-source loop in the security analysis layer parallelises
+/// over OWASP's 2,740 source functions, and each source's
+/// inter-taint walk concurrently fills these caches with results
+/// that are pure functions of static AST state. Cache-fill races on
+/// the same key produce identical values (engine purity), so the
+/// "loser" computation is wasted work but never wrong.
+#[derive(Debug, Default)]
 pub struct InterTaintCaches {
-    aliases_by_file: AHashMap<FileId, AHashMap<String, String>>,
-    alias_targets_by_func: AHashMap<FuncId, AHashMap<String, AliasTarget>>,
-    local_bindings_by_func: AHashMap<FuncId, AHashMap<String, FuncId>>,
-    summaries_by_func: AHashMap<FuncId, FunctionSummary>,
+    aliases_by_file: parking_lot::RwLock<AHashMap<FileId, AHashMap<String, String>>>,
+    alias_targets_by_func: parking_lot::RwLock<AHashMap<FuncId, AHashMap<String, AliasTarget>>>,
+    local_bindings_by_func: parking_lot::RwLock<AHashMap<FuncId, AHashMap<String, FuncId>>>,
+    summaries_by_func: parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
     /// Memo cache for `resolve_call_candidates_with_caller_at`. The
     /// resolver answer for `(caller_func, call_span)` is purely a
     /// function of static AST + symbol-table state — it doesn't
@@ -224,19 +233,43 @@ pub struct InterTaintCaches {
     /// cache, OWASP's 2,740 separate inter-taint runs each re-resolve
     /// the same `String.format(...)` / `Logger.info(...)` call sites
     /// from scratch.
-    ///
-    /// `RefCell` so the cache fills via `&InterTaintCaches::resolved_calls_by_site`
-    /// while the engine holds `&mut InterTaintCaches` for the
-    /// adjacent plain-map fields — interior mutability lets one
-    /// field be cache-mutable through a shared borrow.
     pub(crate) resolved_calls_by_site: ResolvedCallSiteCache,
 }
 
 /// Memo store keyed on `(caller_func, call_span)` → resolved
-/// callees. Wrapped in `RefCell` so it can fill during propagation
-/// while sharing borrows with the rest of `InterTaintCaches`.
+/// callees. `parking_lot::Mutex` (not `RefCell`) so the cache is
+/// `Sync` — required for parallel per-source taint runs.
 pub(crate) type ResolvedCallSiteCache =
-    std::cell::RefCell<AHashMap<(FuncId, Span), std::sync::Arc<[ResolvedCallee]>>>;
+    parking_lot::Mutex<AHashMap<(FuncId, Span), std::sync::Arc<[ResolvedCallee]>>>;
+
+/// Read-or-fill helper for the RwLock-backed engine caches.
+/// Standard double-checked-locking pattern: probe with a read lock
+/// first (the common case post-warmup), upgrade to write only on
+/// miss. Two threads racing on the same key may both run `init()`
+/// — the second writer's `entry().or_insert_with` short-circuits
+/// to the first winner so the cached value is single-source-of-truth
+/// even under contention.
+fn cache_or_insert_with<K, V, F>(
+    map: &parking_lot::RwLock<AHashMap<K, V>>,
+    key: K,
+    init: F,
+) -> V
+where
+    K: std::hash::Hash + Eq + Clone,
+    V: Clone,
+    F: FnOnce() -> V,
+{
+    // Bind the cloned hit to a `let` so the read guard's temporary
+    // ends at the `;` rather than being extended across the function
+    // body. `parking_lot::RwLock` is non-reentrant, so a still-live
+    // read guard would deadlock the subsequent `map.write()`.
+    let cached = map.read().get(&key).cloned();
+    if let Some(existing) = cached {
+        return existing;
+    }
+    let mut write = map.write();
+    write.entry(key).or_insert_with(init).clone()
+}
 
 impl Default for InterTaintConfig {
     fn default() -> Self {
@@ -473,8 +506,8 @@ pub fn interprocedural_taint(
     config: &InterTaintConfig,
     db: &AnalyzerDb,
 ) -> InterTaintResult {
-    let mut caches = InterTaintCaches::default();
-    interprocedural_taint_with_caches(entry_func, entry_sources, config, db, &mut caches)
+    let caches = InterTaintCaches::default();
+    interprocedural_taint_with_caches(entry_func, entry_sources, config, db, &caches)
 }
 
 /// Run interprocedural taint while reusing resolver caches across
@@ -485,7 +518,7 @@ pub fn interprocedural_taint_with_caches(
     entry_sources: &TokenSet,
     config: &InterTaintConfig,
     db: &AnalyzerDb,
-    caches: &mut InterTaintCaches,
+    caches: &InterTaintCaches,
 ) -> InterTaintResult {
     let worklist = vec![InterTaintWorkItem {
         func: entry_func,
@@ -511,7 +544,7 @@ pub fn resume_interprocedural_taint_with_caches(
     mut previous: InterTaintResult,
     config: &InterTaintConfig,
     db: &AnalyzerDb,
-    caches: &mut InterTaintCaches,
+    caches: &InterTaintCaches,
 ) -> InterTaintResult {
     let Some(continuation) = previous.continuation.take() else {
         return previous;
@@ -535,7 +568,7 @@ pub fn interprocedural_taint_to_completion_with_caches(
     entry_sources: &TokenSet,
     config: &InterTaintConfig,
     db: &AnalyzerDb,
-    caches: &mut InterTaintCaches,
+    caches: &InterTaintCaches,
 ) -> InterTaintResult {
     let mut result = interprocedural_taint_with_caches(entry_func, entry_sources, config, db, caches);
     while result.continuation.is_some() {
@@ -570,7 +603,7 @@ fn run_interprocedural_worklist(
     mut seen: AHashSet<FunctionSeed>,
     config: &InterTaintConfig,
     db: &AnalyzerDb,
-    caches: &mut InterTaintCaches,
+    caches: &InterTaintCaches,
 ) -> InterTaintResult {
     let global = db.global_index();
     let mut per_function = accum.per_function;
@@ -647,28 +680,20 @@ fn run_interprocedural_worklist(
             per_function.insert(key, intra);
             continue;
         };
-        let aliases = caches
-            .aliases_by_file
-            .entry(caller_file)
-            .or_insert_with(|| alias_map_for_file(&db.imports_for(caller_file)))
-            .clone();
-        let alias_targets = caches
-            .alias_targets_by_func
-            .entry(func)
-            .or_insert_with(|| alias_targets_for_decl(&db.imports_for(caller_file), &decl))
-            .clone();
-        let mut local_bindings = caches
-            .local_bindings_by_func
-            .entry(func)
-            .or_insert_with(|| {
-                bonsai_callgraph::collect_local_callable_bindings_with_aliases(
-                    &decl.flow_events,
-                    &global,
-                    &decl,
-                    &alias_targets,
-                )
-            })
-            .clone();
+        let aliases = cache_or_insert_with(&caches.aliases_by_file, caller_file, || {
+            alias_map_for_file(&db.imports_for(caller_file))
+        });
+        let alias_targets = cache_or_insert_with(&caches.alias_targets_by_func, func, || {
+            alias_targets_for_decl(&db.imports_for(caller_file), &decl)
+        });
+        let mut local_bindings = cache_or_insert_with(&caches.local_bindings_by_func, func, || {
+            bonsai_callgraph::collect_local_callable_bindings_with_aliases(
+                &decl.flow_events,
+                &global,
+                &decl,
+                &alias_targets,
+            )
+        });
         // Layer in dynamic callback-param bindings from the call
         // site that put us on the worklist. These take precedence
         // over the static (assignment-only) local_bindings since
@@ -703,7 +728,7 @@ fn run_interprocedural_worklist(
             &decl.flow_events,
             &mut state,
             &mut ctx,
-            &mut caches.summaries_by_func,
+            &caches.summaries_by_func,
         );
 
         per_function.insert(key, intra);
@@ -745,7 +770,7 @@ fn propagate_taint_through_events(
     events: &[FlowEvent],
     state: &mut TokenSet,
     ctx: &mut PropagationCtx<'_>,
-    summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
 ) {
     for (event_index, event) in events.iter().enumerate() {
         let adjacent_source_call_args = adjacent_call_args_for_assignment(events, event_index);
@@ -1151,7 +1176,7 @@ fn walk_loop_body_for_propagation(
     body: &[FlowEvent],
     state: &mut TokenSet,
     ctx: &mut PropagationCtx<'_>,
-    summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
 ) {
     let worklist_start = ctx.worklist.len();
     let call_records_start = ctx.call_records.len();
@@ -1413,7 +1438,7 @@ fn propagate_call_event(
     call: CallEventView<'_>,
     state: &mut TokenSet,
     ctx: &mut PropagationCtx<'_>,
-    summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
 ) {
     // Two arg sets, deliberately divergent:
     //   * `tainted_at_call` records args whose direct value is tainted
@@ -1518,7 +1543,7 @@ fn propagate_call_event(
         let Some(callee_decl) = global.decl_of(SymbolId::new(candidate.func.raw())) else {
             continue;
         };
-        let summary = summary_cache.entry(candidate.func).or_insert_with(|| {
+        let summary = cache_or_insert_with(summary_cache, candidate.func, || {
             global
                 .decl_of(SymbolId::new(candidate.func.raw()))
                 .map(compute_function_summary)
@@ -2037,8 +2062,8 @@ pub fn call_site_receives_taint(
     config: &InterTaintConfig,
     db: &AnalyzerDb,
 ) -> bool {
-    let mut caches = InterTaintCaches::default();
-    call_site_receives_taint_with_caches(func, sink_span, entry_sources, config, db, &mut caches)
+    let caches = InterTaintCaches::default();
+    call_site_receives_taint_with_caches(func, sink_span, entry_sources, config, db, &caches)
 }
 
 /// Cached variant of [`call_site_receives_taint`] for batched sink
@@ -2050,7 +2075,7 @@ pub fn call_site_receives_taint_with_caches(
     entry_sources: &TokenSet,
     config: &InterTaintConfig,
     db: &AnalyzerDb,
-    caches: &mut InterTaintCaches,
+    caches: &InterTaintCaches,
 ) -> bool {
     let global = db.global_index();
     let Some(decl) = global.decl_of(SymbolId::new(func.raw())).cloned() else {
@@ -2059,28 +2084,20 @@ pub fn call_site_receives_taint_with_caches(
     let Some(file) = global.declaring_file(SymbolId::new(func.raw())) else {
         return false;
     };
-    let aliases = caches
-        .aliases_by_file
-        .entry(file)
-        .or_insert_with(|| alias_map_for_file(&db.imports_for(file)))
-        .clone();
-    let alias_targets = caches
-        .alias_targets_by_func
-        .entry(func)
-        .or_insert_with(|| alias_targets_for_decl(&db.imports_for(file), &decl))
-        .clone();
-    let local_bindings = caches
-        .local_bindings_by_func
-        .entry(func)
-        .or_insert_with(|| {
-            bonsai_callgraph::collect_local_callable_bindings_with_aliases(
-                &decl.flow_events,
-                &global,
-                &decl,
-                &alias_targets,
-            )
-        })
-        .clone();
+    let aliases = cache_or_insert_with(&caches.aliases_by_file, file, || {
+        alias_map_for_file(&db.imports_for(file))
+    });
+    let alias_targets = cache_or_insert_with(&caches.alias_targets_by_func, func, || {
+        alias_targets_for_decl(&db.imports_for(file), &decl)
+    });
+    let local_bindings = cache_or_insert_with(&caches.local_bindings_by_func, func, || {
+        bonsai_callgraph::collect_local_callable_bindings_with_aliases(
+            &decl.flow_events,
+            &global,
+            &decl,
+            &alias_targets,
+        )
+    });
     let const_bindings = AHashMap::new();
     let ctx = SinkWalkCtx {
         sink_span,
@@ -2096,7 +2113,7 @@ pub fn call_site_receives_taint_with_caches(
         &decl.flow_events,
         entry_sources.clone(),
         &ctx,
-        &mut caches.summaries_by_func,
+        &caches.summaries_by_func,
     );
     found
 }
@@ -2116,7 +2133,7 @@ fn walk_events_for_sink(
     events: &[FlowEvent],
     mut state: TokenSet,
     ctx: &SinkWalkCtx<'_>,
-    summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
 ) -> (TokenSet, bool) {
     for (event_index, event) in events.iter().enumerate() {
         let adjacent_source_call_args = adjacent_call_args_for_assignment(events, event_index);
@@ -2281,7 +2298,7 @@ fn walk_loop_body_for_sink(
     body: &[FlowEvent],
     state: TokenSet,
     ctx: &SinkWalkCtx<'_>,
-    summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
 ) -> (TokenSet, bool) {
     let mut loop_state = state;
     loop {
@@ -2540,7 +2557,7 @@ fn apply_return_taint(
     alias_targets: &AHashMap<String, AliasTarget>,
     local_bindings: &AHashMap<String, FuncId>,
     caller: FuncId,
-    summary_cache: &mut AHashMap<FuncId, FunctionSummary>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
 ) -> bool {
     let FlowEvent::Assign {
         target,
@@ -2623,7 +2640,7 @@ fn apply_return_taint(
         return true;
     }
     for candidate in &candidates {
-        let summary = summary_cache.entry(candidate.func).or_insert_with(|| {
+        let summary = cache_or_insert_with(summary_cache, candidate.func, || {
             global
                 .decl_of(SymbolId::new(candidate.func.raw()))
                 .map(compute_function_summary)
@@ -3684,14 +3701,13 @@ fn resolve_call_candidates_with_caller_at(
     // span (synthesized resolution from summaries, for example)
     // bypass the cache and run uncached.
     if let (Some(cache), Some(span)) = (scope.resolved_calls, call_span) {
-        if let Some(cached) = cache.borrow().get(&(scope.caller, span)) {
-            return cached.iter().cloned().collect();
+        if let Some(cached) = cache.lock().get(&(scope.caller, span)) {
+            return cached.iter().cloned().collect::<Vec<_>>();
         }
         let computed =
             resolve_call_candidates_with_caller_at_uncached(name, scope, receiver_types, call_span);
-        cache
-            .borrow_mut()
-            .insert((scope.caller, span), computed.iter().cloned().collect());
+        let arc: std::sync::Arc<[ResolvedCallee]> = computed.iter().cloned().collect();
+        cache.lock().insert((scope.caller, span), arc);
         return computed;
     }
     resolve_call_candidates_with_caller_at_uncached(name, scope, receiver_types, call_span)

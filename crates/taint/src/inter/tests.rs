@@ -645,7 +645,7 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
         const_bindings: &const_bindings,
         caller: func_id_of(&db, "placeholder"),
     };
-    let (_, found) = walk_events_for_sink(&events, seed(&["cmd"]), &ctx, &mut AHashMap::new());
+    let (_, found) = walk_events_for_sink(&events, seed(&["cmd"]), &ctx, &parking_lot::RwLock::new(AHashMap::new()));
     assert!(
         found,
         "unresolved formatter-style assignment must use source_names before evaluating the sink"
@@ -723,7 +723,7 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
         const_bindings: &const_bindings,
         caller: func_id_of(&db, "placeholder"),
     };
-    let (_, found) = walk_events_for_sink(&events, TokenSet::default(), &ctx, &mut AHashMap::new());
+    let (_, found) = walk_events_for_sink(&events, TokenSet::default(), &ctx, &parking_lot::RwLock::new(AHashMap::new()));
     assert!(
         found,
         "configured source-output calls must introduce taint at the call site, after earlier clean initializers"
@@ -1194,13 +1194,13 @@ fn budgeted_run_can_resume_to_completion() {
         intra_worklist_cap: None,
         ..Default::default()
     };
-    let mut caches = InterTaintCaches::default();
+    let caches = InterTaintCaches::default();
     let result = interprocedural_taint_to_completion_with_caches(
         entry,
         &seed(&["user_input"]),
         &config,
         &db,
-        &mut caches,
+        &caches,
     );
     assert!(!result.saturated);
     assert!(result.continuation.is_none());
@@ -1233,13 +1233,13 @@ fn to_completion_has_no_hidden_pair_ceiling() {
         intra_worklist_cap: None,
         ..Default::default()
     };
-    let mut caches = InterTaintCaches::default();
+    let caches = InterTaintCaches::default();
     let result = interprocedural_taint_to_completion_with_caches(
         entry,
         &seed(&["user_input"]),
         &config,
         &db,
-        &mut caches,
+        &caches,
     );
     assert!(!result.saturated);
     assert!(result.continuation.is_none());

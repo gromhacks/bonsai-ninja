@@ -227,8 +227,8 @@ pub fn value_flow_for_function(
     config: &InterTaintConfig,
 ) -> ValueFlowGraph {
     // Convenience entry point: provision a fresh cache for one-off callers.
-    let mut caches = InterTaintCaches::default();
-    value_flow_for_function_with_caches(entry_func, db, config, &mut caches)
+    let caches = InterTaintCaches::default();
+    value_flow_for_function_with_caches(entry_func, db, config, &caches)
 }
 
 /// Same as `value_flow_for_function`, but threads a caller-provided
@@ -239,7 +239,7 @@ pub fn value_flow_for_function_with_caches(
     entry_func: FuncId,
     db: &AnalyzerDb,
     config: &InterTaintConfig,
-    caches: &mut InterTaintCaches,
+    caches: &InterTaintCaches,
 ) -> ValueFlowGraph {
     let global = db.global_index();
     // No decl for this id → empty graph (e.g. caller asked about a stale FuncId).
