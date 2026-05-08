@@ -399,8 +399,7 @@ fn rhs_has_descendant_shape(source_names: &[String]) -> bool {
 /// alias to the same `raw` identifier in the state.
 fn normalise_target_text(target: &str) -> String {
     normalise_qualified_text(target)
-        .trim_start_matches('*')
-        .trim_start_matches('&')
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
         .trim()
         .to_string()
 }

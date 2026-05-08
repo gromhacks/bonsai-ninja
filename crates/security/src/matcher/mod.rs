@@ -604,7 +604,7 @@ impl<'a> PreparedRule<'a> {
             // alias-chain lookup fails on a punctuation-prefixed key
             // and the package gate misses receiver-typed methods.
             let stripped: String = receiver_type
-                .trim_matches(|c: char| matches!(c, '*' | '&'))
+                .trim_matches(bonsai_common::REFERENCE_SIGILS)
                 .to_string();
             push_unique_package_candidate(&mut candidates, &stripped);
             if let Some(target) = alias_map.get(receiver_type) {
@@ -2678,7 +2678,9 @@ fn call_receiver_text(callee: &str) -> Option<&str> {
 }
 
 fn receiver_root_name(receiver: &str) -> Option<String> {
-    let receiver = receiver.trim().trim_start_matches(['&', '*', '$', '@', '%']);
+    let receiver = receiver
+        .trim()
+        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION);
     let root = receiver
         .split(['.', ':', '\\', '[', '('])
         .next()
@@ -4237,7 +4239,8 @@ fn param_name_matches(params: &[String], name: &str) -> bool {
 /// Strip leading sigils (`$` / `&` / `*`) from a parameter name so
 /// `$x` and `x` compare equal across languages.
 fn normalize_param_name(name: &str) -> &str {
-    name.trim().trim_start_matches(['$', '&', '*'])
+    name.trim()
+        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
 }
 
 /// What kind of entry point we inferred. Drives the finding's

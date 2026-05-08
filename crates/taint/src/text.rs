@@ -132,7 +132,7 @@ fn push_qualified_base(segment: &str, bases: &mut Vec<String>) {
         return;
     }
     // Strip leading `&` / `*` so `&obj.x` and `obj.x` produce the same base.
-    let base = base.trim_start_matches(&['*', '&'][..]);
+    let base = base.trim_start_matches(bonsai_common::REFERENCE_SIGILS);
     if base.is_empty() {
         return;
     }
@@ -192,7 +192,7 @@ fn push_qualified_access(segment: &str, accesses: &mut Vec<String>) {
     }
     let cleaned = segment
         .trim()
-        .trim_start_matches(&['*', '&'][..])
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
         .trim_matches('.');
     // Re-check the dot after trimming — `.foo.` could be left as `foo`.
     if cleaned.is_empty() || !cleaned.contains('.') {

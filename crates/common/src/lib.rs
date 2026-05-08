@@ -19,8 +19,9 @@ pub mod span_cache;
 
 pub use ids::{BasicBlockId, FileId, FuncId, PackageId, SymbolId, TraceStepId, TypeId, ValueId};
 pub use names::{
-    callable_reference_variants, short_qualified_tail, workspace_bonsai_dir, IDENTIFIER_SIGILS,
-    QUALIFIED_NAME_SEPARATORS,
+    callable_reference_variants, short_qualified_tail, workspace_bonsai_dir,
+    ALL_NAME_PUNCTUATION, IDENTIFIER_SIGILS, IMPLICIT_RECEIVER_PREFIXES,
+    QUALIFIED_NAME_SEPARATORS, REFERENCE_SIGILS, SUPER_RECEIVER_TOKENS,
 };
 pub use policy::MATCHER_POLICY_FINGERPRINT;
 pub use precision::Precision;

@@ -137,6 +137,15 @@ Same caveat for the missing first-else assignment synthesis.
   fact table from an adapter.** Adapters report facts through `Decl`
   and `FlowEvent`; the security layer is the only crate that translates
   rule matches into engine-config facts.
+- **No relying on the engine to strip language keywords.** The engine
+  doesn't pattern-match `new `, `return `, `def `, `__construct`,
+  `Self(`, `static(`, or any other syntactic keyword out of raw
+  expression text. Adapters classify constructors structurally
+  (`CallKind::Construct`), emit return values via `FlowEvent::Return`,
+  and produce `value_text` that already has the keyword removed.
+  Cross-language tokens that *do* live in the engine (variable sigils,
+  pointer sigils, implicit-receiver prefixes, super tokens) are named
+  constants in `bonsai_common::names`; see design-patterns.mdx §12a.
 
 ## Testing contract
 

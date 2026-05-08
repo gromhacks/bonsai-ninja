@@ -240,3 +240,34 @@ the engine.
 
 When in doubt, push the work to the adapter. Engine code should look the
 same regardless of the source language.
+
+### 12a. Cross-language tokens live in `bonsai_common`
+
+When the engine genuinely needs to recognise a syntactic token that
+appears in *several* languages — variable sigils, pointer/reference
+sigils, implicit-receiver prefixes, super-call tokens — the set lives
+as a named constant in `bonsai_common::names` and engine code reads
+the constant. Inline `&['$', '@', '%']` / `["self.", "this."]` arrays
+in engine code are forbidden because each new language requires
+touching every site that hardcoded the union.
+
+Existing token sets:
+
+- [`IDENTIFIER_SIGILS`] — `$ @ %` (Perl / PHP / Ruby variable sigils).
+- [`REFERENCE_SIGILS`] — `& *` (Rust borrow / C pointer / reference).
+- [`ALL_NAME_PUNCTUATION`] — union of the two; used at qualified-text
+  comparison sites that need to strip whichever variant the adapter
+  emitted.
+- [`IMPLICIT_RECEIVER_PREFIXES`] — `self.`, `this.` for
+  implicit-receiver detection.
+- [`SUPER_RECEIVER_TOKENS`] — `super`, `parent`, `base` for
+  super-call dispatch.
+- [`QUALIFIED_NAME_SEPARATORS`] — `::`, `->`, `.`, `:` for tail
+  extraction.
+
+Adding a token to one of these constants is the right move when
+another language joins the workspace. Branching on a literal English
+keyword (`new `, `return `, `def `, `__construct`) inside engine code
+is the wrong move — emit a structural fact from the adapter
+(`CallKind::Construct`, `FlowEvent::Return`) and have the engine
+match on the variant instead.

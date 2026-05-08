@@ -18,12 +18,45 @@
 /// once prevents drift.
 pub const IDENTIFIER_SIGILS: &[char] = &['$', '@', '%'];
 
+/// Reference / pointer sigils that adapters keep on raw type and
+/// expression text — Rust's `&` borrow, C/C++'s `*` pointer, mixed
+/// usage in PHP `&$ref` and Perl. Engine code that compares names
+/// strips these because `&Foo`, `*Foo`, and `Foo` denote the same
+/// underlying identifier for taint and resolution purposes.
+///
+/// Defined alongside [`IDENTIFIER_SIGILS`] so the two sets can be
+/// composed without re-listing characters at every call site.
+pub const REFERENCE_SIGILS: &[char] = &['&', '*'];
+
+/// Combined punctuation strip used at qualified-text comparison
+/// sites (`actual.trim_start_matches(ALL_NAME_PUNCTUATION)`). The
+/// union of [`IDENTIFIER_SIGILS`] and [`REFERENCE_SIGILS`] — adapter
+/// emissions can carry either family on raw expression text and the
+/// engine should normalise both before comparing.
+pub const ALL_NAME_PUNCTUATION: &[char] = &['$', '@', '%', '&', '*'];
+
 /// Qualified-name separators recognized by the workspace. `.` is the
 /// universal member access; `::` is Rust/C++/Perl module separator;
 /// `->` is C/C++/PHP/Perl pointer member access; `:` is Erlang
 /// remote call. Order matters when used by callers that try
 /// candidates in priority order — pick the longer alternative first.
 pub const QUALIFIED_NAME_SEPARATORS: &[&str] = &["::", "->", ".", ":"];
+
+/// Implicit-receiver prefixes recognized across object-oriented
+/// languages: `self.` (Python / Ruby / Rust), `this.` (Java / Kotlin
+/// / JS / TS / C# / Dart / Swift / PHP). Engine code that needs to
+/// detect "is this a method call on the implicit receiver" walks
+/// this list rather than enumerating language keywords inline. The
+/// list is the union — adapters that don't use a given prefix never
+/// emit text starting with it.
+pub const IMPLICIT_RECEIVER_PREFIXES: &[&str] = &["self.", "this."];
+
+/// Super / parent receiver tokens used to dispatch into a base
+/// class. `super` covers Java / Kotlin / JS / TS / Python / Ruby /
+/// Swift / Dart / Scala; `parent` covers PHP and Perl; `base`
+/// covers C# and Lua. The set is the union of receiver-equality
+/// tokens for the cross-language `is_super_receiver` predicate.
+pub const SUPER_RECEIVER_TOKENS: &[&str] = &["super", "parent", "base"];
 
 /// Tail of a qualified call/reference name.
 ///

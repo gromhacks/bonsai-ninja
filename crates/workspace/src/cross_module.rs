@@ -653,7 +653,9 @@ impl<'a> TraceBuilder<'a> {
     }
 
     fn resolve_callable_arg(&self, raw: &str, caller: FuncId) -> Option<SymbolId> {
-        let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
+        let trimmed = raw
+            .trim()
+            .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
         if trimmed.is_empty()
             || trimmed.starts_with('"')
             || trimmed.starts_with('\'')
