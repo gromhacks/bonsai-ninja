@@ -3260,30 +3260,64 @@ where
         receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
         ..Default::default()
     };
-    let mut taint_caches = InterTaintCaches::default();
-    let mut exact_graphs: AHashMap<(FuncId, Vec<String>), EntryTaintGraph> = AHashMap::new();
+    let taint_caches = InterTaintCaches::default();
+    // Memoised per-(source-func, seed-set) taint graphs shared across
+    // worker threads. `parking_lot::RwLock` keeps probes lock-free in the
+    // common cache-hit path; `Arc` keeps cache values cheap to clone out
+    // for read-only walks. Cache fills are pure, so the rare double-fill
+    // race produces identical values.
+    let exact_graphs: parking_lot::RwLock<
+        AHashMap<(FuncId, Vec<String>), std::sync::Arc<EntryTaintGraph>>,
+    > = parking_lot::RwLock::new(AHashMap::new());
     // AHashMap iteration order is hash-randomized per process. Sort
     // by FuncId.raw() so the per-source-group analysis order and
     // resulting finding fingerprints are stable across runs.
     let mut source_groups_sorted: Vec<(FuncId, &Vec<usize>)> =
         source_groups.iter().map(|(k, v)| (*k, v)).collect();
     source_groups_sorted.sort_by_key(|(k, _)| k.raw());
+    let total_groups = source_groups_sorted.len();
     on_progress(AnalysisProgress::PhaseStarted {
         label: "building taint chains",
-        total: source_groups_sorted.len() as u64,
+        total: total_groups as u64,
     });
-    for &(src_func_id, indices) in &source_groups_sorted {
-        let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
-            AHashSet::new();
-        for &idx in indices {
-            let (src, _, seeds) = &source_work[idx];
-            let graph_key = (src_func_id, sorted_seed_key(seeds));
-            let graph = exact_graphs.entry(graph_key).or_insert_with(|| {
-                exact_source_seed_graph(src_func_id, seeds, &config, ws.db(), &mut taint_caches)
-            });
-            if graph.tainted_calls.is_empty() {
-                continue;
-            }
+    use rayon::prelude::*;
+    let parallel_out: Vec<FindingWithChain> = source_groups_sorted
+        .par_iter()
+        .flat_map_iter(|&(src_func_id, indices)| {
+            let mut group_out: Vec<FindingWithChain> = Vec::new();
+            let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
+                AHashSet::new();
+            for &idx in indices {
+                let (src, _, seeds) = &source_work[idx];
+                let graph_key = (src_func_id, sorted_seed_key(seeds));
+                // Drop the read guard with `;` before any potential
+                // write upgrade — Rust extends temporary lifetimes
+                // across an if-let's branches, and `parking_lot`
+                // RwLocks deadlock on same-thread read→write.
+                let cached = exact_graphs.read().get(&graph_key).cloned();
+                let graph: std::sync::Arc<EntryTaintGraph> = match cached {
+                    Some(hit) => hit,
+                    None => {
+                        let computed = std::sync::Arc::new(exact_source_seed_graph(
+                            src_func_id,
+                            seeds,
+                            &config,
+                            ws.db(),
+                            &taint_caches,
+                        ));
+                        // Double-checked: another worker may have inserted
+                        // the same (func, seeds) graph while we were
+                        // computing. Identical inputs → identical graph,
+                        // so picking either copy is safe; keep the first
+                        // insertion to avoid serialising downstream Arc
+                        // pointer comparisons across threads.
+                        let mut write = exact_graphs.write();
+                        write.entry(graph_key).or_insert(computed).clone()
+                    }
+                };
+                if graph.tainted_calls.is_empty() {
+                    continue;
+                }
             // Span set of every recorded tainted call on this
             // source graph — sanitizer credit pass uses it to
             // require data-flow connectivity rather than mere
@@ -3384,14 +3418,22 @@ where
                             precision: chain_precision,
                         },
                     ) {
-                        out.push(FindingWithChain {
+                        group_out.push(FindingWithChain {
                             finding: f,
                             chain_funcs,
                         });
                     }
                 }
             }
-        }
+            }
+            group_out
+        })
+        .collect();
+    out.extend(parallel_out);
+    // Progress callback isn't `Send`, so the parallel pass can't tick
+    // mid-flight. Replay one tick per group now so consumers see the
+    // bar advance to the declared total before the phase finishes.
+    for _ in 0..total_groups {
         on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
@@ -3413,7 +3455,7 @@ fn exact_source_seed_graph(
     seeds: &TokenSet,
     config: &InterTaintConfig,
     db: &bonsai_db::AnalyzerDb,
-    caches: &mut InterTaintCaches,
+    caches: &InterTaintCaches,
 ) -> EntryTaintGraph {
     let result =
         bonsai_taint::interprocedural_taint_to_completion_with_caches(source_func, seeds, config, db, caches);
@@ -3454,13 +3496,13 @@ fn source_seed_reaches_return(
         source_bearing_functions: AHashSet::default(),
         ..Default::default()
     };
-    let mut caches = InterTaintCaches::default();
+    let caches = InterTaintCaches::default();
     let result = bonsai_taint::interprocedural_taint_to_completion_with_caches(
         source_func,
         seeds,
         &config,
         db,
-        &mut caches,
+        &caches,
     );
     result
         .tainted_calls

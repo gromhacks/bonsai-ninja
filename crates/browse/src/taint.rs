@@ -275,13 +275,13 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         ..Default::default()
     };
 
-    let mut caches = bonsai_taint::InterTaintCaches::default();
+    let caches = bonsai_taint::InterTaintCaches::default();
     let result = bonsai_taint::interprocedural_taint_to_completion_with_caches(
         source_func,
         &effective_seed,
         &config,
         db,
-        &mut caches,
+        &caches,
     );
 
     let mut records: Vec<TaintRecord> = result

@@ -59,8 +59,8 @@ impl ValueFlowCache {
         if let Some(hit) = self.inner.read().graphs.get(&func).cloned() {
             return hit;
         }
-        let mut caches = InterTaintCaches::default();
-        let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), &mut caches);
+        let caches = InterTaintCaches::default();
+        let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), &caches);
         let arc = Arc::new(graph);
         self.inner.write().graphs.insert(func, arc.clone());
         arc
@@ -90,9 +90,9 @@ impl ValueFlowCache {
         let computed: Vec<(FuncId, Arc<ValueFlowGraph>)> = todo
             .par_iter()
             .map(|&f| {
-                let mut caches = InterTaintCaches::default();
+                let caches = InterTaintCaches::default();
                 let graph =
-                    value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), &mut caches);
+                    value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), &caches);
                 (f, Arc::new(graph))
             })
             .collect();
