@@ -4161,6 +4161,13 @@ fn receiver_call_return_type_names(
     out
 }
 
+/// Extract the inner call name from a `Foo.bar(args)`-shaped
+/// receiver. The taint engine uses the bracket-depth-aware
+/// [`normalise_qualified_text`] because its inputs are post-
+/// concatenation FlowEvent expression texts (`obj['k'].bar()` ->
+/// `obj.k.bar()`); callgraph's shape-equivalent helper uses the
+/// simpler `normalize_receiver_alias_text` because its input is
+/// already structured.
 fn receiver_inner_call_name(receiver: &str) -> Option<String> {
     let receiver = normalise_qualified_text(receiver);
     let receiver = receiver.trim();

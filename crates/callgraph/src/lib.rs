@@ -916,6 +916,12 @@ fn receiver_call_return_type_names(
     out
 }
 
+/// Extract the inner call name from a `Foo.bar(args)`-shaped
+/// receiver, returning `Foo.bar`. Mirrors
+/// `bonsai_taint::inter::receiver_inner_call_name` shape-for-shape;
+/// the only difference is the normalisation helper — see
+/// [`normalize_receiver_alias_text`] for why callgraph's variant is
+/// the structured-input simpler form.
 fn receiver_inner_call_name(receiver: &str) -> Option<String> {
     let receiver = normalize_receiver_alias_text(receiver);
     let receiver = receiver.trim();
@@ -1278,6 +1284,19 @@ fn alias_targets_for_decl(
 }
 
 
+/// Receiver-alias normalisation used at callgraph build time.
+/// Strips outer parentheses (`(repo).run()` → `repo.run()`),
+/// reference sigils (`&str`, `*const T`), and rewrites C/C++/PHP
+/// `->` member access to `.` form.
+///
+/// Intentionally simpler than `bonsai_taint::text::normalise_qualified_text`
+/// — the taint engine's variant additionally handles bracket-depth-
+/// aware string-literal masking and subscript rewriting (`obj['k']`
+/// → `obj.k`) because it normalises arbitrary FlowEvent expression
+/// texts. Callgraph's input is the structured `FlowEvent::Call.callee`
+/// or `Call.receiver` field, which the adapter has already split out
+/// of any subscript expression — so the simpler helper covers every
+/// real shape that reaches edge construction.
 fn normalize_receiver_alias_text(receiver: &str) -> String {
     let mut text = receiver.trim();
     while text.starts_with('(') && text.ends_with(')') && text.len() > 1 {
