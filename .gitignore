@@ -53,3 +53,4 @@ scripts/__pycache__/
 .pytest_cache/
 .mypy_cache/
 scripts/.ruff_cache/
+.claude/scheduled_tasks.lock
