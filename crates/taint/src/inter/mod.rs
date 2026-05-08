@@ -117,8 +117,12 @@ use bonsai_index::GlobalIndex;
 use bonsai_lang_api::ModulePath;
 use bonsai_lang_api::{AliasTarget, CallArg, Decl, DeclKind, FlowEvent};
 use bonsai_resolve::{
-    alias_map_for_file, resolve_callable_with_context, resolve_class, short_tail, visibility_allows,
-    ResolveContext,
+    alias_map_for_file, callee_without_call_args, collect_method_candidates_for_class,
+    enclosing_class_for_decl, export_name_variants, extend_alias_targets_with_declared_types,
+    is_super_receiver, module_target_matches_decl_module_path, module_target_matches_path,
+    namespace_alias_target_tail, prune_receiver_type_names_for_dispatch, push_unique_func,
+    qualified_module_alias_call, resolve_callable_with_context, resolve_class, short_tail,
+    split_qualified_head_tail, visibility_allows, ResolveContext,
 };
 use std::borrow::Cow;
 
@@ -3986,7 +3990,6 @@ fn collect_virtual_dispatch_candidates(
 
 // Class-dispatch helpers live in `bonsai_resolve` so the callgraph
 // and taint engine consume one source of truth.
-use bonsai_resolve::prune_receiver_type_names_for_dispatch;
 
 fn type_alias_for_receiver(decl: &Decl, receiver: &str) -> Option<String> {
     use bonsai_common::REFERENCE_SIGILS;
@@ -4049,7 +4052,6 @@ fn receiver_projects_implicit_receiver(receiver: &str) -> bool {
             .any(|token| receiver.starts_with(&format!("{token}.")))
 }
 
-use bonsai_resolve::is_super_receiver;
 
 fn resolve_super_method_candidates(
     db: &AnalyzerDb,
@@ -4078,7 +4080,6 @@ fn resolve_super_method_candidates(
     out
 }
 
-use bonsai_resolve::{collect_method_candidates_for_class, enclosing_class_for_decl};
 
 fn inferred_receiver_type_names(
     caller_decl: &Decl,
@@ -4174,7 +4175,6 @@ fn receiver_inner_call_name(receiver: &str) -> Option<String> {
     Some(callee.to_string())
 }
 
-use bonsai_resolve::callee_without_call_args;
 
 fn collect_constructed_return_type_names(
     decl: &Decl,
@@ -4322,7 +4322,6 @@ fn constructed_return_type_from_text(
     }
 }
 
-use bonsai_resolve::push_unique_func;
 
 fn collect_receiver_type_names_from_events(
     events: &[FlowEvent],
@@ -4582,7 +4581,6 @@ fn alias_targets_for_decl(
     map
 }
 
-use bonsai_resolve::extend_alias_targets_with_declared_types;
 
 /// Caller-side resolve context derived from `caller`. Returns the
 /// caller's declaring file and a borrow into its `Decl.module_path`,
@@ -4816,7 +4814,6 @@ fn is_single_colon_qualified(name: &str) -> bool {
     name.contains(':') && !name.contains("::")
 }
 
-use bonsai_resolve::qualified_module_alias_call;
 
 fn qualified_alias_tail<'a>(name: &'a str, aliases: &AHashMap<String, String>) -> Option<&'a str> {
     let (head, tail) = split_qualified_head_tail(name)?;
@@ -4828,7 +4825,6 @@ fn alias_head_target<'a>(name: &'a str, aliases: &'a AHashMap<String, String>) -
     aliases.get(head).map(String::as_str)
 }
 
-use bonsai_resolve::namespace_alias_target_tail;
 
 fn resolve_workspace_module_targets(
     db: &AnalyzerDb,
@@ -4899,7 +4895,6 @@ fn resolve_workspace_module_targets(
 // `module_target_matches_decl_module_path` lives in
 // `bonsai_resolve` so the callgraph, taint, and resolve passes
 // share one canonical alias-target match.
-use bonsai_resolve::module_target_matches_decl_module_path;
 
 /// Expand a bare alias-tail into every fully-qualified shape that
 /// resolves to the same callee. Each language declares its own
@@ -4907,13 +4902,10 @@ use bonsai_resolve::module_target_matches_decl_module_path;
 /// (JS/TS: `["exports", "module.exports"]`; languages without this
 /// convention pass `&[]`). Mirrors callgraph's `export_name_variants`
 /// so both passes use one source of truth.
-use bonsai_resolve::export_name_variants;
 
 // Path / module-shape helpers live in `bonsai_resolve` so the
 // callgraph and taint engine share one source of truth.
-use bonsai_resolve::module_target_matches_path;
 
-use bonsai_resolve::split_qualified_head_tail;
 
 /// Apply one event's taint transfer to `state`. Mirror of the
 /// per-event transfer function inside [`crate::intra`] — duplicated
