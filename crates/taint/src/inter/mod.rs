@@ -1742,13 +1742,17 @@ fn propagate_super_return_event(
     if !return_expr_is_super(value_text) && !return_expr_is_super(value_name) {
         return;
     }
-    let Some(receiver_value) = ["super", "self", "this", "base"]
+    // Receivers we might already have taint state for at the moment
+    // a `return super.method(...)` fires: the explicit super-family
+    // tokens and the implicit-receiver bare tokens. Taint state keyed
+    // on any of these gets carried into the resolved super-method.
+    let candidate_receivers = bonsai_common::SUPER_RECEIVER_TOKENS
         .iter()
-        .copied()
-        .find(|candidate| {
-            receiver_expr_is_tainted(candidate, state) || actual_has_descendant_taint(candidate, state)
-        })
-    else {
+        .chain(bonsai_common::IMPLICIT_RECEIVER_TOKENS.iter())
+        .copied();
+    let Some(receiver_value) = candidate_receivers.into_iter().find(|candidate| {
+        receiver_expr_is_tainted(candidate, state) || actual_has_descendant_taint(candidate, state)
+    }) else {
         return;
     };
     let global = ctx.db.global_index();
@@ -4459,8 +4463,9 @@ fn constructed_return_type_from_text(
     alias_targets: &AHashMap<String, AliasTarget>,
 ) -> Option<String> {
     let mut text = value_text.trim();
-    text = text.strip_prefix("return ").unwrap_or(text).trim();
-    text = text.strip_prefix("new ").unwrap_or(text).trim();
+    for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
+        text = text.strip_prefix(*keyword).unwrap_or(text).trim();
+    }
     let candidate = text
         .split(['(', '{', '[', ' ', '\t', '\r', '\n'])
         .next()
@@ -4479,12 +4484,15 @@ fn constructed_return_type_from_text(
 fn static_constructor_return(value_text: &str) -> bool {
     let mut text = value_text.trim();
     text = text.strip_prefix("return ").unwrap_or(text).trim();
-    if text.starts_with("Self(") || text.starts_with("Self {") || text.starts_with("self(") {
+    if bonsai_common::SELF_CONSTRUCTOR_HEADS
+        .iter()
+        .any(|head| text.starts_with(*head))
+    {
         return true;
     }
     matches!(
         text.strip_prefix("new ").map(str::trim),
-        Some(rest) if rest.starts_with("static(") || rest.starts_with("self(")
+        Some(rest) if bonsai_common::SELF_CONSTRUCTOR_HEADS.iter().any(|head| rest.starts_with(*head))
     )
 }
 

@@ -258,12 +258,23 @@ Existing token sets:
 - [`ALL_NAME_PUNCTUATION`] — union of the two; used at qualified-text
   comparison sites that need to strip whichever variant the adapter
   emitted.
-- [`IMPLICIT_RECEIVER_PREFIXES`] — `self.`, `this.` for
-  implicit-receiver detection.
+- [`IMPLICIT_RECEIVER_PREFIXES`] — `self.`, `this.` for prefix-match
+  detection of implicit-receiver method calls.
+- [`IMPLICIT_RECEIVER_TOKENS`] — `self`, `this` (the prefix entries
+  minus the trailing `.`) for receiver-equality checks.
 - [`SUPER_RECEIVER_TOKENS`] — `super`, `parent`, `base` for
   super-call dispatch.
 - [`QUALIFIED_NAME_SEPARATORS`] — `::`, `->`, `.`, `:` for tail
   extraction.
+- [`ABSOLUTE_PATH_PREFIXES`] — `crate::`, `self::`, `::`, `\` for
+  fully-qualified call resolution. (`super::` is excluded because
+  it can repeat — handled inline by the resolver.)
+- [`VALUE_TEXT_LEADING_KEYWORDS`] — `return `, `new ` for engine
+  helpers that receive less-processed `value_text` and must peel
+  these defensively. Adapters using
+  `kit::extract_return_value_text` already get clean text.
+- [`SELF_CONSTRUCTOR_HEADS`] — `Self(`, `Self {`, `self(`,
+  `static(` for Rust / Swift / PHP self-typed constructor returns.
 
 Adding a token to one of these constants is the right move when
 another language joins the workspace. Branching on a literal English

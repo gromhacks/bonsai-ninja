@@ -1239,8 +1239,23 @@ fn missing_target_in_reachable_callees(
     let mut visited: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
     let mut frontier: AHashSet<bonsai_common::SymbolId> = AHashSet::new();
 
-    // Seed: direct callees of the entry decl.
-    collect_callee_symbols(&entry.flow_events, &global, entry, import_aliases, &mut frontier);
+    // Seed: direct callees of the entry decl. Export aliases come
+    // from the entry's adapter so JS/TS `module.exports.X` assignments
+    // count as published callees, while languages without an
+    // export-by-assignment convention pass an empty slice.
+    let entry_export_aliases = ws
+        .db()
+        .adapter_for(file)
+        .map(|adapter| adapter.capabilities().module_export_aliases)
+        .unwrap_or(&[]);
+    collect_callee_symbols(
+        &entry.flow_events,
+        &global,
+        entry,
+        import_aliases,
+        entry_export_aliases,
+        &mut frontier,
+    );
 
     for _depth in 0..max_depth {
         if frontier.is_empty() {
@@ -1283,11 +1298,17 @@ fn missing_target_in_reachable_callees(
                     return true;
                 }
             }
+            let callee_export_aliases = ws
+                .db()
+                .adapter_for(callee_file)
+                .map(|adapter| adapter.capabilities().module_export_aliases)
+                .unwrap_or(&[]);
             collect_callee_symbols(
                 &callee_decl.flow_events,
                 &global,
                 callee_decl,
                 &callee_alias,
+                callee_export_aliases,
                 &mut next,
             );
         }
@@ -2942,10 +2963,11 @@ fn receiver_type_matches_any(actual: &[String], expected: &[String]) -> bool {
 }
 
 fn normalize_type_name_for_match(value: &str) -> String {
-    let mut out = value.trim().trim_start_matches(['$', '@', '%']).to_string();
-    while let Some(stripped) = out.strip_prefix('&').or_else(|| out.strip_prefix('*')) {
-        out = stripped.trim().to_string();
-    }
+    let mut out = value
+        .trim()
+        .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS)
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .to_string();
     if let Some(stripped) = out.strip_suffix("()") {
         out = stripped.trim().to_string();
     }
@@ -2953,7 +2975,9 @@ fn normalize_type_name_for_match(value: &str) -> String {
 }
 
 fn normalize_callee_for_matching(callee: &str) -> String {
-    let mut normalized = callee.trim_start_matches(['$', '@', '%']).replace("()", "");
+    let mut normalized = callee
+        .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS)
+        .replace("()", "");
     if let Some(stripped) = normalized.strip_prefix("new ") {
         normalized = stripped.to_string();
     }
@@ -3945,8 +3969,20 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
         // Build the caller's per-file alias map once per file —
         // shared across every decl in that file.
         let alias_map = file_alias_map(ws, file);
+        let export_aliases = ws
+            .db()
+            .adapter_for(file)
+            .map(|adapter| adapter.capabilities().module_export_aliases)
+            .unwrap_or(&[]);
         for decl in global.decls_in(file) {
-            collect_callee_symbols(&decl.flow_events, &global, decl, &alias_map, &mut callees_seen);
+            collect_callee_symbols(
+                &decl.flow_events,
+                &global,
+                decl,
+                &alias_map,
+                export_aliases,
+                &mut callees_seen,
+            );
         }
     }
 
@@ -4332,6 +4368,7 @@ fn collect_callee_symbols(
     global: &bonsai_index::GlobalIndex,
     caller: &bonsai_lang_api::Decl,
     alias_map: &std::collections::HashMap<String, AliasTarget>,
+    export_aliases: &[&'static str],
     out: &mut ahash::AHashSet<bonsai_common::SymbolId>,
 ) {
     let resolve = |name: &str, out: &mut ahash::AHashSet<bonsai_common::SymbolId>| {
@@ -4393,7 +4430,7 @@ fn collect_callee_symbols(
                 if let Some(name) = source_call.as_deref() {
                     resolve(name, out);
                 }
-                if assignment_exports_callable_names(target) {
+                if assignment_exports_callable_names(target, export_aliases) {
                     for name in source_names {
                         resolve(name, out);
                     }
@@ -4404,11 +4441,11 @@ fn collect_callee_symbols(
                 else_events,
                 ..
             } => {
-                collect_callee_symbols(then_events, global, caller, alias_map, out);
-                collect_callee_symbols(else_events, global, caller, alias_map, out);
+                collect_callee_symbols(then_events, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(else_events, global, caller, alias_map, export_aliases, out);
             }
             FlowEvent::Loop { body, .. } => {
-                collect_callee_symbols(body, global, caller, alias_map, out);
+                collect_callee_symbols(body, global, caller, alias_map, export_aliases, out);
             }
             FlowEvent::Try {
                 body,
@@ -4416,27 +4453,34 @@ fn collect_callee_symbols(
                 finally_events,
                 ..
             } => {
-                collect_callee_symbols(body, global, caller, alias_map, out);
-                collect_callee_symbols(catch_events, global, caller, alias_map, out);
-                collect_callee_symbols(finally_events, global, caller, alias_map, out);
+                collect_callee_symbols(body, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(catch_events, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(finally_events, global, caller, alias_map, export_aliases, out);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_callee_symbols(body, global, caller, alias_map, out);
+                collect_callee_symbols(body, global, caller, alias_map, export_aliases, out);
             }
             _ => {}
         }
     }
 }
 
-/// True when `target` names a CommonJS export point (`module.exports`,
-/// `module.exports.foo`, `exports.foo`). Used to identify
-/// assignments that PUBLISH a callable into the workspace's caller
-/// graph — the `source_names` on these counts as "callee referenced
-/// somewhere" so the leaf-detection heuristic doesn't treat the
-/// exported function as an unreferenced entry point.
-fn assignment_exports_callable_names(target: &str) -> bool {
+/// True when `target` names an export point under any of the
+/// receiver-aliases the caller's adapter declared via
+/// `LanguageCapabilities::module_export_aliases`. JS/TS supply
+/// `["exports", "module.exports"]`; languages without an export-by-
+/// assignment convention pass `&[]` and this returns false.
+///
+/// Used to identify assignments that PUBLISH a callable into the
+/// workspace's caller graph — the `source_names` on these counts as
+/// "callee referenced somewhere" so the leaf-detection heuristic
+/// doesn't treat the exported function as an unreferenced entry
+/// point.
+fn assignment_exports_callable_names(target: &str, export_aliases: &[&'static str]) -> bool {
     let target = target.trim();
-    target == "module.exports" || target.starts_with("module.exports.") || target.starts_with("exports.")
+    export_aliases.iter().any(|alias| {
+        target == *alias || target.starts_with(&format!("{alias}."))
+    })
 }
 
 #[cfg(test)]

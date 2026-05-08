@@ -1106,8 +1106,9 @@ fn constructed_return_type_from_text(
     value_text: &str,
 ) -> Option<String> {
     let mut text = value_text.trim();
-    text = text.strip_prefix("return ").unwrap_or(text).trim();
-    text = text.strip_prefix("new ").unwrap_or(text).trim();
+    for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
+        text = text.strip_prefix(*keyword).unwrap_or(text).trim();
+    }
     let candidate = text
         .split(['(', '{', '[', ' ', '\t', '\r', '\n'])
         .next()
@@ -1127,12 +1128,15 @@ fn constructed_return_type_from_text(
 fn static_constructor_return(value_text: &str) -> bool {
     let mut text = value_text.trim();
     text = text.strip_prefix("return ").unwrap_or(text).trim();
-    if text.starts_with("Self(") || text.starts_with("Self {") || text.starts_with("self(") {
+    if bonsai_common::SELF_CONSTRUCTOR_HEADS
+        .iter()
+        .any(|head| text.starts_with(*head))
+    {
         return true;
     }
     matches!(
         text.strip_prefix("new ").map(str::trim),
-        Some(rest) if rest.starts_with("static(") || rest.starts_with("self(")
+        Some(rest) if bonsai_common::SELF_CONSTRUCTOR_HEADS.iter().any(|head| rest.starts_with(*head))
     )
 }
 
