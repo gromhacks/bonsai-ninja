@@ -241,7 +241,7 @@ the engine.
 When in doubt, push the work to the adapter. Engine code should look the
 same regardless of the source language.
 
-### 12a. Cross-language tokens live in `bonsai_common`
+### 12a. Cross-language tokens live in `bonsai_common`, but adapters can narrow
 
 When the engine genuinely needs to recognise a syntactic token that
 appears in *several* languages — variable sigils, pointer/reference
@@ -250,6 +250,27 @@ as a named constant in `bonsai_common::names` and engine code reads
 the constant. Inline `&['$', '@', '%']` / `["self.", "this."]` arrays
 in engine code are forbidden because each new language requires
 touching every site that hardcoded the union.
+
+For tokens that are language-shaped rather than truly cross-language
+(constructor names, super-receiver tokens, implicit-receiver tokens),
+`LanguageCapabilities` exposes the per-adapter slice and an
+`effective_*()` accessor that falls through to the
+`bonsai_common::*_TOKENS` constant when the adapter declares an
+empty slice:
+
+```rust
+LanguageCapabilities::effective_constructor_method_names()
+LanguageCapabilities::effective_super_receiver_tokens()
+LanguageCapabilities::effective_implicit_receiver_tokens()
+```
+
+Engine code that has access to a `LanguageAdapter` (via
+`db.adapter_for(file)`) should prefer the `effective_*()` accessor
+so adapters can narrow their token sets. Code that doesn't have
+adapter context — `is_super_receiver(name)` style helpers — falls
+through to the cross-language constant; the adapter-aware variant
+is `is_super_receiver_with_tokens(name, tokens)` for callers that
+do know which adapter they're in.
 
 Existing token sets:
 
@@ -286,3 +307,103 @@ keyword (`new `, `return `, `def `, `__construct`) inside engine code
 is the wrong move — emit a structural fact from the adapter
 (`CallKind::Construct`, `FlowEvent::Return`) and have the engine
 match on the variant instead.
+
+## 13. Workspace-cached lookups, never query-time graph walks
+
+The query path is a *lookup* against precomputed state, not a fresh
+graph walk. Every workspace cache follows the same shape:
+
+1. **Lazy-or-eager build** — the cache holds an
+   `Option<Arc<...>>` (or per-key map). `Workspace::open_with_options`
+   prewarms it for the canonical "index now, query many times"
+   case; `query_only` callers skip the prewarm and let the first
+   query lazy-build.
+2. **Sidecar persistence** — long-lived caches (`DataFlowCache`,
+   `ValueFlowCache`, `TaintGraphIndex`) save to
+   `<workspace>/.bonsai/<name>.v<version>.bin` via `bincode` with
+   atomic-rename + `MATCHER_POLICY_FINGERPRINT` validation.
+3. **`parking_lot` interior mutability** — `RwLock<Inner>` (for
+   per-key maps) or `RwLock<Option<Arc<T>>>` (for singletons).
+   Probe with a read lock; upgrade to write only on miss; check
+   the slot again under the write lock so two racers don't both
+   commit a value.
+4. **Invalidate on edit** — every cache exposes `clear()` (or
+   `invalidate_file(file)` for per-file granularity), and
+   `Workspace::ingest_dir` calls every one when a file edit lands.
+
+Concrete wiring:
+
+| Cache | File | Build trigger | Invalidation |
+|-------|------|----------------|--------------|
+| `DataFlowCache` | `crates/workspace/src/dataflow.rs` | `prewarm_all` | per-FuncId via dependency files |
+| `ValueFlowCache` | `crates/workspace/src/value_flow.rs` | `prewarm_all_with_caches` | clear |
+| `FlowIdCache` | `crates/workspace/src/flow_ids.rs` | `prewarm_all` | clear |
+| `TaintGraphIndex` | `crates/workspace/src/taint_index.rs` | lazy on first `taint-analysis` | clear |
+| `TransitiveCallersIndex` | `crates/workspace/src/transitive_callers.rs` | lazy | clear |
+| `ClassMemberIndex` | `crates/workspace/src/class_index.rs` | lazy | clear |
+| `EnclosingIndex` | `crates/workspace/src/enclosing_index.rs` | lazy per file | per-file |
+| `DeclNameIndex` | `crates/workspace/src/decl_name_index.rs` | lazy | clear |
+| `cached_resolved_call_graph` | `crates/workspace/src/lib.rs` | lazy | clear |
+| `inter_taint_caches` | `crates/workspace/src/lib.rs` | per-key lazy | clear |
+
+### 13a. Watch out for `parking_lot` read-then-write hazards
+
+`parking_lot::RwLock` is non-reentrant. Same-thread read→write
+deadlocks. The hazard surface is Rust's temporary-lifetime rules:
+
+```rust
+// WRONG — the RwLockReadGuard from `.read()` lives across both
+// branches of the if-let, so the `else` branch's `.write()`
+// deadlocks against this thread's still-held read lock.
+if let Some(hit) = exact_graphs.read().get(&key).cloned() {
+    return hit;
+} else {
+    let mut write = exact_graphs.write();
+    write.insert(key, computed);
+}
+```
+
+The fix: end the read-lock temporary at a `;` before the write
+upgrade.
+
+```rust
+let cached = exact_graphs.read().get(&key).cloned();
+if let Some(hit) = cached {
+    return hit;
+}
+let mut write = exact_graphs.write();
+write.entry(key).or_insert(computed).clone()
+```
+
+The `cache_or_insert_with` helper in
+`crates/taint/src/inter/mod.rs` and the workspace cache helpers
+all follow this shape. New cache code should too.
+
+## 14. Engine entry points are CONTEXTLESS_LOOKUP_JUSTIFICATION marked
+
+Every call to `GlobalIndex::find_by_name` outside the resolver
+itself must carry a `// CONTEXTLESS_LOOKUP_JUSTIFICATION:`
+comment immediately preceding the call, explaining why a
+contextless lookup is acceptable at that site. The conformance
+test `engine_resolves_via_context_not_bare_name`
+(`crates/conformance/tests/architecture_invariants.rs`)
+enforces this.
+
+The justification typically takes one of three shapes:
+
+- **Resolver primitive itself** — `resolve_callable_with_context`
+  and `resolve_class_with_context` are the canonical narrow
+  resolvers; their `find_by_name` calls feed the immediate
+  `visibility_allows` + receiver-type filter.
+- **Display-only legacy paths** — `bonsai_resolve::resolve_callable`
+  is `#[doc(hidden)]` and consumed by browse output / CLI
+  trace-source resolution where cross-context candidate
+  enumeration is acceptable.
+- **Dynamic-dispatch fallback** — `collect_virtual_dispatch_candidates`
+  in the taint engine when the receiver type is statically
+  unknown; the OverApproximate precision tag is attached at the
+  call site so consumers know the answer is wider than a single
+  receiver-narrowed result.
+
+A site that doesn't fit one of these shapes is almost certainly
+a bug — replace it with `resolve_callable_with_context`.

@@ -37,6 +37,15 @@ consumers all drive it through
 `crates/taint/src/inter/mod.rs`), which shares an `InterTaintCaches` across
 calls and runs to fixpoint within `config.budget`.
 
+The workspace exposes the canonical `InterTaintCaches` singleton via
+`Workspace::inter_taint_caches()`. Every production driver
+(`security/analysis`, `value_flow`, `cross_module`, `browse::taint`,
+`browse::native_export`) borrows that one instance so the engine's
+internal caches — resolver answers per `(caller_func, call_span)`,
+file alias maps, function summaries, local bindings — accumulate
+across runs in a single CLI process. `Workspace::ingest_dir` calls
+`InterTaintCaches::clear()` when a file edit lands.
+
 Only the security layer populates `config.source_bearing_functions` —
 the set of helpers whose matched source has been proven to reach a return.
 A function that reads untrusted data and returns only a status doesn't
@@ -208,6 +217,73 @@ also emits the sibling `FlowEvent::Call`, the inter walker borrows the
 call's arg list. That's semantic correlation between two adapter facts,
 not a text fallback — return-summary checks still use positional
 arguments.
+
+## Workspace-level result caches
+
+The engine's per-call results are cached at the workspace layer so a
+second query of the same shape against the same workspace becomes a
+lookup instead of a fresh propagation pass.
+
+- **`DataFlowCache`** (`crates/workspace/src/dataflow.rs`) — per-`FuncId`
+  `KindedTokens` + `EntryTaintGraph`. Built at index time via
+  `prewarm_all`; persisted to `.bonsai/dataflow.v2.bin`. The cache
+  carries each entry's transitive dependency file set, so an edit to
+  any callee invalidates only the affected entries.
+- **`ValueFlowCache`** (`crates/workspace/src/value_flow.rs`) — per-`FuncId`
+  seed-free `ValueFlowGraph`. Built at index time. Each entry also
+  ships a `returning_seed_names: AHashSet<String>` precomputed at
+  graph-build time — the set of param/assign-target names whose
+  forward closure reaches a `Return` node in the same function.
+  Security-analysis answers "does this seed reach a return?" with
+  a single hash-set intersection.
+- **`TaintGraphIndex`** (`crates/workspace/src/taint_index.rs`) —
+  `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
+  out of the per-invocation map in `build_findings_chain_aware` so
+  a second `taint-analysis` against the same workspace + rulepack
+  reuses the cached graph. Persisted to
+  `.bonsai/taint_graph.v1.bin` with version + config-fingerprint
+  guard; mismatched fingerprints invalidate.
+- **`TransitiveCallersIndex`** (`crates/workspace/src/transitive_callers.rs`) —
+  depth-bounded transitive caller closures on the resolved call
+  graph. The closure is rulepack-independent; security-analysis
+  consults it to schedule caller-frontier expansion for
+  source-returning helpers without re-running BFS per invocation.
+- **`Workspace::cached_resolved_call_graph()`** — singleton
+  `Arc<ResolvedCallGraph>` shared across `inspect`, `security`,
+  `dump callgraph`, the `DataFlowCache`, and the `FlowIdCache`. The
+  data caches receive it via `seed_call_graph(arc)` at workspace
+  open so they don't rebuild identical content.
+
+All caches are `parking_lot::RwLock`-backed and safe to share
+across rayon worker threads. `Workspace::ingest_dir` clears or
+invalidates each one when a file edit lands.
+
+## Resolver semantics and precision
+
+`resolve_callable_with_context` (`crates/resolve/src/lib.rs:124`)
+is the single semantic entry point. It applies, in order:
+
+1. `Visibility::Private` filter — keep only same-file decls.
+2. `Visibility::Module` / `Visibility::Crate` — module-path /
+   top-segment match against the caller's `ModulePath`.
+3. Receiver-type narrowing when `ctx.receiver_type` is `Some` —
+   `Decl.parent` must be the receiver type or in its base chain.
+
+The engine's `resolve_call_candidates_with_caller_at` builds the
+`ResolveContext` from each call site's `(caller_func, call_span)`,
+threads it into the resolver, and memoises the answer in
+`InterTaintCaches::resolved_calls_by_site`. When the answer is a
+single candidate, the edge is `EdgeKind::Direct` /
+`Precision::Narrowed`. When it's multiple, the edge is
+`EdgeKind::Virtual` / `Precision::OverApproximate`. There is no
+"used-tail-fallback widens single candidates to OverApproximate"
+exception — `ResolveContext` filtering already narrowed the result.
+
+Dynamic-dispatch fallback for receiver-type-unknown calls runs
+through `collect_virtual_dispatch_candidates`, which is marked
+with a `CONTEXTLESS_LOOKUP_JUSTIFICATION:` comment and immediately
+narrows by class-shape + visibility before any candidate leaves
+the function.
 
 ## Engine layers
 

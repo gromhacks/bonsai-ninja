@@ -157,6 +157,51 @@ fixpoint. Sub-modules:
 `security`. It hides the orchestration: index a directory, run analysis,
 return facts.
 
+The workspace owns a battery of lazy + eager caches that turn every
+query path into a lookup against precomputed state:
+
+- `DataFlowCache` (`dataflow.rs`) — per-`FuncId` `KindedTokens` +
+  `EntryTaintGraph` + transitive-dependency file set. Prewarmed at
+  open; persisted to `.bonsai/dataflow.v2.bin`.
+- `ValueFlowCache` (`value_flow.rs`) — per-`FuncId` seed-free
+  `ValueFlowGraph` plus a `returning_seed_names` set
+  (precomputed at graph-build time so security-analysis answers
+  "does this seed reach a Return?" with a hash-set intersection).
+  Prewarmed at open; persisted to `.bonsai/value_flow.v2.bin`.
+- `FlowIdCache` (`flow_ids.rs`) — per-`FuncId` flow labels for
+  browse-row F-IDs. Prewarmed at open; shares the workspace-cached
+  resolved call graph via `seed_call_graph`.
+- `TaintGraphIndex` (`taint_index.rs`) — workspace-wide
+  `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
+  out of the per-invocation map so a second `taint-analysis` /
+  `source-analysis` run reuses the cached graph. Persisted to
+  `.bonsai/taint_graph.v1.bin` with version + fingerprint guard.
+- `TransitiveCallersIndex` (`transitive_callers.rs`) — depth-bounded
+  caller closures on the resolved call graph. Rulepack-independent,
+  so the closure survives across rulepack swaps.
+- `ClassMemberIndex` (`class_index.rs`) —
+  `(class_sym, method_name) → Vec<FuncId>` and `class_sym →
+  constructor FuncIds`. Replaces per-resolution linear scans of
+  `decls_in(class_file)`.
+- `EnclosingIndex` (`enclosing_index.rs`) — per-file
+  binary-searchable enclosing-decl span array. `O(log decls in
+  file)` "what decl contains this position?" lookups.
+- `DeclNameIndex` (`decl_name_index.rs`) — workspace-wide
+  lowercased decl-name table for `inspect --query <pat>`
+  `Contains` matching.
+- `cached_resolved_call_graph()` — singleton
+  `Arc<ResolvedCallGraph>` shared with `inspect`, `security`,
+  `dump callgraph`, the dataflow + flow-id caches.
+- `inter_taint_caches()` — workspace-wide singleton
+  `bonsai_taint::InterTaintCaches` so the engine's resolver memo,
+  alias maps, function summaries, and local bindings survive
+  across security/value-flow/inspect runs in one CLI process.
+
+Every cache is interior-mutable (`parking_lot::RwLock` /
+`Mutex`) and safe to share across rayon worker threads.
+`Workspace::ingest_dir` clears or invalidates each cache when a
+file edit lands so subsequent queries observe current state.
+
 ## Security
 
 **`crates/security`** is the rulepack matcher and findings pipeline. It
@@ -216,13 +261,30 @@ When the CLI runs `index`:
 4. The DB/index path enriches call receiver types from adapter-emitted
    type aliases and AST-derived parent links.
 5. `resolve` turns refs into resolved symbols.
-6. `callgraph` builds the call graph.
+6. `callgraph` builds the call graph (cached on the workspace via
+   `cached_resolved_call_graph`; one canonical instance is shared
+   with the dataflow + flow-id caches via `seed_call_graph`).
 7. `cfg` builds basic-block CFGs from flow_events.
-8. `taint` runs interprocedural fixpoint over the SCCs.
-9. Dataflow facts are persisted to `.bonsai/dataflow.v2.bin`.
+8. `taint` runs interprocedural fixpoint over the SCCs through the
+   workspace-wide `InterTaintCaches` singleton — resolver memo,
+   alias maps, function summaries, and local bindings persist across
+   per-source runs.
+9. `DataFlowCache::prewarm_all` and `ValueFlowCache::prewarm_all`
+   fan out across rayon, persist to
+   `.bonsai/dataflow.v2.bin` / `.bonsai/value_flow.v2.bin`.
+10. `FlowIdCache::prewarm_all` materialises browse-row flow labels
+    using the same shared call graph.
 
-Subsequent runs read the dataflow sidecar instead of repeating the work,
-with source-content and dependency-hash checks that invalidate stale facts.
-`index --watch` keeps the workspace open, reparses saved file changes in
-place, tombstones deleted files, and rewrites the sidecar after affected
-entries are rebuilt.
+Query commands (`inspect`, `security taint-analysis`, `dump`, `trace`,
+`browse *`) hit the prewarmed caches; cache misses fall through to
+the engine via the workspace singleton.
+
+Subsequent runs read the sidecars instead of repeating the work,
+with source-content and dependency-hash checks that invalidate stale
+facts. `index --watch` keeps the workspace open, reparses saved file
+changes in place, tombstones deleted files, and rewrites the sidecars
+after affected entries are rebuilt. File edits are wired through
+`Workspace::ingest_dir`, which fans an invalidation event out to
+every cache (dataflow, value-flow, flow-ids, inter-taint singleton,
+resolved call graph, taint-graph index, transitive callers, class
+members, enclosing-decl index, decl-name index).

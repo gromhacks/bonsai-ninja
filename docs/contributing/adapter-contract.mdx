@@ -120,6 +120,72 @@ Adapters must not emit both arms under `then_events` and trust the
 repair to fix it. The repair is a last resort, not a primary strategy.
 Same caveat for the missing first-else assignment synthesis.
 
+## Capability declarations are the narrow source of truth
+
+`LanguageCapabilities` (`crates/lang_api/src/capabilities.rs`) is
+where adapters declare per-language behaviour the engine consults:
+
+- **`module_export_aliases`** — receiver names the language treats as
+  module-export aliases (`exports.X` for JS/TS).
+- **`constructor_method_names`** — narrow constructor-name list.
+  Adapters should override the empty default with the narrowest
+  correct set; the engine's `effective_constructor_method_names()`
+  falls through to `bonsai_common::CONSTRUCTOR_METHOD_NAMES` when
+  the slice is empty (the cross-language fallback).
+- **`super_receiver_tokens`** / **`implicit_receiver_tokens`** — same
+  shape: per-adapter override with cross-language fall-through.
+
+When the adapter narrows these, ambiguous engine-side fallbacks stop
+firing for the adapter's language. Until an adapter populates them,
+the cross-language constants are used; this preserves correctness at
+the cost of recall (a Python method named `init` is mis-recognised
+as a constructor by the cross-language fallback because
+`lang_python` hasn't yet narrowed `constructor_method_names`).
+
+The `Decl`-field population matrix in
+[adapter-capabilities.mdx](./adapter-capabilities.mdx) is the
+canonical view of which adapters populate which fields.
+
+## Workspace caches that depend on adapter facts
+
+Adapters should be aware that the workspace caches several derived
+artifacts per file/decl, keyed on `(FileId, version, content_hash)`
+or equivalent:
+
+- **`ClassMemberIndex`** — `(class_sym, method_name) → Vec<FuncId>`
+  and `class_sym → constructor FuncIds`. Built from the global
+  decl index. Requires adapters to populate `Decl::parent` for
+  class methods and `DeclKind::Constructor` for constructors. If
+  the adapter doesn't tag `DeclKind::Constructor`, the workspace's
+  `Workspace::find_constructor_symbol` falls back to the
+  per-language constructor-name allowlist (see capabilities above).
+- **`EnclosingIndex`** — per-file binary-searchable enclosing-decl
+  span array. Requires `Decl::body_span` (or `Decl::span`) to be
+  monotonically increasing in file-position order; decl bodies in
+  one file must not overlap at the same start.
+- **`DeclNameIndex`** — workspace-wide lowercased decl-name table
+  for `inspect --query <pat>`. Requires `Decl::name` to be the
+  identifier the user would type.
+- **`ValueFlowCache::returning_seed_names`** — precomputed per
+  function from the value-flow graph at index time. Requires
+  adapters to emit `FlowEvent::Return { value_name, value_text, .. }`
+  with `value_name` populated whenever the return value is a single
+  identifier — that's how the security analysis answers "does this
+  seed reach a return?" with a hash-set lookup instead of a per-seed
+  forward-closure walk. Returns of compound expressions
+  (`return x + y`) populate `value_text` only; the value-flow graph
+  emits the Return node but no edge from a name origin, so security
+  analysis falls through to the engine fallback for those shapes.
+- **Per-decl matcher facts cache** (`crates/security/src/matcher/mod.rs`)
+  — caches `collect_calls`, `collect_assignment_texts`, decorators,
+  alias chains, runtime types, lifecycle transitions per decl.
+  Requires `Decl::flow_events` and `Decl::type_aliases` to be stable
+  for a given `(FileId, version, content_hash)`.
+
+These caches are correctness-equivalent to the uncached path by
+construction. They impose no new obligations on adapters beyond the
+existing `Decl` / `FlowEvent` contracts.
+
 ## Forbidden patterns
 
 - **No regex against full file contents.** The tree-sitter tree is the

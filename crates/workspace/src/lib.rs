@@ -907,14 +907,39 @@ impl Workspace {
         // `Decl.parent`; span containment is intentionally not used
         // here because overlapping spans are a syntactic accident,
         // not semantic ownership.
+        //
+        // Two-stage lookup so the workspace path returns the most
+        // complete answer:
+        //   1. Explicit `DeclKind::Constructor` decls (every mature
+        //      adapter populates this).
+        //   2. Per-adapter constructor-name fallback against the
+        //      class's methods (catches adapters that name `__init__`
+        //      or `new` but don't tag the kind).
         let constructors = self
             .inner
             .class_members
             .constructors_of(&self.inner.db, class_sym);
-        constructors
-            .first()
-            .copied()
-            .map(|f| SymbolId::new(f.raw()))
+        if let Some(first) = constructors.first().copied() {
+            return Some(SymbolId::new(first.raw()));
+        }
+        let global = self.inner.db.global_index();
+        let class_file = global.declaring_file(class_sym)?;
+        let names = self
+            .inner
+            .db
+            .adapter_for(class_file)
+            .map(|adapter| adapter.capabilities().effective_constructor_method_names())
+            .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
+        for name in names {
+            let candidates = self
+                .inner
+                .class_members
+                .methods_of(&self.inner.db, class_sym, name);
+            if let Some(first) = candidates.first().copied() {
+                return Some(SymbolId::new(first.raw()));
+            }
+        }
+        None
     }
 
     fn decl_for_symbol(&self, symbol: SymbolId) -> Option<Decl> {

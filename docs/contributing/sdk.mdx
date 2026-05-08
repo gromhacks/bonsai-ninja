@@ -213,8 +213,42 @@ For lower-level operations, `project.workspace()` returns a `&Workspace`:
 let ws = project.workspace();
 let global = ws.db().global_index();
 let cfg = ws.db().cfg(func_id);
-let resolved = ws.resolved_call_graph();
+let resolved = ws.cached_resolved_call_graph(); // singleton Arc; share across queries
 ```
+
+The workspace exposes accessors for the precomputed caches that
+power the "index once, query many times" model. Each one is
+`parking_lot::RwLock`-backed and safe to share across rayon worker
+threads:
+
+```rust
+let dataflow = ws.dataflow();             // per-FuncId KindedTokens + EntryTaintGraph
+let value_flow = ws.value_flow();         // per-FuncId seed-free ValueFlowGraph
+let flow_ids = ws.flow_ids();             // per-FuncId browse-row F-IDs
+let inter_caches = ws.inter_taint_caches(); // engine resolver memo + alias maps
+let resolved = ws.cached_resolved_call_graph(); // Arc<ResolvedCallGraph>
+let taint_idx = ws.taint_index();         // (source_func, seed_key) → EntryTaintGraph
+let callers_idx = ws.transitive_callers(); // depth-bounded caller closures
+let class_idx = ws.class_members();       // (class_sym, method) → FuncId
+let enclosing = ws.enclosing_index();     // per-file binary-searchable enclosing-decl
+let decl_names = ws.decl_name_index();    // lowercased decl-name table for inspect query
+```
+
+`WorkspaceOpenOptions` controls which of these get prewarmed:
+
+```rust
+WorkspaceOpenOptions::default() // prewarm dataflow + value_flow + flow_ids
+WorkspaceOpenOptions::query_only() // load sidecars but skip eager prewarm
+WorkspaceOpenOptions::parse_only() // diagnostics-only; no sidecars
+```
+
+The `default` shape is what `bonsai-ninja index` runs. SDK callers
+that intend to issue many queries against the same workspace should
+prefer `default`; one-shot lookups against a previously-indexed
+workspace can use `query_only`.
+
+`Workspace::ingest_dir` clears or invalidates every cache when a
+file edit lands, so subsequent queries observe current state.
 
 ---
 
