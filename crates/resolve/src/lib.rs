@@ -604,6 +604,91 @@ pub fn canonical_dispatch_type_name(name: &str) -> String {
         .to_string()
 }
 
+/// Split a dotted/scoped qualified name on the *first* separator
+/// (`::`, `.`, or `:` in priority order). Returns `(head, tail)`
+/// where `head` is everything before the separator. Used by alias-
+/// target lookups to decide whether `head` names a known import
+/// alias.
+#[must_use]
+pub fn split_qualified_head_tail(name: &str) -> Option<(&str, &str)> {
+    if let Some((head, tail)) = name.split_once("::") {
+        return Some((head, tail));
+    }
+    if let Some((head, tail)) = name.split_once('.') {
+        return Some((head, tail));
+    }
+    if let Some((head, tail)) = name.split_once(':') {
+        return Some((head, tail));
+    }
+    None
+}
+
+/// When `name`'s head segment names a `Namespace` alias, return
+/// `(module, tail)` so the caller can resolve `tail` against the
+/// alias's target module. Returns `None` for any other shape.
+#[must_use]
+pub fn namespace_alias_target_tail<'a>(
+    name: &'a str,
+    alias_targets: &'a AHashMap<String, AliasTarget>,
+) -> Option<(&'a str, &'a str)> {
+    let (head, tail) = split_qualified_head_tail(name)?;
+    match alias_targets.get(head)? {
+        AliasTarget::Namespace { module } if !module.is_empty() && !tail.is_empty() => {
+            Some((module.as_str(), tail))
+        }
+        _ => None,
+    }
+}
+
+/// True when `name` is a `module_or_alias.tail` shape AND the head
+/// is a known import alias. Used at edge-construction time to
+/// detect calls that must be expanded through the file's alias map
+/// before any direct candidate lookup.
+#[must_use]
+pub fn qualified_module_alias_call(
+    name: &str,
+    aliases: &AHashMap<String, String>,
+) -> bool {
+    let Some((head, _)) = split_qualified_head_tail(name) else {
+        return false;
+    };
+    aliases.contains_key(head)
+}
+
+/// Expand a bare exported name into every receiver-qualified form
+/// the caller's adapter declares via
+/// `LanguageCapabilities::module_export_aliases`. JS/TS declare
+/// `["exports", "module.exports"]`, so `foo` becomes
+/// `[foo, exports.foo, module.exports.foo]`. Languages without the
+/// convention pass `&[]` and the result is a single-element vec.
+#[must_use]
+pub fn export_name_variants(
+    alias_tail: &str,
+    caller_export_aliases: &[&'static str],
+) -> Vec<String> {
+    let mut variants = vec![alias_tail.to_string()];
+    for receiver in caller_export_aliases {
+        variants.push(format!("{receiver}.{alias_tail}"));
+    }
+    variants
+}
+
+/// True when `receiver` is a super-call keyword (`super`, `parent`,
+/// `base`) — possibly wrapped in reference sigils or a trailing
+/// `()`. Used by both the callgraph and the taint engine when
+/// resolving `super.method(...)` to the parent class's method
+/// without falling back to bare-name candidate enumeration.
+#[must_use]
+pub fn is_super_receiver(receiver: &str) -> bool {
+    let receiver = receiver
+        .trim()
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
+    bonsai_common::SUPER_RECEIVER_TOKENS
+        .iter()
+        .any(|token| *token == receiver)
+}
+
 /// True when `decl`'s parent in the global index is a class-like
 /// kind (Class / Struct / Trait / Interface). Helper used by both
 /// the callgraph and the taint engine when deciding whether a
