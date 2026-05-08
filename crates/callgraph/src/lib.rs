@@ -986,7 +986,7 @@ fn collect_constructed_return_type_names_from_events(
             } => {
                 if let Some(type_name) = constructed_return_type_from_text(global, ctx, value_text) {
                     push_unique_string(out, type_name);
-                } else if static_constructor_return(value_text) {
+                } else if bonsai_common::value_text_returns_self_constructor(value_text) {
                     if let Some(type_name) = late_static_type {
                         push_unique_string(out, type_name.to_string());
                     } else if let Some(parent) = decl.parent.and_then(|symbol| global.decl_of(symbol)) {
@@ -1045,22 +1045,10 @@ fn constructed_return_type_from_text(
     (!resolve_class(global, candidate, ctx).is_empty()).then(|| short_callee(candidate).to_string())
 }
 
-// Shared with the taint crate via `bonsai_common::value_text_returns_self_constructor`.
-fn static_constructor_return(value_text: &str) -> bool {
-    bonsai_common::value_text_returns_self_constructor(value_text)
-}
 
 use bonsai_resolve::{push_unique_func, prune_receiver_type_names_for_dispatch};
 
-fn is_super_receiver(receiver: &str) -> bool {
-    let receiver = receiver
-        .trim()
-        .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
-    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
-    bonsai_common::SUPER_RECEIVER_TOKENS
-        .iter()
-        .any(|token| *token == receiver)
-}
+use bonsai_resolve::is_super_receiver;
 
 use bonsai_resolve::enclosing_class_for_decl;
 
@@ -1309,12 +1297,7 @@ fn colon_remote_call(name: &str) -> bool {
     name.contains(':') && !name.contains("::")
 }
 
-fn qualified_module_alias_call(name: &str, aliases: &AHashMap<String, String>) -> bool {
-    let Some((head, _)) = name.split_once(&['.', ':'][..]) else {
-        return false;
-    };
-    aliases.contains_key(head)
-}
+use bonsai_resolve::qualified_module_alias_call;
 
 fn qualified_alias_target_tail<'a>(
     name: &'a str,
@@ -1324,18 +1307,7 @@ fn qualified_alias_target_tail<'a>(
     aliases.get(head).map(String::as_str).map(|target| (target, tail))
 }
 
-fn namespace_alias_target_tail<'a>(
-    name: &'a str,
-    alias_targets: &'a AHashMap<String, AliasTarget>,
-) -> Option<(&'a str, &'a str)> {
-    let (head, tail) = name.split_once(&['.', ':'][..])?;
-    match alias_targets.get(head)? {
-        AliasTarget::Namespace { module } if !module.is_empty() && !tail.is_empty() => {
-            Some((module.as_str(), tail))
-        }
-        _ => None,
-    }
-}
+use bonsai_resolve::namespace_alias_target_tail;
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 /// Resolve a `module.fn` call where `module` is a local alias for a
@@ -1398,18 +1370,7 @@ fn collect_workspace_module_targets(
 // suffix-aware semantic.
 use bonsai_resolve::module_target_matches_decl_module_path;
 
-fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]) -> Vec<String> {
-    let mut variants = vec![alias_tail.to_string()];
-    // Each language's `LanguageCapabilities::module_export_aliases`
-    // names the receivers under which an exported symbol is also
-    // syntactically reachable. JS/TS declare `["exports", "module.exports"]`;
-    // languages without this convention declare `&[]`, in which case
-    // we just return the bare alias_tail with no expansion.
-    for receiver in caller_export_aliases {
-        variants.push(format!("{receiver}.{alias_tail}"));
-    }
-    variants
-}
+use bonsai_resolve::export_name_variants;
 
 // Path / module-shape helpers live in `bonsai_resolve` so the
 // callgraph and taint engine share one source of truth.

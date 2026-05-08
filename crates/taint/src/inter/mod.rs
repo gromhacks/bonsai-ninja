@@ -4049,12 +4049,7 @@ fn receiver_projects_implicit_receiver(receiver: &str) -> bool {
             .any(|token| receiver.starts_with(&format!("{token}.")))
 }
 
-fn is_super_receiver(receiver: &str) -> bool {
-    use bonsai_common::{REFERENCE_SIGILS, SUPER_RECEIVER_TOKENS};
-    let receiver = receiver.trim().trim_start_matches(REFERENCE_SIGILS);
-    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
-    SUPER_RECEIVER_TOKENS.iter().any(|token| *token == receiver)
-}
+use bonsai_resolve::is_super_receiver;
 
 fn resolve_super_method_candidates(
     db: &AnalyzerDb,
@@ -4219,7 +4214,7 @@ fn collect_constructed_return_type_names_from_events(
                     constructed_return_type_from_text(value_text, db, caller, alias_targets)
                 {
                     push_unique_string(out, type_name);
-                } else if static_constructor_return(value_text) {
+                } else if bonsai_common::value_text_returns_self_constructor(value_text) {
                     let global = db.global_index();
                     if let Some(type_name) = late_static_type {
                         push_unique_string(out, type_name.to_string());
@@ -4325,11 +4320,6 @@ fn constructed_return_type_from_text(
     } else {
         None
     }
-}
-
-// Shared with the callgraph crate via `bonsai_common::value_text_returns_self_constructor`.
-fn static_constructor_return(value_text: &str) -> bool {
-    bonsai_common::value_text_returns_self_constructor(value_text)
 }
 
 use bonsai_resolve::push_unique_func;
@@ -4826,12 +4816,7 @@ fn is_single_colon_qualified(name: &str) -> bool {
     name.contains(':') && !name.contains("::")
 }
 
-fn qualified_module_alias_call(name: &str, aliases: &AHashMap<String, String>) -> bool {
-    let Some((head, _)) = split_qualified_head_tail(name) else {
-        return false;
-    };
-    aliases.contains_key(head)
-}
+use bonsai_resolve::qualified_module_alias_call;
 
 fn qualified_alias_tail<'a>(name: &'a str, aliases: &AHashMap<String, String>) -> Option<&'a str> {
     let (head, tail) = split_qualified_head_tail(name)?;
@@ -4843,18 +4828,7 @@ fn alias_head_target<'a>(name: &'a str, aliases: &'a AHashMap<String, String>) -
     aliases.get(head).map(String::as_str)
 }
 
-fn namespace_alias_target_tail<'a>(
-    name: &'a str,
-    alias_targets: &'a AHashMap<String, AliasTarget>,
-) -> Option<(&'a str, &'a str)> {
-    let (head, tail) = split_qualified_head_tail(name)?;
-    match alias_targets.get(head)? {
-        AliasTarget::Namespace { module } if !module.is_empty() && !tail.is_empty() => {
-            Some((module.as_str(), tail))
-        }
-        _ => None,
-    }
-}
+use bonsai_resolve::namespace_alias_target_tail;
 
 fn resolve_workspace_module_targets(
     db: &AnalyzerDb,
@@ -4933,30 +4907,13 @@ use bonsai_resolve::module_target_matches_decl_module_path;
 /// (JS/TS: `["exports", "module.exports"]`; languages without this
 /// convention pass `&[]`). Mirrors callgraph's `export_name_variants`
 /// so both passes use one source of truth.
-fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]) -> Vec<String> {
-    let mut variants = vec![alias_tail.to_string()];
-    for receiver in caller_export_aliases {
-        variants.push(format!("{receiver}.{alias_tail}"));
-    }
-    variants
-}
+use bonsai_resolve::export_name_variants;
 
 // Path / module-shape helpers live in `bonsai_resolve` so the
 // callgraph and taint engine share one source of truth.
 use bonsai_resolve::module_target_matches_path;
 
-fn split_qualified_head_tail(name: &str) -> Option<(&str, &str)> {
-    if let Some((head, tail)) = name.split_once("::") {
-        return Some((head, tail));
-    }
-    if let Some((head, tail)) = name.split_once('.') {
-        return Some((head, tail));
-    }
-    if let Some((head, tail)) = name.split_once(':') {
-        return Some((head, tail));
-    }
-    None
-}
+use bonsai_resolve::split_qualified_head_tail;
 
 /// Apply one event's taint transfer to `state`. Mirror of the
 /// per-event transfer function inside [`crate::intra`] — duplicated
