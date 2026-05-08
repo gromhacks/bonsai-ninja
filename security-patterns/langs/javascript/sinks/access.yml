@@ -12,7 +12,7 @@
   match_examples:
   - name: aws get object command
     code: |
-      const _u = require("@aws-sdk/client-s3");
+      const { GetObjectCommand } = require("@aws-sdk/client-s3");
       function demo(input, req, obj) {
         return new GetObjectCommand(input);
       }
@@ -32,7 +32,7 @@
   match_examples:
   - name: aws put object command
     code: |
-      const _u = require("@aws-sdk/client-s3");
+      const { PutObjectCommand } = require("@aws-sdk/client-s3");
       function demo(input, req, obj) {
         return new PutObjectCommand(input);
       }
@@ -52,7 +52,7 @@
   match_examples:
   - name: aws get secret value command
     code: |
-      const _u = require("@aws-sdk/client-secrets-manager");
+      const { GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
       function demo(input, req, obj) {
         return new GetSecretValueCommand(input);
       }
@@ -72,7 +72,7 @@
   match_examples:
   - name: aws invoke command
     code: |
-      const _u = require("@aws-sdk/client-lambda");
+      const { InvokeCommand } = require("@aws-sdk/client-lambda");
       function demo(input, req, obj) {
         return new InvokeCommand(input);
       }

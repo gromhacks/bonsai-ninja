@@ -97,7 +97,7 @@
   match_examples:
   - name: xmldom parser
     code: |
-      const _u = require("xmldom");
+      const { DOMParser } = require("xmldom");
       function demo(input, req, obj) {
         return new DOMParser(input);
       }
@@ -174,8 +174,8 @@
     - XMLParser
   - name: fast xml parser html entities
     code: |
-      const _u = require("fast-xml-parser");
-      function parser(XMLParser) {
+      const { XMLParser } = require("fast-xml-parser");
+      function parser() {
         return new XMLParser({ htmlEntities: true });
       }
     expect_match_text:

@@ -146,8 +146,8 @@
     - XMLParser
   - name: fast xml parser html entities
     code: |
-      const _u = require("fast-xml-parser");
-      function parser(XMLParser: any) {
+      const { XMLParser } = require("fast-xml-parser");
+      function parser() {
         return new XMLParser({ htmlEntities: true });
       }
     expect_match_text:
