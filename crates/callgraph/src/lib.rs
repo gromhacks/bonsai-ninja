@@ -556,7 +556,9 @@ fn resolve_callable_arg(
         return Vec::new();
     }
     for variant in &variants {
-        let trimmed = variant.trim().trim_start_matches('&').trim_start_matches('*');
+        let trimmed = variant
+            .trim()
+            .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
         if trimmed.is_empty() {
             continue;
         }
@@ -718,7 +720,9 @@ fn resolve_callable_symbol(
     let caller_module = caller_decl.module_path.clone();
     let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
     for variant in variants {
-        let trimmed = variant.trim().trim_start_matches('&').trim_start_matches('*');
+        let trimmed = variant
+            .trim()
+            .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
         if trimmed.is_empty() {
             continue;
         }
@@ -1125,19 +1129,9 @@ fn constructed_return_type_from_text(
     (!resolve_class(global, candidate, ctx).is_empty()).then(|| short_callee(candidate).to_string())
 }
 
+// Shared with the taint crate via `bonsai_common::value_text_returns_self_constructor`.
 fn static_constructor_return(value_text: &str) -> bool {
-    let mut text = value_text.trim();
-    text = text.strip_prefix("return ").unwrap_or(text).trim();
-    if bonsai_common::SELF_CONSTRUCTOR_HEADS
-        .iter()
-        .any(|head| text.starts_with(*head))
-    {
-        return true;
-    }
-    matches!(
-        text.strip_prefix("new ").map(str::trim),
-        Some(rest) if bonsai_common::SELF_CONSTRUCTOR_HEADS.iter().any(|head| rest.starts_with(*head))
-    )
+    bonsai_common::value_text_returns_self_constructor(value_text)
 }
 
 fn prune_receiver_type_names_for_dispatch(
@@ -1195,7 +1189,7 @@ fn collect_transitive_base_type_names(
 
 fn canonical_dispatch_type_name(name: &str) -> String {
     short_callee(name)
-        .trim_start_matches(['&', '*', '$', '@', '%'])
+        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
         .trim_end_matches("()")
         .trim()
         .to_string()
@@ -1208,9 +1202,13 @@ fn push_unique_func(out: &mut Vec<FuncId>, func: FuncId) {
 }
 
 fn is_super_receiver(receiver: &str) -> bool {
-    let receiver = receiver.trim().trim_start_matches(['&', '*']);
+    let receiver = receiver
+        .trim()
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
     let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
-    matches!(receiver, "super" | "parent" | "base")
+    bonsai_common::SUPER_RECEIVER_TOKENS
+        .iter()
+        .any(|token| *token == receiver)
 }
 
 fn enclosing_class_for_decl<'a>(global: &'a GlobalIndex, decl: &Decl) -> Option<&'a Decl> {
@@ -1477,7 +1475,7 @@ fn normalize_receiver_alias_text(receiver: &str) -> String {
     while text.starts_with('(') && text.ends_with(')') && text.len() > 1 {
         text = text[1..text.len() - 1].trim();
     }
-    text.trim_start_matches(['&', '*'])
+    text.trim_start_matches(bonsai_common::REFERENCE_SIGILS)
         .replace("->", ".")
         .trim()
         .trim_matches('.')
