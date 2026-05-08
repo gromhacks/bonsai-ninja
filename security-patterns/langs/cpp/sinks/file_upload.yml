@@ -127,7 +127,8 @@
   match_examples:
   - name: generated direct match
     code: |
-      #include <Poco/URI.h>
+      #include <Poco/Net/PartHandler.h>
+      using Poco::Net::PartHandler;
       void example() {
         const char *arg = "tainted";
         auto *x = new PartHandler(arg);

@@ -126,7 +126,7 @@
       name: Context
   match_examples:
   - name: generated direct match
-    code: "#include <Poco/URI.h>\nvoid example() {\n  const char *arg = \"tainted\"\
+    code: "#include <Poco/Net/Context.h>\nusing Poco::Net::Context;\nvoid example() {\n  const char *arg = \"tainted\"\
       ;\n  auto *x = new Context(arg);\n}\n"
   description: "Poco::Net::Context(...) \u2014 flag when constructed with VERIFY_NONE\
     \ verification mode."

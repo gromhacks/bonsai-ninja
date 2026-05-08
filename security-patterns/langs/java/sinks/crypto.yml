@@ -261,14 +261,11 @@
   match_examples:
   - name: generated shape example
     code: |
-      import bcprov.*;
+      import bcprov.DESEngine;
       class App {
         void handle(String input) throws Exception {
           new DESEngine(input);
         }
-      }
-      class DESEngine {
-        DESEngine(Object... args) {}
       }
   description: BouncyCastle DESEngine.
 - id: java.crypto.keyfactory_dh_512

@@ -92,9 +92,8 @@
       name: StringTemplateResolver
   match_examples:
   - name: generated shape example
-    code: "import org.thymeleaf.*;\nclass App {\n  void handle(String input) throws\
-      \ Exception {\n    new StringTemplateResolver(input);\n  }\n}\nclass StringTemplateResolver\
-      \ {\n  StringTemplateResolver(Object... args) {}\n}\n"
+    code: "import org.thymeleaf.StringTemplateResolver;\nclass App {\n  void handle(String input) throws\
+      \ Exception {\n    new StringTemplateResolver(input);\n  }\n}\n"
   description: "new StringTemplateResolver \u2014 evaluates template text directly\
     \ from input."
 - id: java.template.freemarker_template_ctor

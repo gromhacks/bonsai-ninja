@@ -455,8 +455,8 @@
   - name: declared shape
     code: |
       using Npgsql;
-      class NpgsqlParameter { public NpgsqlParameter(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new NpgsqlParameter(input); } }
-    expect_match_text: [NpgsqlParameter]
+      class App { void Test() { dynamic input = "x"; var result = new Npgsql.NpgsqlParameter(input); } }
+    expect_match_text: [Npgsql.NpgsqlParameter]
   description: "new NpgsqlParameter — parameterised Postgres binding."
 
 - id: csharp.sanitizer.convert_toint32
