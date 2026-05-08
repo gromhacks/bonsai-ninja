@@ -686,7 +686,7 @@ where
         receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
         ..Default::default()
     };
-    let mut source_graph_caches = InterTaintCaches::default();
+    let source_graph_caches = ws.inter_taint_caches();
     let mut source_graphs: AHashMap<(FuncId, Vec<String>), EntryTaintGraph> = AHashMap::new();
     let mut candidates = Vec::new();
     let mut seen = AHashSet::new();
@@ -706,7 +706,9 @@ where
         let graph = global
             .decl_of(SymbolId::new(start.raw()))
             .map(|decl| {
-                let value_flow = ws.value_flow().graph_for(start, ws.db());
+                let value_flow = ws
+                    .value_flow()
+                    .graph_for_with_caches(start, ws.db(), source_graph_caches);
                 let seeds = source_seed_set(pack, hit, decl, Some(value_flow.as_ref()));
                 let graph_key = (start, sorted_seed_key(&seeds));
                 source_graphs
@@ -717,7 +719,7 @@ where
                             &seeds,
                             &source_graph_config,
                             ws.db(),
-                            &mut source_graph_caches,
+                            source_graph_caches,
                         )
                     })
                     .clone()
@@ -3138,7 +3140,11 @@ where
         let Some(src_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
             continue;
         };
-        let value_flow = ws.value_flow().graph_for(src_func_id, ws.db());
+        let value_flow = ws.value_flow().graph_for_with_caches(
+            src_func_id,
+            ws.db(),
+            ws.inter_taint_caches(),
+        );
         let seeds = source_seed_set(pack, src, src_decl, Some(value_flow.as_ref()));
         if seeds.is_empty() {
             continue;
@@ -3158,7 +3164,7 @@ where
         let key = (*src_func_id, sorted_seed_key(seeds));
         let returns_source = *source_returning_cache
             .entry(key)
-            .or_insert_with(|| source_seed_reaches_return(*src_func_id, seeds, ws.db(), intra_worklist_cap));
+            .or_insert_with(|| source_seed_reaches_return(*src_func_id, seeds, ws, intra_worklist_cap));
         if returns_source {
             source_returning_indices.insert(idx);
         }
@@ -3204,7 +3210,7 @@ where
         .map(|(idx, (_, func, _))| (*func, idx))
         .collect();
     frontier.sort_by_key(|(func, idx)| (func.raw(), *idx));
-    let cg = ws.resolved_call_graph();
+    let cg = ws.cached_resolved_call_graph();
     for _ in 0..TRANSITIVE_CALLER_DEPTH {
         let mut next_frontier: Vec<(FuncId, usize)> = Vec::new();
         for &(callee_func, orig_idx) in &frontier {
@@ -3260,12 +3266,17 @@ where
         receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
         ..Default::default()
     };
-    let taint_caches = InterTaintCaches::default();
-    // Memoised per-(source-func, seed-set) taint graphs shared across
-    // worker threads. `parking_lot::RwLock` keeps probes lock-free in the
-    // common cache-hit path; `Arc` keeps cache values cheap to clone out
-    // for read-only walks. Cache fills are pure, so the rare double-fill
-    // race produces identical values.
+    let taint_caches = ws.inter_taint_caches();
+    // Workspace-wide source-seeded graph index (Stage 6). Lifted out
+    // of the per-invocation map so a second `taint-analysis` /
+    // `source-analysis` against the same `(workspace, rulepack)`
+    // becomes a lookup. Within ONE invocation the inner per-thread
+    // `parking_lot::RwLock` still owns the dedup so rayon workers
+    // probe locally before falling back to the workspace index.
+    let workspace_taint_index = ws.taint_index();
+    // Per-invocation fallback map for the rare case where the
+    // workspace index is opted out (e.g. clear_for_config invalidated
+    // mid-scan). Same shape as Stage 1's design.
     let exact_graphs: parking_lot::RwLock<
         AHashMap<(FuncId, Vec<String>), std::sync::Arc<EntryTaintGraph>>,
     > = parking_lot::RwLock::new(AHashMap::new());
@@ -3290,30 +3301,40 @@ where
             for &idx in indices {
                 let (src, _, seeds) = &source_work[idx];
                 let graph_key = (src_func_id, sorted_seed_key(seeds));
-                // Drop the read guard with `;` before any potential
-                // write upgrade — Rust extends temporary lifetimes
-                // across an if-let's branches, and `parking_lot`
-                // RwLocks deadlock on same-thread read→write.
+                // Lookup order:
+                //   1. per-invocation `exact_graphs` (lock-free probe path)
+                //   2. workspace-wide taint index (cross-invocation cache)
+                //   3. compute, populate both layers
+                // Read guards are scoped to a single statement to
+                // avoid the parking_lot read→write deadlock that
+                // tripped Stage 1.
                 let cached = exact_graphs.read().get(&graph_key).cloned();
-                let graph: std::sync::Arc<EntryTaintGraph> = match cached {
-                    Some(hit) => hit,
-                    None => {
-                        let computed = std::sync::Arc::new(exact_source_seed_graph(
-                            src_func_id,
-                            seeds,
-                            &config,
-                            ws.db(),
-                            &taint_caches,
-                        ));
-                        // Double-checked: another worker may have inserted
-                        // the same (func, seeds) graph while we were
-                        // computing. Identical inputs → identical graph,
-                        // so picking either copy is safe; keep the first
-                        // insertion to avoid serialising downstream Arc
-                        // pointer comparisons across threads.
-                        let mut write = exact_graphs.write();
-                        write.entry(graph_key).or_insert(computed).clone()
-                    }
+                let graph: std::sync::Arc<EntryTaintGraph> = if let Some(hit) = cached {
+                    hit
+                } else if let Some(hit) =
+                    workspace_taint_index.get(src_func_id, &graph_key.1)
+                {
+                    // Hydrate the local map so subsequent probes hit
+                    // the lock-free path.
+                    let mut write = exact_graphs.write();
+                    write.entry(graph_key.clone()).or_insert(hit).clone()
+                } else {
+                    let computed = std::sync::Arc::new(exact_source_seed_graph(
+                        src_func_id,
+                        seeds,
+                        &config,
+                        ws.db(),
+                        taint_caches,
+                    ));
+                    // Stage 6: publish to the workspace index first
+                    // so concurrent invocations can pick it up.
+                    let canonical = workspace_taint_index.insert_if_absent(
+                        src_func_id,
+                        graph_key.1.clone(),
+                        computed.clone(),
+                    );
+                    let mut write = exact_graphs.write();
+                    write.entry(graph_key).or_insert(canonical).clone()
                 };
                 if graph.tainted_calls.is_empty() {
                     continue;
@@ -3483,11 +3504,33 @@ fn exact_source_seed_graph(
 fn source_seed_reaches_return(
     source_func: FuncId,
     seeds: &TokenSet,
-    db: &bonsai_db::AnalyzerDb,
+    ws: &Workspace,
     intra_worklist_cap: Option<u32>,
 ) -> bool {
     if seeds.is_empty() {
         return false;
+    }
+    // Fast path: when the workspace value-flow cache holds a graph
+    // for `source_func`, that graph already encodes every reachable
+    // propagation from ANY seed in this function — including Return
+    // nodes. A graph lookup replaces the per-source 64-budget
+    // interprocedural pass for the common case where the workspace
+    // index already prewarmed the cache. The engine fallback below
+    // covers cold caches (e.g. SDK callers using `query_only` mode
+    // without a sidecar).
+    if !ws.value_flow().is_empty() {
+        let graph = ws
+            .value_flow()
+            .graph_for_with_caches(source_func, ws.db(), ws.inter_taint_caches());
+        if reaches_return_via_value_flow(&graph, source_func, seeds) {
+            return true;
+        }
+        // Empty graphs and graphs without Return nodes still need
+        // the engine pass because the value-flow seed is the union
+        // of all params/assigns; absence of a Return-reachable
+        // node in the graph is *not* proof of absence — the
+        // value-flow node kind tagging is best-effort. Stay safe
+        // and consult the engine.
     }
     let config = InterTaintConfig {
         sanitizers: TokenSet::default(),
@@ -3496,18 +3539,53 @@ fn source_seed_reaches_return(
         source_bearing_functions: AHashSet::default(),
         ..Default::default()
     };
-    let caches = InterTaintCaches::default();
     let result = bonsai_taint::interprocedural_taint_to_completion_with_caches(
         source_func,
         seeds,
         &config,
-        db,
-        &caches,
+        ws.db(),
+        ws.inter_taint_caches(),
     );
     result
         .tainted_calls
         .iter()
         .any(|call| call.caller == source_func && call.kind == TaintedCallKind::Return)
+}
+
+fn reaches_return_via_value_flow(
+    graph: &ValueFlowGraph,
+    source_func: FuncId,
+    seeds: &TokenSet,
+) -> bool {
+    use bonsai_taint::ValueFlowNodeKind;
+    // Identify candidate seed nodes: a `Param` or `AssignTarget` in
+    // `source_func` whose value text equals a seed name.
+    let seed_nodes: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.func == source_func
+                && matches!(
+                    node.kind,
+                    ValueFlowNodeKind::Param | ValueFlowNodeKind::AssignTarget
+                )
+                && seeds.contains(&node.value_text)
+        })
+        .cloned()
+        .collect();
+    if seed_nodes.is_empty() {
+        return false;
+    }
+    for seed_node in &seed_nodes {
+        let reach = graph.forward_closure(seed_node);
+        if reach
+            .iter()
+            .any(|n| n.func == source_func && matches!(n.kind, ValueFlowNodeKind::Return))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when the source could syntactically reach the sink — same-fn

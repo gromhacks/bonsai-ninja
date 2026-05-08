@@ -228,6 +228,11 @@ fn resolve_workspace_rooted_call(
         return Vec::new();
     }
     let mut out = Vec::new();
+    // CONTEXTLESS_LOOKUP_JUSTIFICATION: workspace-rooted resolver
+    // primitive. Caller already split a `<mod_path>::<fn_name>`
+    // shape; the candidate list is then narrowed by
+    // `module_target_matches_decl_module_path` + `visibility_allows`
+    // so no bare-name fan-out leaves this function.
     for sym in global.find_by_name(fn_name) {
         let Some(decl) = global.decl_of(*sym) else {
             continue;

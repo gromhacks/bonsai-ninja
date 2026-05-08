@@ -981,29 +981,16 @@ fn scan_calls_batch(
     let global = ws.db().global_index();
     let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
-    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
     let decls = global.decls_in(file);
+    let bundle = decl_match_facts_for(ws, file);
     let mut decl_call_keys: AHashSet<(String, u64)> = AHashSet::new();
 
     for decl in decls {
         let fn_name = decl.name.clone();
-        let mut alias_map = import_aliases.clone();
-        extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
-        bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
-        let mut calls = collect_calls(&decl.flow_events);
-        enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
-        let receiver_counts = receiver_method_call_counts(&calls);
-        let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
-        // Per-decl context: decorators on the decl, must-alias map
-        // from assignment chains, runtime-type narrowings from
-        // lexical type tests, and lifecycle states from adapter
-        // resource transitions. Collected once per decl and shared
-        // by every call-site evaluation that follows.
-        let decl_decorators = collect_decl_decorator_names(ws, file, decl.span);
-        let alias_chains = collect_must_alias_pairs(&decl.flow_events);
-        let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
-        let lifecycle_transitions = collect_lifecycle_transitions(&decl.flow_events);
-        for call in calls {
+        let Some(facts) = bundle.by_decl_span.get(&decl.span).cloned() else {
+            continue;
+        };
+        for call in &facts.calls {
             decl_call_keys.insert((call.callee.clone(), call.span.start));
             for prepared in rules {
                 let Some(matched_callee) = callee_or_alias_matches(
@@ -1012,20 +999,20 @@ fn scan_calls_batch(
                     prepared.name,
                     prepared.attribute,
                     prepared.regex.as_ref(),
-                    &alias_map,
+                    &facts.alias_map,
                 ) else {
                     continue;
                 };
                 if !prepared.call_context_allows(
                     &call.callee,
                     &call.receiver_types,
-                    &alias_map,
+                    &facts.alias_map,
                     file_packages.as_ref(),
                 ) {
                     continue;
                 }
-                let receiver_call_count =
-                    receiver_method_key(&call.callee).and_then(|key| receiver_counts.get(&key).copied());
+                let receiver_call_count = receiver_method_key(&call.callee)
+                    .and_then(|key| facts.receiver_counts.get(&key).copied());
                 if !constraints_pass(ConstraintEval {
                     rule_id: &prepared.rule.id,
                     callee: &matched_callee,
@@ -1036,13 +1023,13 @@ fn scan_calls_batch(
                     constraints: &prepared.rule.constraints.0,
                     constraint_regexes: &prepared.constraint_regexes,
                     receiver_call_count,
-                    assignment_texts: Some(&assignment_map),
+                    assignment_texts: Some(&facts.assignment_map),
                     mode,
                     taint_view,
-                    enclosing_decorators: Some(decl_decorators.as_slice()),
-                    alias_chains: Some(&alias_chains),
-                    runtime_types: Some(&runtime_types),
-                    lifecycle_transitions: Some(&lifecycle_transitions),
+                    enclosing_decorators: Some(facts.decl_decorators.as_slice()),
+                    alias_chains: Some(&facts.alias_chains),
+                    runtime_types: Some(&facts.runtime_types),
+                    lifecycle_transitions: Some(&facts.lifecycle_transitions),
                 }) {
                     continue;
                 }
@@ -1155,7 +1142,7 @@ fn scan_missing_batch(
     let global = ws.db().global_index();
     let file_packages = file_package_set(ws, file);
     let import_aliases = file_alias_map(ws, file);
-    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let bundle = decl_match_facts_for(ws, file);
 
     for decl in global.decls_in(file) {
         if !matches!(
@@ -1164,16 +1151,9 @@ fn scan_missing_batch(
         ) {
             continue;
         }
-        let mut alias_map = import_aliases.clone();
-        extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
-        bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
-        let mut calls = collect_calls(&decl.flow_events);
-        enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
-        let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
-        let decl_decorators = collect_decl_decorator_names(ws, file, decl.span);
-        let alias_chains = collect_must_alias_pairs(&decl.flow_events);
-        let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
-        let lifecycle_transitions = collect_lifecycle_transitions(&decl.flow_events);
+        let Some(facts) = bundle.by_decl_span.get(&decl.span).cloned() else {
+            continue;
+        };
         let target_span = if decl.name_span.start != decl.name_span.end {
             decl.name_span
         } else {
@@ -1193,13 +1173,13 @@ fn scan_missing_batch(
                 constraints: &prepared.rule.constraints.0,
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count: None,
-                assignment_texts: Some(&assignment_map),
+                assignment_texts: Some(&facts.assignment_map),
                 mode,
                 taint_view,
-                enclosing_decorators: Some(decl_decorators.as_slice()),
-                alias_chains: Some(&alias_chains),
-                runtime_types: Some(&runtime_types),
-                lifecycle_transitions: Some(&lifecycle_transitions),
+                enclosing_decorators: Some(facts.decl_decorators.as_slice()),
+                alias_chains: Some(&facts.alias_chains),
+                runtime_types: Some(&facts.runtime_types),
+                lifecycle_transitions: Some(&facts.lifecycle_transitions),
             }) {
                 continue;
             }
@@ -1210,24 +1190,23 @@ fn scan_missing_batch(
             // expected target callee? The intra-procedural check
             // Cross-proc BFS only runs when the rule opts in via
             // `match.search_depth > 0`.
-            let target_present =
-                calls.iter().any(|call| {
-                    callee_or_alias_matches(
+            let target_present = facts.calls.iter().any(|call| {
+                callee_or_alias_matches(
+                    &call.callee,
+                    &call.receiver_types,
+                    prepared.name,
+                    prepared.attribute,
+                    prepared.regex.as_ref(),
+                    &facts.alias_map,
+                )
+                .is_some()
+                    && prepared.call_context_allows(
                         &call.callee,
                         &call.receiver_types,
-                        prepared.name,
-                        prepared.attribute,
-                        prepared.regex.as_ref(),
-                        &alias_map,
+                        &facts.alias_map,
+                        file_packages.as_ref(),
                     )
-                    .is_some()
-                        && prepared.call_context_allows(
-                            &call.callee,
-                            &call.receiver_types,
-                            &alias_map,
-                            file_packages.as_ref(),
-                        )
-                }) || missing_target_in_reachable_callees(ws, file, decl, prepared, &import_aliases);
+            }) || missing_target_in_reachable_callees(ws, file, decl, prepared, &import_aliases);
             if target_present {
                 continue;
             }
@@ -1470,6 +1449,91 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
 
 fn package_cache_content_hash(bytes: &[u8]) -> u64 {
     bonsai_hash::fnv1a_bytes64(bytes)
+}
+
+/// Per-decl derived facts shared across the matcher's call-shaped
+/// scan passes (`scan_calls_batch`, `scan_missing_batch`). Every
+/// field is a pure function of the decl's `flow_events` plus
+/// adapter type-aliases plus the decl's source text, so caching by
+/// `(FileId, version, text_hash)` is sound. Without this cache the
+/// 4-pass matcher recomputes the same `collect_calls` /
+/// `collect_assignment_texts` / etc. for every rule pass — for
+/// OWASP ~110k redundant per-decl walks per analysis run.
+struct DeclMatchFacts {
+    alias_map: std::collections::HashMap<String, AliasTarget>,
+    calls: Vec<CallFact>,
+    receiver_counts: AHashMap<String, u32>,
+    assignment_map: AHashMap<String, String>,
+    decl_decorators: Vec<String>,
+    alias_chains: AHashMap<String, String>,
+    runtime_types: Vec<RuntimeTypeNarrowing>,
+    lifecycle_transitions: Vec<(Span, String, String)>,
+}
+
+/// Bundle of per-decl facts for one file, keyed by `decl.span` (the
+/// stable identifier for a decl within a file).
+struct FileDeclFactsBundle {
+    by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>>,
+}
+
+type DeclFactsCache = RefCell<AHashMap<(FileId, u64, u64), Arc<FileDeclFactsBundle>>>;
+
+thread_local! {
+    static DECL_FACTS_CACHE: DeclFactsCache = RefCell::new(AHashMap::new());
+}
+
+/// Return the per-decl matcher fact bundle for `file`. Builds the
+/// bundle on miss; cached on `(file, version, text_hash)` so source
+/// edits naturally invalidate.
+fn decl_match_facts_for(ws: &Workspace, file: FileId) -> Arc<FileDeclFactsBundle> {
+    let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snap| {
+        (snap.version, package_cache_content_hash(snap.text.as_bytes()))
+    });
+    let key = (file, version, text_hash);
+    if let Some(hit) = DECL_FACTS_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let global = ws.db().global_index();
+    let import_aliases = file_alias_map(ws, file);
+    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let mut by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>> = AHashMap::new();
+    for decl in global.decls_in(file) {
+        let mut alias_map = import_aliases.clone();
+        extend_alias_map_with_declared_types(&mut alias_map, &decl.type_aliases);
+        bonsai_lang_api::extend_alias_map_with_flow_events(&mut alias_map, &decl.flow_events);
+        let mut calls = collect_calls(&decl.flow_events);
+        enrich_call_fact_receiver_types(&mut calls, &decl.type_aliases);
+        let receiver_counts = receiver_method_call_counts(&calls);
+        let assignment_map = collect_assignment_texts(&decl.flow_events, source_text.as_deref());
+        let decl_decorators = collect_decl_decorator_names(ws, file, decl.span);
+        let alias_chains = collect_must_alias_pairs(&decl.flow_events);
+        let runtime_types = collect_runtime_type_narrowings(&decl.flow_events);
+        let lifecycle_transitions = collect_lifecycle_transitions(&decl.flow_events);
+        by_decl_span.insert(
+            decl.span,
+            Arc::new(DeclMatchFacts {
+                alias_map,
+                calls,
+                receiver_counts,
+                assignment_map,
+                decl_decorators,
+                alias_chains,
+                runtime_types,
+                lifecycle_transitions,
+            }),
+        );
+    }
+    let bundle = Arc::new(FileDeclFactsBundle { by_decl_span });
+    DECL_FACTS_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        // Cap thread-local growth — large monorepos can otherwise
+        // pin gigabytes of derived per-decl state per worker.
+        if cache.len() >= 1024 {
+            cache.clear();
+        }
+        cache.insert(key, bundle.clone());
+    });
+    bundle
 }
 
 fn insert_import_target_prefixes(out: &mut AHashSet<String>, module: &str) {

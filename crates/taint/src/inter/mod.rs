@@ -236,6 +236,30 @@ pub struct InterTaintCaches {
     pub(crate) resolved_calls_by_site: ResolvedCallSiteCache,
 }
 
+impl InterTaintCaches {
+    /// Drop every cached entry. Workspace-level callers invoke this
+    /// when an edit invalidates the underlying static AST state — for
+    /// example after `Workspace::ingest_dir` re-writes a file's text.
+    pub fn clear(&self) {
+        self.aliases_by_file.write().clear();
+        self.alias_targets_by_func.write().clear();
+        self.local_bindings_by_func.write().clear();
+        self.summaries_by_func.write().clear();
+        self.resolved_calls_by_site.lock().clear();
+    }
+
+    /// True iff every cache map is empty. Used by tests to verify
+    /// invalidation hooks fire.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.aliases_by_file.read().is_empty()
+            && self.alias_targets_by_func.read().is_empty()
+            && self.local_bindings_by_func.read().is_empty()
+            && self.summaries_by_func.read().is_empty()
+            && self.resolved_calls_by_site.lock().is_empty()
+    }
+}
+
 /// Memo store keyed on `(caller_func, call_span)` → resolved
 /// callees. `parking_lot::Mutex` (not `RefCell`) so the cache is
 /// `Sync` — required for parallel per-source taint runs.

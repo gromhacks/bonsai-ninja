@@ -246,7 +246,11 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
         file_suffix: "App.sol",
         module: "./Pipeline.sol",
         alias: Some("FlowPipeline"),
-        original_name: None,
+        // `import {Pipeline as FlowPipeline} from "./Pipeline.sol"`
+        // is a renamed import — the unaliased symbol IS "Pipeline",
+        // matching the TypeScript `{ persist as persistEnvelope }`
+        // shape directly below.
+        original_name: Some("Pipeline"),
         is_wildcard: false,
     },
     ImportContractCase {
