@@ -64,14 +64,23 @@ impl Matcher {
 /// matcher, sorted callables-first (functions / methods /
 /// constructors before classes / structs before everything else).
 /// This is what `inspect` iterates to build its decl hits.
+///
+/// Iterates the workspace-cached `decl_name_index` so `Contains`
+/// matchers consult precomputed lowercased names; regex matchers
+/// consult the original names. Replaces a per-query
+/// `for file in global.all_files() for decl in decls_in(file)`
+/// double-loop.
 pub fn matching_decls(ws: &Workspace, matcher: &Matcher) -> Vec<Decl> {
-    let global = ws.db().global_index();
+    let entries = ws.decl_name_index().entries(ws.db());
     let mut hits: Vec<Decl> = Vec::new();
-    for file in global.all_files() {
-        for d in global.decls_in(file) {
-            if matcher.is_match(&d.name) {
-                hits.push(d.clone());
-            }
+    for entry in entries.iter() {
+        let matches = match matcher {
+            Matcher::Contains(needle) => entry.lowercased_name.contains(needle),
+            Matcher::Regex(re) => re.is_match(&entry.decl.name),
+            Matcher::MatchAll => true,
+        };
+        if matches {
+            hits.push(entry.decl.clone());
         }
     }
     hits.sort_by_key(|d| match d.kind {

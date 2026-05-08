@@ -269,6 +269,13 @@ fn render_runtime_only() -> String {
             pattern_matching,
             receiver_types,
             module_export_aliases,
+            // The capability struct grew per-adapter slices for
+            // constructor names and receiver tokens; the markdown
+            // baseline doesn't render them yet — destructure-and-
+            // ignore to keep the table contract stable.
+            constructor_method_names: _,
+            super_receiver_tokens: _,
+            implicit_receiver_tokens: _,
         } = caps;
         let aliases = if module_export_aliases.is_empty() {
             "—".to_string()

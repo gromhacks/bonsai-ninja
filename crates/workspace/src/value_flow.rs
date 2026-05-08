@@ -44,6 +44,12 @@ pub struct ValueFlowCache {
 #[derive(Default)]
 struct Inner {
     graphs: AHashMap<FuncId, Arc<ValueFlowGraph>>,
+    /// Per-FuncId set of seed names whose forward-closure in the
+    /// per-entry value-flow graph reaches a `Return` node in the
+    /// same function. Precomputed alongside the graph so
+    /// `source_seed_reaches_return` becomes a hash-set lookup
+    /// instead of a per-seed forward-closure walk.
+    returning_seeds: AHashMap<FuncId, Arc<AHashSet<String>>>,
 }
 
 impl ValueFlowCache {
@@ -78,8 +84,37 @@ impl ValueFlowCache {
         }
         let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), caches);
         let arc = Arc::new(graph);
-        self.inner.write().graphs.insert(func, arc.clone());
+        let returning = Arc::new(compute_returning_seed_names(&arc, func));
+        let mut inner = self.inner.write();
+        inner.graphs.insert(func, arc.clone());
+        inner.returning_seeds.insert(func, returning);
         arc
+    }
+
+    /// Set of seed names whose forward closure in `func`'s
+    /// value-flow graph reaches a `Return` node in `func`.
+    /// Materialised at graph-build time; used by
+    /// `source_seed_reaches_return` to answer "does any of these
+    /// seeds reach a return?" with a single set intersection
+    /// instead of a per-seed forward-closure walk.
+    pub fn returning_seed_names(
+        &self,
+        func: FuncId,
+        db: &AnalyzerDb,
+        caches: &InterTaintCaches,
+    ) -> Arc<AHashSet<String>> {
+        if let Some(hit) = self.inner.read().returning_seeds.get(&func).cloned() {
+            return hit;
+        }
+        // Force the graph to build, which populates `returning_seeds`
+        // as a side effect — simplest way to keep both stores in sync.
+        let _ = self.graph_for_with_caches(func, db, caches);
+        self.inner
+            .read()
+            .returning_seeds
+            .get(&func)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(AHashSet::default()))
     }
 
     /// Eagerly compute graphs for every callable function. Reuses
@@ -116,17 +151,23 @@ impl ValueFlowCache {
         if todo.is_empty() {
             return;
         }
-        let computed: Vec<(FuncId, Arc<ValueFlowGraph>)> = todo
+        let computed: Vec<(FuncId, Arc<ValueFlowGraph>, Arc<AHashSet<String>>)> = todo
             .par_iter()
             .map(|&f| {
-                let graph =
-                    value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), caches);
-                (f, Arc::new(graph))
+                let graph = Arc::new(value_flow_for_function_with_caches(
+                    f,
+                    db,
+                    &InterTaintConfig::default(),
+                    caches,
+                ));
+                let returning = Arc::new(compute_returning_seed_names(&graph, f));
+                (f, graph, returning)
             })
             .collect();
         let mut inner = self.inner.write();
-        for (f, graph) in computed {
+        for (f, graph, returning) in computed {
             inner.graphs.insert(f, graph);
+            inner.returning_seeds.insert(f, returning);
         }
     }
 
@@ -214,7 +255,9 @@ impl ValueFlowCache {
     }
 
     pub fn clear(&self) {
-        self.inner.write().graphs.clear();
+        let mut inner = self.inner.write();
+        inner.graphs.clear();
+        inner.returning_seeds.clear();
     }
 
     /// Conventional sidecar path under `workspace_root/.bonsai/`.
@@ -323,6 +366,46 @@ impl ValueFlowCache {
             entries,
         }
     }
+}
+
+/// Names of `Param` / `AssignTarget` nodes in `func`'s value-flow
+/// graph whose forward closure reaches a `Return` node in `func`.
+/// Built once at graph-build time so per-source "does this seed
+/// reach a return?" queries collapse to a hash-set membership
+/// check.
+fn compute_returning_seed_names(graph: &ValueFlowGraph, func: FuncId) -> AHashSet<String> {
+    let mut out: AHashSet<String> = AHashSet::default();
+    let mut return_nodes: Vec<&ValueFlowNode> = Vec::new();
+    let mut origin_nodes: Vec<&ValueFlowNode> = Vec::new();
+    for node in &graph.nodes {
+        if node.func != func {
+            continue;
+        }
+        match node.kind {
+            ValueFlowNodeKind::Return => return_nodes.push(node),
+            ValueFlowNodeKind::Param | ValueFlowNodeKind::AssignTarget => {
+                origin_nodes.push(node);
+            }
+            _ => {}
+        }
+    }
+    if return_nodes.is_empty() || origin_nodes.is_empty() {
+        return out;
+    }
+    // Forward-walk every origin once and record which ones reach a
+    // Return. This is O(N²) per function but `N` is small (params +
+    // local assign-targets); the alternative would be to backward-
+    // walk from Returns, but the graph already provides forward
+    // edges and we only care about origin names — not the full path.
+    for origin in origin_nodes {
+        let reach = graph.forward_closure(origin);
+        if reach.iter().any(|n| {
+            n.func == func && matches!(n.kind, ValueFlowNodeKind::Return)
+        }) {
+            out.insert(origin.value_text.clone());
+        }
+    }
+    out
 }
 
 fn unique_value_flow_tmp_path(path: &Path) -> PathBuf {

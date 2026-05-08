@@ -37,11 +37,64 @@ pub struct LanguageCapabilities {
     /// Empty by default; an adapter that wants to participate in
     /// cross-module export resolution declares the full set.
     pub module_export_aliases: &'static [&'static str],
+    /// Method names this language uses for constructors (e.g.
+    /// Python's `__init__`, Rust's `new`, Java/C++/C# class-named
+    /// constructors). When empty, callers fall back to the
+    /// cross-language `bonsai_common::CONSTRUCTOR_METHOD_NAMES`
+    /// allowlist for backwards-compatibility — adapters should
+    /// override with the narrowest correct set so cross-language
+    /// fallbacks aren't relied on once the adapter is mature.
+    pub constructor_method_names: &'static [&'static str],
+    /// Receiver tokens that resolve to "the supertype's method"
+    /// (e.g. JS `super`, PHP `parent`, Python `super()` is a call
+    /// not a token). Empty defaults fall through to the cross-
+    /// language `bonsai_common::SUPER_RECEIVER_TOKENS`.
+    pub super_receiver_tokens: &'static [&'static str],
+    /// Receiver tokens that bind to the enclosing instance/class
+    /// (e.g. `self`, `this`, `me`). Empty defaults fall through to
+    /// the cross-language `bonsai_common::IMPLICIT_RECEIVER_TOKENS`.
+    pub implicit_receiver_tokens: &'static [&'static str],
 }
 
 impl LanguageCapabilities {
     /// Useful baseline: no claims at all. Adapters can override individual
     /// fields by constructing from this and mutating.
+    /// Effective constructor method names: the adapter's slice when
+    /// non-empty, otherwise the cross-language fallback in
+    /// `bonsai_common::CONSTRUCTOR_METHOD_NAMES`. Adapters should
+    /// override `constructor_method_names` with the narrowest
+    /// correct set so the fallback only fires for not-yet-migrated
+    /// adapters.
+    #[must_use]
+    pub fn effective_constructor_method_names(&self) -> &'static [&'static str] {
+        if self.constructor_method_names.is_empty() {
+            bonsai_common::CONSTRUCTOR_METHOD_NAMES
+        } else {
+            self.constructor_method_names
+        }
+    }
+
+    /// Effective super-receiver tokens with the same fall-through
+    /// shape as `effective_constructor_method_names`.
+    #[must_use]
+    pub fn effective_super_receiver_tokens(&self) -> &'static [&'static str] {
+        if self.super_receiver_tokens.is_empty() {
+            bonsai_common::SUPER_RECEIVER_TOKENS
+        } else {
+            self.super_receiver_tokens
+        }
+    }
+
+    /// Effective implicit-receiver tokens.
+    #[must_use]
+    pub fn effective_implicit_receiver_tokens(&self) -> &'static [&'static str] {
+        if self.implicit_receiver_tokens.is_empty() {
+            bonsai_common::IMPLICIT_RECEIVER_TOKENS
+        } else {
+            self.implicit_receiver_tokens
+        }
+    }
+
     #[must_use]
     pub const fn unsupported() -> Self {
         Self {
@@ -57,6 +110,9 @@ impl LanguageCapabilities {
             pattern_matching: CapabilityLevel::Unsupported,
             receiver_types: CapabilityLevel::Unsupported,
             module_export_aliases: &[],
+            constructor_method_names: &[],
+            super_receiver_tokens: &[],
+            implicit_receiver_tokens: &[],
         }
     }
 
@@ -84,6 +140,9 @@ impl LanguageCapabilities {
             pattern_matching: CapabilityLevel::Partial,
             receiver_types: CapabilityLevel::Unsupported,
             module_export_aliases: &[],
+            constructor_method_names: &[],
+            super_receiver_tokens: &[],
+            implicit_receiver_tokens: &[],
         }
     }
 }

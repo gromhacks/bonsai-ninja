@@ -683,15 +683,27 @@ pub fn export_name_variants(
 /// `()`. Used by both the callgraph and the taint engine when
 /// resolving `super.method(...)` to the parent class's method
 /// without falling back to bare-name candidate enumeration.
+///
+/// Defaults to the cross-language `bonsai_common::SUPER_RECEIVER_TOKENS`.
+/// Callers that have adapter context should prefer
+/// [`is_super_receiver_with_tokens`] so the adapter's narrowed set
+/// (declared via `LanguageCapabilities::super_receiver_tokens`)
+/// dominates.
 #[must_use]
 pub fn is_super_receiver(receiver: &str) -> bool {
+    is_super_receiver_with_tokens(receiver, bonsai_common::SUPER_RECEIVER_TOKENS)
+}
+
+/// Adapter-aware variant of [`is_super_receiver`]: uses the supplied
+/// token slice (typically
+/// `LanguageCapabilities::effective_super_receiver_tokens()`).
+#[must_use]
+pub fn is_super_receiver_with_tokens(receiver: &str, tokens: &[&str]) -> bool {
     let receiver = receiver
         .trim()
         .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
     let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
-    bonsai_common::SUPER_RECEIVER_TOKENS
-        .iter()
-        .any(|token| *token == receiver)
+    tokens.iter().any(|token| *token == receiver)
 }
 
 /// True when `decl`'s parent in the global index is a class-like
@@ -1121,6 +1133,7 @@ fn dedup_func_ids(out: &mut Vec<bonsai_common::FuncId>) {
 /// (browse output, tracer printing) where cross-context candidate
 /// expansion is acceptable. See
 /// `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
+#[doc(hidden)]
 #[must_use]
 pub fn resolve_callable(global: &GlobalIndex, name: &str) -> Vec<bonsai_common::FuncId> {
     use bonsai_lang_api::DeclKind;

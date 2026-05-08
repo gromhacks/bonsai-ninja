@@ -10,10 +10,14 @@
 // consumers (sdk, integration tests) via path-style access; keep
 // `pub mod`. `cross_module` is internal — consumers go through the
 // `Workspace` facade.
+pub mod class_index;
 pub(crate) mod cross_module;
 pub mod dataflow;
+pub mod decl_name_index;
+pub mod enclosing_index;
 pub mod flow_ids;
 pub mod taint_index;
+pub mod transitive_callers;
 pub mod value_flow;
 
 use bonsai_abstract_interp::TraceLimits;
@@ -28,7 +32,11 @@ use bonsai_vfs::Vfs;
 use cross_module::CrossModuleTracer;
 use dataflow::DataFlowCache;
 use flow_ids::FlowIdCache;
+use class_index::ClassMemberIndex;
+use decl_name_index::DeclNameIndex;
+use enclosing_index::EnclosingIndex;
 use taint_index::TaintGraphIndex;
+use transitive_callers::TransitiveCallersIndex;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
@@ -103,6 +111,24 @@ struct Inner {
     /// (within one CLI process or one SDK session) is a lookup
     /// instead of a full per-source interprocedural pass.
     taint_index: TaintGraphIndex,
+    /// Memoised transitive caller closures on the resolved call
+    /// graph. The closure is rulepack-independent — selection by
+    /// `source_returning_indices` is a post-hoc filter — so a
+    /// second `taint-analysis` against a different rulepack still
+    /// hits the cache. Cleared on file edit.
+    transitive_callers: TransitiveCallersIndex,
+    /// `(class_sym, method_name) → Vec<FuncId>` and
+    /// `class_sym → constructor FuncIds`. Replaces per-resolution
+    /// linear scans of `decls_in(class_file)` in resolve.rs and
+    /// cross_module.rs.
+    class_members: ClassMemberIndex,
+    /// Per-file binary-searchable enclosing-decl index. Replaces
+    /// per-call linear scans of `decls_in(file)` in inspect/browse
+    /// "what decl contains this position?" queries.
+    enclosing: EnclosingIndex,
+    /// Lowercased decl-name table for `inspect --query <pat>`
+    /// `Contains` matches. Built lazily on first inspect query.
+    decl_names: DeclNameIndex,
     reparse_counter: Mutex<u64>,
     root_label: Mutex<String>,
 }
@@ -248,6 +274,10 @@ impl Workspace {
                 inter_taint: InterTaintCaches::default(),
                 resolved_call_graph: parking_lot::RwLock::new(None),
                 taint_index: TaintGraphIndex::new(),
+                transitive_callers: TransitiveCallersIndex::new(),
+                class_members: ClassMemberIndex::new(),
+                enclosing: EnclosingIndex::new(),
+                decl_names: DeclNameIndex::new(),
                 reparse_counter: Mutex::new(0),
                 root_label: Mutex::new(String::new()),
             }),
@@ -297,6 +327,38 @@ impl Workspace {
     /// re-running the engine. Cleared on file edits.
     pub fn taint_index(&self) -> &TaintGraphIndex {
         &self.inner.taint_index
+    }
+
+    /// Workspace-cached transitive caller closures on the resolved
+    /// call graph. `taint-analysis` consults this when scheduling
+    /// caller-frontier expansion for source-returning helpers; the
+    /// closure is rulepack-independent so the cache survives
+    /// rulepack swaps. Builds on first request, cleared on edit.
+    pub fn transitive_callers(&self) -> &TransitiveCallersIndex {
+        &self.inner.transitive_callers
+    }
+
+    /// Workspace-level class/method/constructor index. Replaces
+    /// per-resolution linear scans of `decls_in(class_file)` with
+    /// `(class_sym, method_name) → FuncId` lookups. Built lazily.
+    pub fn class_members(&self) -> &ClassMemberIndex {
+        &self.inner.class_members
+    }
+
+    /// Workspace-level enclosing-decl span index. Replaces
+    /// per-call `decls_in(file)` linear scans in inspect/browse
+    /// "what decl contains this position?" queries with binary
+    /// search.
+    pub fn enclosing_index(&self) -> &EnclosingIndex {
+        &self.inner.enclosing
+    }
+
+    /// Workspace-level decl-name index. `inspect`'s query layer
+    /// iterates this cache instead of re-walking `global.decls_in(file)`
+    /// per query. `Contains` matches use the precomputed lowercased
+    /// names; regex matches use the original names.
+    pub fn decl_name_index(&self) -> &DeclNameIndex {
+        &self.inner.decl_names
     }
 
     pub fn db(&self) -> &AnalyzerDb {
@@ -442,6 +504,12 @@ impl Workspace {
         }
         if options.prewarm_dataflow && !skip_prewarm {
             let sidecar = DataFlowCache::sidecar_path(root);
+            // Build the workspace-cached call graph once, then seed
+            // the dataflow + flow-ids caches with it so they don't
+            // each rebuild identical content.
+            let cg = ws.cached_resolved_call_graph();
+            ws.inner.dataflow.seed_call_graph(cg.clone());
+            ws.inner.flow_ids.seed_call_graph(cg);
             ws.inner.dataflow.prewarm_all(ws.db());
             // Write back so next open gets an even hotter cache.
             if options.save_dataflow_sidecar {
@@ -546,6 +614,18 @@ impl Workspace {
                 // Drop every source-seeded entry-taint graph for the
                 // same reason — call edges may have shifted.
                 self.inner.taint_index.clear();
+                // Transitive caller sets are derived from the call
+                // graph; same invalidation rule.
+                self.inner.transitive_callers.clear();
+                // Class member index keys on global decl state.
+                self.inner.class_members.clear();
+                // Per-file enclosing-decl index keys on the file's
+                // decls — drop just this file's entry to keep
+                // unrelated files warm.
+                self.inner.enclosing.invalidate_file(prev);
+                // Decl-name index is workspace-wide; coarsely drop
+                // it on edit and let the next query rebuild.
+                self.inner.decl_names.clear();
             }
             *self.inner.reparse_counter.lock() += 1;
             ingested.push(id);
@@ -821,18 +901,20 @@ impl Workspace {
     }
 
     fn find_constructor_symbol(&self, class_sym: SymbolId) -> Option<SymbolId> {
-        let global = self.inner.db.global_index();
-        let class_file = global.declaring_file(class_sym)?;
-        // Constructors must be owned by the class declaration through
-        // `Decl.parent`. Span containment is intentionally not used here:
-        // overlapping spans are a syntactic accident, not semantic
-        // ownership.
-        for d in global.decls_in(class_file) {
-            if matches!(d.kind, DeclKind::Constructor) && d.parent == Some(class_sym) {
-                return Some(d.symbol);
-            }
-        }
-        None
+        // Workspace class-member index lookup — O(1) instead of the
+        // prior linear scan of `decls_in(class_file)`. Constructors
+        // must be owned by the class declaration through
+        // `Decl.parent`; span containment is intentionally not used
+        // here because overlapping spans are a syntactic accident,
+        // not semantic ownership.
+        let constructors = self
+            .inner
+            .class_members
+            .constructors_of(&self.inner.db, class_sym);
+        constructors
+            .first()
+            .copied()
+            .map(|f| SymbolId::new(f.raw()))
     }
 
     fn decl_for_symbol(&self, symbol: SymbolId) -> Option<Decl> {
