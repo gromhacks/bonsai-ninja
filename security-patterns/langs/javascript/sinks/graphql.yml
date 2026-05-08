@@ -158,7 +158,7 @@
   match_examples:
   - name: apollo server resolver dispatch
     code: |
-      const _u = require("@apollo/server");
+      const { ApolloServer } = require("@apollo/server");
       function boot(typeDefs, resolvers) {
         return new ApolloServer({ typeDefs, resolvers });
       }
