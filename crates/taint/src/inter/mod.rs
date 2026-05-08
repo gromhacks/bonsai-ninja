@@ -1966,8 +1966,9 @@ fn configured_receiver_state_propagation_matches(
 }
 
 fn type_name_matches_expected(actual: &str, expected: &str) -> bool {
-    let actual = normalise_qualified_text(actual.trim().trim_start_matches(['&', '*', '$', '@', '%']));
-    let expected = normalise_qualified_text(expected.trim().trim_start_matches(['&', '*', '$', '@', '%']));
+    use bonsai_common::ALL_NAME_PUNCTUATION;
+    let actual = normalise_qualified_text(actual.trim().trim_start_matches(ALL_NAME_PUNCTUATION));
+    let expected = normalise_qualified_text(expected.trim().trim_start_matches(ALL_NAME_PUNCTUATION));
     if actual.is_empty() || expected.is_empty() {
         return false;
     }
@@ -4031,16 +4032,18 @@ fn collect_transitive_base_type_names(
 }
 
 fn canonical_dispatch_type_name(name: &str) -> String {
+    use bonsai_common::ALL_NAME_PUNCTUATION;
     short_tail(name)
-        .trim_start_matches(['&', '*', '$', '@', '%'])
+        .trim_start_matches(ALL_NAME_PUNCTUATION)
         .trim_end_matches("()")
         .trim()
         .to_string()
 }
 
 fn type_alias_for_receiver(decl: &Decl, receiver: &str) -> Option<String> {
+    use bonsai_common::REFERENCE_SIGILS;
     let normalized = normalise_qualified_text(receiver)
-        .trim_start_matches(['&', '*'])
+        .trim_start_matches(REFERENCE_SIGILS)
         .trim()
         .trim_matches('.')
         .to_string();
@@ -4063,8 +4066,9 @@ fn type_alias_targets_for_receiver(
     alias_targets: &AHashMap<String, AliasTarget>,
     receiver: &str,
 ) -> Vec<String> {
+    use bonsai_common::REFERENCE_SIGILS;
     let normalized = normalise_qualified_text(receiver)
-        .trim_start_matches(['&', '*'])
+        .trim_start_matches(REFERENCE_SIGILS)
         .trim()
         .trim_matches('.')
         .to_string();
@@ -4087,24 +4091,21 @@ fn type_alias_targets_for_receiver(
 }
 
 fn receiver_projects_implicit_receiver(receiver: &str) -> bool {
+    use bonsai_common::{IMPLICIT_RECEIVER_PREFIXES, SUPER_RECEIVER_TOKENS};
     let receiver = normalise_qualified_text(receiver);
-    // Implicit-receiver prefixes recognized by the engine: `self`
-    // (Python/Ruby/Rust), `this` (Java/Kotlin/JS/TS/C#/Dart/Swift),
-    // `super` (most OO langs), `parent` (kit alias), and `base`
-    // (C# / VB.NET — keyword for the parent class).
-    ["self.", "this.", "super.", "parent.", "base."]
+    IMPLICIT_RECEIVER_PREFIXES
         .iter()
-        .any(|prefix| receiver.starts_with(prefix))
+        .any(|prefix| receiver.starts_with(*prefix))
+        || SUPER_RECEIVER_TOKENS
+            .iter()
+            .any(|token| receiver.starts_with(&format!("{token}.")))
 }
 
 fn is_super_receiver(receiver: &str) -> bool {
-    // C# uses `base` instead of `super`; both forms route through
-    // `resolve_super_method_candidates` so the parent class's
-    // method resolves precisely instead of falling back to
-    // name-only candidate enumeration.
-    let receiver = receiver.trim().trim_start_matches(['&', '*']);
+    use bonsai_common::{REFERENCE_SIGILS, SUPER_RECEIVER_TOKENS};
+    let receiver = receiver.trim().trim_start_matches(REFERENCE_SIGILS);
     let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
-    matches!(receiver, "super" | "parent" | "base")
+    SUPER_RECEIVER_TOKENS.iter().any(|token| *token == receiver)
 }
 
 fn resolve_super_method_candidates(
@@ -5630,9 +5631,9 @@ fn rhs_has_descendant_shape(source_names: &[String]) -> bool {
 }
 
 pub(super) fn normalise_target_text(target: &str) -> String {
+    use bonsai_common::REFERENCE_SIGILS;
     normalise_qualified_text(target)
-        .trim_start_matches('*')
-        .trim_start_matches('&')
+        .trim_start_matches(REFERENCE_SIGILS)
         .trim()
         .to_string()
 }
