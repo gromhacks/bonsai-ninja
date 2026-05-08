@@ -1523,15 +1523,44 @@ fn collect_receiver_field_writes_from_events(
 /// `this.x`, `self.x`, `$this->x` (PHP), `@x` (Ruby), nested
 /// member access. Used to detect class-field taint when one method
 /// writes a field from a parameter.
+///
+/// Implicit-receiver prefixes (`this.`, `self.`, `this->`) are
+/// derived from `IMPLICIT_RECEIVER_PREFIXES` / `IMPLICIT_RECEIVER_TOKENS`.
+/// PHP's `$this->` is the same `this->` shape with the `$` sigil
+/// the PHP adapter keeps on receiver text. Ruby's `@field` instance
+/// variable is recognised on its own; bare PHP `$x` / Perl `%x`
+/// scalars are *not* treated as receiver fields. Nested member
+/// access falls through to the generic `.` / `->` separator check.
 fn receiver_field_target(target: &str) -> bool {
     let target = target.trim();
-    target.starts_with("this.")
-        || target.starts_with("self.")
-        || target.starts_with("$this->")
-        || target.starts_with('@')
-        || target.starts_with("this->")
-        || target.contains('.')
-        || target.contains("->")
+    if bonsai_common::IMPLICIT_RECEIVER_PREFIXES
+        .iter()
+        .any(|prefix| target.starts_with(*prefix))
+    {
+        return true;
+    }
+    if bonsai_common::IMPLICIT_RECEIVER_TOKENS
+        .iter()
+        .any(|token| target.starts_with(&format!("{token}->")))
+    {
+        return true;
+    }
+    // PHP `$this->field` and Ruby `@field` are the only sigil-led
+    // shapes that denote receiver-field writes; other sigil-leading
+    // identifiers (PHP `$user`, Perl `%opts`) are scalars/hashes
+    // unrelated to instance state.
+    if let Some(rest) = target.strip_prefix('$') {
+        if bonsai_common::IMPLICIT_RECEIVER_TOKENS
+            .iter()
+            .any(|token| rest.starts_with(&format!("{token}->")))
+        {
+            return true;
+        }
+    }
+    if target.starts_with('@') {
+        return true;
+    }
+    target.contains('.') || target.contains("->")
 }
 
 /// Case-insensitive-ish param matcher: strips PHP `$`, Rust /
@@ -1548,7 +1577,9 @@ fn param_name_matches(params: &[String], name: &str) -> bool {
 /// Strip leading sigils (PHP `$`, ref/pointer `&`/`*`) that
 /// adapters sometimes leave on raw param names.
 fn normalize_param_name(name: &str) -> &str {
-    name.trim().trim_start_matches(['$', '&', '*'])
+    name.trim()
+        .trim_start_matches(bonsai_common::IDENTIFIER_SIGILS)
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
 }
 
 /// True when a Decorator ref appears immediately before

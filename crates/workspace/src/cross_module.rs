@@ -993,10 +993,10 @@ impl<'a> TraceBuilder<'a> {
             }
         }
         for decl in global.decls_in(class_file) {
-            if matches!(
-                decl.name.as_str(),
-                "__init__" | "constructor" | "__construct" | "init" | "new"
-            ) && decl.parent == Some(class_sym)
+            if bonsai_common::CONSTRUCTOR_METHOD_NAMES
+                .iter()
+                .any(|name| *name == decl.name.as_str())
+                && decl.parent == Some(class_sym)
             {
                 return Some(decl.symbol);
             }
@@ -1072,10 +1072,18 @@ fn normalize_receiver_alias_text(text: &str) -> String {
 }
 
 fn constructor_type_tail(call: &str) -> Option<&str> {
-    let bare = call
-        .trim()
-        .strip_prefix("new ")
-        .unwrap_or_else(|| call.trim())
+    // Peel any leading constructor keyword (`new `) before extracting
+    // the rightmost type segment. Other entries in
+    // VALUE_TEXT_LEADING_KEYWORDS (e.g. `return `) shouldn't appear
+    // here — this site receives only the call form — but iterating
+    // the constant keeps the strip future-proof against new additions.
+    let mut head = call.trim();
+    for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
+        if let Some(rest) = head.strip_prefix(*keyword) {
+            head = rest.trim();
+        }
+    }
+    let bare = head
         .rsplit(&['.', ':'][..])
         .next()
         .unwrap_or(call)

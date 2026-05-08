@@ -275,6 +275,10 @@ Existing token sets:
   `kit::extract_return_value_text` already get clean text.
 - [`SELF_CONSTRUCTOR_HEADS`] — `Self(`, `Self {`, `self(`,
   `static(` for Rust / Swift / PHP self-typed constructor returns.
+- [`CONSTRUCTOR_METHOD_NAMES`] — `__init__` (Python),
+  `constructor` (JS/TS), `__construct` (PHP), `init` (Swift /
+  Objective-C), `new` (Ruby / PHP factory). Fallback when
+  `DeclKind::Constructor` lookup misses.
 
 Adding a token to one of these constants is the right move when
 another language joins the workspace. Branching on a literal English
