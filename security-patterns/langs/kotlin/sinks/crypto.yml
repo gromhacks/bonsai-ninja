@@ -114,13 +114,12 @@
   match_examples:
   - name: generated shape example
     code: |
-      import bcprov.*
+      import bcprov.DESEngine
       class App {
         fun handle(input: String) {
           DESEngine(input)
         }
       }
-      class DESEngine(vararg args: Any?)
   description: BouncyCastle DESEngine.
 - id: kotlin.crypto.keyfactory_dh_512
   enabled: false

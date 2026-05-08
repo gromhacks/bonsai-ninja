@@ -71,9 +71,8 @@
       name: StringTemplateResolver
   match_examples:
   - name: generated shape example
-    code: "import org.thymeleaf.*\nclass App {\n  fun handle(input: String) {\n  \
-      \  StringTemplateResolver(input)\n  }\n}\nclass StringTemplateResolver(vararg\
-      \ args: Any?)\n"
+    code: "import org.thymeleaf.StringTemplateResolver\nclass App {\n  fun handle(input: String) {\n  \
+      \  StringTemplateResolver(input)\n  }\n}\n"
   description: "new StringTemplateResolver \u2014 flag template source as tainted."
 - id: kotlin.template.freemarker_template_ctor
   enabled: true

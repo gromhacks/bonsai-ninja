@@ -223,7 +223,7 @@
   - name: declared shape
     code: |
       using BouncyCastle;
-      class DesEngine { public DesEngine(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new DesEngine(input); } }
+      class App { void Test() { dynamic input = "x"; var result = new BouncyCastle.DesEngine(input); } }
   description: "BouncyCastle DesEngine."
 
 - id: csharp.crypto.md5_hashdata
@@ -369,7 +369,7 @@
   - name: declared shape
     code: |
       using BouncyCastle;
-      class RC4Engine { public RC4Engine(dynamic input) { } } class App { void Test() { dynamic input = "x"; var result = new RC4Engine(input); } }
+      class App { void Test() { dynamic input = "x"; var result = new BouncyCastle.RC4Engine(input); } }
   description: "BouncyCastle RC4Engine — broken stream cipher."
 
 - id: csharp.crypto.random_next_seeded

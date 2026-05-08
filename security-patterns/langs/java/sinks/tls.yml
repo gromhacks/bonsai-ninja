@@ -132,14 +132,11 @@
   match_examples:
   - name: generated shape example
     code: |
-      import org.apache.http.conn.ssl.*;
+      import org.apache.http.conn.ssl.NoopHostnameVerifier;
       class App {
         void handle(String input) throws Exception {
           new NoopHostnameVerifier(input);
         }
-      }
-      class NoopHostnameVerifier {
-        NoopHostnameVerifier(Object... args) {}
       }
   description: Apache HttpClient new NoopHostnameVerifier().
 - id: java.tls.apache_httpclient_trustself

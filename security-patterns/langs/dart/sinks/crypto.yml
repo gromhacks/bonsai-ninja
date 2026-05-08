@@ -78,12 +78,7 @@
   match_examples:
   - name: declared shape
     code: |
-      import 'package:pointycastle/pointycastle.dart';
-      import 'package:pointycastle/pointycastle.dart';
-      import 'package:pointycastle/pointycastle.dart';
-      import 'package:pointycastle/pointycastle.dart';
-      import 'package:pointycastle/pointycastle.dart'; // pointycastle
-      class ECBCipher { ECBCipher([dynamic input, {dynamic htmlEscapeValues}]); }
+      import 'package:pointycastle/pointycastle.dart' show ECBCipher;
       void test() { var input = "x"; var result = ECBCipher(input); }
   description: "pointycastle ECBCipher — deterministic/leaks plaintext structure."
 
@@ -103,12 +98,7 @@
   match_examples:
   - name: declared shape
     code: |
-      import 'package:encrypt/encrypt.dart';
-      import 'package:encrypt/encrypt.dart';
-      import 'package:encrypt/encrypt.dart';
-      import 'package:encrypt/encrypt.dart';
-      import 'package:encrypt/encrypt.dart'; // encrypt
-      class AES { AES([dynamic input, {dynamic htmlEscapeValues}]); }
+      import 'package:encrypt/encrypt.dart' show AES;
       void test() { var input = "x"; var result = AES(input, mode: "AESMode.ecb"); }
   description: "encrypt package AES(mode: AESMode.ecb)."
   imports:

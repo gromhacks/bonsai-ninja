@@ -142,13 +142,12 @@
   match_examples:
   - name: generated shape example
     code: |
-      import org.apache.httpcomponents.*
+      import org.apache.httpcomponents.NoopHostnameVerifier
       class App {
         fun handle(input: String) {
           NoopHostnameVerifier(input)
         }
       }
-      class NoopHostnameVerifier(vararg args: Any?)
   description: Apache HttpClient new NoopHostnameVerifier().
 - id: kotlin.tls.apache_httpclient_trustself
   enabled: true
