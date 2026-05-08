@@ -1414,25 +1414,15 @@ fn expression_receiver_does_not_fall_back_to_bare_method_name() {
     let alias_targets = AHashMap::new();
 
     assert!(
-        !receiver_allows_name_fallback(
-            "pkg.Command(\"sh\").Run",
-            "pkg.Command(\"sh\")",
-            &aliases,
-            &alias_targets
-        ),
+        !receiver_allows_name_fallback("pkg.Command(\"sh\")", &aliases, &alias_targets),
         "expression receivers must not resolve through the bare tail `Run`"
     );
     assert!(
-        !receiver_allows_name_fallback("Runtime.run", "Runtime", &aliases, &alias_targets),
+        !receiver_allows_name_fallback("Runtime", &aliases, &alias_targets),
         "class-looking receivers are not semantic evidence by themselves"
     );
     assert!(
-        !receiver_allows_name_fallback(
-            "Repository.wrap(envelope)",
-            "Repository.wrap(envelope)",
-            &aliases,
-            &alias_targets
-        ),
+        !receiver_allows_name_fallback("Repository.wrap(envelope)", &aliases, &alias_targets),
         "factory receivers must resolve through semantic return-type evidence, not the bare tail"
     );
 

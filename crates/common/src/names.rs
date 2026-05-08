@@ -116,6 +116,29 @@ pub const SELF_CONSTRUCTOR_HEADS: &[&str] = &["Self(", "Self {", "self(", "stati
 pub const CONSTRUCTOR_METHOD_NAMES: &[&str] =
     &["__init__", "constructor", "__construct", "init", "new"];
 
+/// True when `value_text` returns a self-typed constructor
+/// expression — Rust `Self(...)` / `Self { ... }` / `self(...)`,
+/// PHP `new static(...)` late static binding. Both the taint
+/// engine and the callgraph need to recognise this shape so a
+/// `return Self::new(...)` body resolves to its enclosing class's
+/// constructor; the helper lives here so both crates share one
+/// source of truth.
+#[must_use]
+pub fn value_text_returns_self_constructor(value_text: &str) -> bool {
+    let mut text = value_text.trim();
+    text = text.strip_prefix("return ").unwrap_or(text).trim();
+    if SELF_CONSTRUCTOR_HEADS
+        .iter()
+        .any(|head| text.starts_with(*head))
+    {
+        return true;
+    }
+    matches!(
+        text.strip_prefix("new ").map(str::trim),
+        Some(rest) if SELF_CONSTRUCTOR_HEADS.iter().any(|head| rest.starts_with(*head))
+    )
+}
+
 /// Tail of a qualified call/reference name.
 ///
 /// Handles the separators emitted by supported adapters: dotted

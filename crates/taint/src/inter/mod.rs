@@ -3800,9 +3800,13 @@ fn resolve_contextual_call_name(lookup_name: &str, scope: &CallResolveScope<'_>)
         .collect()
 }
 
+/// Test-only predicate: would the resolver permit a bare-name
+/// receiver fallback for `receiver` given these alias maps? Returns
+/// `true` only when the receiver's head segment is a known alias —
+/// not when the receiver carries call/literal punctuation. Pinned
+/// in tests so the bare-name fallback can't silently relax.
 #[cfg(test)]
 fn receiver_allows_name_fallback(
-    lookup_name: &str,
     receiver: &str,
     aliases: &AHashMap<String, String>,
     alias_targets: &AHashMap<String, AliasTarget>,
@@ -3812,18 +3816,16 @@ fn receiver_allows_name_fallback(
     if receiver.is_empty() {
         return false;
     }
-    let head = receiver
-        .split(&['.', ':', '\\', '('][..])
-        .next()
-        .unwrap_or(receiver);
     if receiver
         .chars()
         .any(|ch| matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`') || ch.is_whitespace())
     {
         return false;
     }
-    let tail = short_tail(receiver);
-    let _ = (lookup_name, tail);
+    let head = receiver
+        .split(&['.', ':', '\\', '('][..])
+        .next()
+        .unwrap_or(receiver);
     aliases.contains_key(head) || alias_targets.contains_key(head)
 }
 
@@ -4481,19 +4483,9 @@ fn constructed_return_type_from_text(
     }
 }
 
+// Shared with the callgraph crate via `bonsai_common::value_text_returns_self_constructor`.
 fn static_constructor_return(value_text: &str) -> bool {
-    let mut text = value_text.trim();
-    text = text.strip_prefix("return ").unwrap_or(text).trim();
-    if bonsai_common::SELF_CONSTRUCTOR_HEADS
-        .iter()
-        .any(|head| text.starts_with(*head))
-    {
-        return true;
-    }
-    matches!(
-        text.strip_prefix("new ").map(str::trim),
-        Some(rest) if bonsai_common::SELF_CONSTRUCTOR_HEADS.iter().any(|head| rest.starts_with(*head))
-    )
+    bonsai_common::value_text_returns_self_constructor(value_text)
 }
 
 fn push_unique_func(out: &mut Vec<FuncId>, func: FuncId) {
