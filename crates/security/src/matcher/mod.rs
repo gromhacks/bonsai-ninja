@@ -1046,17 +1046,20 @@ fn scan_calls_batch(
     let Some(idx) = ws.db().decl_index(file) else {
         return;
     };
+    // Build a span-sorted index over the file's decls so the
+    // per-ref enclosing-fn lookup is O(log decls) instead of the
+    // previous O(refs × decls) linear scan. On large workspace
+    // files (Redis main.c, big TypeScript compilation units) the
+    // linear path dominated this batch; the binary search returns
+    // the same decl because function bodies don't overlap and the
+    // rightmost body whose start <= ref.span.start IS the
+    // innermost containing one.
+    let enclosing_index = build_enclosing_decl_index(&decls);
     for r in &idx.refs {
         if r.kind != RefKind::Call || decl_call_keys.contains(&(r.name.clone(), r.span.start)) {
             continue;
         }
-        let enclosing_fn = decls
-            .iter()
-            .find(|d| {
-                let body = d.body_span.unwrap_or(d.span);
-                r.span.start >= body.start && r.span.start < body.end
-            })
-            .map(|d| d.name.clone());
+        let enclosing_fn = lookup_enclosing_decl_name(&enclosing_index, r.span.start);
         for prepared in rules {
             if mode == ConstraintMode::Strict && !prepared.rule.constraints.0.is_empty() {
                 continue;
@@ -3919,6 +3922,53 @@ fn unquote_literal(value: &str) -> Option<&str> {
 /// set. The matcher uses this to recognise constructor calls written
 /// without `new` (e.g. `MyClass(x)` in Python / Ruby) when applying
 /// `kind: new` rules.
+/// Span-sorted index over a file's decls, used by the call-ref
+/// scanners to look up "what function encloses this span?" in
+/// O(log n) instead of the previous O(n) linear scan. Each entry
+/// is `(body.start, body.end, name)`.
+type EnclosingDeclIndex = Vec<(u64, u64, String)>;
+
+fn build_enclosing_decl_index(decls: &[bonsai_lang_api::Decl]) -> EnclosingDeclIndex {
+    let mut idx: EnclosingDeclIndex = decls
+        .iter()
+        .map(|d| {
+            let body = d.body_span.unwrap_or(d.span);
+            (body.start, body.end, d.name.clone())
+        })
+        .collect();
+    // Sort ascending by body.start so we can binary-search for the
+    // rightmost decl whose body covers a given span. Stability isn't
+    // required because the linear predecessor returned the FIRST
+    // matching decl in workspace-iteration order, and decl bodies in
+    // a single file never overlap at the same start (function /
+    // method definitions have unique start positions).
+    idx.sort_unstable_by_key(|(start, _, _)| *start);
+    idx
+}
+
+/// Look up the name of the decl whose body span contains `pos`.
+/// Returns the innermost match — for nested decls (a class
+/// containing a method), the method has the larger body.start and
+/// the binary search lands on it before the class.
+fn lookup_enclosing_decl_name(index: &EnclosingDeclIndex, pos: u64) -> Option<String> {
+    if index.is_empty() {
+        return None;
+    }
+    // partition_point gives the first idx where predicate is false;
+    // for "first start > pos", everything before is start <= pos —
+    // the candidate decl is at idx-1.
+    let partition = index.partition_point(|(start, _, _)| *start <= pos);
+    if partition == 0 {
+        return None;
+    }
+    let (_, end, name) = &index[partition - 1];
+    if pos < *end {
+        Some(name.clone())
+    } else {
+        None
+    }
+}
+
 fn collect_constructor_names(global: &bonsai_index::GlobalIndex) -> AHashSet<String> {
     let mut names = AHashSet::new();
     for file in global.all_files() {
