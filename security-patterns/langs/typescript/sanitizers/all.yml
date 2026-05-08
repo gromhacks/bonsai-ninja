@@ -268,8 +268,9 @@
   match_examples:
   - name: schema parse
     code: |
-      const _u = require("zod");
-      function clean(schema: any, input: unknown) {
+      const { ZodObject } = require("zod");
+      function clean(input: unknown) {
+        const schema = new ZodObject({});
         return schema.parse(input);
       }
     expect_match_text: [schema.parse]
@@ -287,8 +288,9 @@
   match_examples:
   - name: schema safeParse
     code: |
-      const _u = require("zod");
-      function clean(schema: any, input: unknown) {
+      const { ZodObject } = require("zod");
+      function clean(input: unknown) {
+        const schema = new ZodObject({});
         return schema.safeParse(input);
       }
     expect_match_text: [schema.safeParse]
@@ -725,8 +727,9 @@
   match_examples:
   - name: pg pool query with bind args
     code: |
-      const _u = require("mysql");
-      function byId(pool: any, id: string) {
+      const { Pool } = require("pg");
+      function byId(id: string) {
+        const pool = new Pool();
         return pool.query("SELECT * FROM users WHERE id = $1", [id]);
       }
     expect_match_text: [pool.query]
@@ -923,15 +926,17 @@
   match_examples:
   - name: prisma queryRaw tagged template literal placeholder
     code: |
-      const _u = require("@prisma/client");
-      async function byId(prisma: any, id: string) {
+      const { PrismaClient } = require("@prisma/client");
+      async function byId(id: string) {
+        const prisma = new PrismaClient();
         return prisma.$queryRaw`SELECT * FROM users WHERE id = ${id}`;
       }
     expect_match_text: [prisma.$queryRaw]
   - name: prisma executeRaw tagged template literal placeholder
     code: |
-      const _u = require("@prisma/client");
-      async function update(prisma: any, id: string) {
+      const { PrismaClient } = require("@prisma/client");
+      async function update(id: string) {
+        const prisma = new PrismaClient();
         return prisma.$executeRaw`UPDATE users SET seen = true WHERE id = ${id}`;
       }
     expect_match_text: [prisma.$executeRaw]

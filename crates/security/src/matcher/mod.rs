@@ -583,25 +583,60 @@ impl<'a> PreparedRule<'a> {
         }
         let mut candidates = Vec::new();
         push_unique_package_candidate(&mut candidates, callee);
+        let push_target = |out: &mut Vec<String>, target: &AliasTarget| {
+            push_alias_target_package_candidate(out, target);
+            // `var = pkg.Type(...)` binds `var → Type{Type}` via the
+            // flow-event aliaser, but the bare type name alone won't
+            // satisfy `import_matches_package(Type, pkg)`. If `Type`
+            // itself is a `from pkg import Type` alias, chase that
+            // second hop so the gate sees `pkg`.
+            if let AliasTarget::Type { type_name } = target {
+                if let Some(chained) = alias_map.get(type_name) {
+                    push_alias_target_package_candidate(out, chained);
+                }
+            }
+        };
         for receiver_type in receiver_types {
             push_unique_package_candidate(&mut candidates, receiver_type);
+            // Strip pointer / reference sigils that adapters keep on
+            // typed parameters — Go's `*gin.Context`, Rust's
+            // `&str` / `&mut Foo`, C++'s `Foo*`. Without this, the
+            // alias-chain lookup fails on a punctuation-prefixed key
+            // and the package gate misses receiver-typed methods.
+            let stripped: String = receiver_type
+                .trim_matches(|c: char| matches!(c, '*' | '&'))
+                .to_string();
+            push_unique_package_candidate(&mut candidates, &stripped);
             if let Some(target) = alias_map.get(receiver_type) {
-                push_alias_target_package_candidate(&mut candidates, target);
+                push_target(&mut candidates, target);
+            }
+            if stripped != *receiver_type {
+                if let Some(target) = alias_map.get(&stripped) {
+                    push_target(&mut candidates, target);
+                }
+            }
+            // Also chase the head of a qualified receiver type
+            // (`gin.Context` → `gin`, `Poco::Net::Context` → `Poco`),
+            // which is how adapters surface package alias bindings.
+            if let Some((head, _)) = split_call_head_tail(&stripped) {
+                if let Some(target) = alias_map.get(head) {
+                    push_target(&mut candidates, target);
+                }
             }
             if let Some(receiver_tail) = receiver_path_tail(receiver_type).strip_prefix("new ") {
                 if let Some(target) = alias_map.get(receiver_tail) {
-                    push_alias_target_package_candidate(&mut candidates, target);
+                    push_target(&mut candidates, target);
                 }
             } else if let Some(target) = alias_map.get(receiver_path_tail(receiver_type)) {
-                push_alias_target_package_candidate(&mut candidates, target);
+                push_target(&mut candidates, target);
             }
         }
         if let Some(target) = alias_map.get(callee) {
-            push_alias_target_package_candidate(&mut candidates, target);
+            push_target(&mut candidates, target);
         }
         if let Some((head, _)) = split_call_head_tail(callee) {
             if let Some(target) = alias_map.get(head) {
-                push_alias_target_package_candidate(&mut candidates, target);
+                push_target(&mut candidates, target);
             }
         }
         let file_level_package_evidence_allowed = self.rule.kind == crate::rule::RuleKind::Source

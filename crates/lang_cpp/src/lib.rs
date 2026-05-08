@@ -422,10 +422,21 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             continue;
         }
         let is_wildcard = module.ends_with("::*");
+        let module_path = module.trim_end_matches("::*").to_string();
+        // `using Poco::Net::Context;` introduces `Context` as a local
+        // binding for `Poco::Net::Context`. Capture it as an alias so
+        // the rule matcher can chase `Context` back through the import
+        // chain to satisfy package gates like `packages: [Poco]`.
+        // Wildcard `using namespace Poco::Net;` doesn't bind a single
+        // local name, so leave its alias empty.
+        let alias = (!is_wildcard)
+            .then(|| module_path.rsplit("::").next().unwrap_or(""))
+            .filter(|tail| !tail.is_empty())
+            .map(str::to_string);
         imports.push(ImportSpec {
             span: span_of(file, &using_node),
-            module: module.trim_end_matches("::*").to_string(),
-            alias: None,
+            module: module_path,
+            alias,
             is_wildcard,
             original_name: None,
             scope: ImportScope::Module,
