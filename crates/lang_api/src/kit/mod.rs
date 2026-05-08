@@ -7282,35 +7282,62 @@ pub fn apply_class_field_type_aliases(idx: &mut crate::DeclIndex) {
 /// security matching, inspect, and export consume the same receiver
 /// type evidence without receiver-name allowlists.
 pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
-    let class_facts: Vec<(bonsai_common::SymbolId, String, Vec<String>)> = idx
-        .defs
-        .iter()
-        .filter(|decl| {
-            matches!(
-                decl.kind,
-                crate::DeclKind::Class
-                    | crate::DeclKind::Struct
-                    | crate::DeclKind::Trait
-                    | crate::DeclKind::Interface
-            )
-        })
-        .map(|decl| (decl.symbol, decl.name.clone(), decl.bases.clone()))
-        .collect();
+    // Two parallel indexes over the file's class-like decls:
+    //
+    //   * `by_symbol` keys on the SymbolId so the implicit-receiver
+    //     lookup against `decl.parent` is O(1) instead of a linear
+    //     scan per decl.
+    //   * `by_canonical_name` keys on the canonicalised type-name so
+    //     `receiver_projected_type_name` and the base-class walker
+    //     can resolve "what class facts back this type name?" in O(1)
+    //     too. The canonical key strips array suffixes / nullable
+    //     marks so `Foo[]` and `Foo?` both hit the `Foo` entry.
+    //
+    // Pre-computing these once per file replaces what was previously
+    // an O(call events × classes × inheritance levels) scan inside
+    // every receiver-type derivation. Hot on Java / Kotlin /
+    // TypeScript files where one class can hold hundreds of method
+    // calls and the workspace has hundreds of class decls.
+    let mut by_symbol: ahash::AHashMap<bonsai_common::SymbolId, (String, Vec<String>)> =
+        ahash::AHashMap::new();
+    let mut by_canonical_name: ahash::AHashMap<String, (String, Vec<String>)> =
+        ahash::AHashMap::new();
+    for decl in &idx.defs {
+        if !matches!(
+            decl.kind,
+            crate::DeclKind::Class
+                | crate::DeclKind::Struct
+                | crate::DeclKind::Trait
+                | crate::DeclKind::Interface
+        ) {
+            continue;
+        }
+        let entry = (decl.name.clone(), decl.bases.clone());
+        by_symbol.insert(decl.symbol, entry.clone());
+        // Multiple decls may share a canonical name (per-file shadow
+        // classes in tests, for example) — first writer wins; the
+        // existing linear `iter().find()` had the same first-match
+        // semantic.
+        by_canonical_name
+            .entry(canonical_simple_type_name(&decl.name))
+            .or_insert(entry);
+    }
+    let class_facts = ClassFactsIndex {
+        by_symbol: &by_symbol,
+        by_canonical_name: &by_canonical_name,
+    };
 
     for decl in &mut idx.defs {
         let aliases = decl.type_aliases.clone();
         let implicit_receiver_types = decl.parent.and_then(|parent| {
-            class_facts
-                .iter()
-                .find(|(symbol, _, _)| *symbol == parent)
-                .map(|(_, name, bases)| {
-                    let mut types = Vec::with_capacity(1 + bases.len());
-                    push_unique_receiver_type(&mut types, name.clone());
-                    for base in bases {
-                        push_unique_receiver_type(&mut types, base.clone());
-                    }
-                    types
-                })
+            class_facts.by_symbol.get(&parent).map(|(name, bases)| {
+                let mut types = Vec::with_capacity(1 + bases.len());
+                push_unique_receiver_type(&mut types, name.clone());
+                for base in bases {
+                    push_unique_receiver_type(&mut types, base.clone());
+                }
+                types
+            })
         });
         apply_call_receiver_types_to_events(
             &mut decl.flow_events,
@@ -7321,11 +7348,21 @@ pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
     }
 }
 
+/// Index over a file's class-like decls, keyed both by `SymbolId`
+/// (for parent-link lookups) and by canonicalised type name (for
+/// receiver-expr matching). Built once per file in
+/// [`apply_call_receiver_types`] and threaded through the
+/// FlowEvent walk.
+struct ClassFactsIndex<'a> {
+    by_symbol: &'a ahash::AHashMap<bonsai_common::SymbolId, (String, Vec<String>)>,
+    by_canonical_name: &'a ahash::AHashMap<String, (String, Vec<String>)>,
+}
+
 fn apply_call_receiver_types_to_events(
     events: &mut [FlowEvent],
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
-    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+    class_facts: &ClassFactsIndex<'_>,
 ) {
     for event in events {
         match event {
@@ -7398,7 +7435,7 @@ fn receiver_types_for_expr(
     receiver: &str,
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
-    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+    class_facts: &ClassFactsIndex<'_>,
 ) -> Vec<String> {
     let normalized = normalize_receiver_type_expr(receiver);
     let tail = short_name_of(&normalized);
@@ -7434,7 +7471,7 @@ fn receiver_types_for_expr(
 
 fn receiver_projected_type_name(
     receiver: &str,
-    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+    class_facts: &ClassFactsIndex<'_>,
 ) -> Option<String> {
     let has_member_projection = receiver.contains('.')
         || receiver.contains("->")
@@ -7452,15 +7489,15 @@ fn receiver_projected_type_name(
     }
     let canonical_tail = canonical_simple_type_name(&tail);
     class_facts
-        .iter()
-        .find(|(_, name, _)| canonical_simple_type_name(name) == canonical_tail)
-        .map(|(_, name, _)| name.clone())
+        .by_canonical_name
+        .get(&canonical_tail)
+        .map(|(name, _)| name.clone())
 }
 
 fn push_receiver_type_and_bases(
     out: &mut Vec<String>,
     ty: String,
-    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+    class_facts: &ClassFactsIndex<'_>,
 ) {
     let mut seen = std::collections::BTreeSet::new();
     push_receiver_type_and_bases_inner(out, ty, class_facts, &mut seen);
@@ -7469,7 +7506,7 @@ fn push_receiver_type_and_bases(
 fn push_receiver_type_and_bases_inner(
     out: &mut Vec<String>,
     ty: String,
-    class_facts: &[(bonsai_common::SymbolId, String, Vec<String>)],
+    class_facts: &ClassFactsIndex<'_>,
     seen: &mut std::collections::BTreeSet<String>,
 ) {
     let canonical = canonical_simple_type_name(&ty);
@@ -7477,10 +7514,7 @@ fn push_receiver_type_and_bases_inner(
         return;
     }
     push_unique_receiver_type(out, canonical.clone());
-    let Some((_, _, bases)) = class_facts
-        .iter()
-        .find(|(_, name, _)| canonical_simple_type_name(name) == canonical)
-    else {
+    let Some((_, bases)) = class_facts.by_canonical_name.get(&canonical) else {
         return;
     };
     for base in bases {
