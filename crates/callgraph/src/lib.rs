@@ -9,7 +9,14 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent};
-use bonsai_resolve::{resolve_callable_with_context, resolve_class, ResolveContext};
+use bonsai_resolve::{
+    callee_without_call_args, collect_method_candidates_for_class, enclosing_class_for_decl,
+    export_name_variants, extend_alias_targets_with_declared_types, is_super_receiver,
+    module_target_matches_decl_module_path, module_target_matches_path,
+    namespace_alias_target_tail, prune_receiver_type_names_for_dispatch, push_unique_func,
+    push_unique_string, qualified_module_alias_call, resolve_callable_with_context, resolve_class,
+    ResolveContext,
+};
 use serde::{Deserialize, Serialize};
 
 /// What kind of dispatch produced a call edge. The resolver
@@ -851,7 +858,6 @@ fn collect_super_method_targets(
     targets
 }
 
-use bonsai_resolve::collect_method_candidates_for_class;
 
 fn receiver_call_return_type_names(
     global: &GlobalIndex,
@@ -924,7 +930,6 @@ fn receiver_inner_call_name(receiver: &str) -> Option<String> {
     Some(callee.to_string())
 }
 
-use bonsai_resolve::callee_without_call_args;
 
 fn receiver_name_from_call_name(call_name: &str) -> Option<&str> {
     call_name
@@ -1046,11 +1051,8 @@ fn constructed_return_type_from_text(
 }
 
 
-use bonsai_resolve::{push_unique_func, prune_receiver_type_names_for_dispatch};
 
-use bonsai_resolve::is_super_receiver;
 
-use bonsai_resolve::enclosing_class_for_decl;
 
 
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
@@ -1275,7 +1277,6 @@ fn alias_targets_for_decl(
     map
 }
 
-use bonsai_resolve::{extend_alias_targets_with_declared_types, push_unique_string};
 
 fn normalize_receiver_alias_text(receiver: &str) -> String {
     let mut text = receiver.trim();
@@ -1297,7 +1298,6 @@ fn colon_remote_call(name: &str) -> bool {
     name.contains(':') && !name.contains("::")
 }
 
-use bonsai_resolve::qualified_module_alias_call;
 
 fn qualified_alias_target_tail<'a>(
     name: &'a str,
@@ -1307,7 +1307,6 @@ fn qualified_alias_target_tail<'a>(
     aliases.get(head).map(String::as_str).map(|target| (target, tail))
 }
 
-use bonsai_resolve::namespace_alias_target_tail;
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 /// Resolve a `module.fn` call where `module` is a local alias for a
@@ -1368,13 +1367,10 @@ fn collect_workspace_module_targets(
 // `bonsai_resolve` and is re-used here so callgraph and taint
 // share the same canonical match. See `bonsai_resolve` for the
 // suffix-aware semantic.
-use bonsai_resolve::module_target_matches_decl_module_path;
 
-use bonsai_resolve::export_name_variants;
 
 // Path / module-shape helpers live in `bonsai_resolve` so the
 // callgraph and taint engine share one source of truth.
-use bonsai_resolve::module_target_matches_path;
 
 /// Resolve `name` against the global index and return every matching
 /// callable (function, method, constructor) as a [`FuncId`]. Empty
