@@ -102,6 +102,20 @@ pub const VALUE_TEXT_LEADING_KEYWORDS: &[&str] = &["return ", "new "];
 /// constructor return for dispatch.
 pub const SELF_CONSTRUCTOR_HEADS: &[&str] = &["Self(", "Self {", "self(", "static("];
 
+/// Canonical constructor method names across the supported
+/// languages. Used as a *fallback* when a class's
+/// `DeclKind::Constructor` lookup misses — adapters that don't (or
+/// can't) tag their constructor decls structurally still emit the
+/// method by one of these well-known names:
+///
+/// - `__init__` — Python.
+/// - `constructor` — JavaScript / TypeScript class syntax.
+/// - `__construct` — PHP magic method.
+/// - `init` — Swift / Objective-C.
+/// - `new` — Ruby idiom, PHP factory convention.
+pub const CONSTRUCTOR_METHOD_NAMES: &[&str] =
+    &["__init__", "constructor", "__construct", "init", "new"];
+
 /// Tail of a qualified call/reference name.
 ///
 /// Handles the separators emitted by supported adapters: dotted
