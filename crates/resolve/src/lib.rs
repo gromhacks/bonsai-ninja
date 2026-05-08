@@ -253,19 +253,14 @@ fn resolve_workspace_rooted_call(
     out
 }
 
-/// Strip language-specific "absolute path" prefixes so the
-/// remainder is a plain `<module>::<fn>` shape.
-///
-/// - Rust: `crate::`, repeated `super::`, `self::`.
-/// - PHP / C++: leading `\` / `::`.
+/// Strip absolute-path prefixes from a fully-qualified call name so
+/// the remainder is a plain `<module>::<fn>` shape. The non-repeating
+/// prefixes (`crate::`, `self::`, `::`, `\`) come from the
+/// cross-language constant [`bonsai_common::ABSOLUTE_PATH_PREFIXES`];
+/// `super::` is handled inline because it can repeat
+/// (`super::super::foo`).
 fn strip_absolute_path_prefix(name: &str) -> &str {
     let trimmed = name.trim();
-    if let Some(rest) = trimmed.strip_prefix("crate::") {
-        return rest;
-    }
-    if let Some(rest) = trimmed.strip_prefix("self::") {
-        return rest;
-    }
     let mut rest = trimmed;
     let mut stripped_super = false;
     while let Some(next) = rest.strip_prefix("super::") {
@@ -275,11 +270,10 @@ fn strip_absolute_path_prefix(name: &str) -> &str {
     if stripped_super {
         return rest;
     }
-    if let Some(rest) = trimmed.strip_prefix("::") {
-        return rest;
-    }
-    if let Some(rest) = trimmed.strip_prefix('\\') {
-        return rest;
+    for prefix in bonsai_common::ABSOLUTE_PATH_PREFIXES {
+        if let Some(rest) = trimmed.strip_prefix(*prefix) {
+            return rest;
+        }
     }
     trimmed
 }
