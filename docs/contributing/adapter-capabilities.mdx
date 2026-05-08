@@ -153,6 +153,45 @@ plus per-language applicability. If you change an adapter to populate
 a new `Decl` field, the count in the snapshot moves and you also
 update the table cell.
 
+## `LanguageCapabilities` per-adapter token slices
+
+In addition to the `Decl`-field population matrix above, each adapter
+declares a `LanguageCapabilities` struct (`crates/lang_api/src/capabilities.rs`)
+that the engine consults for language-shaped (rather than truly
+cross-language) tokens. Three of these slices accept per-adapter
+overrides with a fall-through to the cross-language constants in
+`bonsai_common::names`:
+
+| Field | Default fall-through | Adapter override |
+|---|---|---|
+| `module_export_aliases` | `&[]` | JS/TS: `&["exports", "module.exports"]` |
+| `constructor_method_names` | `bonsai_common::CONSTRUCTOR_METHOD_NAMES` (`__init__`, `constructor`, `__construct`, `init`, `new`) | Python should override `&["__init__"]`, JS/TS `&["constructor"]`, Ruby `&["initialize", "new"]`, Swift/ObjC `&["init"]`, PHP `&["__construct"]`, etc. |
+| `super_receiver_tokens` | `bonsai_common::SUPER_RECEIVER_TOKENS` (`super`, `parent`, `base`) | JS/TS/Java/Kotlin: `&["super"]`; PHP: `&["parent"]`; C#/Lua: `&["base"]` |
+| `implicit_receiver_tokens` | `bonsai_common::IMPLICIT_RECEIVER_TOKENS` (`self`, `this`, `me`) | Python/Ruby: `&["self"]`; JS/TS/Java/C#: `&["this"]` |
+
+The cross-language fallback fires when an adapter declares an empty
+slice. **Adapters should override with the narrowest correct set so
+fallbacks don't fire for mature adapters** — a Python source
+containing a method named `init` is currently mis-recognised as a
+constructor by the cross-language fallback because `lang_python`
+hasn't yet narrowed `constructor_method_names`.
+
+Engine consumers prefer the adapter-aware accessor:
+
+```rust
+let names = db
+    .adapter_for(file)
+    .map(|a| a.capabilities().effective_constructor_method_names())
+    .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
+```
+
+The same `effective_*()` shape exists for `super_receiver_tokens` and
+`implicit_receiver_tokens`. Code that doesn't have a `LanguageAdapter`
+in scope (CLI early-resolution paths, display-only helpers) falls
+through to the cross-language constant via the no-context wrapper
+`bonsai_resolve::is_super_receiver(name)`; the adapter-aware
+counterpart is `is_super_receiver_with_tokens(name, tokens)`.
+
 ## Related
 
 - [`COVERAGE_BASELINE.md`](../COVERAGE_BASELINE.md) — engine-side
@@ -161,5 +200,7 @@ update the table cell.
   accepted at rulepack load time.
 - `crates/lang_api/src/types.rs` — `Decl` struct definition for the
   fields surveyed here.
+- `crates/lang_api/src/capabilities.rs` — `LanguageCapabilities`
+  struct and `effective_*()` fall-through helpers.
 - Per-adapter sources (`crates/lang_<lang>/src/lib.rs`) — where each
   field is (or isn't) populated.

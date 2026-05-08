@@ -72,6 +72,44 @@ fn query_only_skips_value_flow_prewarm() {
 }
 
 #[test]
+fn returning_seed_names_populates_for_returned_param() {
+    // Single function `def echo(x): return x` — `x`'s forward
+    // closure must reach a `Return` node, so `returning_seed_names`
+    // must contain "x". Without Return-node emission in the
+    // value-flow graph builder this set is silently empty for
+    // every function.
+    let root = tempdir_for_test("bonsai-vf-returning");
+    std::fs::write(
+        root.join("app.py"),
+        "def echo(x):\n    return x\n",
+    )
+    .expect("write fixture");
+
+    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
+        .expect("open succeeds");
+
+    let global = ws.db().global_index();
+    let echo_sym = global
+        .find_by_name("echo")
+        .iter()
+        .copied()
+        .next()
+        .expect("echo decl present");
+    let echo_func = bonsai_common::FuncId::new(echo_sym.raw());
+
+    let returning = ws.value_flow().returning_seed_names(
+        echo_func,
+        ws.db(),
+        ws.inter_taint_caches(),
+    );
+    assert!(
+        returning.contains("x"),
+        "echo(x) returns x — `x` must appear in returning_seed_names; got {:?}",
+        returning
+    );
+}
+
+#[test]
 fn value_flow_sidecar_round_trips_via_query_only() {
     let root = tempdir_for_test("bonsai-vf-sidecar");
     write_python_workspace(&root);

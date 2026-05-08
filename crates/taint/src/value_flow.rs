@@ -315,6 +315,14 @@ fn build_graph_from_result(
     // bindings are invisible. The interprocedural engine has already
     // done CFG-aware propagation; we're just lifting its conclusions
     // into graph form.
+    //
+    // Walk a second time for `FlowEvent::Return` events and emit a
+    // `Return` node per return site, with edges from the
+    // corresponding source identifier(s). Without this pass, the
+    // value-flow graph never carries `Return` nodes, and consumers
+    // that ask "does this seed reach a Return?" (security analysis's
+    // `compute_returning_seed_names` fast path) silently always
+    // answer no.
     use bonsai_lang_api::FlowEvent;
     for event in &entry_decl.flow_events {
         if let FlowEvent::Assign {
@@ -373,6 +381,90 @@ fn build_graph_from_result(
                 graph.add_edge(ValueFlowEdge {
                     from: source_node,
                     to: target_node.clone(),
+                    precision: Precision::Exact,
+                    via_span: *span,
+                });
+            }
+        }
+    }
+
+    // Walk Return events: emit a `Return` node per return site,
+    // and an edge from the matching `value_name` origin (param or
+    // assign target) to the Return. Recurses into Branch / Try /
+    // Switch sub-events so nested returns are captured.
+    fn collect_return_events<'a>(
+        events: &'a [FlowEvent],
+        out: &mut Vec<(&'a Span, &'a str, &'a str)>,
+    ) {
+        for event in events {
+            match event {
+                FlowEvent::Return {
+                    span,
+                    value_name,
+                    value_text,
+                } => {
+                    let name = value_name.as_deref().unwrap_or("");
+                    let text = value_text.as_deref().unwrap_or("");
+                    out.push((span, name, text));
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    collect_return_events(then_events, out);
+                    collect_return_events(else_events, out);
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    collect_return_events(body, out);
+                    collect_return_events(catch_events, out);
+                    collect_return_events(finally_events, out);
+                }
+                FlowEvent::Loop { body, .. } => collect_return_events(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut return_sites: Vec<(&Span, &str, &str)> = Vec::new();
+    collect_return_events(&entry_decl.flow_events, &mut return_sites);
+    for (span, value_name, _value_text) in return_sites {
+        let return_node = ValueFlowNode {
+            func: entry_func,
+            span: *span,
+            value_text: value_name.to_string(),
+            kind: ValueFlowNodeKind::Return,
+        };
+        graph.nodes.insert(return_node.clone());
+        if !value_name.is_empty() {
+            // Stitch from any existing origin / assign-target / call-arg
+            // node carrying the same identifier so forward closure from
+            // a seed reaches the Return when its value flows here.
+            let mut from_candidates: Vec<ValueFlowNode> = graph
+                .nodes
+                .iter()
+                .filter(|n| n.func == entry_func && n.value_text == value_name)
+                .filter(|n| !matches!(n.kind, ValueFlowNodeKind::Return))
+                .cloned()
+                .collect();
+            // Prefer the origin (Param / AssignTarget) over a synthesised
+            // CallArg / Read so the closure roots cleanly.
+            from_candidates.sort_by_key(|n| match n.kind {
+                ValueFlowNodeKind::Param => 0,
+                ValueFlowNodeKind::AssignTarget => 1,
+                ValueFlowNodeKind::CallArg => 2,
+                ValueFlowNodeKind::Read => 3,
+                ValueFlowNodeKind::Catch => 4,
+                ValueFlowNodeKind::Return => 5,
+            });
+            for from_node in from_candidates.into_iter().take(1) {
+                graph.add_edge(ValueFlowEdge {
+                    from: from_node,
+                    to: return_node.clone(),
                     precision: Precision::Exact,
                     via_span: *span,
                 });

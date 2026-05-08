@@ -28,6 +28,13 @@ class and verify each box.
       inside string literals.
 - [ ] **Matcher policy fingerprint bumped.** If the change alters
       propagation semantics, `MATCHER_POLICY_FINGERPRINT` is incremented.
+- [ ] **`CONTEXTLESS_LOOKUP_JUSTIFICATION` markers preserved.** New
+      `find_by_name` calls outside the resolver primitives carry the
+      marker comment; conformance test
+      `engine_resolves_via_context_not_bare_name` passes.
+- [ ] **Single-candidate edges stay `Direct/Narrowed`.** No new
+      widenings to `OverApproximate` when the resolver already
+      narrowed the candidate set.
 - [ ] **Documentation updated.** `docs/contributing/taint-engine-spec.mdx` reflects the
       new behaviour.
 
@@ -113,6 +120,29 @@ class and verify each box.
       signatures referenced in docs match the current code.
 - [ ] **Cross-links resolve.** Markdown links point at existing files
       and sections.
+
+## Workspace-cache change (`crates/workspace/src/{dataflow,value_flow,flow_ids,taint_index,transitive_callers,class_index,enclosing_index,decl_name_index}.rs`)
+
+- [ ] **Invalidation hook fires on edit.** New caches expose `clear()`
+      (or `invalidate_file(file)` for per-file granularity) and
+      `Workspace::ingest_dir` calls it in the `if let Some(prev) = old_id`
+      block.
+- [ ] **`parking_lot` read-then-write hazard avoided.** Read-lock
+      temporaries from `if let Some(x) = lock.read().get(...).cloned()`
+      are bound to a `let` so the guard drops before any
+      `lock.write()` upgrade. The `cache_or_insert_with` helper
+      pattern (`crates/taint/src/inter/mod.rs`) is the template.
+- [ ] **Sidecar persistence is content-addressed.** New on-disk
+      caches carry a version + content-hash + matcher-policy
+      fingerprint. Mismatched fingerprints invalidate.
+- [ ] **Workspace prewarm wires through the shared call graph.** New
+      caches that need a `ResolvedCallGraph` accept it via
+      `seed_call_graph(arc)` (or call
+      `Workspace::cached_resolved_call_graph()`); they don't rebuild
+      identical content.
+- [ ] **Tests cover invalidation.** A unit test rewrites a fixture
+      file and asserts the cache produces fresh results (not stale
+      ones).
 
 ## All changes
 
