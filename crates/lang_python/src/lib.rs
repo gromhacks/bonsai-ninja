@@ -121,6 +121,9 @@ impl LanguageAdapter for PythonAdapter {
         LanguageCapabilities {
             reflection: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: &["__init__"],
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["self"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

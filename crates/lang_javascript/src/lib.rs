@@ -56,6 +56,9 @@ impl LanguageAdapter for JavaScriptAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             module_export_aliases: &["exports", "module.exports"],
+            constructor_method_names: &["constructor"],
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

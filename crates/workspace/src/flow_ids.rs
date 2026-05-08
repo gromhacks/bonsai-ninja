@@ -74,7 +74,9 @@ impl FlowIdCache {
     /// call graph hasn't been built yet or the cache line for
     /// `func` is missing; warm-path calls never touch them.
     pub fn labels_for_func(&self, func: FuncId, db: &AnalyzerDb, vfs: &bonsai_vfs::Vfs) -> Arc<[String]> {
-        if let Some(hit) = self.inner.read().labels.get(&func).cloned() {
+        // Drop the read guard's temporary before the write upgrade.
+        let cached = self.inner.read().labels.get(&func).cloned();
+        if let Some(hit) = cached {
             return hit;
         }
         let cg = self.call_graph(db, vfs);
@@ -99,7 +101,9 @@ impl FlowIdCache {
     /// builder lock keeps two concurrent queries from both paying
     /// the build cost.
     fn call_graph(&self, db: &AnalyzerDb, _vfs: &bonsai_vfs::Vfs) -> Arc<ResolvedCallGraph> {
-        if let Some(cg) = self.inner.read().cg.clone() {
+        // Drop the read guard's temporary before the write upgrade.
+        let cached = self.inner.read().cg.clone();
+        if let Some(cg) = cached {
             return cg;
         }
         let global = db.global_index();

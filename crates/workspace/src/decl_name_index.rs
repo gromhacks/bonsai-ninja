@@ -32,7 +32,9 @@ impl DeclNameIndex {
     /// Snapshot of every decl in the workspace, with lowercased
     /// names precomputed. Built lazily on first access.
     pub fn entries(&self, db: &AnalyzerDb) -> Arc<Vec<DeclNameEntry>> {
-        if let Some(hit) = self.inner.read().clone() {
+        // Drop the read guard's temporary before the write upgrade.
+        let cached = self.inner.read().clone();
+        if let Some(hit) = cached {
             return hit;
         }
         let global = db.global_index();

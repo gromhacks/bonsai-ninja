@@ -179,9 +179,15 @@ impl LanguageAdapter for RustAdapter {
             pattern_matching: CapabilityLevel::Exact,
             receiver_types: CapabilityLevel::Partial,
             module_export_aliases: &[],
-            constructor_method_names: &[],
-            super_receiver_tokens: &[],
-            implicit_receiver_tokens: &[],
+            // Rust has no constructor keyword; the idiomatic
+            // associated function is `new`. The cross-language
+            // fallback also accepts `new`, but declaring it here
+            // narrows other-language entries (`__init__`,
+            // `__construct`, `init`) so a same-named Rust method
+            // isn't mis-recognised as a constructor.
+            constructor_method_names: &["new"],
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["self"],
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {

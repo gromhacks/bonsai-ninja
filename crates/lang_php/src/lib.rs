@@ -72,6 +72,9 @@ impl LanguageAdapter for PhpAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: &["__construct"],
+            super_receiver_tokens: &["parent", "self"],
+            implicit_receiver_tokens: &["$this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

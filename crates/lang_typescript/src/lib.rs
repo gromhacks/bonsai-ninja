@@ -83,6 +83,9 @@ impl LanguageAdapter for TypeScriptAdapter {
         LanguageCapabilities {
             module_export_aliases: &["exports", "module.exports"],
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: &["constructor"],
+            super_receiver_tokens: &["super"],
+            implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }
     }

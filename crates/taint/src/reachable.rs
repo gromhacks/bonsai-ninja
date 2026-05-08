@@ -405,11 +405,30 @@ pub fn taint_facts_for_entry(entry_func: FuncId, db: &AnalyzerDb, _sanitizers: &
 ///   tokens, used so the persisted call graph captures every edge a
 ///   downstream analysis might want, even when a name was never an
 ///   assignment target.
+/// One-off entry point that provisions a fresh `InterTaintCaches`.
+/// Workspace consumers should prefer
+/// [`taint_facts_and_graph_for_entry_with_caches`] so the engine's
+/// resolver memo / alias maps / function summaries survive across
+/// the workspace's prewarm and per-source runs.
 #[must_use]
 pub fn taint_facts_and_graph_for_entry(
     entry_func: FuncId,
     db: &AnalyzerDb,
+    sanitizers: &TokenSet,
+) -> (KindedTokens, EntryTaintGraph) {
+    let caches = crate::inter::InterTaintCaches::default();
+    taint_facts_and_graph_for_entry_with_caches(entry_func, db, sanitizers, &caches)
+}
+
+/// Variant that threads a caller-provided `InterTaintCaches` so
+/// workspace prewarm shares the resolver memo with subsequent
+/// security-analysis / value-flow / inspect runs.
+#[must_use]
+pub fn taint_facts_and_graph_for_entry_with_caches(
+    entry_func: FuncId,
+    db: &AnalyzerDb,
     _sanitizers: &TokenSet,
+    caches: &crate::inter::InterTaintCaches,
 ) -> (KindedTokens, EntryTaintGraph) {
     let mut facts = KindedTokens::default();
     let mut graph = EntryTaintGraph::default();
@@ -468,13 +487,12 @@ pub fn taint_facts_and_graph_for_entry(
             intra_worklist_cap: None,
             ..Default::default()
         };
-        let caches = crate::inter::InterTaintCaches::default();
         let graph_result = crate::inter::interprocedural_taint_to_completion_with_caches(
             entry_func,
             &graph_seed,
             &config,
             db,
-            &caches,
+            caches,
         );
         graph.call_records = graph_result
             .call_records

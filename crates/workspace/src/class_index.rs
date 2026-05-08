@@ -67,7 +67,10 @@ impl ClassMemberIndex {
     }
 
     fn built(&self, db: &AnalyzerDb) -> Arc<Built> {
-        if let Some(hit) = self.inner.read().clone() {
+        // Drop the read guard's temporary before the write upgrade
+        // below — parking_lot RwLock is non-reentrant.
+        let cached = self.inner.read().clone();
+        if let Some(hit) = cached {
             return hit;
         }
         let mut methods: AHashMap<(SymbolId, String), Vec<FuncId>> = AHashMap::default();

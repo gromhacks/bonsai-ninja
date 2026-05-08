@@ -46,7 +46,8 @@ pub use inter::{
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
     merge_into, name_reachable_through_chain_kinded, name_reachable_through_file_kinded,
-    name_reachable_through_func_kinded, taint_facts_and_graph_for_entry, taint_facts_for_entry,
+    name_reachable_through_func_kinded, taint_facts_and_graph_for_entry,
+    taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry,
     EntryTaintGraph, FactKind, KindedTokens, TaintedCallEdge, TokenSet,
 };
 pub use value_flow::{

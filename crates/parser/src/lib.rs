@@ -93,11 +93,16 @@ impl Default for ParserCache {
 
 impl std::fmt::Debug for ParserCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let cache = self.cache.read();
-        let parsers = self.parsers.lock();
+        // Snapshot each lock independently — never hold two locks
+        // simultaneously here. `parse()` acquires (cache, parsers,
+        // parser, cache) in distinct windows; `Debug::fmt`
+        // previously held (cache, parsers) at the same time, an
+        // AB-BA hazard if a peer ever held parsers then cache.
+        let cached_files = self.cache.read().len();
+        let live_parsers = self.parsers.lock().len();
         f.debug_struct("ParserCache")
-            .field("cached_files", &cache.len())
-            .field("live_parsers", &parsers.len())
+            .field("cached_files", &cached_files)
+            .field("live_parsers", &live_parsers)
             .field("parse_timeout", &self.options.parse_timeout)
             .finish()
     }
@@ -150,7 +155,11 @@ impl ParserCache {
         let mut parser = parser.lock();
         // Re-check while holding this language parser. A peer thread for the
         // same language may have finished this file while we waited.
-        if let Some(entry) = self.cache.read().get(&file).cloned() {
+        // Drop the read guard's temporary at the `;` so it can't
+        // extend into the subsequent `self.cache.write()` (line 244)
+        // and trigger a same-thread read→write deadlock.
+        let cached = self.cache.read().get(&file).cloned();
+        if let Some(entry) = cached {
             if entry.version == snapshot.version {
                 return Ok(entry);
             }
