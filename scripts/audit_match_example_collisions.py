@@ -13,10 +13,14 @@ Collision rows are merge candidates. They mean two rules can recognize the
 same adapter fact in at least one fixture, so the rules should be merged,
 split by a more precise match shape, or otherwise de-duplicated.
 
-Rules using `arg_tainted` are excluded from collision accounting because
-the inventory command is the pre-taint sink/source/sanitizer pass and
-intentionally ignores tainted-argument predicates. The taint-aware
-validator and `rulepack_conformance` tests own those examples.
+Rules using `arg_tainted` are excluded from BOTH collision and owner-
+miss accounting. The inventory command is the pre-taint
+sink/source/sanitizer pass and intentionally ignores tainted-argument
+predicates, so an `arg_tainted` rule's example will never report a
+match in this audit even when the example syntactically nails the
+rule's shape. The taint-aware validator and `rulepack_conformance`
+tests are the right place to verify those examples; flagging them as
+owner-misses here would be a false positive.
 """
 
 from __future__ import annotations
@@ -354,6 +358,15 @@ def main() -> int:
 
         for case, _ in group:
             if case.expect_no_match:
+                continue
+            # Rules with `arg_tainted` constraints can't match in
+            # isolated examples — they need a taint source-to-sink
+            # chain to fire. The example is the rule's correct
+            # syntactic shape, so flagging it as an owner-miss only
+            # because the static analyser found no taint flow would
+            # be a false positive in this audit's accounting. Same
+            # treatment as collision filtering below.
+            if case.rule_id in arg_tainted_rules:
                 continue
             hits = rows_by_case.get(case.key, [])
             owner_hits = [hit for hit in hits if hit.matched_rule == case.rule_id]
