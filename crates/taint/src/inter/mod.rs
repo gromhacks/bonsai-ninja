@@ -4066,6 +4066,15 @@ fn collect_virtual_dispatch_candidates(
         return Vec::new();
     }
     let mut out = Vec::new();
+    // CONTEXTLESS_LOOKUP_JUSTIFICATION: dynamic-dispatch fallback
+    // when receiver type is unknown. Every survivor is filtered
+    // immediately below — DeclKind narrows to callables, parent
+    // narrows to class-like decls, and visibility_allows narrows
+    // to declarations the caller's module / file can reach. The
+    // OverApproximate precision tag is attached at the call site
+    // (`taint/src/inter/mod.rs` virtual-dispatch construction) so
+    // consumers always know this set is wider than a single-receiver
+    // result would be.
     for sym in global.find_by_name(method_name) {
         let Some(decl) = global.decl_of(*sym) else {
             continue;
@@ -4898,7 +4907,6 @@ fn resolve_call_candidates(
     }
     let tail = short_tail(lookup_name);
     let resolved_name = aliases.get(tail).map(String::as_str).unwrap_or(tail);
-    let used_tail_fallback = resolved_name != lookup_name;
     candidates = lookup(resolved_name);
     if candidates.is_empty() && resolved_name != lookup_name {
         candidates = lookup(lookup_name);
@@ -4909,7 +4917,14 @@ fn resolve_call_candidates(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let (kind, precision) = if candidates.len() == 1 && !used_tail_fallback {
+    // `lookup` is `resolve_callable_with_context` which already
+    // applies visibility + module + receiver-type narrowing — so
+    // when exactly one candidate survives, the call IS direct
+    // regardless of which lookup name produced the hit. Only the
+    // multi-candidate case is ambiguous virtual dispatch. The
+    // earlier `used_tail_fallback` widening was a vestigial guard
+    // that drowned single-candidate hits in `OverApproximate`.
+    let (kind, precision) = if candidates.len() == 1 {
         (EdgeKind::Direct, Precision::Narrowed)
     } else {
         (EdgeKind::Virtual, Precision::OverApproximate)

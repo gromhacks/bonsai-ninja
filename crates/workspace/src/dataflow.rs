@@ -104,6 +104,11 @@ pub struct SerializableSnapshot {
 #[derive(Default, Debug)]
 pub struct DataFlowCache {
     inner: RwLock<Inner>,
+    /// Lazy-built workspace-wide resolved call graph, shared across
+    /// `prewarm_all` / `snapshot` / `dependency_files_for_db` so the
+    /// graph is constructed at most once per cache lifetime instead
+    /// of three times. Cleared on `invalidate_file`.
+    cached_call_graph: RwLock<Option<Arc<bonsai_callgraph::ResolvedCallGraph>>>,
 }
 
 #[derive(Default, Debug)]
@@ -141,6 +146,31 @@ impl DataFlowCache {
         Self::default()
     }
 
+    /// Lazy-built per-cache resolved call graph. Built on first
+    /// access, dropped by `invalidate_file`. Shared across the
+    /// internal prewarm / snapshot / dependency-walk paths so the
+    /// graph is constructed at most once per cache lifetime.
+    fn call_graph_for(&self, db: &AnalyzerDb) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
+        if let Some(hit) = self.cached_call_graph.read().as_ref().cloned() {
+            return hit;
+        }
+        let built = Arc::new(snapshot_call_graph(db));
+        let mut slot = self.cached_call_graph.write();
+        if let Some(existing) = slot.as_ref().cloned() {
+            return existing;
+        }
+        *slot = Some(built.clone());
+        built
+    }
+
+    /// Inject a workspace-cached call graph as the seed for this
+    /// cache. Workspace-level callers that already hold one (via
+    /// `Workspace::cached_resolved_call_graph`) call this once at
+    /// open time so the dataflow cache skips a second build.
+    pub fn seed_call_graph(&self, graph: Arc<bonsai_callgraph::ResolvedCallGraph>) {
+        *self.cached_call_graph.write() = Some(graph);
+    }
+
     /// Get the cached taint facts for a function, computing them on
     /// demand if not cached. Returns `Arc<KindedTokens>` so multiple
     /// concurrent readers share one allocation.
@@ -161,7 +191,7 @@ impl DataFlowCache {
             return hit;
         }
         let (facts, graph) = taint_facts_and_graph_for_entry(func, db, &TokenSet::default());
-        let dependencies = dependency_files_for_db(func, db);
+        let dependencies = self.dependency_files_via_cache(func, db);
         let computed = Arc::new(facts);
         let graph = Arc::new(graph);
         let mut inner = self.inner.write();
@@ -194,7 +224,7 @@ impl DataFlowCache {
             return hit;
         }
         let (facts, graph) = taint_facts_and_graph_for_entry(func, db, &TokenSet::default());
-        let dependencies = dependency_files_for_db(func, db);
+        let dependencies = self.dependency_files_via_cache(func, db);
         let facts = Arc::new(facts);
         let graph = Arc::new(graph);
         let mut inner = self.inner.write();
@@ -302,7 +332,7 @@ impl DataFlowCache {
                 (f, Arc::new(facts), Arc::new(graph))
             })
             .collect();
-        let call_graph = snapshot_call_graph(db);
+        let call_graph = self.call_graph_for(db);
         let global = db.global_index();
         let mut inner = self.inner.write();
         for (f, facts, graph) in computed {
@@ -331,6 +361,10 @@ impl DataFlowCache {
     /// `file`. Entries without dependency metadata are treated as
     /// stale so older live caches fail closed.
     pub fn invalidate_file(&self, file: FileId) {
+        // Drop the cached resolved call graph: a file edit may have
+        // added/removed/renamed callees, which would silently poison
+        // every dependency walk that consumed the stale graph.
+        *self.cached_call_graph.write() = None;
         let mut inner = self.inner.write();
         let stale: AHashSet<FuncId> = inner
             .facts
@@ -378,9 +412,9 @@ impl DataFlowCache {
     /// function even if `SymbolId`/`FuncId` counters land on
     /// different numbers during a fresh index.
     pub fn snapshot(&self, db: &AnalyzerDb) -> SerializableSnapshot {
+        let call_graph = self.call_graph_for(db);
         let inner = self.inner.read();
         let global = db.global_index();
-        let call_graph = snapshot_call_graph(db);
         let file_hashes = current_file_hashes(db);
         let mut snapshot_files = Vec::new();
         let mut file_to_snapshot_index: AHashMap<FileId, u32> = AHashMap::new();
@@ -858,10 +892,14 @@ fn snapshot_call_graph(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
     )
 }
 
-fn dependency_files_for_db(func: FuncId, db: &AnalyzerDb) -> AHashSet<FileId> {
-    let global = db.global_index();
-    let call_graph = snapshot_call_graph(db);
-    dependency_files(func, &call_graph, &global)
+impl DataFlowCache {
+    /// Compute the file dependency set for `func` using the cache's
+    /// internally-cached call graph (built once per cache lifetime).
+    fn dependency_files_via_cache(&self, func: FuncId, db: &AnalyzerDb) -> AHashSet<FileId> {
+        let global = db.global_index();
+        let call_graph = self.call_graph_for(db);
+        dependency_files(func, &call_graph, &global)
+    }
 }
 
 fn dependency_files(

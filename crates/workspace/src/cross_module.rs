@@ -992,10 +992,15 @@ impl<'a> TraceBuilder<'a> {
                 return Some(decl.symbol);
             }
         }
+        // Per-adapter constructor-name list when the adapter has
+        // narrowed it; falls through to the cross-language allowlist.
+        let names = self
+            .db
+            .adapter_for(class_file)
+            .map(|adapter| adapter.capabilities().effective_constructor_method_names())
+            .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
         for decl in global.decls_in(class_file) {
-            if bonsai_common::CONSTRUCTOR_METHOD_NAMES
-                .iter()
-                .any(|name| *name == decl.name.as_str())
+            if names.iter().any(|name| *name == decl.name.as_str())
                 && decl.parent == Some(class_sym)
             {
                 return Some(decl.symbol);

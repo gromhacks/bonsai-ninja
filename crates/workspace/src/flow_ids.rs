@@ -233,6 +233,15 @@ impl FlowIdCache {
         inner.truncated.clear();
         inner.prewarmed = false;
     }
+
+    /// Seed the workspace-shared resolved call graph as the cached
+    /// graph for this flow-id cache so the lazy `call_graph()`
+    /// build is skipped. Called once at workspace open after the
+    /// workspace builds its own canonical graph; saves rebuilding
+    /// the same content twice.
+    pub fn seed_call_graph(&self, graph: Arc<ResolvedCallGraph>) {
+        self.inner.write().cg = Some(graph);
+    }
 }
 
 fn collect_flow_ids_for_chains(

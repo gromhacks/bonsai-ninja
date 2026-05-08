@@ -3186,64 +3186,50 @@ where
     // caller branch that happens to be reachable from the same
     // function. Only helpers where the matched source reaches a
     // Return event are eligible for caller scheduling.
-    const TRANSITIVE_CALLER_DEPTH: usize = 4;
+    const TRANSITIVE_CALLER_DEPTH: u32 = 4;
+    // The transitive caller closure is rulepack-independent — it's
+    // a pure function of the resolved call graph — so we let the
+    // workspace cache it once and consult it here. Per-source-
+    // returning func, look up the cached closure, then attribute
+    // each transitive caller back to the source's `orig_idx` so
+    // lineage stays correct (without the orig_idx tracking, the
+    // old fallback could attach an unrelated source rule's lineage
+    // to a chain — the canonical bug was a Redis report titled
+    // "source in ACLLoadFromFile" but rendered as starting at
+    // `aclCommand`).
+    let cg = ws.cached_resolved_call_graph();
+    let transitive_callers = ws.transitive_callers();
     let mut visited: AHashSet<(FuncId, usize)> = source_work
         .iter()
         .enumerate()
         .filter(|(idx, _)| source_returning_indices.contains(idx))
         .map(|(idx, (_, func, _))| (*func, idx))
         .collect();
-    // Iterate the seed set in a deterministic order. AHashMap key
-    // iteration is randomized per process, which would otherwise leak
-    // into the order callers get scheduled and ultimately into
-    // finding fingerprints (see `finding_ids_deterministic_across_runs`).
-    //
-    // Keep the original source-work index beside each frontier func.
-    // Without this ancestry, the old fallback could attach an unrelated
-    // source to the chain. That produced impossible reports such as
-    // "source in ACLLoadFromFile" with a rendered chain starting at
-    // `aclCommand`.
-    let mut frontier: Vec<(FuncId, usize)> = source_work
+    // Iterate `(func, orig_idx)` pairs in deterministic order so the
+    // resulting `source_work` extension order is stable across runs.
+    let mut seed_pairs: Vec<(FuncId, usize)> = source_work
         .iter()
         .enumerate()
         .filter(|(idx, _)| source_returning_indices.contains(idx))
         .map(|(idx, (_, func, _))| (*func, idx))
         .collect();
-    frontier.sort_by_key(|(func, idx)| (func.raw(), *idx));
-    let cg = ws.cached_resolved_call_graph();
-    for _ in 0..TRANSITIVE_CALLER_DEPTH {
-        let mut next_frontier: Vec<(FuncId, usize)> = Vec::new();
-        for &(callee_func, orig_idx) in &frontier {
-            // Collect & sort callers so each frontier expansion
-            // produces stable ordering regardless of call-graph
-            // iteration order.
-            let mut callers: Vec<FuncId> = cg.callers_of(callee_func).map(|edge| edge.from).collect();
-            callers.sort_by_key(|f| f.raw());
-            callers.dedup();
-            for caller_func in callers {
-                if !visited.insert((caller_func, orig_idx)) {
-                    continue;
-                }
-                let (orig_src, _, _) = &source_work[orig_idx];
-                // Empty seed — the inter pass's
-                // `apply_return_taint` consults the callee's
-                // `returns_external` and taints the assignment LHS
-                // when it sees `var = source_helper()`. Adding a
-                // non-empty seed risks pre-tainting unrelated
-                // identifiers and producing false positives on the
-                // caller's body.
-                let new_idx = source_work.len();
-                source_work.push((*orig_src, caller_func, TokenSet::default()));
-                source_groups.entry(caller_func).or_default().push(new_idx);
-                next_frontier.push((caller_func, orig_idx));
+    seed_pairs.sort_by_key(|(func, idx)| (func.raw(), *idx));
+    for &(seed_func, orig_idx) in &seed_pairs {
+        let callers = transitive_callers.callers_of(&cg, seed_func, TRANSITIVE_CALLER_DEPTH);
+        for caller_func in callers.iter().copied() {
+            if !visited.insert((caller_func, orig_idx)) {
+                continue;
             }
+            let (orig_src, _, _) = &source_work[orig_idx];
+            // Empty seed — the inter pass's `apply_return_taint`
+            // consults the callee's `returns_external` and taints
+            // the assignment LHS when it sees
+            // `var = source_helper()`. A non-empty seed risks
+            // pre-tainting unrelated identifiers in the caller.
+            let new_idx = source_work.len();
+            source_work.push((*orig_src, caller_func, TokenSet::default()));
+            source_groups.entry(caller_func).or_default().push(new_idx);
         }
-        if next_frontier.is_empty() {
-            break;
-        }
-        next_frontier.sort_by_key(|(func, idx)| (func.raw(), *idx));
-        next_frontier.dedup();
-        frontier = next_frontier;
     }
 
     // Functions the security layer has proven source-returning.
@@ -3510,28 +3496,22 @@ fn source_seed_reaches_return(
     if seeds.is_empty() {
         return false;
     }
-    // Fast path: when the workspace value-flow cache holds a graph
-    // for `source_func`, that graph already encodes every reachable
-    // propagation from ANY seed in this function — including Return
-    // nodes. A graph lookup replaces the per-source 64-budget
-    // interprocedural pass for the common case where the workspace
-    // index already prewarmed the cache. The engine fallback below
-    // covers cold caches (e.g. SDK callers using `query_only` mode
-    // without a sidecar).
-    if !ws.value_flow().is_empty() {
-        let graph = ws
-            .value_flow()
-            .graph_for_with_caches(source_func, ws.db(), ws.inter_taint_caches());
-        if reaches_return_via_value_flow(&graph, source_func, seeds) {
-            return true;
-        }
-        // Empty graphs and graphs without Return nodes still need
-        // the engine pass because the value-flow seed is the union
-        // of all params/assigns; absence of a Return-reachable
-        // node in the graph is *not* proof of absence — the
-        // value-flow node kind tagging is best-effort. Stay safe
-        // and consult the engine.
+    // Fast path: a hash-set lookup against the precomputed
+    // `returning_seed_names` set built when the value-flow graph
+    // for `source_func` was constructed. This collapses the
+    // per-seed forward-closure walk into a single intersection.
+    let returning_names = ws.value_flow().returning_seed_names(
+        source_func,
+        ws.db(),
+        ws.inter_taint_caches(),
+    );
+    if !returning_names.is_empty() && seeds.iter().any(|s| returning_names.contains(s)) {
+        return true;
     }
+    // Engine fallback for cold caches (`query_only` callers without
+    // a sidecar) and for the rare graphs whose Return-node tagging
+    // is best-effort. The fallback consults the workspace inter-
+    // taint singleton so the resolver memo + alias maps survive.
     let config = InterTaintConfig {
         sanitizers: TokenSet::default(),
         budget: 64,
@@ -3550,42 +3530,6 @@ fn source_seed_reaches_return(
         .tainted_calls
         .iter()
         .any(|call| call.caller == source_func && call.kind == TaintedCallKind::Return)
-}
-
-fn reaches_return_via_value_flow(
-    graph: &ValueFlowGraph,
-    source_func: FuncId,
-    seeds: &TokenSet,
-) -> bool {
-    use bonsai_taint::ValueFlowNodeKind;
-    // Identify candidate seed nodes: a `Param` or `AssignTarget` in
-    // `source_func` whose value text equals a seed name.
-    let seed_nodes: Vec<_> = graph
-        .nodes
-        .iter()
-        .filter(|node| {
-            node.func == source_func
-                && matches!(
-                    node.kind,
-                    ValueFlowNodeKind::Param | ValueFlowNodeKind::AssignTarget
-                )
-                && seeds.contains(&node.value_text)
-        })
-        .cloned()
-        .collect();
-    if seed_nodes.is_empty() {
-        return false;
-    }
-    for seed_node in &seed_nodes {
-        let reach = graph.forward_closure(seed_node);
-        if reach
-            .iter()
-            .any(|n| n.func == source_func && matches!(n.kind, ValueFlowNodeKind::Return))
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// True when the source could syntactically reach the sink — same-fn

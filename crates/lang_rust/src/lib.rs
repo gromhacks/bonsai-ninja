@@ -179,6 +179,9 @@ impl LanguageAdapter for RustAdapter {
             pattern_matching: CapabilityLevel::Exact,
             receiver_types: CapabilityLevel::Partial,
             module_export_aliases: &[],
+            constructor_method_names: &[],
+            super_receiver_tokens: &[],
+            implicit_receiver_tokens: &[],
         }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
