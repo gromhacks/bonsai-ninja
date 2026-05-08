@@ -89,7 +89,12 @@ pub struct RuleMatch {
 pub struct InterTaintView<'a> {
     calls_by_span: AHashMap<Span, Vec<&'a TaintedCall>>,
     calls: Vec<&'a TaintedCall>,
-    verdict_cache: RefCell<AHashMap<(String, FileId, u64, u64), bool>>,
+    /// `Mutex` instead of `RefCell` so the view is `Sync` — required
+    /// when the matcher's outer file loop runs in parallel via
+    /// rayon. Cache reads are short and contention-free in practice
+    /// (most ruleset+file combinations miss or hit at most once),
+    /// so the lock is not a measurable cost.
+    verdict_cache: parking_lot::Mutex<AHashMap<(String, FileId, u64, u64), bool>>,
 }
 
 impl<'a> InterTaintView<'a> {
@@ -105,14 +110,14 @@ impl<'a> InterTaintView<'a> {
         Self {
             calls_by_span,
             calls: calls.iter().collect(),
-            verdict_cache: RefCell::new(AHashMap::new()),
+            verdict_cache: parking_lot::Mutex::new(AHashMap::new()),
         }
     }
 
     /// Check the per-rule cached verdict for a span, if any.
     fn cached_verdict(&self, rule_id: &str, span: Span) -> Option<bool> {
         self.verdict_cache
-            .borrow()
+            .lock()
             .get(&(rule_id.to_string(), span.file, span.start, span.end))
             .copied()
     }
@@ -126,7 +131,7 @@ impl<'a> InterTaintView<'a> {
             return;
         }
         self.verdict_cache
-            .borrow_mut()
+            .lock()
             .insert((rule_id.to_string(), span.file, span.start, span.end), verdict);
     }
 
@@ -425,6 +430,7 @@ fn match_rules_against_facts_with_progress_and_mode<F>(
 where
     F: FnMut(),
 {
+    use rayon::prelude::*;
     let db = ws.db();
     let global = db.global_index();
     let prepared: Vec<PreparedRule<'_>> = rules.iter().filter_map(|rule| PreparedRule::new(rule)).collect();
@@ -436,28 +442,46 @@ where
     } else {
         AHashSet::new()
     };
-    let mut out: Vec<RuleMatch> = Vec::new();
-    for file in global.all_files() {
-        let Some(adapter) = ws.db().adapter_for(file) else {
-            on_file_done();
-            continue;
-        };
-        let language = adapter.language_id();
-        let file_rules: Vec<&PreparedRule<'_>> = prepared
-            .iter()
-            .filter(|rule| rule.rule.language == language.as_str())
-            .collect();
-        if !file_rules.is_empty() {
-            scan_file_rules(
-                ws,
-                file,
-                &file_rules,
-                &constructor_names,
-                mode,
-                taint_view,
-                &mut out,
-            );
-        }
+    // Each `scan_file_rules` writes only to its own per-file Vec —
+    // no shared state across files — so file-level work is
+    // embarrassingly parallel. `par_iter` distributes files across
+    // rayon's pool; per-thread match Vecs are flat-mapped at the
+    // join. Match collection order is non-deterministic across
+    // runs, but downstream callers already invoke `sort_matches` on
+    // the returned Vec before emission to keep finding ids stable.
+    let files: Vec<_> = global.all_files().collect();
+    let total = files.len();
+    let out: Vec<RuleMatch> = files
+        .par_iter()
+        .flat_map_iter(|&file| {
+            let mut file_out: Vec<RuleMatch> = Vec::new();
+            if let Some(adapter) = ws.db().adapter_for(file) {
+                let language = adapter.language_id();
+                let file_rules: Vec<&PreparedRule<'_>> = prepared
+                    .iter()
+                    .filter(|rule| rule.rule.language == language.as_str())
+                    .collect();
+                if !file_rules.is_empty() {
+                    scan_file_rules(
+                        ws,
+                        file,
+                        &file_rules,
+                        &constructor_names,
+                        mode,
+                        taint_view,
+                        &mut file_out,
+                    );
+                }
+            }
+            file_out
+        })
+        .collect();
+    // Drain progress ticks after the parallel work completes.
+    // `on_file_done` is `FnMut` and not Sync; a per-tick callback
+    // mid-scan would force serialisation. Bulk-replaying the count
+    // here keeps the progress UI in sync without sacrificing the
+    // parallel speedup.
+    for _ in 0..total {
         on_file_done();
     }
     out

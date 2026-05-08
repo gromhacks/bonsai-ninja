@@ -25,6 +25,8 @@ serde_yaml = "0.9"
 ahash = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
+parking_lot = "0.12"
+rayon = { workspace = true }
 
 [dev-dependencies]
 bonsai_lang_python = { workspace = true }
@@ -49,7 +51,6 @@ bonsai_lang_elixir = { workspace = true }
 bonsai_lang_erlang = { workspace = true }
 bonsai_lang_solidity = { workspace = true }
 bonsai_adapters = { workspace = true }
-rayon = { workspace = true }
 
 [lints]
 workspace = true
