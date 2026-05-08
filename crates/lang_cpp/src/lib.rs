@@ -410,26 +410,33 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     }
     for using_node in collect_kinds(tree, &["using_declaration"]) {
         // Tree-sitter-cpp doesn't break the path into fields, so we
-        // recover it textually by stripping the syntactic prefix and
-        // trailing semicolon.
-        let module = node_text(&using_node, src)
+        // recover it textually. Two distinct shapes share this node
+        // kind:
+        //
+        //   * `using namespace X::Y;` — wildcard import; brings every
+        //     name in `X::Y` into scope, no single local binding.
+        //   * `using X::Y::Z;`        — single-symbol import; binds
+        //     `Z` locally to `X::Y::Z`.
+        //
+        // The leading `using namespace` keyword is the discriminator;
+        // detect it BEFORE trimming so the wildcard form isn't
+        // misclassified as a single-symbol import that would alias
+        // `Y` (the second-to-last segment) by accident.
+        let raw = node_text(&using_node, src);
+        let raw_trimmed = raw.trim_start();
+        let is_wildcard_namespace = raw_trimmed.starts_with("using namespace ");
+        let module_path = raw_trimmed
             .trim_start_matches("using ")
             .trim_start_matches("namespace ")
             .trim_end_matches(';')
             .trim()
+            .trim_end_matches("::*")
             .to_string();
-        if module.is_empty() {
+        if module_path.is_empty() {
             continue;
         }
-        let is_wildcard = module.ends_with("::*");
-        let module_path = module.trim_end_matches("::*").to_string();
-        // `using Poco::Net::Context;` introduces `Context` as a local
-        // binding for `Poco::Net::Context`. Capture it as an alias so
-        // the rule matcher can chase `Context` back through the import
-        // chain to satisfy package gates like `packages: [Poco]`.
-        // Wildcard `using namespace Poco::Net;` doesn't bind a single
-        // local name, so leave its alias empty.
-        let alias = (!is_wildcard)
+        // Tail-segment binding only applies to the single-symbol form.
+        let alias = (!is_wildcard_namespace)
             .then(|| module_path.rsplit("::").next().unwrap_or(""))
             .filter(|tail| !tail.is_empty())
             .map(str::to_string);
@@ -437,7 +444,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             span: span_of(file, &using_node),
             module: module_path,
             alias,
-            is_wildcard,
+            is_wildcard: is_wildcard_namespace,
             original_name: None,
             scope: ImportScope::Module,
         });

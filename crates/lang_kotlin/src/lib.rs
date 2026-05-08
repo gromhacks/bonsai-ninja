@@ -82,24 +82,28 @@ impl LanguageAdapter for KotlinAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        // Kotlin's `object Foo { fun bar() { ... } }` parses as
-        // `infix_expression` (with `object` as the operator) in
-        // tree-sitter-kotlin, so the kit's class-kind detection
-        // doesn't see a class node. Synthesize a class decl for
-        // each such pattern and re-parent the contained methods so
-        // `Foo.bar(...)` dispatches correctly.
-        synthesize_kotlin_object_decls(&mut idx, file, ctx);
-        // Module path from `package com.foo.bar` declaration; falls
-        // back to file-stem when absent.
-        let segments = parse_with(PACK_NAME, file, ctx)
-            .and_then(|(snapshot, tree)| extract_kotlin_package(tree.root_node(), snapshot.text.as_bytes()));
-        if let Some(segments) = segments {
-            bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
-        } else {
-            bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
-        }
+        // Parse once and thread the snapshot + tree through every
+        // post-process step (object synthesis, package detection,
+        // visibility / type-alias / class-base enrichment, exception
+        // types). The kit caches per-file parses on the snapshot, but
+        // calling `parse_with` four separate times re-walks bookkeeping
+        // we can avoid by hoisting.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Kotlin's `object Foo { fun bar() { ... } }` parses as
+            // `infix_expression` (with `object` as the operator) in
+            // tree-sitter-kotlin, so the kit's class-kind detection
+            // doesn't see a class node. Synthesize a class decl for
+            // each such pattern and re-parent the contained methods so
+            // `Foo.bar(...)` dispatches correctly.
+            synthesize_kotlin_object_decls(&mut idx, file, &tree, src);
+            // Module path from `package com.foo.bar` declaration; falls
+            // back to file-stem when absent.
+            if let Some(segments) = extract_kotlin_package(tree.root_node(), src) {
+                bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
+            } else {
+                bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
+            }
             let vis_map = collect_modifier_visibility(tree.root_node(), file, src, &KOTLIN_VOCAB);
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
@@ -154,15 +158,17 @@ impl LanguageAdapter for KotlinAdapter {
                     decl.bases = bases.clone();
                 }
             }
-        }
-        // Populate Throw::thrown_type and Try::catch_types from the
-        // parse tree. Done at the end so any prior post-processing
-        // that mutates flow_events runs before this final enrichment.
-        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            let src = snapshot.text.as_bytes();
+            // Throw::thrown_type and Try::catch_types — done after
+            // any flow_events mutation so this final enrichment is
+            // the authoritative type fact.
             for decl in &mut idx.defs {
                 populate_kotlin_exception_types(&mut decl.flow_events, &tree, src);
             }
+        } else {
+            // Parse failed; still run the file-stem fallback so the
+            // semantic-identity pass doesn't leave decls without
+            // module paths.
+            bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         }
         // Same JVM library surface as Java.
         const KOTLIN_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
@@ -504,18 +510,14 @@ fn collect_kotlin_type_aliases(
 /// to dispatch into. The synthesized class carries the
 /// infix_expression span so any subsequent post-process keyed on
 /// span (e.g. `apply_class_field_type_aliases`) lines up.
-fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, ctx: &AdapterContext<'_>) {
-    let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
-        return;
-    };
-    let src = snapshot.text.as_bytes();
+fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
     let mut next_symbol_raw = idx
         .defs
         .iter()
         .map(|d| d.symbol.raw())
         .max()
         .map_or(0, |m| m + 1);
-    for infix in collect_kinds(&tree, &["infix_expression"]) {
+    for infix in collect_kinds(tree, &["infix_expression"]) {
         let mut cursor = infix.walk();
         let mut object_keyword = false;
         let mut name_node: Option<Node<'_>> = None;

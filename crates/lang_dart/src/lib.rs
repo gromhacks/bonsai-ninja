@@ -228,9 +228,11 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             }
             // `show` and `hide` both appear as `combinator` nodes;
             // only `show` introduces a binding (hide *removes* names),
-            // so skip non-`show` keywords.
+            // so skip non-`show` keywords. Match on the first
+            // whitespace-delimited token to avoid catching identifiers
+            // that incidentally start with `show` characters.
             let combinator_text = node_text(&child, src);
-            if !combinator_text.trim_start().starts_with("show") {
+            if combinator_text.split_whitespace().next() != Some("show") {
                 continue;
             }
             let mut child_cursor = child.walk();

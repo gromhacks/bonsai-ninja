@@ -5056,7 +5056,11 @@ fn resolve_workspace_module_targets(
         let ctx = ResolveContext::new(*caller_file, caller_module).with_alias_map(alias_targets);
         resolve_callable_with_context(&global, name, &ctx)
     };
-    for func in export_name_variants(alias_tail)
+    let caller_export_aliases = caller_ctx
+        .and_then(|(file, _)| db.adapter_for(*file))
+        .map(|adapter| adapter.capabilities().module_export_aliases)
+        .unwrap_or(&[]);
+    for func in export_name_variants(alias_tail, caller_export_aliases)
         .into_iter()
         .flat_map(|name| resolve(&name))
     {
@@ -5100,12 +5104,18 @@ fn resolve_workspace_module_targets(
 // share one canonical alias-target match.
 use bonsai_resolve::module_target_matches_decl_module_path;
 
-fn export_name_variants(alias_tail: &str) -> Vec<String> {
-    vec![
-        alias_tail.to_string(),
-        format!("exports.{alias_tail}"),
-        format!("module.exports.{alias_tail}"),
-    ]
+/// Expand a bare alias-tail into every fully-qualified shape that
+/// resolves to the same callee. Each language declares its own
+/// export-receiver aliases via `LanguageCapabilities::module_export_aliases`
+/// (JS/TS: `["exports", "module.exports"]`; languages without this
+/// convention pass `&[]`). Mirrors callgraph's `export_name_variants`
+/// so both passes use one source of truth.
+fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]) -> Vec<String> {
+    let mut variants = vec![alias_tail.to_string()];
+    for receiver in caller_export_aliases {
+        variants.push(format!("{receiver}.{alias_tail}"));
+    }
+    variants
 }
 
 fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
