@@ -217,7 +217,26 @@ pub struct InterTaintCaches {
     alias_targets_by_func: AHashMap<FuncId, AHashMap<String, AliasTarget>>,
     local_bindings_by_func: AHashMap<FuncId, AHashMap<String, FuncId>>,
     summaries_by_func: AHashMap<FuncId, FunctionSummary>,
+    /// Memo cache for `resolve_call_candidates_with_caller_at`. The
+    /// resolver answer for `(caller_func, call_span)` is purely a
+    /// function of static AST + symbol-table state — it doesn't
+    /// depend on which source seeded the analysis. Without this
+    /// cache, OWASP's 2,740 separate inter-taint runs each re-resolve
+    /// the same `String.format(...)` / `Logger.info(...)` call sites
+    /// from scratch.
+    ///
+    /// `RefCell` so the cache fills via `&InterTaintCaches::resolved_calls_by_site`
+    /// while the engine holds `&mut InterTaintCaches` for the
+    /// adjacent plain-map fields — interior mutability lets one
+    /// field be cache-mutable through a shared borrow.
+    pub(crate) resolved_calls_by_site: ResolvedCallSiteCache,
 }
+
+/// Memo store keyed on `(caller_func, call_span)` → resolved
+/// callees. Wrapped in `RefCell` so it can fill during propagation
+/// while sharing borrows with the rest of `InterTaintCaches`.
+pub(crate) type ResolvedCallSiteCache =
+    std::cell::RefCell<AHashMap<(FuncId, Span), std::sync::Arc<[ResolvedCallee]>>>;
 
 impl Default for InterTaintConfig {
     fn default() -> Self {
@@ -659,6 +678,11 @@ fn run_interprocedural_worklist(
         }
 
         let mut state = seed.clone();
+        // Resolver cache lives on `caches` but is borrowed
+        // immutably here (interior-mutable via `RefCell`) so it can
+        // share the borrow with the rest of `caches`'s mutable
+        // fields used elsewhere in the loop body.
+        let resolved_calls_cache = &caches.resolved_calls_by_site;
         let mut ctx = PropagationCtx {
             caller: func,
             config,
@@ -673,6 +697,7 @@ fn run_interprocedural_worklist(
             precision: &mut precision,
             current_trace_id: lineage,
             lineage_history: &lineage_history,
+            resolved_calls: Some(resolved_calls_cache),
         };
         propagate_taint_through_events(
             &decl.flow_events,
@@ -709,6 +734,11 @@ struct PropagationCtx<'a> {
     precision: &'a mut Precision,
     current_trace_id: Option<u64>,
     lineage_history: &'a AHashSet<FunctionSeedBase>,
+    /// Resolver memo cache — populated at the top of an inter-taint
+    /// run from `InterTaintCaches::resolved_calls_by_site` so every
+    /// `Call` event walked during propagation hits the cache instead
+    /// of re-resolving `(caller, span)` from scratch.
+    resolved_calls: Option<&'a ResolvedCallSiteCache>,
 }
 
 fn propagate_taint_through_events(
@@ -2540,6 +2570,11 @@ fn apply_return_taint(
         db,
         caller,
         config,
+        // Summary-builder context doesn't share the propagation
+        // cache today; populating it here would require threading
+        // `resolved_calls` into every summary-pass entrypoint. Left
+        // `None` so this path stays uncached.
+        resolved_calls: None,
     };
     let candidates = resolve_call_candidates_with_caller_at(callee_name, &resolve_scope, &[], Some(*span));
     let tainted_call_arg = effective_source_call_args
@@ -3575,7 +3610,7 @@ fn call_arg_is_directly_tainted(text: &str, state: &TokenSet) -> bool {
 /// One resolver candidate — a concrete callee FuncId together with
 /// the [`EdgeKind`] + [`Precision`] of the edge that reached it.
 #[derive(Clone, Debug)]
-struct ResolvedCallee {
+pub(crate) struct ResolvedCallee {
     func: FuncId,
     kind: EdgeKind,
     precision: Precision,
@@ -3588,6 +3623,12 @@ struct CallResolveScope<'a> {
     db: &'a AnalyzerDb,
     caller: FuncId,
     config: &'a InterTaintConfig,
+    /// Optional memo cache — callers in the propagation walker
+    /// supply `Some` so the resolver doesn't re-walk the same call
+    /// site for every source-seeded run. Off-tree callers (summary
+    /// builders that already memoise their own results) leave it
+    /// `None`.
+    resolved_calls: Option<&'a ResolvedCallSiteCache>,
 }
 
 impl<'a> CallResolveScope<'a> {
@@ -3599,6 +3640,7 @@ impl<'a> CallResolveScope<'a> {
             db: ctx.db,
             caller: ctx.caller,
             config: ctx.config,
+            resolved_calls: ctx.resolved_calls,
         }
     }
 }
@@ -3619,11 +3661,43 @@ fn resolve_call_candidates_with_caller(
         db,
         caller,
         config,
+        resolved_calls: None,
     };
     resolve_call_candidates_with_caller_at(name, &scope, &[], None)
 }
 
 fn resolve_call_candidates_with_caller_at(
+    name: &str,
+    scope: &CallResolveScope<'_>,
+    receiver_types: &[String],
+    call_span: Option<Span>,
+) -> Vec<ResolvedCallee> {
+    // Memo cache: the resolver answer for `(caller, span)` is purely
+    // a function of static AST + symbol-table state, so any
+    // source-seeded run that re-walks the same call site shares the
+    // same answer. OWASP's 2,740 separate inter-taint runs all walk
+    // into `String.format(...)` and friends; without this memo each
+    // re-resolves from scratch.
+    //
+    // Cache only applies when both a cache reference and a stable
+    // span identifier are present — call sites that don't supply a
+    // span (synthesized resolution from summaries, for example)
+    // bypass the cache and run uncached.
+    if let (Some(cache), Some(span)) = (scope.resolved_calls, call_span) {
+        if let Some(cached) = cache.borrow().get(&(scope.caller, span)) {
+            return cached.iter().cloned().collect();
+        }
+        let computed =
+            resolve_call_candidates_with_caller_at_uncached(name, scope, receiver_types, call_span);
+        cache
+            .borrow_mut()
+            .insert((scope.caller, span), computed.iter().cloned().collect());
+        return computed;
+    }
+    resolve_call_candidates_with_caller_at_uncached(name, scope, receiver_types, call_span)
+}
+
+fn resolve_call_candidates_with_caller_at_uncached(
     name: &str,
     scope: &CallResolveScope<'_>,
     receiver_types: &[String],
