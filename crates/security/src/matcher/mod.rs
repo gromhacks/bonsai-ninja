@@ -810,6 +810,8 @@ fn return_rule_match(
 
 fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], out: &mut Vec<RuleMatch>) {
     let global = ws.db().global_index();
+    let file_packages = file_package_set(ws, file);
+    let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         // Resolve the enclosing-class name AND its declared bases for
         // kind:param `in_class:` rules. Decl.parent points at the
@@ -864,6 +866,13 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                     callee_matches(param, prepared.name, prepared.attribute, prepared.regex.as_ref())
                 };
                 if !matched {
+                    continue;
+                }
+                // Package gate — same one calls/reads/writes use. A
+                // param rule with `packages: [django]` should only
+                // fire on files importing django, not on any file
+                // with a same-named parameter.
+                if !prepared.call_context_allows(param, &[], &alias_map, file_packages.as_ref()) {
                     continue;
                 }
                 let (file_path, line, col, span) = first_param_read_site(ws, file, decl, param)
@@ -2091,6 +2100,8 @@ fn scan_writes_batch(
 ) {
     let global = ws.db().global_index();
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let file_packages = file_package_set(ws, file);
+    let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
         let writes = collect_writes(&decl.flow_events);
         for (target, span) in writes {
@@ -2114,6 +2125,13 @@ fn scan_writes_batch(
                     prepared.attribute,
                     prepared.regex.as_ref(),
                 ) {
+                    continue;
+                }
+                // Same package-signal gate the call/read scanners use —
+                // a receiver-agnostic write target like
+                // `^[A-Za-z_$]\w*\.headers$` would otherwise fire on
+                // any file regardless of the rule's `packages` list.
+                if !prepared.call_context_allows(&target, &[], &alias_map, file_packages.as_ref()) {
                     continue;
                 }
                 if !constraints_pass(ConstraintEval {
