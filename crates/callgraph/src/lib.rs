@@ -8,8 +8,8 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, TypeAliasBinding};
-use bonsai_resolve::{resolve_callable_with_context, resolve_class, visibility_allows, ResolveContext};
+use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent};
+use bonsai_resolve::{resolve_callable_with_context, resolve_class, ResolveContext};
 use serde::{Deserialize, Serialize};
 
 /// What kind of dispatch produced a call edge. The resolver
@@ -851,89 +851,7 @@ fn collect_super_method_targets(
     targets
 }
 
-fn collect_method_candidates_for_class(
-    global: &GlobalIndex,
-    class_sym: SymbolId,
-    method_name: &str,
-    ctx: &ResolveContext<'_>,
-    seen: &mut AHashSet<SymbolId>,
-    out: &mut Vec<FuncId>,
-) {
-    let mut seen_classes = AHashSet::new();
-    collect_method_candidates_for_class_inner(
-        global,
-        class_sym,
-        method_name,
-        ctx,
-        seen,
-        &mut seen_classes,
-        out,
-    );
-}
-
-fn collect_method_candidates_for_class_inner(
-    global: &GlobalIndex,
-    class_sym: SymbolId,
-    method_name: &str,
-    ctx: &ResolveContext<'_>,
-    seen_methods: &mut AHashSet<SymbolId>,
-    seen_classes: &mut AHashSet<SymbolId>,
-    out: &mut Vec<FuncId>,
-) {
-    if !seen_classes.insert(class_sym) {
-        return;
-    }
-    let Some(class_decl) = global.decl_of(class_sym) else {
-        return;
-    };
-    if !matches!(
-        class_decl.kind,
-        DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-    ) {
-        return;
-    }
-    let Some(class_file) = global.declaring_file(class_sym) else {
-        return;
-    };
-    let mut matched_local_method = false;
-    for decl in global.decls_in(class_file) {
-        if decl.name != method_name {
-            continue;
-        }
-        if !matches!(
-            decl.kind,
-            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-        ) {
-            continue;
-        }
-        let Some(decl_file) = global.declaring_file(decl.symbol) else {
-            continue;
-        };
-        if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
-            continue;
-        }
-        if decl.parent == Some(class_sym) && seen_methods.insert(decl.symbol) {
-            matched_local_method = true;
-            out.push(FuncId::new(decl.symbol.raw()));
-        }
-    }
-    if matched_local_method {
-        return;
-    }
-    for base in &class_decl.bases {
-        for base_sym in resolve_class(global, base, ctx) {
-            collect_method_candidates_for_class_inner(
-                global,
-                base_sym,
-                method_name,
-                ctx,
-                seen_methods,
-                seen_classes,
-                out,
-            );
-        }
-    }
-}
+use bonsai_resolve::collect_method_candidates_for_class;
 
 fn receiver_call_return_type_names(
     global: &GlobalIndex,
@@ -1132,68 +1050,7 @@ fn static_constructor_return(value_text: &str) -> bool {
     bonsai_common::value_text_returns_self_constructor(value_text)
 }
 
-fn prune_receiver_type_names_for_dispatch(
-    type_names: Vec<String>,
-    global: &GlobalIndex,
-    ctx: &ResolveContext<'_>,
-) -> Vec<String> {
-    if type_names.len() < 2 {
-        return type_names;
-    }
-    let canonical_types: Vec<String> = type_names
-        .iter()
-        .map(|name| canonical_dispatch_type_name(name))
-        .collect();
-    let mut inherited = AHashSet::new();
-    for type_name in &type_names {
-        for class_sym in resolve_class(global, type_name, ctx) {
-            collect_transitive_base_type_names(global, class_sym, ctx, &mut inherited);
-        }
-    }
-    let mut out = Vec::new();
-    for (idx, type_name) in type_names.into_iter().enumerate() {
-        if inherited.contains(&canonical_types[idx])
-            && canonical_types
-                .iter()
-                .enumerate()
-                .any(|(other_idx, other)| other_idx != idx && other != &canonical_types[idx])
-        {
-            continue;
-        }
-        push_unique_string(&mut out, type_name);
-    }
-    out
-}
-
-fn collect_transitive_base_type_names(
-    global: &GlobalIndex,
-    class_sym: SymbolId,
-    ctx: &ResolveContext<'_>,
-    out: &mut AHashSet<String>,
-) {
-    let Some(class_decl) = global.decl_of(class_sym) else {
-        return;
-    };
-    for base in &class_decl.bases {
-        let canonical = canonical_dispatch_type_name(base);
-        if !out.insert(canonical) {
-            continue;
-        }
-        for base_sym in resolve_class(global, base, ctx) {
-            collect_transitive_base_type_names(global, base_sym, ctx, out);
-        }
-    }
-}
-
-fn canonical_dispatch_type_name(name: &str) -> String {
-    short_callee(name)
-        .trim_start_matches(bonsai_common::ALL_NAME_PUNCTUATION)
-        .trim_end_matches("()")
-        .trim()
-        .to_string()
-}
-
-use bonsai_resolve::push_unique_func;
+use bonsai_resolve::{push_unique_func, prune_receiver_type_names_for_dispatch};
 
 fn is_super_receiver(receiver: &str) -> bool {
     let receiver = receiver
@@ -1205,19 +1062,7 @@ fn is_super_receiver(receiver: &str) -> bool {
         .any(|token| *token == receiver)
 }
 
-fn enclosing_class_for_decl<'a>(global: &'a GlobalIndex, decl: &Decl) -> Option<&'a Decl> {
-    if let Some(parent) = decl.parent {
-        if let Some(parent_decl) = global.decl_of(parent) {
-            if matches!(
-                parent_decl.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-            ) {
-                return Some(parent_decl);
-            }
-        }
-    }
-    None
-}
+use bonsai_resolve::enclosing_class_for_decl;
 
 
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
@@ -1442,27 +1287,7 @@ fn alias_targets_for_decl(
     map
 }
 
-fn extend_alias_targets_with_declared_types(
-    alias_targets: &mut AHashMap<String, AliasTarget>,
-    type_aliases: &[TypeAliasBinding],
-) {
-    for alias in type_aliases {
-        if alias.name.is_empty() || alias.type_name.is_empty() {
-            continue;
-        }
-        alias_targets
-            .entry(alias.name.clone())
-            .or_insert_with(|| AliasTarget::Type {
-                type_name: alias.type_name.clone(),
-            });
-    }
-}
-
-fn push_unique_string(out: &mut Vec<String>, value: String) {
-    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
-        out.push(value);
-    }
-}
+use bonsai_resolve::{extend_alias_targets_with_declared_types, push_unique_string};
 
 fn normalize_receiver_alias_text(receiver: &str) -> String {
     let mut text = receiver.trim();
