@@ -1538,3 +1538,214 @@ fn collect_callable_targets_exact(global: &GlobalIndex, name: &str) -> Vec<FuncI
 pub fn short_callee(name: &str) -> &str {
     short_qualified_tail(name)
 }
+
+/// True when `call_name` resolves to `target_func` from `caller_decl`'s
+/// site context. Threads alias map + local callable bindings + global
+/// resolver narrowing — same shape `inspect`'s chain-edge renderer
+/// uses, exposed here so `bonsai_workspace::flow_ids` can answer the
+/// same question without depending on `bonsai_inspect`.
+///
+/// Without this, syntactic `name == target || name.ends_with(".target")`
+/// quietly drops aliased import calls — `from os.path import join as j;
+/// j(req)` doesn't string-match `os.path.join`, so flow-id consumers
+/// undercount chains while inspect renders them.
+#[must_use]
+pub fn call_resolves_to_func(
+    global: &GlobalIndex,
+    aliases: &AHashMap<String, AliasTarget>,
+    local_bindings: &AHashMap<String, FuncId>,
+    caller_decl: &Decl,
+    call_name: &str,
+    target_func: FuncId,
+) -> bool {
+    let short = short_qualified_tail(call_name);
+    if local_bindings
+        .get(call_name)
+        .or_else(|| local_bindings.get(short))
+        .is_some_and(|func| *func == target_func)
+    {
+        return true;
+    }
+    let mut candidates =
+        collect_callable_targets_with_context_and_aliases(global, call_name, caller_decl, aliases);
+    if candidates.is_empty() && short != call_name {
+        candidates =
+            collect_callable_targets_with_context_and_aliases(global, short, caller_decl, aliases);
+    }
+    candidates.contains(&target_func)
+}
+
+/// Walk `events` (recursing into Branch/Loop/Try/Defer/Using) and
+/// return the span of the first `Call` (or `Assign::source_call`)
+/// whose name resolves to `target_func`. Returns `None` when no
+/// resolvable edge exists.
+///
+/// `aliases` is the caller's alias map (file-level imports + decl-
+/// level type aliases + flow-event-extended aliases);
+/// `local_bindings` is the result of [`collect_local_callable_bindings`].
+#[must_use]
+pub fn find_call_span_resolved(
+    events: &[FlowEvent],
+    target_func: FuncId,
+    target_name: &str,
+    global: &GlobalIndex,
+    aliases: &AHashMap<String, AliasTarget>,
+    local_bindings: &AHashMap<String, FuncId>,
+    caller_decl: &Decl,
+) -> Option<Span> {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                span,
+                receiver,
+                args,
+                ..
+            } if call_event_matches_target_func(
+                name,
+                receiver.as_deref(),
+                args,
+                target_func,
+                target_name,
+                global,
+                aliases,
+                local_bindings,
+                caller_decl,
+            ) =>
+            {
+                return Some(*span);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(span) = find_call_span_resolved(
+                    then_events,
+                    target_func,
+                    target_name,
+                    global,
+                    aliases,
+                    local_bindings,
+                    caller_decl,
+                ) {
+                    return Some(span);
+                }
+                if let Some(span) = find_call_span_resolved(
+                    else_events,
+                    target_func,
+                    target_name,
+                    global,
+                    aliases,
+                    local_bindings,
+                    caller_decl,
+                ) {
+                    return Some(span);
+                }
+            }
+            FlowEvent::Loop { body, .. } => {
+                if let Some(span) = find_call_span_resolved(
+                    body,
+                    target_func,
+                    target_name,
+                    global,
+                    aliases,
+                    local_bindings,
+                    caller_decl,
+                ) {
+                    return Some(span);
+                }
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                if let Some(span) = find_call_span_resolved(
+                    body,
+                    target_func,
+                    target_name,
+                    global,
+                    aliases,
+                    local_bindings,
+                    caller_decl,
+                )
+                .or_else(|| {
+                    find_call_span_resolved(
+                        catch_events,
+                        target_func,
+                        target_name,
+                        global,
+                        aliases,
+                        local_bindings,
+                        caller_decl,
+                    )
+                })
+                .or_else(|| {
+                    find_call_span_resolved(
+                        finally_events,
+                        target_func,
+                        target_name,
+                        global,
+                        aliases,
+                        local_bindings,
+                        caller_decl,
+                    )
+                }) {
+                    return Some(span);
+                }
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                if let Some(span) = find_call_span_resolved(
+                    body,
+                    target_func,
+                    target_name,
+                    global,
+                    aliases,
+                    local_bindings,
+                    caller_decl,
+                ) {
+                    return Some(span);
+                }
+            }
+            FlowEvent::Assign {
+                source_call: Some(name),
+                span,
+                ..
+            } if call_resolves_to_func(global, aliases, local_bindings, caller_decl, name, target_func) => {
+                return Some(*span);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)] // matches the per-call narrowing primitive
+fn call_event_matches_target_func(
+    name: &str,
+    receiver: Option<&str>,
+    args: &[CallArg],
+    target_func: FuncId,
+    _target_name: &str,
+    global: &GlobalIndex,
+    aliases: &AHashMap<String, AliasTarget>,
+    local_bindings: &AHashMap<String, FuncId>,
+    caller_decl: &Decl,
+) -> bool {
+    if call_resolves_to_func(global, aliases, local_bindings, caller_decl, name, target_func) {
+        return true;
+    }
+    receiver.is_some()
+        && args.iter().any(|arg| {
+            call_resolves_to_func(
+                global,
+                aliases,
+                local_bindings,
+                caller_decl,
+                arg.value_text.trim(),
+                target_func,
+            )
+        })
+}

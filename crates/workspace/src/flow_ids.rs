@@ -16,7 +16,7 @@ use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{FuncId, Precision, SymbolId};
 use bonsai_db::AnalyzerDb;
-use bonsai_lang_api::{DeclKind, FlowEvent};
+use bonsai_lang_api::DeclKind;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -299,13 +299,20 @@ pub fn compute_flow_id(chain_names: &[String]) -> String {
     format!("F:{:016x}", bonsai_hash::fnv1a_names64(chain_names))
 }
 
-/// DFS-enumerate every syntactic call path starting from the tail of
-/// `base`. Mirrors `bonsai_cli::commands::inspect::enumerate_call_paths_from`;
-/// kept here rather than delegating because this crate is a dep of
-/// `bonsai_inspect`. An edge `caller → callee` is included only when
-/// the caller's flow events contain a real call to `callee.name` —
-/// the same syntactic-pin check that drops `(over-approx)` edges
-/// from inspect's render.
+/// DFS-enumerate every alias-aware call path starting from the tail
+/// of `base`. An edge `caller → callee` is included only when the
+/// caller's flow events contain a real call that resolves (through
+/// the alias map + local callable bindings + global resolver
+/// narrowing) to `callee` — same shape `inspect`'s chain-edge
+/// renderer uses, so flow-id consumers and inspect agree on the
+/// chain set.
+///
+/// Earlier this used a syntactic `name == target || name.ends_with`
+/// check that silently dropped aliased import calls
+/// (`from os.path import join as j; j(req)` failed to match
+/// `os.path.join`). The renamed-import shape is exactly what the
+/// browse-row F: ids → `inspect --flow F:…` paste contract relies
+/// on; the alias-aware check restores parity.
 fn enumerate_call_paths_from(
     cg: &ResolvedCallGraph,
     db: &AnalyzerDb,
@@ -319,6 +326,9 @@ fn enumerate_call_paths_from(
     let global = db.global_index();
     let mut out: Vec<Vec<FuncId>> = Vec::new();
     let mut stack: Vec<(Vec<FuncId>, usize)> = vec![(base.to_vec(), 0)];
+    let mut alias_cache: AHashMap<bonsai_common::FileId, AHashMap<String, bonsai_lang_api::AliasTarget>> =
+        AHashMap::new();
+    let mut bindings_cache: AHashMap<FuncId, AHashMap<String, FuncId>> = AHashMap::new();
     while let Some((path, extra)) = stack.pop() {
         if out.len() >= max_paths {
             break;
@@ -334,6 +344,21 @@ fn enumerate_call_paths_from(
             out.push(path);
             continue;
         }
+        let mut aliases = alias_cache
+            .entry(tail_decl.span.file)
+            .or_insert_with(|| {
+                bonsai_lang_api::alias_map_from_import_specs(&db.imports_for(tail_decl.span.file))
+                    .into_iter()
+                    .collect()
+            })
+            .clone();
+        bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &tail_decl.flow_events);
+        let local_bindings = bindings_cache
+            .entry(tail)
+            .or_insert_with(|| {
+                bonsai_callgraph::collect_local_callable_bindings(&tail_decl.flow_events, &global, tail_decl)
+            })
+            .clone();
         let mut resolvable: Vec<FuncId> = cg
             .callees_of(tail)
             .map(|e| e.to)
@@ -344,7 +369,16 @@ fn enumerate_call_paths_from(
                 let Some(callee_decl) = global.decl_of(SymbolId::new(c.raw())) else {
                     return false;
                 };
-                find_call_span(&tail_decl.flow_events, &callee_decl.name)
+                bonsai_callgraph::find_call_span_resolved(
+                    &tail_decl.flow_events,
+                    *c,
+                    &callee_decl.name,
+                    &global,
+                    &aliases,
+                    &local_bindings,
+                    tail_decl,
+                )
+                .is_some()
             })
             .collect();
         if resolvable.is_empty() {
@@ -362,51 +396,6 @@ fn enumerate_call_paths_from(
         out.push(base.to_vec());
     }
     out
-}
-
-/// True when `events` contains a call to `target` (or `*.target`).
-/// Mirrors the helper of the same name in `bonsai_cli` — kept here
-/// to avoid a workspace → cli reverse dep.
-fn find_call_span(events: &[FlowEvent], target: &str) -> bool {
-    for e in events {
-        match e {
-            FlowEvent::Call {
-                name, receiver, args, ..
-            } => {
-                if name == target || name.ends_with(&format!(".{target}")) {
-                    return true;
-                }
-                if receiver.is_some()
-                    && args
-                        .iter()
-                        .any(|arg| bonsai_lang_api::kit::short_name_of(arg.value_text.trim()) == target)
-                {
-                    return true;
-                }
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } if find_call_span(then_events, target) || find_call_span(else_events, target) => {
-                return true;
-            }
-            FlowEvent::Loop { body, .. } if find_call_span(body, target) => return true,
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } if find_call_span(body, target)
-                || find_call_span(catch_events, target)
-                || find_call_span(finally_events, target) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 /// Backward DFS over `cg` from `target` to its roots. Returns the
