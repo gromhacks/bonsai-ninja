@@ -858,7 +858,11 @@ fn build_taint_graph(
     let mut reachable_facts: Vec<ExportReachableFacts> = Vec::new();
     for f in &functions {
         let func = FuncId::new(f.func_id);
-        let kinded = bonsai_taint::name_reachable_through_func_kinded(func, db);
+        // Workspace-cached structural reachability — same content
+        // as `bonsai_taint::name_reachable_through_func_kinded`
+        // but memoised across the export pass so two functions
+        // sharing a hop don't compute it twice.
+        let kinded = ws.name_reachable_kinded_for(func);
         if kinded.by_kind.is_empty() {
             continue;
         }

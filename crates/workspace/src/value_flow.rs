@@ -359,7 +359,12 @@ impl ValueFlowCache {
         Ok(loaded)
     }
 
-    fn snapshot(&self) -> SerializableValueFlowSnapshot {
+    /// In-memory snapshot of the cache for tests, daemon checkpoints,
+    /// and SDK consumers that want to ship the cache shape across
+    /// process boundaries without going through disk. Mirrors
+    /// `DataFlowCache::snapshot`.
+    #[must_use]
+    pub fn snapshot(&self) -> SerializableValueFlowSnapshot {
         let inner = self.inner.read();
         let entries = inner
             .graphs
@@ -374,6 +379,27 @@ impl ValueFlowCache {
             matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
             entries,
         }
+    }
+
+    /// Restore from an in-memory snapshot, applying the same
+    /// version + matcher-policy-fingerprint validation as
+    /// `load_from_disk`. Returns the number of entries that
+    /// survived; mismatched fingerprints invalidate everything.
+    pub fn load_snapshot(&self, snap: SerializableValueFlowSnapshot) -> usize {
+        if snap.version != VALUE_FLOW_CACHE_VERSION {
+            return 0;
+        }
+        if snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
+            return 0;
+        }
+        let mut inner = self.inner.write();
+        let mut loaded = 0;
+        for entry in snap.entries {
+            let func = FuncId::new(entry.func_raw);
+            inner.graphs.insert(func, Arc::new(entry.graph));
+            loaded += 1;
+        }
+        loaded
     }
 }
 

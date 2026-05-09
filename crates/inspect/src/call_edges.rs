@@ -59,10 +59,18 @@ impl<'a> CallEdgeResolver<'a> {
         bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &caller_decl.flow_events);
         let local_bindings = self.local_bindings_for_func(caller_func, caller_decl).clone();
         let global = self.workspace.db().global_index();
-        let span = find_call_span_resolved(
+        // Single canonical edge predicate — same primitive
+        // `bonsai_workspace::flow_ids` consumes, so inspect's
+        // chain renderer and the browse-row F: id hash agree
+        // on the resolvable edge set.
+        let span = bonsai_callgraph::find_call_span_resolved(
             &caller_decl.flow_events,
+            target_func,
             target_name,
-            Some((&global, &aliases, &local_bindings, caller_decl, target_func)),
+            &global,
+            &aliases,
+            &local_bindings,
+            caller_decl,
         );
         self.edge_spans.insert((caller_func, target_func), span);
         span
@@ -187,31 +195,25 @@ pub fn find_call_span_to_func_uncached(
     bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &caller_decl.flow_events);
     let local_bindings =
         bonsai_callgraph::collect_local_callable_bindings(&caller_decl.flow_events, &global, caller_decl);
-    find_call_span_resolved(
+    bonsai_callgraph::find_call_span_resolved(
         &caller_decl.flow_events,
+        target_func,
         target_name,
-        Some((&global, &aliases, &local_bindings, caller_decl, target_func)),
+        &global,
+        &aliases,
+        &local_bindings,
+        caller_decl,
     )
 }
 
+/// Syntactic-only edge predicate. Returns the span of the first
+/// `Call` whose name string-matches `target` (or `*.target`) or
+/// whose receiver-arg short-name matches. Used by display-only
+/// paths that don't have a FuncId in hand;
+/// [`bonsai_callgraph::find_call_span_resolved`] is the canonical
+/// alias-aware version every chain-edge consumer should prefer.
 #[must_use]
 pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span> {
-    find_call_span_resolved(events, target, None)
-}
-
-type ResolvedCallTarget<'a> = (
-    &'a bonsai_index::GlobalIndex,
-    &'a ahash::AHashMap<String, AliasTarget>,
-    &'a ahash::AHashMap<String, FuncId>,
-    &'a Decl,
-    FuncId,
-);
-
-fn find_call_span_resolved(
-    events: &[FlowEvent],
-    target: &str,
-    resolved_target: Option<ResolvedCallTarget<'_>>,
-) -> Option<Span> {
     for event in events {
         match event {
             FlowEvent::Call {
@@ -220,7 +222,13 @@ fn find_call_span_resolved(
                 receiver,
                 args,
                 ..
-            } if call_event_matches_target(name, receiver.as_deref(), args, target, resolved_target) => {
+            } if name == target
+                || name.ends_with(&format!(".{target}"))
+                || (receiver.is_some()
+                    && args
+                        .iter()
+                        .any(|arg| bonsai_resolve::short_tail(arg.value_text.trim()) == target)) =>
+            {
                 return Some(*span);
             }
             FlowEvent::Branch {
@@ -228,16 +236,16 @@ fn find_call_span_resolved(
                 else_events,
                 ..
             } => {
-                if let Some(span) = find_call_span_resolved(then_events, target, resolved_target) {
-                    return Some(span);
+                if let Some(s) = find_call_span_by_name(then_events, target) {
+                    return Some(s);
                 }
-                if let Some(span) = find_call_span_resolved(else_events, target, resolved_target) {
-                    return Some(span);
+                if let Some(s) = find_call_span_by_name(else_events, target) {
+                    return Some(s);
                 }
             }
             FlowEvent::Loop { body, .. } => {
-                if let Some(span) = find_call_span_resolved(body, target, resolved_target) {
-                    return Some(span);
+                if let Some(s) = find_call_span_by_name(body, target) {
+                    return Some(s);
                 }
             }
             FlowEvent::Try {
@@ -246,100 +254,27 @@ fn find_call_span_resolved(
                 finally_events,
                 ..
             } => {
-                if let Some(span) = find_call_span_resolved(body, target, resolved_target)
-                    .or_else(|| find_call_span_resolved(catch_events, target, resolved_target))
-                    .or_else(|| find_call_span_resolved(finally_events, target, resolved_target))
+                if let Some(s) = find_call_span_by_name(body, target)
+                    .or_else(|| find_call_span_by_name(catch_events, target))
+                    .or_else(|| find_call_span_by_name(finally_events, target))
                 {
-                    return Some(span);
+                    return Some(s);
                 }
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if let Some(span) = find_call_span_resolved(body, target, resolved_target) {
-                    return Some(span);
+                if let Some(s) = find_call_span_by_name(body, target) {
+                    return Some(s);
                 }
             }
             FlowEvent::Assign {
                 source_call: Some(name),
                 span,
                 ..
-            } if assign_call_matches_target(name, target, resolved_target) => {
+            } if name == target || name.ends_with(&format!(".{target}")) => {
                 return Some(*span);
             }
             _ => {}
         }
     }
     None
-}
-
-fn call_event_matches_target(
-    name: &str,
-    receiver: Option<&str>,
-    args: &[bonsai_lang_api::CallArg],
-    target: &str,
-    resolved_target: Option<ResolvedCallTarget<'_>>,
-) -> bool {
-    if let Some((global, aliases, local_bindings, caller_decl, target_func)) = resolved_target {
-        return call_resolves_to_func(global, aliases, local_bindings, caller_decl, name, target_func)
-            || receiver.is_some()
-                && args.iter().any(|arg| {
-                    call_resolves_to_func(
-                        global,
-                        aliases,
-                        local_bindings,
-                        caller_decl,
-                        arg.value_text.trim(),
-                        target_func,
-                    )
-                });
-    }
-    name == target
-        || name.ends_with(&format!(".{target}"))
-        || receiver.is_some()
-            && args
-                .iter()
-                .any(|arg| bonsai_resolve::short_tail(arg.value_text.trim()) == target)
-}
-
-fn assign_call_matches_target(
-    name: &str,
-    target: &str,
-    resolved_target: Option<ResolvedCallTarget<'_>>,
-) -> bool {
-    if let Some((global, aliases, local_bindings, caller_decl, target_func)) = resolved_target {
-        return call_resolves_to_func(global, aliases, local_bindings, caller_decl, name, target_func);
-    }
-    name == target || name.ends_with(&format!(".{target}"))
-}
-
-fn call_resolves_to_func(
-    global: &bonsai_index::GlobalIndex,
-    aliases: &ahash::AHashMap<String, AliasTarget>,
-    local_bindings: &ahash::AHashMap<String, FuncId>,
-    caller_decl: &Decl,
-    call_name: &str,
-    target_func: FuncId,
-) -> bool {
-    let short = bonsai_resolve::short_tail(call_name);
-    if local_bindings
-        .get(call_name)
-        .or_else(|| local_bindings.get(short))
-        .is_some_and(|func| *func == target_func)
-    {
-        return true;
-    }
-    let mut candidates = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
-        global,
-        call_name,
-        caller_decl,
-        aliases,
-    );
-    if candidates.is_empty() && short != call_name {
-        candidates = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
-            global,
-            short,
-            caller_decl,
-            aliases,
-        );
-    }
-    candidates.contains(&target_func)
 }

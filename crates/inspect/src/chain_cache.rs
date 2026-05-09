@@ -56,8 +56,10 @@ pub struct ChainCache<'a> {
     /// cache lifetime. `OnceLock` (not `OnceCell`) so the cache
     /// can initialise under a shared reference across threads
     /// — the first thread to touch it wins; the rest see the
-    /// stored value.
-    pub(crate) resolved: OnceLock<ResolvedCallGraph>,
+    /// stored value. Stored as `Arc` so we share the workspace's
+    /// canonical singleton instead of deep-cloning a 100k-edge
+    /// `CallGraph` per inspect invocation.
+    pub(crate) resolved: OnceLock<Arc<ResolvedCallGraph>>,
     pub(crate) chains_r: ChainsCache,
     pub(crate) downstream_r: DownstreamCache,
     pub(crate) reachable_r: ReachableCache,
@@ -142,7 +144,8 @@ impl<'a> ChainCache<'a> {
     /// all share the same allocation.
     pub fn resolved_graph(&self) -> &ResolvedCallGraph {
         self.resolved
-            .get_or_init(|| (*self.ws.cached_resolved_call_graph()).clone())
+            .get_or_init(|| self.ws.cached_resolved_call_graph())
+            .as_ref()
     }
 
     /// Resolved-graph chain enumeration. Eliminates the

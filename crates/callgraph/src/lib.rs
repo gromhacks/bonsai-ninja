@@ -5,6 +5,13 @@
 //! trust it. Summaries are compositional cached facts derived from a
 //! function's CFG plus the summaries of every target it calls.
 
+pub mod chains;
+
+pub use chains::{
+    downstream_funcs_set, enumerate_chains_resolved, is_precise_chain, ChainTruncation,
+    ResolvedChain,
+};
+
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
 use bonsai_index::GlobalIndex;

@@ -14,7 +14,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{FuncId, Precision, SymbolId};
+use bonsai_common::{FuncId, SymbolId};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
 use parking_lot::RwLock;
@@ -401,86 +401,20 @@ fn enumerate_call_paths_from(
 /// Backward DFS over `cg` from `target` to its roots. Returns the
 /// chain paths (entry → target) as slices of [`FuncId`]; a
 /// `truncated` flag is set when either the chain cap or the probe
-/// budget was hit. Precision is not returned here because the
-/// flow-id cache doesn't surface it — the separate [`FlowIdCache`]
-/// only stores the hashed names.
-///
-/// Duplicated from `bonsai_inspect::chains::enumerate_chains_resolved`
-/// for the same cycle-avoidance reason as [`compute_flow_id`].
+/// budget was hit. Precision is discarded — the flow-id cache only
+/// hashes names — but the underlying enumeration is the canonical
+/// `bonsai_callgraph::chains::enumerate_chains_resolved`. Earlier
+/// this carried a private byte-equivalent copy that drifted on
+/// cycle / precision-cut edges; consolidating eliminates the
+/// browse F: id / `inspect --flow F:…` parity hazard.
 fn enumerate_chains(
     cg: &ResolvedCallGraph,
     target: FuncId,
     max_chains: usize,
     max_probes: usize,
 ) -> (Vec<Vec<FuncId>>, bool) {
-    let mut results: Vec<Vec<FuncId>> = Vec::new();
-    // DFS uses a (path-reversed, path-set, precision) stack so cycle
-    // detection is O(1) per edge instead of O(N) `path_rev.contains`.
-    // Mirrors the shape used by
-    // `bonsai_inspect::chains::enumerate_chains_resolved`; the two
-    // are duplicated for the cycle-avoidance reason in
-    // [`compute_flow_id`].
-    let mut initial_set = ahash::AHashSet::new();
-    initial_set.insert(target);
-    let mut stack: Vec<(Vec<FuncId>, ahash::AHashSet<FuncId>, Precision)> =
-        vec![(vec![target], initial_set, Precision::Exact)];
-    let mut visited_budget: usize = 0;
-    let mut truncated = false;
-    // Mirror inspect's `pushed_any_parent` shape so cycle handling
-    // doesn't over-emit. inspect only emits when ALL parents are
-    // cyclic (no extension was pushed); a cycle edge alongside
-    // valid parents must NOT push a partial chain — that would
-    // make browse F: IDs over-count vs `inspect --flow F:…`,
-    // breaking the documented "paste from browse into inspect"
-    // contract.
-    let mut emitted_chains: ahash::AHashSet<Vec<FuncId>> = ahash::AHashSet::new();
-    while let Some((path_rev, path_set, prec)) = stack.pop() {
-        if results.len() >= max_chains {
-            truncated = true;
-            break;
-        }
-        visited_budget += 1;
-        if visited_budget > max_probes.saturating_mul(16) {
-            truncated = true;
-            break;
-        }
-        let Some(&tip) = path_rev.last() else {
-            continue;
-        };
-        let callers: Vec<_> = cg.callers_of(tip).collect();
-        let mut pushed_any_parent = false;
-        let mut pushed_precise_parent = false;
-        for edge in callers {
-            if path_set.contains(&edge.from) {
-                continue; // skip cycle edge; emit only if ALL parents cycle
-            }
-            let mut extended = path_rev.clone();
-            extended.push(edge.from);
-            let mut next_set = path_set.clone();
-            next_set.insert(edge.from);
-            let next_prec = prec.meet(edge.precision);
-            if is_precise_chain(next_prec) {
-                pushed_precise_parent = true;
-            }
-            stack.push((extended, next_set, next_prec));
-            pushed_any_parent = true;
-        }
-        if !pushed_any_parent || (!pushed_precise_parent && is_precise_chain(prec)) {
-            // Either an entry point, every caller was cyclic, or the
-            // only non-cyclic parents would degrade an exact/narrowed
-            // suffix to over-approximate/unknown. This mirrors
-            // `bonsai_inspect::chains::enumerate_chains_resolved` so
-            // browse/export F: ids stay paste-compatible with inspect.
-            let mut chain = path_rev;
-            chain.reverse();
-            if emitted_chains.insert(chain.clone()) && results.len() < max_chains {
-                results.push(chain);
-            }
-        }
-    }
-    (results, truncated)
-}
-
-fn is_precise_chain(precision: Precision) -> bool {
-    matches!(precision, Precision::Exact | Precision::Narrowed)
+    let (chains, truncation) =
+        bonsai_callgraph::chains::enumerate_chains_resolved(cg, target, max_chains, max_probes);
+    let truncated = truncation.is_truncated();
+    (chains.into_iter().map(|c| c.funcs).collect(), truncated)
 }

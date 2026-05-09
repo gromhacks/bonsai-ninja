@@ -534,8 +534,18 @@ pub fn interprocedural_taint(
     interprocedural_taint_with_caches(entry_func, entry_sources, config, db, &caches)
 }
 
-/// Run interprocedural taint while reusing resolver caches across
-/// repeated runs in the same workspace.
+/// Run interprocedural taint for one budget chunk and return the
+/// partial result with a `continuation` token when the worklist
+/// hasn't drained.
+///
+/// This is the *chunked* primitive — every batch consumes
+/// `config.budget` worklist items and stops, even mid-fixpoint, so
+/// long-running daemon consumers can interleave work or surface
+/// progress between chunks. Pair with
+/// [`resume_interprocedural_taint_with_caches`] to drive subsequent
+/// chunks against the same cache state. Most callers should prefer
+/// [`interprocedural_taint_to_completion_with_caches`], which loops
+/// the chunked driver to fixpoint internally.
 #[must_use]
 pub fn interprocedural_taint_with_caches(
     entry_func: FuncId,
@@ -562,7 +572,11 @@ pub fn interprocedural_taint_with_caches(
     )
 }
 
-/// Continue a previously saturated interprocedural run.
+/// Continue a previously chunked / saturated interprocedural run
+/// using the `continuation` from `previous`. Pair with
+/// [`interprocedural_taint_with_caches`]; the
+/// `_to_completion_with_caches` wrapper loops both internally for
+/// callers that don't need chunked progress.
 #[must_use]
 pub fn resume_interprocedural_taint_with_caches(
     mut previous: InterTaintResult,

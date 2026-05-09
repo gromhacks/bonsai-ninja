@@ -110,6 +110,31 @@ fn returning_seed_names_populates_for_returned_param() {
 }
 
 #[test]
+fn snapshot_rejects_stale_matcher_policy_fingerprint() {
+    let root = tempdir_for_test("bonsai-vf-fingerprint");
+    write_python_workspace(&root);
+
+    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
+        .expect("open succeeds");
+    let mut snap = ws.value_flow().snapshot();
+    assert!(
+        !snap.entries.is_empty(),
+        "fixture must produce persisted value-flow entries"
+    );
+    snap.matcher_policy_fingerprint ^= 1;
+
+    let root2 = tempdir_for_test("bonsai-vf-fingerprint-2");
+    write_python_workspace(&root2);
+    let ws2 = Workspace::open_with_options(&root2, registry(), WorkspaceOpenOptions::query_only())
+        .expect("second workspace opens");
+    let surviving = ws2.value_flow().load_snapshot(snap);
+    assert_eq!(
+        surviving, 0,
+        "value-flow sidecar entries must be rejected after matcher policy drift"
+    );
+}
+
+#[test]
 fn value_flow_sidecar_round_trips_via_query_only() {
     let root = tempdir_for_test("bonsai-vf-sidecar");
     write_python_workspace(&root);
