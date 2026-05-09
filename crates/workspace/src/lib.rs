@@ -10,6 +10,7 @@
 // consumers (sdk, integration tests) via path-style access; keep
 // `pub mod`. `cross_module` is internal — consumers go through the
 // `Workspace` facade.
+pub mod callgraph_sidecar;
 pub mod class_index;
 pub(crate) mod cross_module;
 pub mod dataflow;
@@ -168,6 +169,32 @@ pub struct FileRefresh {
     pub file: FileId,
     pub path: std::path::PathBuf,
     pub kind: FileRefreshKind,
+}
+
+/// Progress-event surface for `Workspace::open_with_options_and_events`.
+/// Callers with a CLI / TUI / IDE attach a callback; pure programmatic
+/// consumers pass `|_| {}` and pay nothing.
+///
+/// This enum is the single source of truth for open-path progress —
+/// the SDK re-exports it as `bonsai_sdk::WorkspaceOpenEvent` so its
+/// callbacks see the same variants. Earlier the SDK had its own
+/// hand-rolled prewarm pipeline that drifted from this one and
+/// re-introduced the OWASP single-core cliff every time a new
+/// cache landed in `Workspace::open_with_options` but not the SDK.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceOpenEvent {
+    IngestStarted,
+    IngestFinished { files: usize },
+    ParseStarted { files: usize },
+    ParseFileIndexed,
+    ParseFinished,
+    DataflowPrewarmStarted { pending: usize },
+    DataflowEntryBuilt,
+    DataflowPrewarmFinished,
+    ValueFlowPrewarmStarted,
+    ValueFlowPrewarmFinished,
+    FlowIdsPrewarmStarted,
+    FlowIdsPrewarmFinished,
 }
 
 /// Controls how [`Workspace::open_with_options`] interacts with the
@@ -430,6 +457,36 @@ impl Workspace {
     /// security/analysis, inspect, browse-export, and the dump-callgraph
     /// command all share one allocation. Cleared on file edit via
     /// [`Self::ingest_dir`].
+    ///
+    /// Seed the slot from a sidecar with [`Self::seed_resolved_call_graph`]
+    /// at workspace open time to skip the initial build entirely.
+    pub fn seed_resolved_call_graph(&self, graph: Arc<bonsai_callgraph::ResolvedCallGraph>) {
+        *self.inner.resolved_call_graph.write() = Some(graph);
+    }
+
+    /// Load the conventional callgraph sidecar for `root` and seed
+    /// the workspace's `cached_resolved_call_graph` slot if every
+    /// recorded `(path, content_hash)` matches current state.
+    /// Returns `true` when the sidecar was a hit.
+    pub fn load_callgraph_sidecar(&self, root: &Path) -> bool {
+        let path = callgraph_sidecar::callgraph_sidecar_path(root);
+        if let Some(graph) = callgraph_sidecar::load_callgraph_sidecar(&path, &self.inner.db) {
+            self.seed_resolved_call_graph(Arc::new(graph));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Persist the current resolved call graph to the conventional
+    /// sidecar path for `root`. Builds the graph on-demand if it
+    /// hasn't been built yet.
+    pub fn save_callgraph_sidecar(&self, root: &Path) -> std::io::Result<()> {
+        let path = callgraph_sidecar::callgraph_sidecar_path(root);
+        let graph = self.cached_resolved_call_graph();
+        callgraph_sidecar::save_callgraph_sidecar(&path, &self.inner.db, &graph)
+    }
+
     pub fn cached_resolved_call_graph(&self) -> Arc<bonsai_callgraph::ResolvedCallGraph> {
         // Drop the read guard's temporary at the `;` so the
         // subsequent `.write()` below can't deadlock on a
@@ -511,17 +568,40 @@ impl Workspace {
         registry: Arc<LanguageRegistry>,
         options: WorkspaceOpenOptions,
     ) -> Result<Self, WorkspaceError> {
+        Self::open_with_options_and_events(root, registry, options, &|_| {})
+    }
+
+    /// Same as [`Self::open_with_options`] but fires
+    /// [`WorkspaceOpenEvent`]s through `on_event` at each phase
+    /// boundary. The SDK's `Bonsai::workspace_with_options_and_progress`
+    /// delegates here so a single source of truth drives both
+    /// programmatic and CLI/TUI open paths — no more drift between
+    /// `Workspace`'s prewarms and what the SDK exposes.
+    pub fn open_with_options_and_events<F>(
+        root: &Path,
+        registry: Arc<LanguageRegistry>,
+        options: WorkspaceOpenOptions,
+        on_event: &F,
+    ) -> Result<Self, WorkspaceError>
+    where
+        F: Fn(WorkspaceOpenEvent) + Sync,
+    {
         use rayon::prelude::*;
         let ws = Self::new_with_open_options(registry, options);
+        on_event(WorkspaceOpenEvent::IngestStarted);
         ws.ingest_dir(root)?;
+        let files = ws.vfs().all_files();
+        on_event(WorkspaceOpenEvent::IngestFinished { files: files.len() });
         // Pass 1: per-file decl + import indexing in parallel.
         // `AnalyzerDb` is `Sync`, so tree-sitter parsing + adapter
         // `extract_declarations` run concurrently on the rayon pool
         // while cache insertion serialises on the db's RwLock.
-        let files = ws.vfs().all_files();
+        on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
         files.par_iter().for_each(|f| {
             let _ = ws.db().decl_index(*f);
+            on_event(WorkspaceOpenEvent::ParseFileIndexed);
         });
+        on_event(WorkspaceOpenEvent::ParseFinished);
         // Pass 2: eager workspace-wide taint-connected dataflow
         // prewarm. Each function gets its per-entry interprocedural
         // taint facts computed once here; every later `inspect` /
@@ -544,6 +624,13 @@ impl Workspace {
             let sidecar = DataFlowCache::sidecar_path(root);
             let _ = ws.inner.dataflow.load_from_disk(&sidecar, ws.db());
         }
+        // Try to load the persisted call graph before any cache
+        // that depends on it asks for one. Saves several seconds
+        // on every CLI invocation against a workspace with a
+        // fresh `.bonsai/callgraph.v1.bin`.
+        if options.load_dataflow_sidecar && !skip_prewarm {
+            let _ = ws.load_callgraph_sidecar(root);
+        }
         if options.prewarm_dataflow && !skip_prewarm {
             let sidecar = DataFlowCache::sidecar_path(root);
             // Build the workspace-cached call graph once, then seed
@@ -560,10 +647,20 @@ impl Workspace {
             ws.inner
                 .dataflow
                 .seed_inter_taint_caches(ws.shared_inter_taint_caches());
-            ws.inner.dataflow.prewarm_all(ws.db());
+            let pending = ws.inner.dataflow.pending_count(ws.db());
+            on_event(WorkspaceOpenEvent::DataflowPrewarmStarted { pending });
+            ws.inner.dataflow.prewarm_all_with_progress(ws.db(), |_| {
+                on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
+            });
+            on_event(WorkspaceOpenEvent::DataflowPrewarmFinished);
             // Write back so next open gets an even hotter cache.
             if options.save_dataflow_sidecar {
                 let _ = ws.inner.dataflow.save_to_disk(&sidecar, ws.db());
+                // Persist the resolved call graph alongside the
+                // dataflow sidecar — invalidation rule is
+                // identical (content-hash + matcher policy
+                // fingerprint), so they always co-evolve.
+                let _ = ws.save_callgraph_sidecar(root);
             }
         }
         // Pass 3: workspace-wide value-flow cache. Same shape as the
@@ -582,9 +679,11 @@ impl Workspace {
             let _ = ws.inner.value_flow.load_from_disk(&sidecar);
         }
         if options.prewarm_value_flow && !skip_value_flow {
+            on_event(WorkspaceOpenEvent::ValueFlowPrewarmStarted);
             ws.inner
                 .value_flow
                 .prewarm_all_with_caches(ws.db(), &ws.inner.inter_taint);
+            on_event(WorkspaceOpenEvent::ValueFlowPrewarmFinished);
             if options.save_value_flow_sidecar {
                 let sidecar = ValueFlowCache::sidecar_path(root);
                 let _ = ws.inner.value_flow.save_to_disk(&sidecar);
@@ -593,7 +692,9 @@ impl Workspace {
         // Pass 4: flow-id cache. Mirrors the dataflow shape — every
         // browse-row flow-id lookup is O(1) once warmed.
         if options.prewarm_flow_ids && !skip_prewarm {
+            on_event(WorkspaceOpenEvent::FlowIdsPrewarmStarted);
             ws.inner.flow_ids.prewarm_all(ws.db(), ws.vfs());
+            on_event(WorkspaceOpenEvent::FlowIdsPrewarmFinished);
         }
         Ok(ws)
     }
@@ -1255,40 +1356,69 @@ fn read_supported_source_files(
     let mut entries: Vec<_> = builder.build().filter_map(Result::ok).collect();
     entries.sort_by(|a, b| a.path().cmp(b.path()));
 
-    let mut files = Vec::new();
-    for entry in entries {
-        if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if registry.adapter_for_extension(ext).is_none() {
-            continue;
-        }
-        if !include_minified && path_looks_minified(path) {
-            tracing::debug!(path = %path.display(), "skipping minified file (filename)");
-            skipped_minified += 1;
-            continue;
-        }
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidData) => continue,
-            Err(error) => return Err(WorkspaceError::Io(error)),
-        };
-        if !include_minified && content_looks_minified(&text) {
-            tracing::debug!(path = %path.display(), "skipping minified file (content)");
-            skipped_minified += 1;
-            continue;
-        }
-        let hash = fnv1a_bytes64(text.as_bytes());
-        files.push(SourceFileContent {
-            path: path.to_path_buf(),
-            text,
-            hash,
-        });
+    // Read files in parallel. The prior sequential `for entry in
+    // entries { read_to_string(...) }` loop blocked the downstream
+    // parallel decl-index pass on a single core for ~30ms per file
+    // — minutes wasted on cold-FS-cache OWASP / Redis opens.
+    // Determinism: input `entries` is sorted; we sort `files` by
+    // path again after the parallel collect so FileId allocation
+    // stays deterministic regardless of read-completion order.
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let skipped_counter = AtomicUsize::new(0);
+    enum ReadOutcome {
+        Keep(SourceFileContent),
+        Skip,
+        Err(std::io::Error),
     }
+    let outcomes: Vec<ReadOutcome> = entries
+        .into_par_iter()
+        .map(|entry| {
+            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+                return ReadOutcome::Skip;
+            }
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+                return ReadOutcome::Skip;
+            };
+            if registry.adapter_for_extension(ext).is_none() {
+                return ReadOutcome::Skip;
+            }
+            if !include_minified && path_looks_minified(path) {
+                tracing::debug!(path = %path.display(), "skipping minified file (filename)");
+                skipped_counter.fetch_add(1, Ordering::Relaxed);
+                return ReadOutcome::Skip;
+            }
+            let text = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::InvalidData) => {
+                    return ReadOutcome::Skip;
+                }
+                Err(error) => return ReadOutcome::Err(error),
+            };
+            if !include_minified && content_looks_minified(&text) {
+                tracing::debug!(path = %path.display(), "skipping minified file (content)");
+                skipped_counter.fetch_add(1, Ordering::Relaxed);
+                return ReadOutcome::Skip;
+            }
+            let hash = fnv1a_bytes64(text.as_bytes());
+            ReadOutcome::Keep(SourceFileContent {
+                path: path.to_path_buf(),
+                text,
+                hash,
+            })
+        })
+        .collect();
+    let mut files = Vec::with_capacity(outcomes.len());
+    for outcome in outcomes {
+        match outcome {
+            ReadOutcome::Keep(file) => files.push(file),
+            ReadOutcome::Skip => {}
+            ReadOutcome::Err(error) => return Err(WorkspaceError::Io(error)),
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    skipped_minified += skipped_counter.load(Ordering::Relaxed);
     Ok((files, skipped_minified))
 }
 

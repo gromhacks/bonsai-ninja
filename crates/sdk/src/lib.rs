@@ -106,26 +106,13 @@ pub mod trace_render {
 /// The SDK owns workspace opening and indexing; terminal frontends can
 /// translate these events into spinners or progress bars without
 /// reaching into `bonsai_workspace` internals.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum WorkspaceOpenEvent {
-    IngestStarted,
-    IngestFinished { files: usize },
-    ParseStarted { files: usize },
-    ParseFileIndexed,
-    ParseFinished,
-    DataflowPrewarmStarted { pending: usize },
-    DataflowEntryBuilt,
-    DataflowPrewarmFinished,
-    /// Per-FuncId value-flow graph prewarm started — runs in
-    /// parallel via rayon. Without this, security-analysis lazy-
-    /// faults the per-source value-flow graph one source at a
-    /// time under a single RwLock — the OWASP single-core cliff.
-    ValueFlowPrewarmStarted,
-    ValueFlowPrewarmFinished,
-    /// FlowIdCache prewarm — workspace browse-row F: ids ready.
-    FlowIdsPrewarmStarted,
-    FlowIdsPrewarmFinished,
-}
+///
+/// Re-exported from `bonsai_workspace::WorkspaceOpenEvent` so SDK
+/// consumers and the workspace's own `open_with_options_and_events`
+/// path see the same variants. Earlier the SDK had a private copy
+/// + a hand-rolled prewarm pipeline; both have been collapsed onto
+/// the workspace's canonical implementation.
+pub use bonsai_workspace::WorkspaceOpenEvent;
 
 /// SDK configuration and workspace factory.
 #[derive(Clone)]
@@ -336,87 +323,17 @@ impl Bonsai {
             Ok(_) => anyhow::bail!("workspace path is not a directory: {}", root.display()),
             Err(err) => anyhow::bail!("workspace not accessible: {} ({err})", root.display()),
         }
-
-        let ws =
-            Workspace::new_with_open_options(self.registry.clone(), self.apply_workspace_options(options));
-
-        on_event(WorkspaceOpenEvent::IngestStarted);
-        ws.ingest_dir(root)
-            .with_context(|| format!("ingesting {}", root.display()))?;
-        let files = ws.vfs().all_files();
-        on_event(WorkspaceOpenEvent::IngestFinished { files: files.len() });
-
-        on_event(WorkspaceOpenEvent::ParseStarted { files: files.len() });
-        use rayon::prelude::*;
-        files.par_iter().for_each(|file| {
-            let _ = ws.db().decl_index(*file);
-            on_event(WorkspaceOpenEvent::ParseFileIndexed);
-        });
-        on_event(WorkspaceOpenEvent::ParseFinished);
-
-        let skip_dataflow = std::env::var("BONSAI_NO_DATAFLOW")
-            .ok()
-            .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"));
-        if options.load_dataflow_sidecar && !skip_dataflow {
-            let _ = ws.load_dataflow_sidecar(root);
-        }
-        if options.prewarm_dataflow && !skip_dataflow {
-            let pending = ws.dataflow().pending_count(ws.db());
-            on_event(WorkspaceOpenEvent::DataflowPrewarmStarted { pending });
-            // Seed the dataflow + flow-ids caches with the
-            // workspace-cached resolved call graph so each
-            // sub-cache doesn't rebuild identical content.
-            let cg = ws.cached_resolved_call_graph();
-            ws.dataflow().seed_call_graph(cg.clone());
-            ws.flow_ids().seed_call_graph(cg);
-            ws.dataflow()
-                .seed_inter_taint_caches(ws.shared_inter_taint_caches());
-            if pending > 0 {
-                ws.dataflow().prewarm_all_with_progress(ws.db(), |_| {
-                    on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
-                });
-            } else {
-                ws.dataflow().prewarm_all(ws.db());
-            }
-            on_event(WorkspaceOpenEvent::DataflowPrewarmFinished);
-            if options.save_dataflow_sidecar {
-                let _ = ws.save_dataflow_sidecar(root);
-            }
-        }
-
-        // Value-flow prewarm — the OWASP single-core cliff lives
-        // here. `value_flow().prewarm_all_with_caches` fans out
-        // across rayon threads. Without it, security-analysis's
-        // per-source `graph_for_with_caches` faults each
-        // function's graph sequentially under the cache RwLock,
-        // serialising 2,740 interprocedural taint runs on
-        // OWASP. Gated by the same dataflow opt-out env var
-        // (`BONSAI_NO_DATAFLOW`) plus the open-options flag.
-        let skip_value_flow = std::env::var("BONSAI_NO_VALUE_FLOW")
-            .ok()
-            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
-        if options.load_value_flow_sidecar && !skip_value_flow {
-            let _ = ws.load_value_flow_sidecar(root);
-        }
-        if options.prewarm_value_flow && !skip_value_flow && !skip_dataflow {
-            on_event(WorkspaceOpenEvent::ValueFlowPrewarmStarted);
-            ws.value_flow()
-                .prewarm_all_with_caches(ws.db(), ws.inter_taint_caches());
-            on_event(WorkspaceOpenEvent::ValueFlowPrewarmFinished);
-            if options.save_value_flow_sidecar {
-                let _ = ws.save_value_flow_sidecar(root);
-            }
-        }
-
-        // FlowIdCache prewarm — workspace browse-row F: ids
-        // populated up-front so per-row lookups are O(1).
-        if options.prewarm_flow_ids && !skip_dataflow {
-            on_event(WorkspaceOpenEvent::FlowIdsPrewarmStarted);
-            ws.flow_ids().prewarm_all(ws.db(), ws.vfs());
-            on_event(WorkspaceOpenEvent::FlowIdsPrewarmFinished);
-        }
-
-        Ok(ws)
+        // Single source of truth: every prewarm + sidecar pass
+        // lives in `Workspace::open_with_options_and_events`. The
+        // SDK is now a thin wrapper that forwards events. Earlier
+        // this method hand-rolled a parallel implementation that
+        // drifted from the workspace's pipeline every time a new
+        // cache landed there but not here — the OWASP single-core
+        // cliff was reintroduced multiple times before being
+        // collapsed onto this delegation.
+        let opts = self.apply_workspace_options(options);
+        Workspace::open_with_options_and_events(root, self.registry.clone(), opts, on_event)
+            .with_context(|| format!("opening workspace at {}", root.display()))
     }
 }
 

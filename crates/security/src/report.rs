@@ -242,19 +242,26 @@ pub(crate) fn render_sarif_with_provenance(
     // descriptor catalogue at hand, so populate the name + tags
     // surface that GitHub renders and let IDE plugins fall back to
     // the bonsai property bag for the rest.
+    //
+    // Pre-build a (sink_rule_id → first_finding) map so the
+    // per-rule descriptor build is O(rules + findings) instead of
+    // O(rules × findings). On OWASP-scale reports the linear
+    // `report.findings.iter().find(...)` was several seconds of
+    // visible end-of-scan latency.
+    let mut representatives: ahash::AHashMap<&str, &crate::Finding> = ahash::AHashMap::new();
+    for finding in &report.findings {
+        representatives
+            .entry(finding.sink.rule_id.as_str())
+            .or_insert(finding);
+    }
     let rules_json: Vec<serde_json::Value> = rules_in_order
         .iter()
         .map(|rule_id| {
-            // Pick a representative finding for this rule to source
-            // tag / severity defaults. First match wins; rules that
-            // collide on different severities will reflect the
-            // first finding's severity, which is acceptable for the
-            // descriptor layer (per-result `level` / `kind` is
-            // authoritative).
-            let representative = report
-                .findings
-                .iter()
-                .find(|finding| finding.sink.rule_id == *rule_id);
+            // First-match-wins semantics preserved: the AHashMap
+            // entry is populated only on the first encounter, and
+            // `report.findings` iteration order is stable across
+            // runs (sorted upstream by severity then finding_id).
+            let representative = representatives.get(rule_id.as_str()).copied();
             let default_level = representative
                 .map(|finding| sarif_level_for_severity(finding.severity))
                 .unwrap_or("warning");
