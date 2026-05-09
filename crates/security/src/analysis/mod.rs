@@ -3128,46 +3128,84 @@ where
         return Vec::new();
     }
     let mut out = Vec::new();
-    let mut source_work: Vec<(&RuleMatch, FuncId, TokenSet)> = Vec::new();
+    // Materialise per-source value-flow seeds in parallel. On
+    // OWASP this loop runs 2,740 times sequentially without rayon
+    // because each `graph_for_with_caches` faults a per-function
+    // value-flow graph under a single RwLock. The cache is
+    // RwLock-backed and order-independent (cache-fill races on the
+    // same key produce identical values — see `InterTaintCaches`
+    // doc), so the fan-out is a pure scheduling change. Input
+    // ordering is preserved: `sources` is sorted upstream
+    // (`sort_matches`) and `par_iter().filter_map().collect()` is
+    // order-preserving, so downstream `idx`-keyed dedup
+    // (`emitted_for_source_sink_flow`) sees identical idx values.
+    use rayon::prelude::*;
+    let source_entries: Vec<(&RuleMatch, FuncId, TokenSet)> = sources
+        .par_iter()
+        .filter_map(|src| {
+            let src_key = match_func_key(src)?;
+            let &src_func_id = funcs_by_key.get(&src_key)?;
+            let src_decl = global.decl_of(SymbolId::new(src_func_id.raw()))?;
+            let value_flow = ws.value_flow().graph_for_with_caches(
+                src_func_id,
+                ws.db(),
+                ws.inter_taint_caches(),
+            );
+            let seeds = source_seed_set(pack, src, src_decl, Some(value_flow.as_ref()));
+            if seeds.is_empty() {
+                return None;
+            }
+            Some((src, src_func_id, seeds))
+        })
+        .collect();
+    let mut source_work: Vec<(&RuleMatch, FuncId, TokenSet)> =
+        Vec::with_capacity(source_entries.len());
     let mut source_groups: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
-    for src in sources {
-        let Some(src_key) = match_func_key(src) else {
-            continue;
-        };
-        let Some(&src_func_id) = funcs_by_key.get(&src_key) else {
-            continue;
-        };
-        let Some(src_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
-            continue;
-        };
-        let value_flow = ws.value_flow().graph_for_with_caches(
-            src_func_id,
-            ws.db(),
-            ws.inter_taint_caches(),
-        );
-        let seeds = source_seed_set(pack, src, src_decl, Some(value_flow.as_ref()));
-        if seeds.is_empty() {
-            continue;
-        }
+    for (src, src_func_id, seeds) in source_entries {
         let idx = source_work.len();
         source_work.push((src, src_func_id, seeds));
         source_groups.entry(src_func_id).or_default().push(idx);
     }
 
-    let mut source_returning_indices: AHashSet<usize> = AHashSet::new();
-    let mut source_returning_cache: AHashMap<(FuncId, Vec<String>), bool> = AHashMap::new();
     on_progress(AnalysisProgress::PhaseStarted {
         label: "checking source returns",
         total: source_work.len() as u64,
     });
+    // Parallel "does this seed reach a Return?" pass. Dedup keys
+    // first so each unique `(src_func_id, sorted_seed_key)` runs
+    // only once, mirroring the previous sequential cache. Then
+    // fan out across rayon — `source_seed_reaches_return` consults
+    // the workspace value-flow cache (RwLock-backed, thread-safe)
+    // and falls back to the engine via the workspace InterTaintCaches
+    // singleton, also thread-safe. `on_progress` isn't `Sync`, so
+    // ticks are replayed sequentially after the parallel collect.
+    let mut unique_keys: Vec<(FuncId, Vec<String>)> = Vec::new();
+    {
+        let mut seen: AHashSet<(FuncId, Vec<String>)> = AHashSet::new();
+        for (_, src_func_id, seeds) in source_work.iter() {
+            let key = (*src_func_id, sorted_seed_key(seeds));
+            if seen.insert(key.clone()) {
+                unique_keys.push(key);
+            }
+        }
+    }
+    let returning_pairs: Vec<((FuncId, Vec<String>), bool)> = unique_keys
+        .par_iter()
+        .map(|key| {
+            let seeds: TokenSet = key.1.iter().cloned().collect();
+            let returns = source_seed_reaches_return(key.0, &seeds, ws, intra_worklist_cap);
+            (key.clone(), returns)
+        })
+        .collect();
+    let returning_map: AHashMap<(FuncId, Vec<String>), bool> = returning_pairs.into_iter().collect();
+    let mut source_returning_indices: AHashSet<usize> = AHashSet::new();
     for (idx, (_, src_func_id, seeds)) in source_work.iter().enumerate() {
         let key = (*src_func_id, sorted_seed_key(seeds));
-        let returns_source = *source_returning_cache
-            .entry(key)
-            .or_insert_with(|| source_seed_reaches_return(*src_func_id, seeds, ws, intra_worklist_cap));
-        if returns_source {
+        if *returning_map.get(&key).unwrap_or(&false) {
             source_returning_indices.insert(idx);
         }
+    }
+    for _ in 0..source_work.len() {
         on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
@@ -3277,7 +3315,8 @@ where
         label: "building taint chains",
         total: total_groups as u64,
     });
-    use rayon::prelude::*;
+    // `rayon::prelude::*` is already in scope from the
+    // earlier `source_entries` parallel pass.
     let parallel_out: Vec<FindingWithChain> = source_groups_sorted
         .par_iter()
         .flat_map_iter(|&(src_func_id, indices)| {

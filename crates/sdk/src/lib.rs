@@ -116,6 +116,15 @@ pub enum WorkspaceOpenEvent {
     DataflowPrewarmStarted { pending: usize },
     DataflowEntryBuilt,
     DataflowPrewarmFinished,
+    /// Per-FuncId value-flow graph prewarm started — runs in
+    /// parallel via rayon. Without this, security-analysis lazy-
+    /// faults the per-source value-flow graph one source at a
+    /// time under a single RwLock — the OWASP single-core cliff.
+    ValueFlowPrewarmStarted,
+    ValueFlowPrewarmFinished,
+    /// FlowIdCache prewarm — workspace browse-row F: ids ready.
+    FlowIdsPrewarmStarted,
+    FlowIdsPrewarmFinished,
 }
 
 /// SDK configuration and workspace factory.
@@ -354,6 +363,14 @@ impl Bonsai {
         if options.prewarm_dataflow && !skip_dataflow {
             let pending = ws.dataflow().pending_count(ws.db());
             on_event(WorkspaceOpenEvent::DataflowPrewarmStarted { pending });
+            // Seed the dataflow + flow-ids caches with the
+            // workspace-cached resolved call graph so each
+            // sub-cache doesn't rebuild identical content.
+            let cg = ws.cached_resolved_call_graph();
+            ws.dataflow().seed_call_graph(cg.clone());
+            ws.flow_ids().seed_call_graph(cg);
+            ws.dataflow()
+                .seed_inter_taint_caches(ws.shared_inter_taint_caches());
             if pending > 0 {
                 ws.dataflow().prewarm_all_with_progress(ws.db(), |_| {
                     on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
@@ -365,6 +382,38 @@ impl Bonsai {
             if options.save_dataflow_sidecar {
                 let _ = ws.save_dataflow_sidecar(root);
             }
+        }
+
+        // Value-flow prewarm — the OWASP single-core cliff lives
+        // here. `value_flow().prewarm_all_with_caches` fans out
+        // across rayon threads. Without it, security-analysis's
+        // per-source `graph_for_with_caches` faults each
+        // function's graph sequentially under the cache RwLock,
+        // serialising 2,740 interprocedural taint runs on
+        // OWASP. Gated by the same dataflow opt-out env var
+        // (`BONSAI_NO_DATAFLOW`) plus the open-options flag.
+        let skip_value_flow = std::env::var("BONSAI_NO_VALUE_FLOW")
+            .ok()
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        if options.load_value_flow_sidecar && !skip_value_flow {
+            let _ = ws.load_value_flow_sidecar(root);
+        }
+        if options.prewarm_value_flow && !skip_value_flow && !skip_dataflow {
+            on_event(WorkspaceOpenEvent::ValueFlowPrewarmStarted);
+            ws.value_flow()
+                .prewarm_all_with_caches(ws.db(), ws.inter_taint_caches());
+            on_event(WorkspaceOpenEvent::ValueFlowPrewarmFinished);
+            if options.save_value_flow_sidecar {
+                let _ = ws.save_value_flow_sidecar(root);
+            }
+        }
+
+        // FlowIdCache prewarm — workspace browse-row F: ids
+        // populated up-front so per-row lookups are O(1).
+        if options.prewarm_flow_ids && !skip_dataflow {
+            on_event(WorkspaceOpenEvent::FlowIdsPrewarmStarted);
+            ws.flow_ids().prewarm_all(ws.db(), ws.vfs());
+            on_event(WorkspaceOpenEvent::FlowIdsPrewarmFinished);
         }
 
         Ok(ws)
