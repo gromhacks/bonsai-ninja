@@ -140,6 +140,8 @@ fn workspace_open_progress() -> impl Fn(WorkspaceOpenEvent) + Sync {
     let ingest: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
     let parse: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
     let dataflow: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
+    let value_flow: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
+    let flow_ids: Arc<Mutex<Option<indicatif::ProgressBar>>> = Arc::new(Mutex::new(None));
 
     move |event| match event {
         WorkspaceOpenEvent::IngestStarted => {
@@ -177,6 +179,24 @@ fn workspace_open_progress() -> impl Fn(WorkspaceOpenEvent) + Sync {
         }
         WorkspaceOpenEvent::DataflowPrewarmFinished => {
             if let Some(bar) = dataflow.lock().expect("dataflow progress lock").take() {
+                bar.finish_and_clear();
+            }
+        }
+        WorkspaceOpenEvent::ValueFlowPrewarmStarted => {
+            *value_flow.lock().expect("value-flow progress lock") =
+                Some(progress::spinner("building value-flow graph"));
+        }
+        WorkspaceOpenEvent::ValueFlowPrewarmFinished => {
+            if let Some(bar) = value_flow.lock().expect("value-flow progress lock").take() {
+                bar.finish_and_clear();
+            }
+        }
+        WorkspaceOpenEvent::FlowIdsPrewarmStarted => {
+            *flow_ids.lock().expect("flow-ids progress lock") =
+                Some(progress::spinner("building flow ids"));
+        }
+        WorkspaceOpenEvent::FlowIdsPrewarmFinished => {
+            if let Some(bar) = flow_ids.lock().expect("flow-ids progress lock").take() {
                 bar.finish_and_clear();
             }
         }
