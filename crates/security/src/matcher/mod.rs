@@ -1065,12 +1065,36 @@ fn scan_calls_batch(
     // the same decl because function bodies don't overlap and the
     // rightmost body whose start <= ref.span.start IS the
     // innermost containing one.
-    let enclosing_index = build_enclosing_decl_index(&decls);
+    // Workspace-cached binary-search index (built once per
+    // `(FileId, version)`), shared across the 4 matcher passes
+    // and across `cmd_security` subcommands. Replaces the prior
+    // per-batch local builder.
+    let enclosing_entries = ws.enclosing_index().entries_for(ws.db(), file);
     for r in &idx.refs {
         if r.kind != RefKind::Call || decl_call_keys.contains(&(r.name.clone(), r.span.start)) {
             continue;
         }
-        let enclosing_fn = lookup_enclosing_decl_name(&enclosing_index, r.span.start);
+        let enclosing_fn = ws
+            .enclosing_index()
+            .enclosing_name(ws.db(), file, r.span.start)
+            .or_else(|| {
+                // Fast fallback when the entry is already built;
+                // partition_point preserves the prior matcher
+                // semantics (innermost match by binary search).
+                if enclosing_entries.is_empty() {
+                    return None;
+                }
+                let partition = enclosing_entries.partition_point(|e| e.start <= r.span.start);
+                if partition == 0 {
+                    return None;
+                }
+                let entry = &enclosing_entries[partition - 1];
+                if r.span.start < entry.end {
+                    Some(entry.name.clone())
+                } else {
+                    None
+                }
+            });
         for prepared in rules {
             if mode == ConstraintMode::Strict && !prepared.rule.constraints.0.is_empty() {
                 continue;
@@ -1285,28 +1309,61 @@ fn missing_target_in_reachable_callees(
                 continue;
             };
             // Per-callee aliases / packages so child resolutions
-            // use the callee's own imports, not the entry's.
+            // use the callee's own imports, not the entry's. The
+            // workspace-cached `decl_match_facts_for(ws, callee_file)`
+            // returns Arc-shared `DeclMatchFacts` keyed on
+            // `(FileId, version, content_hash)`; using it instead
+            // of inlining `collect_calls` /
+            // `extend_alias_map_with_declared_types` /
+            // `enrich_call_fact_receiver_types` per callee
+            // collapses Missing-rule BFS cost to one cache hit
+            // per (file, decl) pair across the whole search.
             let callee_file = global.declaring_file(callee_decl.symbol).unwrap_or(file);
             let callee_file_packages = file_package_set(ws, callee_file);
-            let mut callee_alias = file_alias_map(ws, callee_file);
-            extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
-            bonsai_lang_api::extend_alias_map_with_flow_events(&mut callee_alias, &callee_decl.flow_events);
-            let mut calls = collect_calls(&callee_decl.flow_events);
-            enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
-            for call in calls {
+            let callee_bundle = decl_match_facts_for(ws, callee_file);
+            // Bundle covers every decl in the file; index by
+            // span. Fallback: if the cache layer didn't
+            // materialise this decl (rare — adapters that emit
+            // a decl with no flow_events skip it), fall through
+            // to the prior inline shape.
+            let callee_facts = callee_bundle.by_decl_span.get(&callee_decl.span).cloned();
+            let (calls_view, callee_alias_owned, callee_alias_borrow): (
+                std::borrow::Cow<'_, [CallFact]>,
+                Option<std::collections::HashMap<String, AliasTarget>>,
+                Option<&std::collections::HashMap<String, AliasTarget>>,
+            ) = if let Some(facts) = &callee_facts {
+                (
+                    std::borrow::Cow::Borrowed(facts.calls.as_slice()),
+                    None,
+                    Some(&facts.alias_map),
+                )
+            } else {
+                let mut callee_alias = file_alias_map(ws, callee_file);
+                extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
+                bonsai_lang_api::extend_alias_map_with_flow_events(
+                    &mut callee_alias,
+                    &callee_decl.flow_events,
+                );
+                let mut calls = collect_calls(&callee_decl.flow_events);
+                enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
+                (std::borrow::Cow::Owned(calls), Some(callee_alias), None)
+            };
+            let callee_alias_ref = callee_alias_borrow
+                .unwrap_or_else(|| callee_alias_owned.as_ref().expect("alias map populated"));
+            for call in calls_view.iter() {
                 if callee_or_alias_matches(
                     &call.callee,
                     &call.receiver_types,
                     prepared.name,
                     prepared.attribute,
                     prepared.regex.as_ref(),
-                    &callee_alias,
+                    callee_alias_ref,
                 )
                 .is_some()
                     && prepared.call_context_allows(
                         &call.callee,
                         &call.receiver_types,
-                        &callee_alias,
+                        callee_alias_ref,
                         callee_file_packages.as_ref(),
                     )
                 {
@@ -1322,7 +1379,7 @@ fn missing_target_in_reachable_callees(
                 &callee_decl.flow_events,
                 &global,
                 callee_decl,
-                &callee_alias,
+                callee_alias_ref,
                 callee_export_aliases,
                 &mut next,
             );
@@ -1398,12 +1455,21 @@ fn file_alias_map(ws: &Workspace, file: FileId) -> std::collections::HashMap<Str
     bonsai_lang_api::kit::alias_map_from_imports(&imports)
 }
 
-type FilePackageSetCache = RefCell<AHashMap<(FileId, u64, u64), Arc<AHashSet<String>>>>;
-
-// Per-thread cache for canonical package names imported by each file snapshot.
-thread_local! {
-    static FILE_PACKAGE_SET_CACHE: FilePackageSetCache = RefCell::new(AHashMap::new());
-}
+// Process-level shared cache (parking_lot::RwLock) keyed on
+// `(FileId, version, content_hash)`. Earlier this was a
+// `thread_local!` which meant rayon work-stealing across the 4
+// matcher passes (sources / sinks / sanitizers / pattern_sinks)
+// rebuilt the same file's package set on every worker that hadn't
+// seen it. The shared cache hits ~100% across all passes once a
+// file has been visited once.
+//
+// Cross-workspace correctness: the key includes content_hash, so a
+// byte-identical file in two workspaces returns the same package
+// set (which is correct — the package set is purely a function of
+// the file's import declarations).
+static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<
+    parking_lot::RwLock<AHashMap<(FileId, u64, u64), Arc<AHashSet<String>>>>,
+> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
 /// Build the set of canonical package names imported by `file`.
 /// Pre-enumerates every prefix shape an import target could match
@@ -1418,7 +1484,10 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
         )
     });
     let key = (file, version, text_hash);
-    if let Some(hit) = FILE_PACKAGE_SET_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+    // Drop the read guard at the `;` before any potential write
+    // upgrade — parking_lot RwLocks are non-reentrant.
+    let cached = FILE_PACKAGE_SET_CACHE.read().get(&key).cloned();
+    if let Some(hit) = cached {
         return hit;
     }
     let Some(imports) = ws.db().import_index(file) else {
@@ -1437,14 +1506,11 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
         }
     }
     let out = Arc::new(out);
-    FILE_PACKAGE_SET_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() >= 4096 {
-            cache.clear();
-        }
-        cache.insert(key, out.clone());
-    });
-    out
+    let mut write = FILE_PACKAGE_SET_CACHE.write();
+    if write.len() >= 4096 {
+        write.clear();
+    }
+    write.entry(key).or_insert_with(|| out.clone()).clone()
 }
 
 fn package_cache_content_hash(bytes: &[u8]) -> u64 {
@@ -1476,11 +1542,27 @@ struct FileDeclFactsBundle {
     by_decl_span: AHashMap<Span, Arc<DeclMatchFacts>>,
 }
 
-type DeclFactsCache = RefCell<AHashMap<(FileId, u64, u64), Arc<FileDeclFactsBundle>>>;
-
-thread_local! {
-    static DECL_FACTS_CACHE: DeclFactsCache = RefCell::new(AHashMap::new());
-}
+// Process-level shared cache (parking_lot::RwLock) keyed on
+// `(FileId, version, content_hash)`. Earlier this was a
+// `thread_local!` which meant rayon work-stealing across the 4
+// matcher passes (sources / sinks / sanitizers / pattern_sinks)
+// rebuilt the same file's per-decl bundle on every worker that
+// hadn't seen it yet — expected reuse rate ~25%. The shared
+// cache approaches 100% reuse across passes.
+//
+// Cross-workspace correctness: bundle is purely a function of
+// `decl.flow_events` + adapter capabilities + source text, all
+// folded into the cache key's `content_hash`. Two workspaces that
+// open byte-identical files share the cache hit (correct).
+//
+// Note: `collect_decl_decorator_names` consults `ws` to walk the
+// adapter for decorator extraction. The workspace handle leaves
+// no state in the cached bundle other than what's derived from
+// `decl.flow_events` + content_hash, so two workspaces with
+// byte-identical files produce byte-identical bundles.
+static DECL_FACTS_CACHE: std::sync::LazyLock<
+    parking_lot::RwLock<AHashMap<(FileId, u64, u64), Arc<FileDeclFactsBundle>>>,
+> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
 /// Return the per-decl matcher fact bundle for `file`. Builds the
 /// bundle on miss; cached on `(file, version, text_hash)` so source
@@ -1490,7 +1572,8 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId) -> Arc<FileDeclFactsBundle
         (snap.version, package_cache_content_hash(snap.text.as_bytes()))
     });
     let key = (file, version, text_hash);
-    if let Some(hit) = DECL_FACTS_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+    let cached = DECL_FACTS_CACHE.read().get(&key).cloned();
+    if let Some(hit) = cached {
         return hit;
     }
     let global = ws.db().global_index();
@@ -1524,16 +1607,11 @@ fn decl_match_facts_for(ws: &Workspace, file: FileId) -> Arc<FileDeclFactsBundle
         );
     }
     let bundle = Arc::new(FileDeclFactsBundle { by_decl_span });
-    DECL_FACTS_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        // Cap thread-local growth — large monorepos can otherwise
-        // pin gigabytes of derived per-decl state per worker.
-        if cache.len() >= 1024 {
-            cache.clear();
-        }
-        cache.insert(key, bundle.clone());
-    });
-    bundle
+    let mut write = DECL_FACTS_CACHE.write();
+    if write.len() >= 1024 {
+        write.clear();
+    }
+    write.entry(key).or_insert_with(|| bundle.clone()).clone()
 }
 
 fn insert_import_target_prefixes(out: &mut AHashSet<String>, module: &str) {
@@ -4010,52 +4088,13 @@ fn unquote_literal(value: &str) -> Option<&str> {
 /// set. The matcher uses this to recognise constructor calls written
 /// without `new` (e.g. `MyClass(x)` in Python / Ruby) when applying
 /// `kind: new` rules.
-/// Span-sorted index over a file's decls, used by the call-ref
-/// scanners to look up "what function encloses this span?" in
-/// O(log n) instead of the previous O(n) linear scan. Each entry
-/// is `(body.start, body.end, name)`.
-type EnclosingDeclIndex = Vec<(u64, u64, String)>;
-
-fn build_enclosing_decl_index(decls: &[bonsai_lang_api::Decl]) -> EnclosingDeclIndex {
-    let mut idx: EnclosingDeclIndex = decls
-        .iter()
-        .map(|d| {
-            let body = d.body_span.unwrap_or(d.span);
-            (body.start, body.end, d.name.clone())
-        })
-        .collect();
-    // Sort ascending by body.start so we can binary-search for the
-    // rightmost decl whose body covers a given span. Stability isn't
-    // required because the linear predecessor returned the FIRST
-    // matching decl in workspace-iteration order, and decl bodies in
-    // a single file never overlap at the same start (function /
-    // method definitions have unique start positions).
-    idx.sort_unstable_by_key(|(start, _, _)| *start);
-    idx
-}
-
-/// Look up the name of the decl whose body span contains `pos`.
-/// Returns the innermost match — for nested decls (a class
-/// containing a method), the method has the larger body.start and
-/// the binary search lands on it before the class.
-fn lookup_enclosing_decl_name(index: &EnclosingDeclIndex, pos: u64) -> Option<String> {
-    if index.is_empty() {
-        return None;
-    }
-    // partition_point gives the first idx where predicate is false;
-    // for "first start > pos", everything before is start <= pos —
-    // the candidate decl is at idx-1.
-    let partition = index.partition_point(|(start, _, _)| *start <= pos);
-    if partition == 0 {
-        return None;
-    }
-    let (_, end, name) = &index[partition - 1];
-    if pos < *end {
-        Some(name.clone())
-    } else {
-        None
-    }
-}
+// `build_enclosing_decl_index` and `lookup_enclosing_decl_name`
+// were earlier per-batch helpers; their span-sorted binary-search
+// index is now provided by the workspace-cached
+// `bonsai_workspace::enclosing_index::EnclosingIndex` so the
+// build cost is paid once per `(FileId, version)` rather than per
+// matcher pass per `cmd_security` subcommand. Consumers route
+// through `ws.enclosing_index().entries_for(...)`.
 
 fn collect_constructor_names(global: &bonsai_index::GlobalIndex) -> AHashSet<String> {
     let mut names = AHashSet::new();

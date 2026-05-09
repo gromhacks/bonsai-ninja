@@ -165,7 +165,7 @@ impl CallGraph {
 /// stitch chains across unrelated decls (the `Pool::__construct` vs
 /// `CurlFactory::__construct` problem) — they are different symbols
 /// and therefore different graph nodes.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResolvedCallGraph {
     cg: CallGraph,
 }

@@ -245,7 +245,7 @@ impl InterTaintCaches {
         self.alias_targets_by_func.write().clear();
         self.local_bindings_by_func.write().clear();
         self.summaries_by_func.write().clear();
-        self.resolved_calls_by_site.lock().clear();
+        self.resolved_calls_by_site.write().clear();
     }
 
     /// True iff every cache map is empty. Used by tests to verify
@@ -256,15 +256,18 @@ impl InterTaintCaches {
             && self.alias_targets_by_func.read().is_empty()
             && self.local_bindings_by_func.read().is_empty()
             && self.summaries_by_func.read().is_empty()
-            && self.resolved_calls_by_site.lock().is_empty()
+            && self.resolved_calls_by_site.read().is_empty()
     }
 }
 
 /// Memo store keyed on `(caller_func, call_span)` → resolved
-/// callees. `parking_lot::Mutex` (not `RefCell`) so the cache is
-/// `Sync` — required for parallel per-source taint runs.
+/// callees. `parking_lot::RwLock` for the same reason the four
+/// sibling caches use it: read-mostly access pattern under the
+/// parallel `flat_map_iter` per-source loop in
+/// `build_findings_chain_aware`. Earlier shape was `Mutex` and
+/// serialised every per-call-site lookup.
 pub(crate) type ResolvedCallSiteCache =
-    parking_lot::Mutex<AHashMap<(FuncId, Span), std::sync::Arc<[ResolvedCallee]>>>;
+    parking_lot::RwLock<AHashMap<(FuncId, Span), std::sync::Arc<[ResolvedCallee]>>>;
 
 /// Read-or-fill helper for the RwLock-backed engine caches.
 /// Standard double-checked-locking pattern: probe with a read lock
@@ -3739,13 +3742,25 @@ fn resolve_call_candidates_with_caller_at(
     // span (synthesized resolution from summaries, for example)
     // bypass the cache and run uncached.
     if let (Some(cache), Some(span)) = (scope.resolved_calls, call_span) {
-        if let Some(cached) = cache.lock().get(&(scope.caller, span)) {
-            return cached.iter().cloned().collect::<Vec<_>>();
+        // Probe with read lock first; upgrade only on miss. Drop
+        // the read guard's temporary at the `;` so the subsequent
+        // `.write()` below can't deadlock on a same-thread
+        // read→write upgrade (parking_lot RwLock is non-reentrant).
+        let cached = cache
+            .read()
+            .get(&(scope.caller, span))
+            .cloned();
+        if let Some(arc) = cached {
+            return arc.iter().cloned().collect::<Vec<_>>();
         }
         let computed =
             resolve_call_candidates_with_caller_at_uncached(name, scope, receiver_types, call_span);
         let arc: std::sync::Arc<[ResolvedCallee]> = computed.iter().cloned().collect();
-        cache.lock().insert((scope.caller, span), arc);
+        // `or_insert` keeps a winner from a concurrent fill on the
+        // same key — engine purity guarantees the values are
+        // identical anyway, but pinning the first writer keeps
+        // downstream Arc-pointer comparisons stable.
+        cache.write().entry((scope.caller, span)).or_insert(arc);
         return computed;
     }
     resolve_call_candidates_with_caller_at_uncached(name, scope, receiver_types, call_span)

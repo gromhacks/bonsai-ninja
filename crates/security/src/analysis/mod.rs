@@ -687,61 +687,104 @@ where
         ..Default::default()
     };
     let source_graph_caches = ws.inter_taint_caches();
-    let mut source_graphs: AHashMap<(FuncId, Vec<String>), EntryTaintGraph> = AHashMap::new();
-    let mut candidates = Vec::new();
-    let mut seen = AHashSet::new();
     on_progress(AnalysisProgress::PhaseStarted {
         label: "enumerating source paths",
         total: source_hits.len() as u64,
     });
-    for hit in &source_hits {
-        let Some(source_match) = source_finding_match(hit, pack) else {
-            on_progress(AnalysisProgress::PhaseTicked);
-            continue;
-        };
-        let Some(start) = func_id_for_match(hit, &func_ids) else {
-            on_progress(AnalysisProgress::PhaseTicked);
-            continue;
-        };
-        let graph = global
-            .decl_of(SymbolId::new(start.raw()))
-            .map(|decl| {
-                let value_flow = ws
-                    .value_flow()
-                    .graph_for_with_caches(start, ws.db(), source_graph_caches);
-                let seeds = source_seed_set(pack, hit, decl, Some(value_flow.as_ref()));
-                let graph_key = (start, sorted_seed_key(&seeds));
-                source_graphs
-                    .entry(graph_key)
-                    .or_insert_with(|| {
-                        exact_source_seed_graph(
-                            start,
-                            &seeds,
-                            &source_graph_config,
-                            ws.db(),
-                            source_graph_caches,
-                        )
-                    })
-                    .clone()
-            })
-            .unwrap_or_else(|| ws.dataflow().graph_for(start, ws.db()).as_ref().clone());
-        let lineages = enumerate_tainted_source_lineages(&graph.call_records, start, 6, 24);
-        if lineages.is_empty() {
-            let path = vec![start];
-            let Some(chain_names) = chain_names_for_path(ws, &path) else {
-                on_progress(AnalysisProgress::PhaseTicked);
-                continue;
+    // Workspace-wide taint-graph index (Stage 6). Lifted out of the
+    // per-invocation map so re-running source-analysis with a
+    // different `--tag` filter against the same workspace +
+    // rulepack reuses cached graphs. Per-invocation
+    // `local_graphs` map kept as L1 to avoid re-cloning Arcs from
+    // the workspace cache for in-pass duplicates.
+    let workspace_taint_index = ws.taint_index();
+    let local_graphs: parking_lot::RwLock<
+        AHashMap<(FuncId, Vec<String>), Arc<EntryTaintGraph>>,
+    > = parking_lot::RwLock::new(AHashMap::new());
+    use rayon::prelude::*;
+    // Per-thread `seen` Vecs merged at the end so the parallel
+    // collect doesn't serialise on a global set lock; the second
+    // `seen` pass below is a single-threaded canonicalisation.
+    let parallel_candidates: Vec<SourceAnalysisCandidate> = source_hits
+        .par_iter()
+        .flat_map_iter(|hit| {
+            let mut local: Vec<SourceAnalysisCandidate> = Vec::new();
+            let Some(source_match) = source_finding_match(hit, pack) else {
+                return local.into_iter();
             };
-            let taint_path = Vec::new();
-            let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
-            let dedupe_key = (
-                source_match.rule_id.clone(),
-                source_match.file.clone(),
-                source_match.line,
-                flow_id.clone(),
-            );
-            if seen.insert(dedupe_key) {
-                candidates.push(SourceAnalysisCandidate {
+            let Some(start) = func_id_for_match(hit, &func_ids) else {
+                return local.into_iter();
+            };
+            let graph = global
+                .decl_of(SymbolId::new(start.raw()))
+                .map(|decl| {
+                    let value_flow = ws
+                        .value_flow()
+                        .graph_for_with_caches(start, ws.db(), source_graph_caches);
+                    let seeds = source_seed_set(pack, hit, decl, Some(value_flow.as_ref()));
+                    let graph_key = (start, sorted_seed_key(&seeds));
+                    // L1: per-invocation map. Drop the read guard
+                    // before any potential write upgrade.
+                    let cached = local_graphs.read().get(&graph_key).cloned();
+                    if let Some(arc) = cached {
+                        return (*arc).clone();
+                    }
+                    // L2: workspace-wide TaintGraphIndex.
+                    if let Some(arc) = workspace_taint_index.get(start, &graph_key.1) {
+                        local_graphs
+                            .write()
+                            .entry(graph_key.clone())
+                            .or_insert(arc.clone());
+                        return (*arc).clone();
+                    }
+                    // Compute, publish to both layers.
+                    let computed = Arc::new(exact_source_seed_graph(
+                        start,
+                        &seeds,
+                        &source_graph_config,
+                        ws.db(),
+                        source_graph_caches,
+                    ));
+                    let canonical = workspace_taint_index.insert_if_absent(
+                        start,
+                        graph_key.1.clone(),
+                        computed,
+                    );
+                    local_graphs
+                        .write()
+                        .entry(graph_key)
+                        .or_insert(canonical.clone());
+                    (*canonical).clone()
+                })
+                .unwrap_or_else(|| ws.dataflow().graph_for(start, ws.db()).as_ref().clone());
+            let lineages = enumerate_tainted_source_lineages(&graph.call_records, start, 6, 24);
+            if lineages.is_empty() {
+                let path = vec![start];
+                let Some(chain_names) = chain_names_for_path(ws, &path) else {
+                    return local.into_iter();
+                };
+                let taint_path = Vec::new();
+                let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+                local.push(SourceAnalysisCandidate {
+                    source: source_match.clone(),
+                    path,
+                    flow_id,
+                    chain_names,
+                    taint_path,
+                });
+                return local.into_iter();
+            }
+            for lineage in lineages {
+                let terminal = lineage.last().map(|record| record.callee).unwrap_or(start);
+                let Some(path) = chain_funcs_for_lineage(&lineage, start, terminal) else {
+                    continue;
+                };
+                let Some(chain_names) = chain_names_for_path(ws, &path) else {
+                    continue;
+                };
+                let taint_path = taint_path_for_lineage(ws, &lineage, None);
+                let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+                local.push(SourceAnalysisCandidate {
                     source: source_match.clone(),
                     path,
                     flow_id,
@@ -749,35 +792,28 @@ where
                     taint_path,
                 });
             }
-            on_progress(AnalysisProgress::PhaseTicked);
-            continue;
+            local.into_iter()
+        })
+        .collect();
+
+    // Single-threaded dedupe pass — preserves the first-occurrence
+    // semantics of the prior sequential `seen` set across the
+    // par-collected candidates. Order is stable because
+    // `flat_map_iter` preserves input order on collection.
+    let mut seen: AHashSet<(String, String, u32, String)> = AHashSet::new();
+    let mut candidates: Vec<SourceAnalysisCandidate> = Vec::with_capacity(parallel_candidates.len());
+    for candidate in parallel_candidates {
+        let dedupe_key = (
+            candidate.source.rule_id.clone(),
+            candidate.source.file.clone(),
+            candidate.source.line,
+            candidate.flow_id.clone(),
+        );
+        if seen.insert(dedupe_key) {
+            candidates.push(candidate);
         }
-        for lineage in lineages {
-            let terminal = lineage.last().map(|record| record.callee).unwrap_or(start);
-            let Some(path) = chain_funcs_for_lineage(&lineage, start, terminal) else {
-                continue;
-            };
-            let Some(chain_names) = chain_names_for_path(ws, &path) else {
-                continue;
-            };
-            let taint_path = taint_path_for_lineage(ws, &lineage, None);
-            let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
-            let dedupe_key = (
-                source_match.rule_id.clone(),
-                source_match.file.clone(),
-                source_match.line,
-                flow_id.clone(),
-            );
-            if seen.insert(dedupe_key) {
-                candidates.push(SourceAnalysisCandidate {
-                    source: source_match.clone(),
-                    path,
-                    flow_id,
-                    chain_names,
-                    taint_path,
-                });
-            }
-        }
+    }
+    for _ in 0..source_hits.len() {
         on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
