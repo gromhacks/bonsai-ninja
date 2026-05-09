@@ -59,10 +59,16 @@ pub const IMPLICIT_RECEIVER_TOKENS: &[&str] = &["self", "this"];
 
 /// Super / parent receiver tokens used to dispatch into a base
 /// class. `super` covers Java / Kotlin / JS / TS / Python / Ruby /
-/// Swift / Dart / Scala; `parent` covers PHP and Perl; `base`
-/// covers C# and Lua. The set is the union of receiver-equality
-/// tokens for the cross-language `is_super_receiver` predicate.
-pub const SUPER_RECEIVER_TOKENS: &[&str] = &["super", "parent", "base"];
+/// Swift / Dart / Scala; `parent` and `self` cover PHP's
+/// `parent::method` and `self::method` qualifiers; `base` covers
+/// C# and Lua; `SUPER` (case-sensitive) covers Perl's
+/// `$self->SUPER::method()`. The set is the union of
+/// receiver-equality tokens for the cross-language
+/// `is_super_receiver` predicate; adapters that want to narrow
+/// further declare their own `super_receiver_tokens` slice in
+/// `LanguageCapabilities` and the engine prefers
+/// `effective_super_receiver_tokens()` when the adapter is known.
+pub const SUPER_RECEIVER_TOKENS: &[&str] = &["super", "parent", "base", "SUPER"];
 
 /// Absolute-path prefixes that adapters may surface on
 /// fully-qualified call names — Rust's `crate::` (this crate's

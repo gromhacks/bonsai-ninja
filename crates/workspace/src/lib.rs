@@ -20,13 +20,14 @@ pub mod taint_index;
 pub mod transitive_callers;
 pub mod value_flow;
 
+use ahash::AHashMap;
 use bonsai_abstract_interp::TraceLimits;
 use bonsai_common::{FileId, FuncId, Precision, SymbolId};
 use bonsai_db::{AnalyzerDb, AnalyzerDbOptions, DbStats};
 use bonsai_diagnostics::Diagnostic;
 use bonsai_hash::fnv1a_bytes64;
 use bonsai_lang_api::{Decl, DeclKind, LanguageRegistry};
-use bonsai_taint::InterTaintCaches;
+use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
 use bonsai_vfs::Vfs;
 use cross_module::CrossModuleTracer;
@@ -132,6 +133,11 @@ struct Inner {
     /// Lowercased decl-name table for `inspect --query <pat>`
     /// `Contains` matches. Built lazily on first inspect query.
     decl_names: DeclNameIndex,
+    /// Workspace-wide memo of `name_reachable_through_func_kinded`
+    /// per FuncId. browse-export and inspect both walk the same
+    /// per-function structural reachability set; without this
+    /// cache they recompute it per call.
+    reachable_kinded: parking_lot::RwLock<AHashMap<FuncId, Arc<KindedTokens>>>,
     reparse_counter: Mutex<u64>,
     root_label: Mutex<String>,
 }
@@ -281,6 +287,7 @@ impl Workspace {
                 class_members: ClassMemberIndex::new(),
                 enclosing: EnclosingIndex::new(),
                 decl_names: DeclNameIndex::new(),
+                reachable_kinded: parking_lot::RwLock::new(AHashMap::new()),
                 reparse_counter: Mutex::new(0),
                 root_label: Mutex::new(String::new()),
             }),
@@ -370,6 +377,25 @@ impl Workspace {
     /// names; regex matches use the original names.
     pub fn decl_name_index(&self) -> &DeclNameIndex {
         &self.inner.decl_names
+    }
+
+    /// Cached structural-reachability tokens per `FuncId`. Mirrors
+    /// `bonsai_taint::name_reachable_through_func_kinded` but
+    /// memoised so browse-export and inspect's chain-cache share one
+    /// computation per function. Cleared on file edits.
+    pub fn name_reachable_kinded_for(&self, func: FuncId) -> Arc<KindedTokens> {
+        // Drop the read guard's temporary at the `;` so the
+        // subsequent `.write()` doesn't deadlock with our own read.
+        let cached = self.inner.reachable_kinded.read().get(&func).cloned();
+        if let Some(hit) = cached {
+            return hit;
+        }
+        let computed = Arc::new(bonsai_taint::name_reachable_through_func_kinded(
+            func,
+            &self.inner.db,
+        ));
+        let mut map = self.inner.reachable_kinded.write();
+        map.entry(func).or_insert(computed).clone()
     }
 
     pub fn db(&self) -> &AnalyzerDb {
@@ -650,6 +676,9 @@ impl Workspace {
                 // Decl-name index is workspace-wide; coarsely drop
                 // it on edit and let the next query rebuild.
                 self.inner.decl_names.clear();
+                // Per-FuncId structural reachability depends on
+                // the edited file's flow events; coarse drop.
+                self.inner.reachable_kinded.write().clear();
             }
             *self.inner.reparse_counter.lock() += 1;
             ingested.push(id);

@@ -16,7 +16,9 @@ use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{
     AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind, TypeAliasBinding,
 };
-use bonsai_resolve::{resolve_callable_with_context, resolve_class, visibility_allows, ResolveContext};
+use bonsai_resolve::{
+    is_super_receiver, resolve_callable_with_context, resolve_class, visibility_allows, ResolveContext,
+};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CrossModuleOptions {
@@ -1030,11 +1032,12 @@ impl<'a> TraceBuilder<'a> {
     }
 }
 
-fn is_super_receiver(receiver: &str) -> bool {
-    let receiver = receiver.trim().trim_start_matches(['&', '*']);
-    let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
-    matches!(receiver, "super" | "parent" | "base")
-}
+// Super-receiver detection delegates to the canonical
+// `bonsai_resolve::is_super_receiver` so the cross-language token
+// set + adapter-narrowed slices stay in one place. Earlier this
+// file carried a private inline duplicate that drifted from the
+// canonical set (it didn't recognise Perl's `SUPER`); deleted in
+// favour of the shared primitive.
 
 fn enclosing_class_for_decl<'a>(global: &'a bonsai_index::GlobalIndex, decl: &Decl) -> Option<&'a Decl> {
     if let Some(parent) = decl.parent {
