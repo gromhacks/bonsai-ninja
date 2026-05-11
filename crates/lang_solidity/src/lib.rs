@@ -418,7 +418,9 @@ fn synthesize_try_return_assigns(events: &mut Vec<FlowEvent>, src: &[u8]) {
                                     source_call: Some(source_call),
                                     source_call_args,
                                     source_names,
-                                },
+                        declares_new_binding: false,
+                        value_kind: None,
+                    },
                             );
                         }
                     }

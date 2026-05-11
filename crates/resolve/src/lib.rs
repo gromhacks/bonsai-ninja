@@ -1414,6 +1414,7 @@ mod tests {
             receiver_field_writes: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
+            return_type: None,
         };
         global.insert(DeclIndex {
             file,

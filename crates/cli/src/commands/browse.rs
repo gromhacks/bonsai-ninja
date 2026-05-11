@@ -1629,6 +1629,8 @@ mod tests {
                 source_call: Some("read_user".to_string()),
                 source_call_args: vec!["request".to_string()],
                 span: span(),
+                            declares_new_binding: false,
+                value_kind: None,
             },
             FlowEvent::Call {
                 name: "sink".to_string(),

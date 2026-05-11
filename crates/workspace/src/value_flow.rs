@@ -7,28 +7,53 @@
 //! source-node selection before it runs exact source-seeded taint
 //! paths.
 
+use crate::value_flow_disk::{decode as decode_value_flow_entry, encode as encode_value_flow_entry, ValueFlowEntry};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
+use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_lang_api::DeclKind;
 use bonsai_taint::{value_flow_for_function_with_caches, InterTaintCaches, InterTaintConfig};
 pub use bonsai_taint::{ValueFlowEdge, ValueFlowGraph, ValueFlowNode, ValueFlowNodeKind};
 use parking_lot::RwLock;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    process,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// On-disk format version. Bump when the snapshot shape changes
-/// (new node kind, edge field, etc.) so old sidecars are rejected.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 2;
-static VALUE_FLOW_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// On-disk format version. Bump when the layout changes so old
+/// sidecars are rejected. v3 is the workspace-interned factstore
+/// format produced by [`bonsai_factstore`]; older bincode-based v2
+/// sidecars (extension `.bin`) co-exist on disk but are ignored —
+/// they don't share `MAGIC` with the factstore reader so they fail
+/// the open check naturally.
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 3;
+
+/// Caller-defined table id stamped into the factstore header. Lets
+/// the reader detect "this is the value-flow store" vs other
+/// per-function stores when several share a directory.
+const VALUE_FLOW_TABLE_ID: u32 = 1;
+
+/// Pipeline-hash field in the factstore header. We fold the matcher
+/// policy fingerprint into 64 bits so a matcher policy change
+/// invalidates the cache (same semantic as the v2 sidecar's
+/// `matcher_policy_fingerprint` field).
+fn value_flow_pipeline_hash() -> u64 {
+    let raw = MATCHER_POLICY_FINGERPRINT;
+    // Fold the 128-bit fingerprint into 64 bits by xor of halves.
+    let lo = raw as u64;
+    let hi = (raw >> 64) as u64;
+    lo ^ hi
+}
+
+/// Per-function content-address hash used for fine-grained
+/// invalidation. v3 ties the entire cache to the matcher policy
+/// fingerprint via the file-level pipeline hash and clears on file
+/// edits via [`crate::Workspace::ingest_dir`], so per-entry hashes
+/// are unused. The field is reserved on the wire so a future version
+/// can attach per-function content fingerprints without bumping the
+/// fact-store layout.
+const RESERVED_BODY_HASH: u64 = 0;
 
 /// Cache of `ValueFlowGraph` per entry function.
 ///
@@ -50,6 +75,13 @@ struct Inner {
     /// `source_seed_reaches_return` becomes a hash-set lookup
     /// instead of a per-seed forward-closure walk.
     returning_seeds: AHashMap<FuncId, Arc<AHashSet<String>>>,
+    /// Disk-backed source of truth, populated by either
+    /// [`ValueFlowCache::load_from_disk`] or
+    /// [`ValueFlowCache::prewarm_to_disk`]. When present, lookups
+    /// that miss the in-memory map probe the fact store before
+    /// falling through to the engine; the in-memory map then caches
+    /// the decoded entry for subsequent hits.
+    disk: Option<Arc<FactStoreReader>>,
 }
 
 impl ValueFlowCache {
@@ -90,6 +122,12 @@ impl ValueFlowCache {
         if let Some(hit) = cached {
             return hit;
         }
+        // Disk probe: when a sidecar / prewarm output is open the
+        // entry might already be encoded on disk. Decoding paged
+        // bytes is cheaper than re-running the interprocedural pass.
+        if let Some(arc) = self.try_hydrate_from_disk(func) {
+            return arc;
+        }
         let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), caches);
         let arc = Arc::new(graph);
         let returning = Arc::new(compute_returning_seed_names(&arc, func));
@@ -97,6 +135,31 @@ impl ValueFlowCache {
         inner.graphs.insert(func, arc.clone());
         inner.returning_seeds.insert(func, returning);
         arc
+    }
+
+    /// Probe the disk store for `func`, decode the payload, and hydrate
+    /// the in-memory cache. Returns the cached graph on hit. `None`
+    /// when there is no disk store, no entry for `func`, or the entry
+    /// fails to decode (corrupt blob — falls through to recompute).
+    fn try_hydrate_from_disk(&self, func: FuncId) -> Option<Arc<ValueFlowGraph>> {
+        let reader = self.inner.read().disk.clone()?;
+        let hit = reader.get(u64::from(func.raw())).ok().flatten()?;
+        let pool = reader.string_pool().ok()?;
+        let entry = decode_value_flow_entry(&hit.payload, &pool).ok()?;
+        let arc_graph = Arc::new(entry.graph);
+        let arc_returning = Arc::new(entry.returning_seeds);
+        let mut inner = self.inner.write();
+        inner
+            .graphs
+            .entry(func)
+            .or_insert_with(|| arc_graph.clone());
+        inner
+            .returning_seeds
+            .entry(func)
+            .or_insert_with(|| arc_returning.clone());
+        // Re-fetch in case a peer thread won the insert race so we
+        // return the canonical Arc rather than our local one.
+        Some(inner.graphs.get(&func).cloned().unwrap_or(arc_graph))
     }
 
     /// Set of seed names whose forward closure in `func`'s
@@ -116,7 +179,8 @@ impl ValueFlowCache {
             return hit;
         }
         // Force the graph to build, which populates `returning_seeds`
-        // as a side effect — simplest way to keep both stores in sync.
+        // as a side effect (either from disk or from the engine) —
+        // simplest way to keep both stores in sync.
         let _ = self.graph_for_with_caches(func, db, caches);
         self.inner
             .read()
@@ -141,22 +205,14 @@ impl ValueFlowCache {
     /// Accumulating resolver answers across the prewarm fold means
     /// the post-prewarm singleton is already hot for security's
     /// per-source taint runs.
+    ///
+    /// In-memory variant: every computed graph stays resident in the
+    /// in-memory map. Use [`Self::prewarm_to_disk`] when peak RAM
+    /// matters — that variant streams entries directly into a
+    /// fact-store file as they're produced and leaves the in-memory
+    /// map empty so subsequent queries page in lazily.
     pub fn prewarm_all_with_caches(&self, db: &AnalyzerDb, caches: &InterTaintCaches) {
-        use rayon::prelude::*;
-        let global = db.global_index();
-        let mut funcs: Vec<FuncId> = Vec::new();
-        for file in global.all_files() {
-            for d in global.decls_in(file) {
-                if matches!(
-                    d.kind,
-                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-                ) {
-                    funcs.push(FuncId::new(d.symbol.raw()));
-                }
-            }
-        }
-        let already: AHashSet<FuncId> = self.inner.read().graphs.keys().copied().collect();
-        let todo: Vec<FuncId> = funcs.into_iter().filter(|f| !already.contains(f)).collect();
+        let todo = self.functions_pending_prewarm(db);
         if todo.is_empty() {
             return;
         }
@@ -178,6 +234,118 @@ impl ValueFlowCache {
             inner.graphs.insert(f, graph);
             inner.returning_seeds.insert(f, returning);
         }
+    }
+
+    /// Stream-and-write prewarm. Computes every callable function's
+    /// graph in parallel, encodes each into the fact-store writer
+    /// immediately (so peak RAM is bounded by the in-flight rayon
+    /// chunk, not by the workspace), atomically replaces the sidecar
+    /// at `path`, and opens the resulting file as the cache's disk
+    /// store. After this call the in-memory map is empty; subsequent
+    /// `graph_for` calls hydrate one entry at a time on demand.
+    ///
+    /// On encode/write error the cache is left untouched and the
+    /// error is returned so callers can fall back to in-memory
+    /// prewarm if disk is unavailable.
+    pub fn prewarm_to_disk(
+        &self,
+        path: &Path,
+        db: &AnalyzerDb,
+        caches: &InterTaintCaches,
+    ) -> std::io::Result<usize> {
+        let todo = self.functions_pending_prewarm(db);
+        if todo.is_empty() {
+            // Even when there's nothing new to compute we still
+            // open the existing sidecar (if any) so subsequent
+            // queries hit disk. Treat absent file as "nothing on
+            // disk" rather than as an error.
+            if path.exists() {
+                let _ = self.load_from_disk(path);
+            }
+            return Ok(0);
+        }
+        // Carry the writer behind a Mutex: the rayon worker pool
+        // races on `intern` and `add`, both of which mutate the
+        // writer's interior buffers. Encoding the entry runs under
+        // The new channel-based writer takes `&self` for both `add`
+        // and `intern`, so workers share the writer directly without
+        // a Mutex wrapper. File I/O happens off the rayon hot path
+        // on the writer's dedicated thread; intern serializes on a
+        // small mutex internal to the writer.
+        let writer = FactStoreWriter::create_with_capacity(
+            path,
+            VALUE_FLOW_TABLE_ID,
+            value_flow_pipeline_hash(),
+            todo.len(),
+            // Rough heuristics for capacity hints: ~512 bytes of
+            // interned bytes and ~64 unique strings per function.
+            // The writer grows past these if needed.
+            todo.len().saturating_mul(512),
+            todo.len().saturating_mul(64),
+        )
+        .map_err(map_factstore_io)?;
+        todo.par_iter().for_each(|&f| {
+            let graph = value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), caches);
+            let returning = compute_returning_seed_names(&graph, f);
+            let entry = ValueFlowEntry {
+                graph,
+                returning_seeds: returning,
+            };
+            let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
+            if let Err(err) = writer.add(u64::from(f.raw()), RESERVED_BODY_HASH, &payload) {
+                tracing::warn!(error = %err, "value-flow factstore add failed");
+            }
+        });
+        let written = writer.finish().map_err(map_factstore_io)?;
+        let reader = FactStoreReader::open(
+            path,
+            VALUE_FLOW_TABLE_ID,
+            value_flow_pipeline_hash(),
+        )
+        .map_err(map_factstore_io)?;
+        let mut inner = self.inner.write();
+        // Drop any stale in-memory entries; the disk store is the
+        // single source of truth from here forward.
+        inner.graphs.clear();
+        inner.returning_seeds.clear();
+        inner.disk = Some(Arc::new(reader));
+        Ok(written)
+    }
+
+    /// Collect the FuncIds we still need to compute — every callable
+    /// function whose graph isn't already resident in memory or on
+    /// disk.
+    fn functions_pending_prewarm(&self, db: &AnalyzerDb) -> Vec<FuncId> {
+        let global = db.global_index();
+        let mut funcs: Vec<FuncId> = Vec::new();
+        for file in global.all_files() {
+            for d in global.decls_in(file) {
+                if matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    funcs.push(FuncId::new(d.symbol.raw()));
+                }
+            }
+        }
+        let inner = self.inner.read();
+        let in_memory: AHashSet<FuncId> = inner.graphs.keys().copied().collect();
+        let disk = inner.disk.clone();
+        drop(inner);
+        funcs
+            .into_iter()
+            .filter(|f| {
+                if in_memory.contains(f) {
+                    return false;
+                }
+                if let Some(reader) = &disk {
+                    if reader.get(u64::from(f.raw())).ok().flatten().is_some() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect()
     }
 
     /// Forward transitive closure from `node` across the per-function
@@ -252,121 +420,192 @@ impl ValueFlowCache {
         out
     }
 
-    /// Number of cached graphs.
+    /// Number of cached graphs across the in-memory map and any
+    /// open disk store.
+    ///
+    /// Disk-backed entries that haven't been queried yet count
+    /// toward this total — the cache's "size" is the union. When
+    /// no disk store is open this collapses to the in-memory count.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.read().graphs.len()
+        let inner = self.inner.read();
+        let in_memory = inner.graphs.len();
+        let on_disk = inner.disk.as_ref().map_or(0, |r| r.len());
+        // A disk-resident entry that's been hydrated into the
+        // in-memory map appears in both counts; subtract the overlap
+        // so callers can use `len()` as a true "how many distinct
+        // graphs are reachable" metric.
+        let overlap = match inner.disk.as_ref() {
+            Some(reader) => inner
+                .graphs
+                .keys()
+                .filter(|f| reader.get(u64::from(f.raw())).ok().flatten().is_some())
+                .count(),
+            None => 0,
+        };
+        in_memory + on_disk - overlap
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        let inner = self.inner.read();
+        let mem_empty = inner.graphs.is_empty();
+        let disk_empty = inner.disk.as_ref().map_or(true, |r| r.is_empty());
+        mem_empty && disk_empty
     }
 
+    /// Drop every cached entry and close any open disk store.
+    /// Triggered by file edits via [`crate::Workspace::ingest_dir`]
+    /// — the on-disk file is left in place for the next prewarm to
+    /// overwrite atomically.
     pub fn clear(&self) {
         let mut inner = self.inner.write();
         inner.graphs.clear();
         inner.returning_seeds.clear();
+        inner.disk = None;
     }
 
     /// Conventional sidecar path under `workspace_root/.bonsai/`.
+    /// v3 uses the `.factstore` extension to make the format change
+    /// obvious in directory listings; pre-v3 `.bin` files are not
+    /// recognised by the new reader and are ignored on load.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
-        workspace_bonsai_dir(workspace_root).join(format!("value_flow.v{VALUE_FLOW_CACHE_VERSION}.bin"))
+        workspace_bonsai_dir(workspace_root)
+            .join(format!("value_flow.v{VALUE_FLOW_CACHE_VERSION}.factstore"))
     }
 
-    /// Serialize all cached graphs to disk as a versioned bincode
-    /// blob. Mirrors `DataFlowCache::save_to_disk`'s atomic-rename
-    /// shape so partial writes can't survive a crash.
+    /// Serialize all in-memory + disk-backed graphs to a fact-store
+    /// file at `path`, atomic-rename style. The new file becomes the
+    /// cache's disk store on success so subsequent queries page from
+    /// disk instead of holding the just-written entries in memory.
     pub fn save_to_disk(&self, path: &Path) -> std::io::Result<()> {
-        let snap = self.snapshot();
-        let bytes =
-            bincode::serialize(&snap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        let inner = self.inner.read();
+        let writer = FactStoreWriter::create_with_capacity(
+            path,
+            VALUE_FLOW_TABLE_ID,
+            value_flow_pipeline_hash(),
+            inner.graphs.len(),
+            inner.graphs.len().saturating_mul(512),
+            inner.graphs.len().saturating_mul(64),
+        )
+        .map_err(map_factstore_io)?;
+        // First, fold every in-memory entry into the writer. We
+        // clone the maps' entries to plain owned `ValueFlowEntry`s
+        // because the encoder expects owned data; the clone is cheap
+        // (Arc + a HashSet clone) and frees us from juggling lifetimes.
+        let mem_entries: Vec<(FuncId, Arc<ValueFlowGraph>, Arc<AHashSet<String>>)> = inner
+            .graphs
+            .iter()
+            .map(|(f, g)| {
+                let returning = inner
+                    .returning_seeds
+                    .get(f)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(AHashSet::default()));
+                (*f, g.clone(), returning)
+            })
+            .collect();
+        let disk_reader = inner.disk.clone();
+        drop(inner);
+        let mut written_keys: AHashSet<FuncId> = AHashSet::with_capacity(mem_entries.len());
+        for (f, graph, returning) in mem_entries {
+            let entry = ValueFlowEntry {
+                graph: (*graph).clone(),
+                returning_seeds: (*returning).clone(),
+            };
+            let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
+            writer
+                .add(u64::from(f.raw()), RESERVED_BODY_HASH, &payload)
+                .map_err(map_factstore_io)?;
+            written_keys.insert(f);
         }
-        // Write to a temp file first, then atomic-rename — avoids leaving a
-        // half-written sidecar on the path if the process is killed mid-write.
-        let tmp_path = unique_value_flow_tmp_path(path);
-        {
-            use std::io::Write;
-            let mut tmp_file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_path)?;
-            tmp_file.write_all(&bytes)?;
-            tmp_file.sync_all()?;
-        }
-        if let Err(err) = std::fs::rename(&tmp_path, path) {
-            // Best-effort cleanup of the orphan temp file.
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(err);
-        }
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Ok(dir) = std::fs::File::open(parent) {
-                    let _ = dir.sync_all();
+        // Then any disk-backed entries the in-memory map didn't cover.
+        // Decode each one through the existing pool and re-encode
+        // through the new writer's pool — string ids aren't portable
+        // across files.
+        if let Some(reader) = disk_reader {
+            let pool = reader.string_pool().map_err(map_factstore_io)?;
+            for item in reader.iter() {
+                let (key, hit) = item.map_err(map_factstore_io)?;
+                let func = FuncId::new(u32::try_from(key).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "value-flow sidecar key out of FuncId u32 range",
+                    )
+                })?);
+                if written_keys.contains(&func) {
+                    continue;
                 }
+                let entry = decode_value_flow_entry(&hit.payload, &pool).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                })?;
+                let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
+                writer
+                    .add(u64::from(func.raw()), RESERVED_BODY_HASH, &payload)
+                    .map_err(map_factstore_io)?;
+                written_keys.insert(func);
             }
         }
+        writer.finish().map_err(map_factstore_io)?;
+        // We deliberately do NOT mutate the in-memory map here.
+        // `save_to_disk` is the "persist current state" call — its
+        // contract is that the cache continues to behave the same in
+        // memory after a save. The fact-store file just gives a
+        // future process (or a future `load_from_disk` on this
+        // process) a way to skip the rebuild.
+        //
+        // The bounded-RAM mode is reached via `prewarm_to_disk`,
+        // which streams entries to disk as they're computed and
+        // intentionally leaves the in-memory map empty so subsequent
+        // queries page lazily.
         Ok(())
     }
 
-    /// Load from a sidecar written by `save_to_disk`. Returns the
-    /// number of entries that survived version validation. Non-
-    /// existent sidecar returns `Ok(0)` (nothing to load, not an
-    /// error). Version-mismatch / corrupt blob returns `Ok(0)` after
-    /// logging.
+    /// Load from a fact-store file written by [`Self::save_to_disk`]
+    /// (or [`Self::prewarm_to_disk`]). Returns the number of entries
+    /// the file contains; the cache then probes them lazily on
+    /// `graph_for_with_caches`.
+    ///
+    /// Non-existent file returns `Ok(0)` (nothing to load, not an
+    /// error). Version / pipeline-hash mismatch and corrupt files
+    /// return `Ok(0)` after a `tracing::warn!` — the next prewarm
+    /// will overwrite the file.
     pub fn load_from_disk(&self, path: &Path) -> std::io::Result<usize> {
         if !path.exists() {
             return Ok(0);
         }
-        let bytes = std::fs::read(path)?;
-        let snap: SerializableValueFlowSnapshot = match bincode::deserialize(&bytes) {
-            Ok(s) => s,
-            Err(error) => {
+        let reader = match FactStoreReader::open(
+            path,
+            VALUE_FLOW_TABLE_ID,
+            value_flow_pipeline_hash(),
+        ) {
+            Ok(reader) => reader,
+            Err(err) => {
                 tracing::warn!(
                     path = %path.display(),
-                    error = %error,
-                    "ignoring corrupt value-flow sidecar"
+                    error = %err,
+                    "ignoring stale or corrupt value-flow sidecar"
                 );
                 return Ok(0);
             }
         };
-        if snap.version != VALUE_FLOW_CACHE_VERSION {
-            tracing::warn!(
-                path = %path.display(),
-                version = snap.version,
-                expected = VALUE_FLOW_CACHE_VERSION,
-                "ignoring value-flow sidecar with version mismatch"
-            );
-            return Ok(0);
-        }
-        if snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
-            // Matcher policy changed — graphs may not reflect
-            // current rule semantics. Drop.
-            return Ok(0);
-        }
+        let entries = reader.len();
         let mut inner = self.inner.write();
-        let mut loaded = 0;
-        for entry in snap.entries {
-            let func = FuncId::new(entry.func_raw);
-            inner.graphs.insert(func, Arc::new(entry.graph));
-            loaded += 1;
-        }
-        Ok(loaded)
+        inner.disk = Some(Arc::new(reader));
+        Ok(entries)
     }
 
     /// In-memory snapshot of the cache for tests, daemon checkpoints,
     /// and SDK consumers that want to ship the cache shape across
-    /// process boundaries without going through disk. Mirrors
+    /// process boundaries without going through disk. Includes both
+    /// in-memory and disk-backed entries; the latter are decoded
+    /// inline so the snapshot is fully self-contained. Mirrors
     /// `DataFlowCache::snapshot`.
     #[must_use]
     pub fn snapshot(&self) -> SerializableValueFlowSnapshot {
         let inner = self.inner.read();
-        let entries = inner
+        let mut entries: Vec<SerializableValueFlowEntry> = inner
             .graphs
             .iter()
             .map(|(func, graph)| SerializableValueFlowEntry {
@@ -374,6 +613,29 @@ impl ValueFlowCache {
                 graph: (**graph).clone(),
             })
             .collect();
+        let disk = inner.disk.clone();
+        let included: AHashSet<u32> = entries.iter().map(|e| e.func_raw).collect();
+        drop(inner);
+        if let Some(reader) = disk {
+            if let Ok(pool) = reader.string_pool() {
+                for item in reader.iter() {
+                    let Ok((key, hit)) = item else { continue };
+                    let Ok(func_raw) = u32::try_from(key) else {
+                        continue;
+                    };
+                    if included.contains(&func_raw) {
+                        continue;
+                    }
+                    let Ok(entry) = decode_value_flow_entry(&hit.payload, &pool) else {
+                        continue;
+                    };
+                    entries.push(SerializableValueFlowEntry {
+                        func_raw,
+                        graph: entry.graph,
+                    });
+                }
+            }
+        }
         SerializableValueFlowSnapshot {
             version: VALUE_FLOW_CACHE_VERSION,
             matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
@@ -443,14 +705,16 @@ fn compute_returning_seed_names(graph: &ValueFlowGraph, func: FuncId) -> AHashSe
     out
 }
 
-fn unique_value_flow_tmp_path(path: &Path) -> PathBuf {
-    let counter = VALUE_FLOW_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut name = path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("value_flow.v1.bin"));
-    name.push(format!(".tmp.{}.{}", process::id(), counter));
-    path.with_file_name(name)
+/// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`
+/// so callers don't pivot on the inner error variant. The fact-store
+/// errors that bubble up here are I/O-shaped (truncation, bad magic,
+/// pipeline mismatch) and treating them as opaque `Other` is the
+/// right granularity for sidecar consumers.
+fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
+    match err {
+        bonsai_factstore::FactStoreError::Io(e) => e,
+        other => std::io::Error::new(std::io::ErrorKind::Other, other),
+    }
 }
 
 /// On-disk snapshot. Round-trips via bincode.
@@ -560,17 +824,19 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_tmp_paths_are_unique_per_write() {
-        let path = Path::new("/tmp/value_flow.v1.bin");
-        let first = unique_value_flow_tmp_path(path);
-        let second = unique_value_flow_tmp_path(path);
-
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), path.parent());
-        assert!(first
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("value_flow.v1.bin.tmp.")));
+    fn save_atomically_replaces_existing_sidecar() {
+        // The factstore writer's atomic-rename pattern is exercised
+        // by `bonsai_factstore::writer::tests::write_atomic_*`.
+        // Here we just verify the workspace-level save_to_disk uses
+        // it correctly: writing twice to the same path leaves a
+        // single, valid file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("v.factstore");
+        let cache = ValueFlowCache::new();
+        cache.save_to_disk(&path).expect("first save");
+        assert!(path.exists());
+        cache.save_to_disk(&path).expect("second save replaces");
+        assert!(path.exists());
     }
 
     #[test]

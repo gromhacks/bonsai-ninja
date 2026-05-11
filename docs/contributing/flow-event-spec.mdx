@@ -1,0 +1,488 @@
+---
+title: "FlowEvent Shape Specification"
+description: "Normative shape contract for the cross-language FlowEvent emitted by every adapter."
+---
+
+# FlowEvent shape specification
+
+The canonical, cross-language shape of `bonsai_lang_api::FlowEvent`. Every
+adapter must emit events that conform to this spec — the engine's
+intra/inter-procedural passes, the matcher, the trace exporter, and the
+SDK all read events through this contract. New adapters and field
+additions begin here.
+
+The enum lives at
+[`crates/lang_api/src/types.rs`](../../crates/lang_api/src/types.rs).
+
+## Conformance gates
+
+Every variant declared "supported" by an adapter is exercised by the
+[capability matrix](./adapter-capabilities.mdx) and by the
+**flow-event conformance suite**
+(`crates/conformance/tests/flow_event_conformance.rs`), which runs
+canonical fixtures through every bundled adapter and asserts the
+shape contract documented below. Phase rollouts must move the
+matrix cell from ❌ to ✅ and add or refresh the cross-language
+fixture before merge.
+
+## Variant catalog
+
+The eleven `FlowEvent` variants below are the complete vocabulary the
+engine accepts. Anything else is an adapter bug.
+
+### `Call`
+
+```text
+Call {
+  span,                       // required
+  name: String,               // adapter-normalized callee identifier
+  receiver: Option<String>,   // explicit `obj.foo()` receiver text
+  receiver_types: Vec<String>,// static types of `receiver`, post-kit pass
+  call_kind: CallKind,        // Function | Method | Constructor | Macro | Indirect
+  args: Vec<CallArg>,         // positional arguments, `text` always set
+}
+```
+
+Adapter obligations:
+
+- `name` is the **callee short name** (`run`, not `self.run` and not
+  `app.Repo.run`). Method dispatch is recoverable from
+  `(receiver, receiver_types, name)`; mixing qualified syntax into
+  `name` breaks cross-language symbol resolution.
+- `receiver` is set for `obj.foo()` / `obj->foo()` / `obj:foo()` /
+  `obj::foo()` / `obj#foo()`. Implicit-receiver bare calls
+  (`self.foo()` written as `foo()`) leave `receiver` as `None`; the
+  kit's `apply_call_receiver_types` pass then infers
+  `receiver_types` from the enclosing decl's `implicit_receiver_names`.
+- `receiver_types` MUST be empty at adapter output time; the kit
+  post-pass fills it. Adapters that want to short-circuit (e.g. when
+  the callee class is unambiguous from the syntax) may pre-populate
+  it — the kit pass is idempotent.
+- `call_kind::Constructor` is structural: `CallKind::Construct` for
+  `new Foo(...)` / `Foo::new(...)` / `Foo()` (Python `__init__` is
+  matched by `effective_constructor_method_names()`, not by name in
+  the engine).
+- `args[i].text` is the verbatim caller-side source for that positional
+  argument. Keyword / named arguments are flattened to text and not
+  retained as a separate map; analyses that need keyword semantics
+  read the source text via `Span`.
+
+### `Branch`
+
+```text
+Branch {
+  span,
+  condition: Option<String>,   // condition source text, language-neutral form
+  then_events: Vec<FlowEvent>,
+  else_events: Vec<FlowEvent>, // empty when source has no else arm
+}
+```
+
+Adapter obligations:
+
+- `condition` is the **adapter-normalized** condition text. The engine
+  uses it for path-sensitive narrowing of dead arms
+  (`if False: sink(tainted)` → drop the body). It is not a parsed
+  AST node — `!x` and `not x` are both acceptable surface forms.
+- `then_events` / `else_events` must be **non-overlapping** even when
+  the grammar emits a single flat block. The kit helper
+  `repair_branch_events_by_else_keyword` partitions on the literal
+  `else` keyword for C-like grammars; adapters in match/case-heavy
+  languages call `split_match_arms_in_branch_events`.
+- A branch with no else arm leaves `else_events` empty. Adapters MUST
+  NOT synthesize an empty `else: pass` arm — the engine treats empty
+  arms as "no constraint", not "no effect".
+
+### `Loop`
+
+```text
+Loop {
+  span,
+  loop_kind: LoopKind,         // For | While | DoWhile | ForEach | Loop
+  body: Vec<FlowEvent>,
+}
+```
+
+Adapter obligations:
+
+- `body` contains the loop-body events. A bare `for x in xs: F(x)`
+  produces `Loop { body: [Call { name: "F", args: [{ text: "x" }] }] }`
+  with no Assign for the iteration binding — the engine resolves `x`
+  through the function's parameter list / scope chain (the loop
+  binding is part of the surrounding `Decl::params` for some grammars,
+  or is synthesized by the kit's `split_foreach_header` for others).
+- `LoopKind::ForEach` is for explicit collection iteration; `For` is
+  C-style `for(init; test; step)`. `Loop` covers infinite/`loop` /
+  `while true`.
+
+### `Assign`
+
+```text
+Assign {
+  span,
+  target: String,                  // LHS bare name
+  source_name: Option<String>,     // bare-name RHS rename: `y = x` → Some("x")
+  source_call: Option<String>,     // direct call RHS: `y = f(x)` → Some("f")
+  source_call_args: Vec<String>,   // call-arg texts when source_call set
+  source_names: Vec<String>,       // bare identifiers in a compound RHS
+  declares_new_binding: bool,      // CST node is a declaration (let/var/val/...)
+  value_kind: Option<AssignValueKind>, // Literal | CallResult | Compound | Unknown
+}
+```
+
+Adapter obligations:
+
+- For a **simple rename** (`y = x`): set `source_name`, leave
+  `source_call` and `source_names` empty.
+- For a **direct call**  (`y = f(x)` / `y = obj.f(x)`): set
+  `source_call` to the callee short name and `source_call_args` to the
+  per-positional arg texts; `source_name` and `source_names` stay
+  empty.
+- For a **compound RHS** (`y = a + b`, `y = f"{x}"`, `y = obj.field`):
+  set `source_names` to every bare identifier visited; leave
+  `source_name` and `source_call` empty.
+- For a **literal RHS** (`y = "abc"`, `y = 42`, `y = true`,
+  `y = None`): leave all three empty and set
+  `value_kind = Some(AssignValueKind::Literal)`.
+- `declares_new_binding` is `true` when the CST kind unambiguously
+  introduces a new local binding (`let`, `var`, `val`, `const`, `my`,
+  `our`, `local`, Python first-assignment in scope, etc.). It is
+  `false` for re-assignments. This drives Phase-2 scope-aware
+  bindings — incorrect values cause spurious cross-scope taint.
+- `value_kind` is `None` for adapters that have not opted into
+  Phase-5 classification; the engine then conservatively treats the
+  RHS as `Compound`. Once set, the engine uses it to short-circuit
+  name-bridging for `Literal` RHS.
+
+Multiple sibling assignments in a single source-level statement
+(`a, b = f()`) emit one `Assign` per LHS target. Destructuring with
+heterogeneous RHS shapes (`a, b = c, d`) emits `Assign { target: "a",
+source_name: Some("c") }` and `Assign { target: "b", source_name:
+Some("d") }`.
+
+### `Return`
+
+```text
+Return {
+  span,
+  value_text: Option<String>,   // verbatim return-expression text
+  value_name: Option<String>,   // single bare identifier returned
+}
+```
+
+Adapter obligations:
+
+- A bare-name return (`return x`): `value_name = Some("x")`,
+  `value_text = Some("x")`.
+- A call-expression return (`return f(x)`): `value_name = None`,
+  `value_text = Some("f(x)")`.
+- A compound return (`return x + y`): `value_name = None`,
+  `value_text = Some("x + y")`.
+- A void / bare `return;`: both `None`.
+- A template-literal return (``return `${x}` ``): `value_name =
+  Some("x")` when the template wraps exactly one identifier with no
+  static prefix/suffix that would make the value a derivation rather
+  than a pass-through.
+
+The interprocedural pass reads `value_name` first (precise pass-through)
+and `value_text` second (compound transit summary). Adapters that
+populate `value_text` but not `value_name` give up Phase-1 precision
+on return-value taint.
+
+### `Throw`
+
+```text
+Throw {
+  span,
+  value_name: Option<String>,   // `throw err` → Some("err")
+  thrown_type: Option<String>,  // `throw new IOException(...)` → Some("IOException")
+}
+```
+
+Adapter obligations:
+
+- `value_name` is the bare identifier when the throw target is a
+  single name (`throw err`, `raise e`). For
+  `throw new IOException(msg)` it stays `None` — the value isn't a
+  name reference.
+- `thrown_type` is the **adapter-extracted static type**. Java /
+  Kotlin / C# / Scala / Swift adapters populate this through
+  `populate_*_exception_types`. Adapters that don't surface throw
+  types leave it `None`, and the engine falls back to seeding any
+  catch arm in scope.
+
+### `Try`
+
+```text
+Try {
+  span,
+  body: Vec<FlowEvent>,
+  catch_events: Vec<FlowEvent>,
+  finally_events: Vec<FlowEvent>,
+  catch_param: Option<String>,  // first-param binding of the catch arm
+  catch_types: Vec<String>,     // declared catch-arm types
+}
+```
+
+Adapter obligations:
+
+- `body` holds the try / begin block events.
+- `catch_events` is the **flattened union** of every catch / except /
+  rescue arm. Adapters that need to preserve per-arm precision should
+  emit separate `Try` events per arm; the canonical shape merges arms
+  to give the engine one catch region to reason about.
+- `catch_param` is the catch-arm's first-parameter binding: `e` in
+  `catch (e)` / `except Exception as e:` / `rescue => e`. When
+  present, the engine seeds the catch region with this name
+  pre-tainted whenever any `Throw` in the body throws a tainted
+  `value_name`.
+- `catch_types` is the union of declared exception types across every
+  arm. Empty means catch-all (`catch (...)`, `except:`). When
+  non-empty, the engine pairs it with `Throw::thrown_type` to skip
+  arms whose declared type cannot catch this throw.
+
+### `Break` / `Continue`
+
+```text
+Break    { span, label: Option<String> }
+Continue { span, label: Option<String> }
+```
+
+These are control-flow markers consumed by the CFG builder. Adapters
+include `label` when the source has a labeled break (Java/Kotlin
+labeled loops, Rust loop labels, Swift labeled `continue`).
+
+### `Yield`
+
+```text
+Yield { span, value_text: Option<String> }
+```
+
+`yield`, `yield from`, `yield return`. Suspend-and-emit edges with
+the yielded expression as verbatim text. The interprocedural pass
+treats yields as no-ops by default; consumers that want generator
+semantics (Phase 7) read the value_text directly.
+
+### `Await`
+
+```text
+Await { span, value_name: Option<String> }
+```
+
+`await`, `.await`, `await?`. The intra-pass treats `await expr` as
+unwrap-pass: a tainted promise yields a tainted resolved value. The
+adapter populates `value_name` when the awaited expression is a bare
+identifier; compound awaited expressions
+(`await fetch(url)`) leave it `None`.
+
+### `Defer`
+
+```text
+Defer { span, body: Vec<FlowEvent> }
+```
+
+Go `defer stmt`, Swift `defer { … }`. Body events conceptually
+execute at scope exit; the CFG builder threads them after the normal
+returns.
+
+### `Using`
+
+```text
+Using { span, body: Vec<FlowEvent> }
+```
+
+Python `with`, C# `using`. Body events execute under the managed
+resource. The engine treats `Using::body` as a normal sequenced
+block for taint propagation; lifecycle facts come through
+`FlowEvent::Lifecycle`.
+
+### `Lifecycle`
+
+```text
+Lifecycle { span, name: String, transition: String }
+```
+
+Resource lifecycle transition on a named binding. `transition` is one
+of the canonical states: `freed`, `closed`, `unlocked`, `cancelled`,
+`moved`. Consumed by the matcher's `RequiresState` constraint and by
+the CFG builder for use-after-free / double-free analysis.
+
+## Cross-language equivalences
+
+The conformance suite asserts these semantic equivalences. When an
+adapter emits a structurally different shape for a semantically
+identical construct, it is an adapter bug, not a "language quirk."
+
+| Construct | Python | JS/TS | Java/Kotlin/C# | Rust | Go | Ruby |
+|---|---|---|---|---|---|---|
+| Bare rename | `y = x` | `let y = x` | `var y = x` | `let y = x` | `y := x` | `y = x` |
+| Direct call | `y = f(x)` | `let y = f(x)` | `var y = f(x)` | `let y = f(x)` | `y := f(x)` | `y = f(x)` |
+| Literal write | `y = "abc"` | `let y = "abc"` | `var y = "abc"` | `let y = "abc"` | `y := "abc"` | `y = "abc"` |
+| Single-condition branch | `if x: F(t)` | `if (x) F(t)` | `if (x) F(t);` | `if x { F(t) }` | `if x { F(t) }` | `F(t) if x` |
+| Catch-bind | `except E as e:` | `catch (e)` | `catch (E e)` | n/a | n/a | `rescue => e` |
+
+Adapter outputs MUST agree at the FlowEvent level. The exact field
+populations are listed below.
+
+### Bare rename — `y = x`
+
+```text
+Assign {
+  target: "y",
+  source_name: Some("x"),
+  source_call: None,
+  source_call_args: [],
+  source_names: [],
+  declares_new_binding: true | false,  // language-dependent
+  value_kind: None,
+}
+```
+
+### Direct call — `y = f(x)`
+
+```text
+Assign {
+  target: "y",
+  source_name: None,
+  source_call: Some("f"),
+  source_call_args: ["x"],
+  source_names: [],
+  declares_new_binding: true | false,
+  value_kind: Some(CallResult) | None,
+}
+```
+
+### Literal write — `y = "abc"`
+
+```text
+Assign {
+  target: "y",
+  source_name: None,
+  source_call: None,
+  source_call_args: [],
+  source_names: [],
+  declares_new_binding: true | false,
+  value_kind: Some(Literal),
+}
+```
+
+### Single-condition branch — `if x: F(t)`
+
+```text
+Branch {
+  condition: Some("x"),
+  then_events: [Call { name: "F", args: [{ text: "t" }] }],
+  else_events: [],
+}
+```
+
+### Catch-bind — `try { F(t) } catch e { ... }`
+
+```text
+Try {
+  body: [Call { name: "F", args: [{ text: "t" }] }],
+  catch_events: [...],
+  finally_events: [],
+  catch_param: Some("e"),
+  catch_types: [...],   // empty for catch-all; populated for typed
+}
+```
+
+## Field-level invariants
+
+These are universal — every adapter, every language, every variant.
+
+1. **Spans are byte-offset, source-relative.** A span pointing into a
+   re-written buffer or a macro-expansion buffer breaks trace
+   rendering and call-site reporting.
+2. **Names are short, not qualified.** `Decl::qualified_name` exists
+   precisely so `FlowEvent::Call.name` doesn't need to.
+3. **Empty fields use empty collections, not synthetic placeholders.**
+   `Branch { else_events: [] }` is the right shape for a no-else
+   branch; `Branch { else_events: [Call { name: "<noop>", ... }] }` is
+   wrong.
+4. **Field semantics are language-agnostic.** An adapter cannot
+   redefine `source_call` to mean "the LHS of `=`" because that
+   language has weird syntax — it pre-normalises the syntax during
+   extraction.
+5. **Events are tree-structured, not flat.** Loop bodies live inside
+   the `Loop::body` field, not in a sibling list with implicit
+   sequencing. The engine's CFG builder relies on the tree.
+
+## Out of scope (Phase 10-12)
+
+The engine improvement plan explicitly defers three classes of work that
+would require a separate non-tree-sitter front end. These are documented
+here for completeness; they are **not** roadmap items the conformance
+suite gates on.
+
+### Phase 10 — Macro / template expansion
+
+Languages with significant macro / template machinery (Rust
+declarative + procedural macros, C/C++ preprocessor, Elixir macros,
+Lisp-family quote/unquote) cannot be analysed at the source level
+alone. The expanded form is what executes, and tree-sitter sees only
+the unexpanded surface.
+
+Concretely, `lazy_static! { static ref X: Mutex<HashMap<…>> = … }` in
+Rust, `#define LOG(...)` in C, Elixir's `use GenServer`, and Common
+Lisp's `defmacro` all produce executable code the adapter never sees.
+The engine reports `UnsupportedConstruct` for these forms and degrades
+to `Precision::OverApproximate` for any flow that intersects them.
+
+A correct treatment requires either:
+
+- Running each language's macro expander as a pre-step, parsing the
+  expanded output (slow; tooling churn; rustc / cpp / etc. as runtime
+  dependencies).
+- Or a hand-rolled macro expander per language, kept in sync with the
+  upstream compiler (significant maintenance burden).
+
+Either approach is out of scope for the tree-sitter-based engine.
+
+### Phase 11 — FFI bindings
+
+Cross-language calls (Python `ctypes` / `cffi` into C, Rust `extern
+"C"` into anything, Java JNI, .NET P/Invoke, Node.js native addons)
+flow data across language boundaries the engine doesn't bridge.
+
+Tree-sitter parses each language independently and the workspace
+indexes them in separate adapter passes. A `c_function` exported via
+`#[no_mangle] pub extern "C" fn …` is a Rust `Decl`; the
+matching `ctypes.CDLL("libfoo.so").c_function` call in Python is a
+Python `FlowEvent::Call`. Bridging them would require a
+language-agnostic ABI model the analyser doesn't have.
+
+Workarounds in the matcher: rules that need cross-language coverage
+declare both sides separately (a Rust sink rule + a Python source
+rule) and rely on the user's threat model to connect them.
+
+### Phase 12 — Bytecode backends
+
+Pre-compiled artefacts (Python `.pyc`, Java `.class` / `.jar`, .NET
+`.dll`, Ruby `.rbc`, Lua bytecode, WebAssembly modules) ship without
+source. The engine ingests source text; bytecode is invisible.
+
+Decompilation is technically possible but loses semantic fidelity
+(Java decompilers struggle with `invokedynamic`; Python `dis` doesn't
+recover original AST). The pragmatic stance: report bytecode
+artefacts as `UnsupportedConstruct` at ingest time and rely on the
+user to provide source. Closed-source dependencies remain a known
+blind spot.
+
+## Adapter migration
+
+Adding a new event variant or field is a **two-step** rollout:
+
+1. **Define the field with a sensible default** (`Option<T>` /
+   `Vec<T>` / `bool`). Existing adapters and serialized fixtures keep
+   working — the default produces the pre-rollout behaviour.
+2. **Populate it adapter-by-adapter**, gating progress on the
+   capability matrix. Each adapter PR moves one cell from ❌ to ✅
+   and includes the per-adapter fixture that exercises it.
+
+Removing a field or renaming a variant is a **MATCHER_POLICY_FINGERPRINT
+bump** (see [specification.mdx](./specification.mdx#3-stability)).
+Sidecar caches keyed on the fingerprint are invalidated; existing
+fixtures and serialized snapshots fail to deserialize at the
+`#[serde(default)]` boundary. Plan for a major version bump.

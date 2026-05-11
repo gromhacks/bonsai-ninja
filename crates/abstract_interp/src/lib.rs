@@ -464,6 +464,8 @@ mod tests {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: Vec::new(),
+                    declares_new_binding: false,
+            value_kind: None,
         }
     }
 

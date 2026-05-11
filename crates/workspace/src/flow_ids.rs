@@ -12,14 +12,33 @@
 //! Per-function DFS is capped at `MAX_CHAINS` / `MAX_PROBES`;
 //! truncated functions render with a `…` suffix.
 
+use crate::flow_ids_disk::{decode as decode_flow_id_entry, encode as encode_flow_id_entry, FlowIdEntry};
 use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
-use bonsai_common::{FuncId, SymbolId};
+use bonsai_common::{workspace_bonsai_dir, FuncId, SymbolId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
+use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_lang_api::DeclKind;
 use parking_lot::RwLock;
 use rayon::prelude::*;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Caller-defined table id stamped into the flow-id factstore. 3 is
+/// the next free slot after dataflow (2) and value-flow (1).
+const FLOW_IDS_TABLE_ID: u32 = 3;
+
+/// On-disk format version. Bump when the encoding changes so old
+/// sidecars are rejected on open.
+pub const FLOW_IDS_CACHE_VERSION: u32 = 1;
+
+/// Pipeline-hash field in the factstore header. Folds the matcher
+/// policy fingerprint into 64 bits so a matcher policy change
+/// invalidates the cache file.
+fn flow_ids_pipeline_hash() -> u64 {
+    let raw = MATCHER_POLICY_FINGERPRINT;
+    (raw as u64) ^ ((raw >> 64) as u64)
+}
 
 /// Per-function chain cap. Matches `bonsai_inspect`'s `--max-flows`
 /// default so the prewarmed id set is a subset of what inspect
@@ -56,6 +75,11 @@ struct Inner {
     labels: AHashMap<FuncId, Arc<[String]>>,
     truncated: AHashSet<FuncId>,
     prewarmed: bool,
+    /// Optional disk-backed source of truth, populated by
+    /// [`FlowIdCache::prewarm_to_disk`] or
+    /// [`FlowIdCache::load_from_disk`]. Lookups that miss the
+    /// in-memory map probe this before falling back to the engine.
+    disk: Option<Arc<FactStoreReader>>,
 }
 
 impl FlowIdCache {
@@ -79,6 +103,9 @@ impl FlowIdCache {
         if let Some(hit) = cached {
             return hit;
         }
+        if let Some(arc) = self.try_hydrate_from_disk(func) {
+            return arc;
+        }
         let cg = self.call_graph(db, vfs);
         let (chains, trunc) = enumerate_chains(&cg, func, MAX_CHAINS, MAX_PROBES);
         // Mirror `inspect`'s chain extension: each backward chain
@@ -95,6 +122,23 @@ impl FlowIdCache {
             inner.truncated.insert(func);
         }
         arc
+    }
+
+    /// Probe the disk store for `func`, decode the payload, and
+    /// hydrate the in-memory cache. Returns the cached labels on
+    /// hit. `None` when there is no disk store, no entry for `func`,
+    /// or the entry fails to decode.
+    fn try_hydrate_from_disk(&self, func: FuncId) -> Option<Arc<[String]>> {
+        let reader = self.inner.read().disk.clone()?;
+        let hit = reader.get(u64::from(func.raw())).ok().flatten()?;
+        let entry = decode_flow_id_entry(&hit.payload).ok()?;
+        let arc: Arc<[String]> = Arc::from(entry.labels.into_boxed_slice());
+        let mut inner = self.inner.write();
+        inner.labels.entry(func).or_insert_with(|| arc.clone());
+        if entry.truncated {
+            inner.truncated.insert(func);
+        }
+        Some(inner.labels.get(&func).cloned().unwrap_or(arc))
     }
 
     /// Build (or return) the shared resolved call graph. Single
@@ -140,8 +184,15 @@ impl FlowIdCache {
     /// `true` when chain enumeration hit its cap for `func` — the
     /// label set is a prefix of reality. Callers surface this as a
     /// trailing `…` in the rendered cell.
+    ///
+    /// Forces a hydrate when the entry is on disk but not yet in
+    /// memory, so the disk record's `truncated` bit is honoured.
     #[must_use]
     pub fn was_truncated(&self, func: FuncId) -> bool {
+        if self.inner.read().labels.contains_key(&func) {
+            return self.inner.read().truncated.contains(&func);
+        }
+        let _ = self.try_hydrate_from_disk(func);
         self.inner.read().truncated.contains(&func)
     }
 
@@ -228,6 +279,130 @@ impl FlowIdCache {
         self.prewarm_all_with_progress(db, vfs, |_| {});
     }
 
+    /// Stream-and-write prewarm. Computes flow-id labels for every
+    /// callable function in parallel, encodes each entry into a
+    /// fact-store writer immediately so peak RAM is bounded by the
+    /// in-flight rayon chunk, atomically replaces the sidecar at
+    /// `path`, and opens the resulting file as the cache's disk
+    /// store. After this call the in-memory map is empty;
+    /// subsequent `labels_for_func` calls hydrate one entry at a
+    /// time on demand.
+    pub fn prewarm_to_disk<F>(
+        &self,
+        path: &Path,
+        db: &AnalyzerDb,
+        vfs: &bonsai_vfs::Vfs,
+        on_each_done: F,
+    ) -> std::io::Result<usize>
+    where
+        F: Fn(FuncId) + Sync + Send,
+    {
+        let cg = self.call_graph(db, vfs);
+        let global = db.global_index();
+        let mut funcs: Vec<FuncId> = Vec::new();
+        for file in global.all_files() {
+            for decl in global.decls_in(file) {
+                if matches!(
+                    decl.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    funcs.push(FuncId::new(decl.symbol.raw()));
+                }
+            }
+        }
+        let already: AHashSet<FuncId> = self.inner.read().labels.keys().copied().collect();
+        let disk_clone = self.inner.read().disk.clone();
+        let todo: Vec<FuncId> = funcs
+            .into_iter()
+            .filter(|f| {
+                if already.contains(f) {
+                    return false;
+                }
+                if let Some(reader) = &disk_clone {
+                    if reader.get(u64::from(f.raw())).ok().flatten().is_some() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        if todo.is_empty() {
+            self.inner.write().prewarmed = true;
+            if path.exists() {
+                let _ = self.load_from_disk(path);
+            }
+            return Ok(0);
+        }
+        // Channel-based writer: workers push entries through the
+        // queue; a dedicated writer thread serializes file I/O.
+        let writer = FactStoreWriter::create_with_capacity(
+            path,
+            FLOW_IDS_TABLE_ID,
+            flow_ids_pipeline_hash(),
+            todo.len(),
+            // Flow-id labels are short (8-16 char hex hashes) and
+            // capped at MAX_LABELS_PER_FUNC per function, so the
+            // payload bytes scale modestly.
+            todo.len().saturating_mul(256),
+            todo.len().saturating_mul(MAX_LABELS_PER_FUNC),
+        )
+        .map_err(map_factstore_io)?;
+        todo.par_iter().for_each(|&f| {
+            let (chains, trunc) = enumerate_chains(&cg, f, MAX_CHAINS, MAX_PROBES);
+            let (ids, label_trunc) = collect_flow_ids_for_chains(&cg, db, chains);
+            let entry = FlowIdEntry {
+                labels: ids,
+                truncated: trunc || label_trunc,
+            };
+            let payload = encode_flow_id_entry(&entry);
+            if let Err(err) = writer.add(u64::from(f.raw()), 0, &payload) {
+                tracing::warn!(error = %err, "flow-ids factstore add failed");
+            }
+            on_each_done(f);
+        });
+        let written = writer.finish().map_err(map_factstore_io)?;
+        let reader = FactStoreReader::open(path, FLOW_IDS_TABLE_ID, flow_ids_pipeline_hash())
+            .map_err(map_factstore_io)?;
+        let mut inner = self.inner.write();
+        inner.labels.clear();
+        inner.truncated.clear();
+        inner.disk = Some(Arc::new(reader));
+        inner.prewarmed = true;
+        Ok(written)
+    }
+
+    /// Conventional sidecar path under `workspace_root/.bonsai/`.
+    #[must_use]
+    pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
+        workspace_bonsai_dir(workspace_root)
+            .join(format!("flow_ids.v{FLOW_IDS_CACHE_VERSION}.factstore"))
+    }
+
+    /// Open the factstore sidecar at `path` and swap it in as the
+    /// cache's disk store. Returns the number of entries the file
+    /// contains. Non-existent / version-mismatched / corrupt files
+    /// silently return `Ok(0)` after logging.
+    pub fn load_from_disk(&self, path: &Path) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let reader = match FactStoreReader::open(path, FLOW_IDS_TABLE_ID, flow_ids_pipeline_hash()) {
+            Ok(reader) => reader,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "ignoring stale or corrupt flow-ids factstore sidecar"
+                );
+                return Ok(0);
+            }
+        };
+        let entries = reader.len();
+        let mut inner = self.inner.write();
+        inner.disk = Some(Arc::new(reader));
+        Ok(entries)
+    }
+
     /// Drop every entry. Called by the workspace-wide
     /// invalidation path when a file changes — coarse but correct.
     pub fn invalidate_all(&self) {
@@ -236,6 +411,7 @@ impl FlowIdCache {
         inner.labels.clear();
         inner.truncated.clear();
         inner.prewarmed = false;
+        inner.disk = None;
     }
 
     /// Seed the workspace-shared resolved call graph as the cached
@@ -245,6 +421,15 @@ impl FlowIdCache {
     /// the same content twice.
     pub fn seed_call_graph(&self, graph: Arc<ResolvedCallGraph>) {
         self.inner.write().cg = Some(graph);
+    }
+}
+
+/// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`
+/// so callers don't pivot on the inner error variant.
+fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
+    match err {
+        bonsai_factstore::FactStoreError::Io(e) => e,
+        other => std::io::Error::new(std::io::ErrorKind::Other, other),
     }
 }
 

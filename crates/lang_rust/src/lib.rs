@@ -297,7 +297,7 @@ fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
                 source_names,
                 source_call_args,
                 ..
-            } => {
+                    } => {
                 for arg in source_call_args {
                     for capture in rust_format_named_captures(arg) {
                         if !source_names.iter().any(|existing| existing == &capture) {

@@ -1235,7 +1235,17 @@ pub(crate) fn cmd_inspect(
     // suggestions — don't raise an error. Zero hits is a legit outcome
     // for a substring / regex query; only commands that take a concrete
     // symbol (trace, dump-hir, refs) should treat it as usage error.
+    //
+    // JSON / SARIF output stays machine-parseable: emit `[]` (or the
+    // empty wrapped page) instead of the human-readable
+    // "no matches for ..." line so downstream tools that pipe through
+    // `jq` / programmatic consumers don't have to special-case empty
+    // results.
     if report.decl_hits.is_empty() && report.hits.is_empty() {
+        if matches!(format, BrowseFormat::Json | BrowseFormat::Sarif) {
+            cli_println!("[]");
+            return Ok(());
+        }
         let kind_label = if kind_filter.is_empty() {
             String::new()
         } else {
@@ -3644,6 +3654,8 @@ mod tests {
             source_call: Some("read_user".to_string()),
             source_call_args: vec!["request".to_string()],
             span: span(10),
+                    declares_new_binding: false,
+            value_kind: None,
         }
     }
 

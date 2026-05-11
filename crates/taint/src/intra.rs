@@ -640,6 +640,8 @@ mod tests {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: Vec::new(),
+                    declares_new_binding: false,
+            value_kind: None,
         }
     }
 
@@ -651,6 +653,8 @@ mod tests {
             source_call: Some(callee.to_string()),
             source_call_args: args.iter().map(|a| (*a).to_string()).collect(),
             source_names: Vec::new(),
+                    declares_new_binding: false,
+            value_kind: None,
         }
     }
 

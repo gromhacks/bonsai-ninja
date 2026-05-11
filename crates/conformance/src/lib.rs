@@ -5,6 +5,8 @@
 //! pass: workspace ingestion, declaration extraction, resolution, HIR
 //! lowering, CFG construction, and trace emission.
 
+pub mod capability_matrix;
+
 use bonsai_lang_api::LanguageAdapter;
 use bonsai_testkit::workspace_with;
 use bonsai_workspace::Workspace;

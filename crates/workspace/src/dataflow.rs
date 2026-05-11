@@ -102,6 +102,19 @@ pub struct SerializableSnapshot {
     pub entries: Vec<SnapshotEntry>,
 }
 
+/// Caller-defined table id for the dataflow fact-store sidecar.
+/// Distinguishes a dataflow fact-store from a value-flow one when
+/// they share the `.bonsai/` directory.
+const DATAFLOW_FACTSTORE_TABLE_ID: u32 = 2;
+
+/// Pipeline-hash field in the factstore header. Folds the matcher
+/// policy fingerprint into 64 bits so a matcher policy change
+/// invalidates the cache file.
+fn dataflow_pipeline_hash() -> u64 {
+    let raw = MATCHER_POLICY_FINGERPRINT;
+    (raw as u64) ^ ((raw >> 64) as u64)
+}
+
 /// Thread-safe per-function taint-facts cache. One instance per
 /// `Workspace`; owned by [`crate::Workspace`].
 #[derive(Default, Debug)]
@@ -118,6 +131,13 @@ pub struct DataFlowCache {
     /// engine's resolver memo / alias maps / function summaries
     /// accumulate across runs.
     seeded_inter_taint: RwLock<Option<Arc<InterTaintCaches>>>,
+    /// Optional disk-backed source of truth, populated by
+    /// [`DataFlowCache::prewarm_to_disk`] or
+    /// [`DataFlowCache::load_from_disk`]. When present, lookups that
+    /// miss the in-memory map probe the fact store before falling
+    /// through to the engine. Held in an `Arc` so look-up paths can
+    /// drop the inner read-lock before doing the disk seek.
+    disk: RwLock<Option<Arc<bonsai_factstore::FactStoreReader>>>,
 }
 
 #[derive(Default, Debug)]
@@ -234,6 +254,9 @@ impl DataFlowCache {
         if let Some(hit) = cached {
             return hit;
         }
+        if let Some((facts, _graph)) = self.try_hydrate_from_disk(func) {
+            return facts;
+        }
         let (facts, graph) = self.compute_facts_and_graph(func, db);
         let dependencies = self.dependency_files_via_cache(func, db);
         let computed = Arc::new(facts);
@@ -249,6 +272,36 @@ impl DataFlowCache {
         inner.graphs.insert(func, graph);
         inner.dependencies.insert(func, dependencies);
         computed
+    }
+
+    /// Probe the disk store for `func`, decode the payload, and
+    /// hydrate the in-memory caches. Returns `(facts, graph)` on hit.
+    /// `None` when there is no disk store, no entry for `func`, or the
+    /// entry fails to decode (corrupt blob — caller falls through to
+    /// recompute via the engine).
+    fn try_hydrate_from_disk(
+        &self,
+        func: FuncId,
+    ) -> Option<(Arc<KindedTokens>, Arc<EntryTaintGraph>)> {
+        let reader = self.disk.read().clone()?;
+        let hit = reader.get(u64::from(func.raw())).ok().flatten()?;
+        let entry = crate::dataflow_disk::decode(&hit.payload).ok()?;
+        let dependencies = entry.dependency_set();
+        let facts = Arc::new(entry.facts);
+        let graph = Arc::new(entry.graph);
+        let mut inner = self.inner.write();
+        if inner.sanitizer_fingerprint == 0 {
+            inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
+        }
+        if inner.matcher_policy_fingerprint == 0 {
+            inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
+        }
+        inner.facts.entry(func).or_insert_with(|| facts.clone());
+        inner.graphs.entry(func).or_insert_with(|| graph.clone());
+        inner.dependencies.entry(func).or_insert(dependencies);
+        let canonical_facts = inner.facts.get(&func).cloned().unwrap_or(facts);
+        let canonical_graph = inner.graphs.get(&func).cloned().unwrap_or(graph);
+        Some((canonical_facts, canonical_graph))
     }
 
     pub fn graph_for(&self, func: FuncId, db: &AnalyzerDb) -> Arc<EntryTaintGraph> {
@@ -267,6 +320,9 @@ impl DataFlowCache {
         let cached = self.inner.read().graphs.get(&func).cloned();
         if let Some(hit) = cached {
             return hit;
+        }
+        if let Some((_facts, graph)) = self.try_hydrate_from_disk(func) {
+            return graph;
         }
         let (facts, graph) = self.compute_facts_and_graph(func, db);
         let dependencies = self.dependency_files_via_cache(func, db);
@@ -401,6 +457,112 @@ impl DataFlowCache {
         inner.prewarmed = true;
     }
 
+    /// Stream-and-write prewarm. Computes every callable function's
+    /// facts + graph in parallel, encodes each into a fact-store
+    /// writer immediately so peak RAM is bounded by the in-flight
+    /// rayon chunk rather than the workspace size, atomically
+    /// replaces the sidecar at `path`, and opens the resulting file
+    /// as the cache's disk store. After this call the in-memory
+    /// caches are empty; subsequent `facts_for` / `graph_for` calls
+    /// hydrate one entry at a time on demand.
+    pub fn prewarm_to_disk<F>(
+        &self,
+        path: &Path,
+        db: &AnalyzerDb,
+        on_each_done: F,
+    ) -> std::io::Result<usize>
+    where
+        F: Fn(FuncId) + Sync + Send,
+    {
+        let global = db.global_index();
+        let mut funcs: Vec<FuncId> = Vec::new();
+        for file in global.all_files() {
+            for d in global.decls_in(file) {
+                if matches!(
+                    d.kind,
+                    DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+                ) {
+                    funcs.push(FuncId::new(d.symbol.raw()));
+                }
+            }
+        }
+        // Skip entries already on disk or in memory.
+        let already: AHashSet<FuncId> = self.inner.read().facts.keys().copied().collect();
+        let disk_clone = self.disk.read().clone();
+        let todo: Vec<FuncId> = funcs
+            .into_iter()
+            .filter(|f| {
+                if already.contains(f) {
+                    return false;
+                }
+                if let Some(reader) = &disk_clone {
+                    if reader.get(u64::from(f.raw())).ok().flatten().is_some() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        if todo.is_empty() {
+            // Open the existing sidecar if any so subsequent queries
+            // hit disk; treat absent file as "nothing on disk."
+            if path.exists() {
+                let _ = self.load_from_disk(path, db);
+            }
+            return Ok(0);
+        }
+        // Channel-based writer: workers push entries to a queue
+        // drained by a dedicated I/O thread, so file writes never
+        // block the rayon worker pool.
+        let writer = bonsai_factstore::FactStoreWriter::create_with_capacity(
+            path,
+            DATAFLOW_FACTSTORE_TABLE_ID,
+            dataflow_pipeline_hash(),
+            todo.len(),
+            todo.len().saturating_mul(1024),
+            todo.len().saturating_mul(64),
+        )
+        .map_err(map_factstore_io)?;
+        let call_graph = self.call_graph_for(db);
+        let global_for_deps = db.global_index();
+        todo.par_iter().for_each(|&f| {
+            let (facts, graph) = self.compute_facts_and_graph(f, db);
+            let dependencies = dependency_files(f, &call_graph, &global_for_deps);
+            let entry = crate::dataflow_disk::DataFlowEntry::from_owned(facts, graph, dependencies);
+            let payload = crate::dataflow_disk::encode(&entry);
+            if let Err(err) = writer.add(u64::from(f.raw()), 0, &payload) {
+                tracing::warn!(error = %err, "dataflow factstore add failed");
+            }
+            on_each_done(f);
+        });
+        let written = writer.finish().map_err(map_factstore_io)?;
+        let reader = bonsai_factstore::FactStoreReader::open(
+            path,
+            DATAFLOW_FACTSTORE_TABLE_ID,
+            dataflow_pipeline_hash(),
+        )
+        .map_err(map_factstore_io)?;
+        // Drop in-memory state and swap in the disk store.
+        let mut inner = self.inner.write();
+        inner.facts.clear();
+        inner.graphs.clear();
+        inner.dependencies.clear();
+        // Record file content hashes so reload validation works the
+        // same as the legacy bincode path.
+        for file in db.vfs().all_files() {
+            if let Ok(snap) = db.vfs().snapshot(file) {
+                inner.file_hashes.insert(file, content_hash(snap.text.as_bytes()));
+            }
+        }
+        inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
+        inner.sanitizer_tokens = Arc::new(TokenSet::default());
+        inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
+        inner.prewarmed = true;
+        drop(inner);
+        *self.disk.write() = Some(Arc::new(reader));
+        Ok(written)
+    }
+
     /// Drop facts for every function declared in `file`, plus every
     /// cached function whose transitive dependency set includes
     /// `file`. Entries without dependency metadata are treated as
@@ -441,14 +603,31 @@ impl DataFlowCache {
         self.inner.read().prewarmed
     }
 
-    /// Number of cached entries. Handy for tests + the `open_with`
-    /// stats printout.
+    /// Number of cached entries across in-memory and disk-backed
+    /// stores. Handy for tests + the `open_with` stats printout.
     pub fn len(&self) -> usize {
-        self.inner.read().facts.len()
+        let in_memory = self.inner.read().facts.len();
+        let on_disk = self.disk.read().as_ref().map_or(0, |r| r.len());
+        // Disk-resident entries that have been hydrated into the
+        // in-memory map appear in both counts; subtract the overlap
+        // for a true "distinct entries reachable" metric.
+        let overlap = match self.disk.read().as_ref() {
+            Some(reader) => self
+                .inner
+                .read()
+                .facts
+                .keys()
+                .filter(|f| reader.get(u64::from(f.raw())).ok().flatten().is_some())
+                .count(),
+            None => 0,
+        };
+        in_memory + on_disk - overlap
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        let mem_empty = self.inner.read().facts.is_empty();
+        let disk_empty = self.disk.read().as_ref().map_or(true, |r| r.is_empty());
+        mem_empty && disk_empty
     }
 
     /// Serialise the cache to a `bincode`-compatible snapshot. Each
@@ -458,6 +637,25 @@ impl DataFlowCache {
     /// different numbers during a fresh index.
     pub fn snapshot(&self, db: &AnalyzerDb) -> SerializableSnapshot {
         let call_graph = self.call_graph_for(db);
+        // Hydrate every disk-backed entry into the in-memory caches
+        // before iterating below. The streaming prewarm path
+        // (`prewarm_to_disk`) clears in-memory facts after writing
+        // the factstore sidecar, so without this the bincode v2.bin
+        // snapshot would be empty even though the v3.factstore
+        // sidecar holds the data. Idempotent: a hot in-memory hit
+        // skips the disk seek.
+        if self.disk.read().is_some() {
+            let global_pre = db.global_index();
+            for file in db.vfs().all_files() {
+                for decl in global_pre.functions_in(file) {
+                    let func = FuncId::new(decl.symbol.raw());
+                    let already_hot = self.inner.read().facts.contains_key(&func);
+                    if !already_hot {
+                        let _ = self.try_hydrate_from_disk(func);
+                    }
+                }
+            }
+        }
         let inner = self.inner.read();
         let global = db.global_index();
         let file_hashes = current_file_hashes(db);
@@ -669,6 +867,8 @@ impl DataFlowCache {
         inner.prewarmed = false;
         inner.sanitizer_fingerprint = 0;
         inner.matcher_policy_fingerprint = 0;
+        drop(inner);
+        *self.disk.write() = None;
     }
 
     /// Persist the cache to `path` as a `bincode`-encoded
@@ -753,12 +953,51 @@ impl DataFlowCache {
         Ok(self.load_snapshot(snap, db))
     }
 
-    /// Conventional location for the on-disk cache under a workspace
-    /// root. Downstream callers (CLI, MCP server, LSP) all share this
-    /// path so reloads are automatic.
+    /// Conventional location for the legacy bincode dataflow sidecar.
+    /// Kept for backward-compatible warm-cache reloads written by
+    /// older bonsai-ninja builds. New code should prefer
+    /// [`Self::factstore_sidecar_path`] which is the streaming-prewarm
+    /// target and bounds peak RAM.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
         workspace_bonsai_dir(workspace_root).join("dataflow.v2.bin")
+    }
+
+    /// Conventional location for the new disk-backed fact-store
+    /// dataflow sidecar. Co-resides with the legacy sidecar; readers
+    /// validate version + pipeline hash on open so a stale file is
+    /// silently dropped.
+    #[must_use]
+    pub fn factstore_sidecar_path(workspace_root: &Path) -> PathBuf {
+        workspace_bonsai_dir(workspace_root).join("dataflow.v3.factstore")
+    }
+
+    /// Open the factstore sidecar at `path` and swap it in as the
+    /// cache's disk store. Returns the number of entries the file
+    /// contains. Non-existent / version-mismatched / corrupt files
+    /// silently return `Ok(0)` after logging.
+    pub fn load_factstore_sidecar(&self, path: &Path) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let reader = match bonsai_factstore::FactStoreReader::open(
+            path,
+            DATAFLOW_FACTSTORE_TABLE_ID,
+            dataflow_pipeline_hash(),
+        ) {
+            Ok(reader) => reader,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "ignoring stale or corrupt dataflow factstore sidecar"
+                );
+                return Ok(0);
+            }
+        };
+        let entries = reader.len();
+        *self.disk.write() = Some(Arc::new(reader));
+        Ok(entries)
     }
 
     /// Compatibility accessor. Sanitizers are reporting evidence and
@@ -911,6 +1150,15 @@ fn current_file_hashes(db: &AnalyzerDb) -> AHashMap<FileId, u64> {
             Some((file, content_hash(snap.text.as_bytes())))
         })
         .collect()
+}
+
+/// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`
+/// so the dataflow API stays uniform with the legacy bincode path.
+fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
+    match err {
+        bonsai_factstore::FactStoreError::Io(e) => e,
+        other => std::io::Error::new(std::io::ErrorKind::Other, other),
+    }
 }
 
 fn snapshot_call_graph(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {

@@ -330,6 +330,13 @@ fn main() -> Result<()> {
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
     let _ = NO_CACHE.set(cli.no_cache || no_cache_env);
     let _ = PARSE_TIMEOUT_MS.set(cli.parse_timeout_ms);
+    // Mirror `--debug <categories>` into `BONSAI_DEBUG` so the
+    // diagnostics::debug filter (read on first call) sees the
+    // categories the user enabled. CLI flag takes precedence over
+    // any pre-set env value — explicit beats inherited.
+    if let Some(categories) = cli.debug.as_deref().filter(|c| !c.is_empty()) {
+        std::env::set_var("BONSAI_DEBUG", categories);
+    }
     // --no-progress piggybacks on the same gating machinery. The
     // progress module additionally checks `NO_PROGRESS` / `NO_COLOR`
     // env and stderr-TTY-ness itself.

@@ -161,6 +161,11 @@ impl LanguageAdapter for CppAdapter {
                 if let Some(aliases) = alias_map.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
                 }
+                // Repair catch-param bindings: the kit's generic
+                // extractor picks the first identifier descendant of
+                // the catch clause, which on C++ `catch (const T& e)`
+                // is the type identifier rather than the binding.
+                fix_cpp_catch_params(&mut decl.flow_events, &tree, src);
                 // Bases only attach to class-shaped decls; skip
                 // free functions, methods, vars, etc.
                 if !is_class_like(decl.kind) {
@@ -509,4 +514,117 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+/// Repair `catch_param` on C++ `Try` events. The kit's generic
+/// extractor returns the first identifier descendant of the catch
+/// clause, which on `catch (const std::exception& e)` is the type
+/// identifier rather than the binding. We re-extract the binding
+/// from the parse tree via the standard `parameter_declaration` →
+/// `declarator` → identifier chain.
+fn fix_cpp_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree, src: &[u8]) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                ..
+            } => {
+                if let Some(node) = bonsai_lang_api::kit::node_at_span(
+                    tree.root_node(),
+                    *span,
+                    &["try_statement"],
+                ) {
+                    if let Some(name) = cpp_catch_param_binding(node, src) {
+                        *catch_param = Some(name);
+                    }
+                }
+                fix_cpp_catch_params(body, tree, src);
+                fix_cpp_catch_params(catch_events, tree, src);
+                fix_cpp_catch_params(finally_events, tree, src);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                fix_cpp_catch_params(then_events, tree, src);
+                fix_cpp_catch_params(else_events, tree, src);
+            }
+            FlowEvent::Loop { body, .. }
+            | FlowEvent::Defer { body, .. }
+            | FlowEvent::Using { body, .. } => {
+                fix_cpp_catch_params(body, tree, src);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn cpp_catch_param_binding(try_node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut tcur = try_node.walk();
+    for child in try_node.named_children(&mut tcur) {
+        if child.kind() != "catch_clause" {
+            continue;
+        }
+        // catch_clause > parameter_list > parameter_declaration > declarator > identifier.
+        let mut ccur = child.walk();
+        for sub in child.named_children(&mut ccur) {
+            let target = if sub.kind() == "parameter_list" {
+                let mut pcur = sub.walk();
+                let mut found: Option<Node<'_>> = None;
+                for c in sub.named_children(&mut pcur) {
+                    if c.kind() == "parameter_declaration" {
+                        found = Some(c);
+                        break;
+                    }
+                }
+                found
+            } else if sub.kind() == "parameter_declaration" {
+                Some(sub)
+            } else {
+                None
+            };
+            let Some(pdecl) = target else { continue };
+            // The `declarator` field of `parameter_declaration` is the
+            // binding. For `const T& e`, the declarator is a
+            // reference_declarator → identifier. For bare `T e`, the
+            // declarator is an identifier.
+            let decl = pdecl.child_by_field_name("declarator");
+            if let Some(decl) = decl {
+                if let Some(ident) = first_identifier_descendant_cpp(decl) {
+                    return Some(node_text(&ident, src).trim().to_string());
+                }
+            }
+            // Fallback: trailing identifier among the named children.
+            let mut pcur = pdecl.walk();
+            let mut last_ident: Option<Node<'_>> = None;
+            for n in pdecl.named_children(&mut pcur) {
+                if let Some(found) = first_identifier_descendant_cpp(n) {
+                    last_ident = Some(found);
+                }
+            }
+            if let Some(n) = last_ident {
+                return Some(node_text(&n, src).trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn first_identifier_descendant_cpp<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    if node.kind() == "identifier" || node.kind() == "field_identifier" {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = first_identifier_descendant_cpp(child) {
+            return Some(found);
+        }
+    }
+    None
 }

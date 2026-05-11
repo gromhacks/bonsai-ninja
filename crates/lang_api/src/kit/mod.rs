@@ -1349,6 +1349,8 @@ fn walk_into(
                         source_call: source_call.clone(),
                         source_call_args: source_call_args.clone(),
                         source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
                     });
                 }
             }
@@ -1360,6 +1362,8 @@ fn walk_into(
                     source_call: source_call.clone(),
                     source_call_args: source_call_args.clone(),
                     source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
                 });
             }
             for extra_target in extra_lhs_binding_targets(&node, target_node, src, &target) {
@@ -1370,6 +1374,8 @@ fn walk_into(
                     source_call: source_call.clone(),
                     source_call_args: source_call_args.clone(),
                     source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
                 });
             }
             out.push(FlowEvent::Assign {
@@ -1379,6 +1385,8 @@ fn walk_into(
                 source_call,
                 source_call_args,
                 source_names,
+                declares_new_binding: false,
+                value_kind: None,
             });
         }
         // Walk every named child so nested calls inside the LHS or RHS
@@ -1906,6 +1914,8 @@ fn emit_using_as_pattern_assigns(
                         source_call,
                         source_call_args,
                         source_names,
+                        declares_new_binding: false,
+                        value_kind: None,
                     });
                 }
             }
@@ -3102,6 +3112,8 @@ fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> V
             source_call: None,
             source_call_args: Vec::new(),
             source_names: Vec::new(),
+                        declares_new_binding: false,
+                        value_kind: None,
         })
         .collect()
 }
@@ -3175,6 +3187,8 @@ fn extract_rust_style_match_bindings(file: FileId, node: &Node<'_>, src: &[u8]) 
             source_call: None,
             source_call_args: Vec::new(),
             source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
         });
     }
     out
@@ -3241,6 +3255,8 @@ fn extract_comprehension_for_clause_assigns(file: FileId, clause: &Node<'_>, src
             source_call: None,
             source_call_args: Vec::new(),
             source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
         })
         .collect()
 }
@@ -3275,6 +3291,8 @@ fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) ->
             source_call: None,
             source_call_args: Vec::new(),
             source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
         })
         .collect()
 }
@@ -3499,6 +3517,8 @@ fn ruby_append_mutation_assignment(
         source_call: None,
         source_call_args: Vec::new(),
         source_names,
+        declares_new_binding: false,
+        value_kind: None,
     });
     true
 }
@@ -3937,6 +3957,7 @@ pub fn decl_index_with_handler(
             receiver_field_writes,
             implicit_receiver_names,
             receiver_state_sources,
+            return_type: None,
         });
     }
 
@@ -4024,6 +4045,7 @@ pub fn decl_index_with_handler(
             receiver_field_writes: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
+            return_type: None,
         });
     }
 
@@ -4070,6 +4092,7 @@ pub fn decl_index_with_handler(
             receiver_field_writes: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
+            return_type: None,
         });
     }
 
@@ -4128,6 +4151,7 @@ pub fn decl_index_with_handler(
             receiver_field_writes: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
+            return_type: None,
         });
     }
 
@@ -4386,7 +4410,7 @@ fn collect_receiver_field_writes_inner(
                 source_call_args,
                 source_names,
                 ..
-            } => {
+                    } => {
                 if !place_matches_receiver(target, receiver_names, receiver_prefixes) {
                     continue;
                 }
@@ -4552,7 +4576,7 @@ fn collect_receiver_state_sources_inner(
                 source_name,
                 source_names,
                 ..
-            } => {
+                    } => {
                 if let Some(source) = source_name {
                     collect_receiver_state_source_name(source, locals, implicit_receiver_names, out);
                 }
@@ -6871,6 +6895,8 @@ fn emit_inline_closure_param_bindings(
             source_call: None,
             source_call_args: Vec::new(),
             source_names: sources.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
         });
     }
 }
@@ -7274,6 +7300,240 @@ pub fn apply_class_field_type_aliases(idx: &mut crate::DeclIndex) {
     }
 }
 
+/// Heuristically classify the RHS shape of every
+/// `FlowEvent::Assign` whose `value_kind` is still `None`. Engine-
+/// driven Phase-5 const-propagation reads `value_kind` to decide
+/// whether the write is a "clean overwrite" (literal RHS — no
+/// identifier carriers reach it) or a name-bridging carrier
+/// (anything that references an identifier).
+///
+/// Adapters can set `value_kind` themselves at construction time
+/// when their CST surface gives them exact info; this pass is the
+/// safety net for adapters that don't. The classification is
+/// conservative — when the adapter recorded no `source_name`,
+/// `source_call`, `source_names`, or `source_call_args`, the RHS
+/// has no identifier carriers and is treated as `Literal`. When
+/// `source_call` is set, the RHS is a call (`CallResult`).
+/// Everything else is `Compound`. The pass runs after
+/// `apply_call_receiver_types` so the classification reflects
+/// the post-stitch event tree.
+pub fn apply_assign_value_kind(idx: &mut crate::DeclIndex) {
+    for decl in &mut idx.defs {
+        classify_assign_value_kinds(&mut decl.flow_events);
+    }
+}
+
+/// Populate `Decl.return_type` for function-shaped decls by reading
+/// the tree-sitter `return_type` / `type` field of the corresponding
+/// CST node. Most grammars expose a named field for the return-type
+/// annotation; this helper walks the function-node kinds declared by
+/// `handler.fn_kinds` and assigns `return_type` when the field
+/// resolves to a non-empty type node. Pure adapter facts — the
+/// engine never interprets them. Idempotent: existing non-empty
+/// return_type values are preserved.
+pub fn populate_decl_return_types(
+    decl_index: &mut crate::DeclIndex,
+    tree: &tree_sitter::Tree,
+    src: &[u8],
+    handler: &GrammarHandler,
+) {
+    // Build a span → return_type map by walking the tree once.
+    let mut by_span: std::collections::HashMap<bonsai_common::Span, String> =
+        std::collections::HashMap::new();
+    let mut stack = vec![tree.root_node()];
+    let is_fn_kind = |k: &str| handler.fn_kinds.contains(&k) || GENERIC_HANDLER.fn_kinds.contains(&k);
+    while let Some(node) = stack.pop() {
+        if is_fn_kind(node.kind()) {
+            if let Some(ty_node) = node
+                .child_by_field_name("return_type")
+                .or_else(|| node.child_by_field_name("type"))
+                .or_else(|| node.child_by_field_name("result"))
+            {
+                let text = node_text(&ty_node, src).trim().to_string();
+                if !text.is_empty() {
+                    let span = bonsai_common::Span::new(
+                        decl_index.file,
+                        u64::try_from(node.start_byte()).unwrap_or(u64::MAX),
+                        u64::try_from(node.end_byte()).unwrap_or(u64::MAX),
+                    );
+                    by_span.insert(span, canonical_simple_type_name(&text));
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    if by_span.is_empty() {
+        return;
+    }
+    for decl in &mut decl_index.defs {
+        if decl.return_type.is_some() {
+            continue;
+        }
+        if let Some(rt) = by_span.get(&decl.span) {
+            if !rt.is_empty() {
+                decl.return_type = Some(rt.clone());
+            }
+        }
+    }
+}
+
+/// Propagate adapter-extracted `Decl.return_type` onto LHS
+/// type_aliases for `let y = f()` shaped assignments. Phase-6
+/// lightweight type inference — when the callee's return type is
+/// known, the LHS gains a type alias entry so subsequent
+/// `y.method()` calls resolve to the right class's method set
+/// without re-walking the source. Only fires when:
+///   * The assignment is a direct call (`source_call: Some(callee)`).
+///   * The callee resolves to a Decl with a non-empty `return_type`.
+///   * The LHS has no existing alias for `target` (don't clobber
+///     adapter-supplied annotations).
+///
+/// The lookup is name-based (callee shortname matched against decl
+/// names in the same index). Out-of-file callees fall through —
+/// cross-file inference is a future deliverable.
+pub fn apply_assign_call_result_types(idx: &mut crate::DeclIndex) {
+    use std::collections::HashMap;
+    // Build callee_name → return_type map.
+    let mut returns: HashMap<String, String> = HashMap::new();
+    for decl in &idx.defs {
+        if let Some(rt) = &decl.return_type {
+            if !rt.is_empty() {
+                returns.insert(decl.name.clone(), rt.clone());
+            }
+        }
+    }
+    if returns.is_empty() {
+        return;
+    }
+    // Drive per-decl rewriting. We can't simply mutate the
+    // `flow_events` because `type_aliases` lives on the Decl itself
+    // — we accumulate proposed (target, type_name) entries from the
+    // events, then add them to the decl's `type_aliases` if absent.
+    for decl in &mut idx.defs {
+        let mut proposed: Vec<crate::TypeAliasBinding> = Vec::new();
+        propose_call_result_type_aliases(&decl.flow_events, &returns, &mut proposed);
+        if proposed.is_empty() {
+            continue;
+        }
+        for binding in proposed {
+            let already = decl
+                .type_aliases
+                .iter()
+                .any(|existing| existing.name == binding.name);
+            if !already {
+                decl.type_aliases.push(binding);
+            }
+        }
+    }
+}
+
+fn propose_call_result_type_aliases(
+    events: &[FlowEvent],
+    returns: &std::collections::HashMap<String, String>,
+    out: &mut Vec<crate::TypeAliasBinding>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target,
+                source_call: Some(callee),
+                ..
+            } => {
+                if target.is_empty() {
+                    continue;
+                }
+                if let Some(rt) = returns.get(callee.as_str()) {
+                    out.push(crate::TypeAliasBinding {
+                        name: target.clone(),
+                        type_name: rt.clone(),
+                    });
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                propose_call_result_type_aliases(then_events, returns, out);
+                propose_call_result_type_aliases(else_events, returns, out);
+            }
+            FlowEvent::Loop { body, .. }
+            | FlowEvent::Defer { body, .. }
+            | FlowEvent::Using { body, .. } => {
+                propose_call_result_type_aliases(body, returns, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                propose_call_result_type_aliases(body, returns, out);
+                propose_call_result_type_aliases(catch_events, returns, out);
+                propose_call_result_type_aliases(finally_events, returns, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } => {
+                if value_kind.is_some() {
+                    continue;
+                }
+                let kind = if source_call.is_some() {
+                    crate::AssignValueKind::CallResult
+                } else if source_name.is_none()
+                    && source_names.is_empty()
+                    && source_call_args.is_empty()
+                {
+                    crate::AssignValueKind::Literal
+                } else {
+                    crate::AssignValueKind::Compound
+                };
+                *value_kind = Some(kind);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                classify_assign_value_kinds(then_events);
+                classify_assign_value_kinds(else_events);
+            }
+            FlowEvent::Loop { body, .. }
+            | FlowEvent::Defer { body, .. }
+            | FlowEvent::Using { body, .. } => {
+                classify_assign_value_kinds(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                classify_assign_value_kinds(body);
+                classify_assign_value_kinds(catch_events);
+                classify_assign_value_kinds(finally_events);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Populate `FlowEvent::Call::receiver_types` from adapter-emitted
 /// semantic declaration facts. Adapters already attach
 /// `Decl.type_aliases` for typed parameters, locals, fields, and
@@ -7375,6 +7635,26 @@ fn apply_call_receiver_types_to_events(
                     for ty in receiver_types_for_expr(receiver, aliases, implicit_receiver_types, class_facts)
                     {
                         push_unique_receiver_type(receiver_types, ty);
+                    }
+                } else if let Some(types) = implicit_receiver_types {
+                    // Bare-name call inside a class method body
+                    // (`foo()` instead of `this.foo()`) is an
+                    // implicit-self call across Java / Kotlin /
+                    // C# / Scala / Swift / Python / Ruby. We fill
+                    // `receiver_types` with the enclosing class
+                    // and its bases so the resolver narrows
+                    // dispatch the same way it does for explicit
+                    // `this.foo()`. The narrowing isn't always
+                    // accurate (free top-level functions called
+                    // from within a method body inherit the
+                    // class's type incorrectly), but the
+                    // downstream resolver checks whether the
+                    // callee actually exists on the class
+                    // via Visibility + module_path gating, so
+                    // over-fill at the receiver-type layer is
+                    // bounded by that semantic check.
+                    for ty in types {
+                        push_unique_receiver_type(receiver_types, ty.clone());
                     }
                 }
             }

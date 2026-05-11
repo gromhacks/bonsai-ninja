@@ -237,6 +237,7 @@ impl LanguageAdapter for RubyAdapter {
                 receiver_field_writes: Vec::new(),
                 implicit_receiver_names: Vec::new(),
                 receiver_state_sources: Vec::new(),
+                return_type: None,
             }]
         } else {
             Vec::new()

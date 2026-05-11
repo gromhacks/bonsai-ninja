@@ -575,6 +575,7 @@ fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree
             receiver_field_writes: Vec::new(),
             implicit_receiver_names: Vec::new(),
             receiver_state_sources: Vec::new(),
+            return_type: None,
         });
         // Re-parent every method-like decl whose span is contained
         // by the lambda body to the synthesized class.

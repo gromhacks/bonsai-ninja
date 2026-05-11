@@ -55,7 +55,7 @@ fn sdk_index_writes_dataflow_sidecar() {
         "index should eagerly prewarm reusable taint facts"
     );
     assert!(ws.dataflow().len() >= 2);
-    let sidecar = DataFlowCache::sidecar_path(&root);
+    let sidecar = DataFlowCache::factstore_sidecar_path(&root);
     assert!(
         sidecar.exists(),
         "index should persist the reusable dataflow sidecar"

@@ -201,6 +201,20 @@ pub(crate) struct Cli {
     #[arg(long = "parse-timeout", global = true, value_name = "MS")]
     pub(crate) parse_timeout_ms: Option<u64>,
 
+    /// Enable categorised debug logging on stderr. Pass a
+    /// comma-separated list of category names, or `*` for all.
+    /// Available categories include `idg-closure` (per-source seed /
+    /// closure / xcall counts), `idg-resolve` (callgraph callee
+    /// resolution), `recv-state` (receiver-state propagation
+    /// fixpoint), `find-group` (finding combination /
+    /// primary-vs-additional decisions), `taint-graph` (cross-call
+    /// edge ordering), `xcall` (cross-file edge index per closure).
+    /// Equivalent to `BONSAI_DEBUG=<categories>` for the analyzer
+    /// process — useful for tracking down non-determinism, missing
+    /// findings, or unexpected over-approximation.
+    #[arg(long = "debug", global = true, value_name = "CATEGORIES")]
+    pub(crate) debug: Option<String>,
+
     #[command(subcommand)]
     pub(crate) command: Cmd,
 }

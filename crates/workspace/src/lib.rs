@@ -14,12 +14,16 @@ pub mod callgraph_sidecar;
 pub mod class_index;
 pub(crate) mod cross_module;
 pub mod dataflow;
+pub mod dataflow_disk;
 pub mod decl_name_index;
 pub mod enclosing_index;
 pub mod flow_ids;
+pub mod flow_ids_disk;
 pub mod taint_index;
+pub mod taint_index_disk;
 pub mod transitive_callers;
 pub mod value_flow;
+pub mod value_flow_disk;
 
 use ahash::AHashMap;
 use bonsai_abstract_interp::TraceLimits;
@@ -534,6 +538,39 @@ impl Workspace {
         )
     }
 
+    /// Build the workspace-wide IDG once and seed it onto
+    /// [`AnalyzerDb`] so consumers can fetch it via
+    /// [`AnalyzerDb::idg_service`]. Idempotent — calling twice with
+    /// the same workspace state is a no-op (the seed is monotonic).
+    ///
+    /// Built from the cached global index + resolved call graph. The
+    /// transfer pass parallelises across functions; the stitching
+    /// phase serialises. Returns the populated service handle so
+    /// callers can immediately query it without re-fetching from db.
+    pub fn build_and_seed_idg_service(&self) -> Arc<bonsai_idg::IdgQueryService> {
+        // Avoid recomputing if a peer thread already seeded the slot.
+        if let Some(svc) = self.inner.db.idg_service() {
+            return svc;
+        }
+        let global = self.inner.db.global_index();
+        let cg = self.cached_resolved_call_graph();
+        // Thread per-file alias maps into the IDG resolver so
+        // `import { persist as persistEnvelope }` style alias
+        // renames still resolve to the underlying callee. The
+        // callgraph already used these maps; the IDG layer now
+        // reuses them to keep its name filter from rejecting
+        // alias-rewritten call sites.
+        let db = &self.inner.db;
+        let ws = bonsai_idg::workspace_adapter::build_with_aliases(
+            global.as_ref(),
+            cg.as_ref(),
+            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+        );
+        let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
+        self.inner.db.set_idg_service(service.clone());
+        service
+    }
+
     /// Build a fully indexed workspace: ingest `root`, parallel-prewarm
     /// each file's decl index, load the dataflow sidecar (if valid),
     /// fill missing taint entries, and write the sidecar back. SDK
@@ -615,14 +652,22 @@ impl Workspace {
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         if options.load_dataflow_sidecar && !skip_prewarm {
-            // Try the sidecar first — a warm cache from a previous
-            // run, validated against current file content hashes
-            // surgically, is much cheaper than a full rebuild. Any
-            // entries that fail validation (file changed, function
-            // moved, version mismatch) are dropped; `prewarm_all`
-            // below backfills them.
-            let sidecar = DataFlowCache::sidecar_path(root);
-            let _ = ws.inner.dataflow.load_from_disk(&sidecar, ws.db());
+            // Prefer the new disk-backed factstore sidecar if one
+            // exists — opening it is just an mmap, and it'll keep
+            // peak RAM bounded for the rest of the session. Fall
+            // back to the legacy bincode sidecar otherwise so older
+            // `.bonsai/dataflow.v2.bin` files continue to warm-start
+            // a session.
+            let factstore_sidecar = DataFlowCache::factstore_sidecar_path(root);
+            let loaded = ws
+                .inner
+                .dataflow
+                .load_factstore_sidecar(&factstore_sidecar)
+                .unwrap_or(0);
+            if loaded == 0 {
+                let legacy_sidecar = DataFlowCache::sidecar_path(root);
+                let _ = ws.inner.dataflow.load_from_disk(&legacy_sidecar, ws.db());
+            }
         }
         // Try to load the persisted call graph before any cache
         // that depends on it asks for one. Saves several seconds
@@ -632,13 +677,19 @@ impl Workspace {
             let _ = ws.load_callgraph_sidecar(root);
         }
         if options.prewarm_dataflow && !skip_prewarm {
-            let sidecar = DataFlowCache::sidecar_path(root);
             // Build the workspace-cached call graph once, then seed
             // the dataflow + flow-ids caches with it so they don't
             // each rebuild identical content.
             let cg = ws.cached_resolved_call_graph();
             ws.inner.dataflow.seed_call_graph(cg.clone());
             ws.inner.flow_ids.seed_call_graph(cg);
+            // Build the workspace IDG once the call graph and global
+            // index are available. Seeded onto the db so every
+            // consumer (value-flow, security analysis, browse,
+            // inspect, dump, export) can fetch it via
+            // `db.idg_service()` instead of running the legacy
+            // per-source interprocedural engine.
+            let _ = ws.build_and_seed_idg_service();
             // Seed the dataflow cache with the workspace's
             // InterTaintCaches singleton so the engine's resolver
             // memo / alias maps / function summaries built during
@@ -649,19 +700,40 @@ impl Workspace {
                 .seed_inter_taint_caches(ws.shared_inter_taint_caches());
             let pending = ws.inner.dataflow.pending_count(ws.db());
             on_event(WorkspaceOpenEvent::DataflowPrewarmStarted { pending });
-            ws.inner.dataflow.prewarm_all_with_progress(ws.db(), |_| {
-                on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
-            });
-            on_event(WorkspaceOpenEvent::DataflowPrewarmFinished);
-            // Write back so next open gets an even hotter cache.
             if options.save_dataflow_sidecar {
-                let _ = ws.inner.dataflow.save_to_disk(&sidecar, ws.db());
+                // Streaming prewarm: each computed entry is encoded
+                // and appended to the fact-store sidecar immediately,
+                // then the file is opened back as the cache's disk
+                // store. Peak RAM is bounded by the in-flight rayon
+                // chunk — this is the OOM fix for the dataflow cache.
+                let factstore_sidecar = DataFlowCache::factstore_sidecar_path(root);
+                if let Err(err) =
+                    ws.inner
+                        .dataflow
+                        .prewarm_to_disk(&factstore_sidecar, ws.db(), |_| {
+                            on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
+                        })
+                {
+                    tracing::warn!(
+                        path = %factstore_sidecar.display(),
+                        error = %err,
+                        "dataflow prewarm to disk failed; falling back to in-memory prewarm"
+                    );
+                    ws.inner.dataflow.prewarm_all_with_progress(ws.db(), |_| {
+                        on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
+                    });
+                }
                 // Persist the resolved call graph alongside the
-                // dataflow sidecar — invalidation rule is
-                // identical (content-hash + matcher policy
-                // fingerprint), so they always co-evolve.
+                // dataflow sidecar — invalidation rule is identical
+                // (content-hash + matcher policy fingerprint), so
+                // they always co-evolve.
                 let _ = ws.save_callgraph_sidecar(root);
+            } else {
+                ws.inner.dataflow.prewarm_all_with_progress(ws.db(), |_| {
+                    on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
+                });
             }
+            on_event(WorkspaceOpenEvent::DataflowPrewarmFinished);
         }
         // Pass 3: workspace-wide value-flow cache. Same shape as the
         // dataflow prewarm but for the seed-free per-entry value-flow
@@ -680,20 +752,61 @@ impl Workspace {
         }
         if options.prewarm_value_flow && !skip_value_flow {
             on_event(WorkspaceOpenEvent::ValueFlowPrewarmStarted);
-            ws.inner
-                .value_flow
-                .prewarm_all_with_caches(ws.db(), &ws.inner.inter_taint);
-            on_event(WorkspaceOpenEvent::ValueFlowPrewarmFinished);
             if options.save_value_flow_sidecar {
+                // Streaming prewarm: each computed entry is encoded
+                // and appended to the sidecar writer immediately, then
+                // the file is opened back as the cache's disk store.
+                // Peak RAM is bounded by the in-flight rayon chunk
+                // rather than the workspace size — this is the
+                // OWASP-class memory fix.
                 let sidecar = ValueFlowCache::sidecar_path(root);
-                let _ = ws.inner.value_flow.save_to_disk(&sidecar);
+                if let Err(err) = ws
+                    .inner
+                    .value_flow
+                    .prewarm_to_disk(&sidecar, ws.db(), &ws.inner.inter_taint)
+                {
+                    tracing::warn!(
+                        path = %sidecar.display(),
+                        error = %err,
+                        "value-flow prewarm to disk failed; falling back to in-memory prewarm"
+                    );
+                    ws.inner
+                        .value_flow
+                        .prewarm_all_with_caches(ws.db(), &ws.inner.inter_taint);
+                }
+            } else {
+                // Caller opted out of persisting the sidecar (e.g.
+                // ephemeral SDK consumer). Stay in-memory.
+                ws.inner
+                    .value_flow
+                    .prewarm_all_with_caches(ws.db(), &ws.inner.inter_taint);
             }
+            on_event(WorkspaceOpenEvent::ValueFlowPrewarmFinished);
         }
         // Pass 4: flow-id cache. Mirrors the dataflow shape — every
         // browse-row flow-id lookup is O(1) once warmed.
         if options.prewarm_flow_ids && !skip_prewarm {
             on_event(WorkspaceOpenEvent::FlowIdsPrewarmStarted);
-            ws.inner.flow_ids.prewarm_all(ws.db(), ws.vfs());
+            // Streaming prewarm: each computed entry encodes to a
+            // fact-store sidecar immediately so peak RAM stays
+            // bounded by the in-flight rayon chunk. Falls back to
+            // in-memory if disk write fails.
+            let sidecar = FlowIdCache::sidecar_path(root);
+            // Try to hydrate from any existing sidecar before recomputing.
+            let _ = ws.inner.flow_ids.load_from_disk(&sidecar);
+            if let Err(err) = ws.inner.flow_ids.prewarm_to_disk(
+                &sidecar,
+                ws.db(),
+                ws.vfs(),
+                |_| {},
+            ) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %err,
+                    "flow-ids prewarm to disk failed; falling back to in-memory prewarm"
+                );
+                ws.inner.flow_ids.prewarm_all(ws.db(), ws.vfs());
+            }
             on_event(WorkspaceOpenEvent::FlowIdsPrewarmFinished);
         }
         Ok(ws)
@@ -752,6 +865,12 @@ impl Workspace {
                 // cache on edit. Cheaper than per-graph dependency
                 // tracking and matches the FlowIdCache strategy.
                 self.inner.value_flow.clear();
+                // The IDG segments depend on per-file decl state; an
+                // edit can shift place ids, node ids, and cross-file
+                // edges. Coarse drop matches the dataflow / value-flow
+                // strategy. Phase 7 will refine this to per-file
+                // segment rebuild.
+                self.inner.db.invalidate_idg_service();
                 // The workspace-wide inter-taint caches memoize
                 // resolver answers, alias maps, and function summaries
                 // — every entry is keyed off static AST state that
@@ -872,6 +991,9 @@ impl Workspace {
         self.inner.db.invalidate_file(file);
         self.inner.dataflow.invalidate_file(file);
         self.inner.flow_ids.invalidate_all();
+        // Drop the IDG service so cross-file edges that originated
+        // from the removed file aren't queried out of stale state.
+        self.inner.db.invalidate_idg_service();
         *self.inner.reparse_counter.lock() += 1;
         Some(file)
     }
@@ -899,6 +1021,11 @@ impl Workspace {
             self.inner.dataflow.clear();
             self.inner.flow_ids.invalidate_all();
         }
+        // The IDG segments depend on per-file decl state; an edit
+        // can shift place ids, node ids, and cross-file edges.
+        // Coarse drop matches the dataflow invalidation strategy —
+        // next query lazy-rebuilds via `build_and_seed_idg_service`.
+        self.inner.db.invalidate_idg_service();
         *self.inner.reparse_counter.lock() += 1;
         id
     }

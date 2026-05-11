@@ -618,13 +618,21 @@ fn populate_csharp_exception_types(
                 catch_events,
                 finally_events,
                 catch_types,
+                catch_param,
                 ..
             } => {
-                if catch_types.is_empty() {
-                    if let Some(node) =
-                        bonsai_lang_api::kit::node_at_span(tree.root_node(), *span, &["try_statement"])
-                    {
+                if let Some(node) =
+                    bonsai_lang_api::kit::node_at_span(tree.root_node(), *span, &["try_statement"])
+                {
+                    if catch_types.is_empty() {
                         *catch_types = collect_csharp_catch_types(node, src);
+                    }
+                    // The kit's generic catch_param extractor picks the
+                    // type identifier (or qualified type) on C#'s
+                    // `catch (T name)` shape. Fix in the adapter where
+                    // we have the structural context.
+                    if let Some(name) = collect_csharp_catch_param_name(node, src) {
+                        *catch_param = Some(name);
                     }
                 }
                 populate_csharp_exception_types(body, tree, src);
@@ -673,6 +681,41 @@ fn csharp_thrown_type_for_node(throw_node: tree_sitter::Node<'_>, src: &[u8]) ->
                         src,
                     )));
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Pull the binding name out of `catch (T name)`. Returns `None` for
+/// catch-all (`catch { }`) and for catch declarations that omit the
+/// name (`catch (T) { }` — unusual but legal in C#).
+fn collect_csharp_catch_param_name(try_node: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    let mut try_cursor = try_node.walk();
+    for child in try_node.named_children(&mut try_cursor) {
+        if child.kind() != "catch_clause" {
+            continue;
+        }
+        let mut clause_cursor = child.walk();
+        for sub in child.named_children(&mut clause_cursor) {
+            if sub.kind() != "catch_declaration" {
+                continue;
+            }
+            // The `name` field is the binding identifier; the `type`
+            // field is the exception type.
+            if let Some(name_node) = sub.child_by_field_name("name") {
+                return Some(node_text(&name_node, src).trim().to_string());
+            }
+            // Fallback: rightmost named identifier after the type.
+            let mut pcur = sub.walk();
+            let mut last_ident: Option<tree_sitter::Node<'_>> = None;
+            for n in sub.named_children(&mut pcur) {
+                if n.kind() == "identifier" {
+                    last_ident = Some(n);
+                }
+            }
+            if let Some(n) = last_ident {
+                return Some(node_text(&n, src).trim().to_string());
             }
         }
     }

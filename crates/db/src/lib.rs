@@ -12,6 +12,7 @@ use bonsai_abstract_interp::{run_entry, RawTrace, TraceLimits};
 use bonsai_cfg::{build_cfg_from_flow, Cfg};
 use bonsai_common::{FileId, FuncId, SymbolId};
 use bonsai_diagnostics::DiagnosticSink;
+use bonsai_idg::IdgQueryService;
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AdapterContext, DeclIndex, DynAdapter, ImportIndex, ImportSpec, LanguageRegistry};
 use bonsai_parser::{ParseError, ParsedFile, ParserCache, ParserOptions};
@@ -43,6 +44,14 @@ struct DbInner {
     /// `AdapterContext.workspace_root` to derive workspace-relative
     /// module paths (semantic-identity contract).
     workspace_root: RwLock<Option<std::path::PathBuf>>,
+    /// Workspace-wide IDG query service. Seeded by the workspace at
+    /// open/index time via [`AnalyzerDb::set_idg_service`]. Consumers
+    /// (value-flow, security analysis, browse, dump, export, inspect)
+    /// fetch the service via [`AnalyzerDb::idg_service`] and run their
+    /// dataflow queries against it instead of repeatedly invoking the
+    /// per-source interprocedural taint engine. Cleared on file edit
+    /// because cross-file edges may have shifted.
+    idg_service: RwLock<Option<Arc<IdgQueryService>>>,
 }
 
 #[derive(Default)]
@@ -97,6 +106,7 @@ impl AnalyzerDb {
                 parser: ParserCache::with_options(parser_options),
                 cache: RwLock::new(Caches::default()),
                 workspace_root: RwLock::new(None),
+                idg_service: RwLock::new(None),
             }),
         }
     }
@@ -112,6 +122,28 @@ impl AnalyzerDb {
     /// workspaces opened without a root (adapter unit tests).
     pub fn workspace_root(&self) -> Option<std::path::PathBuf> {
         self.inner.workspace_root.read().clone()
+    }
+
+    /// Seed the workspace-wide IDG query service. Called by
+    /// [`bonsai_workspace::Workspace`] at open / index time once the
+    /// global index and resolved call graph are in place. Consumers
+    /// then fetch the service via [`Self::idg_service`].
+    pub fn set_idg_service(&self, service: Arc<IdgQueryService>) {
+        *self.inner.idg_service.write() = Some(service);
+    }
+
+    /// Workspace-wide IDG query service, if seeded. Consumers should
+    /// fall back to legacy per-source engine paths when this returns
+    /// `None` (only happens in adapter / unit tests that bypass the
+    /// workspace open path).
+    pub fn idg_service(&self) -> Option<Arc<IdgQueryService>> {
+        self.inner.idg_service.read().clone()
+    }
+
+    /// Drop the cached IDG service. Called by the workspace on file
+    /// edit so a stale service cannot poison subsequent queries.
+    pub fn invalidate_idg_service(&self) {
+        *self.inner.idg_service.write() = None;
     }
 
     /// Underlying VFS handle. Use this when extracting raw file
@@ -192,6 +224,8 @@ impl AnalyzerDb {
         let value = Arc::new(self.adapter_context_with(|ctx| {
             let mut index = adapter.extract_declarations(file, ctx);
             bonsai_lang_api::apply_call_receiver_types(&mut index);
+            bonsai_lang_api::apply_assign_value_kind(&mut index);
+            bonsai_lang_api::apply_assign_call_result_types(&mut index);
             index
         }));
         let mut cache = self.inner.cache.write();

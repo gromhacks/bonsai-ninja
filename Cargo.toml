@@ -45,6 +45,8 @@ members = [
     "crates/adapters",
     "crates/cli",
     "crates/security",
+    "crates/factstore",
+    "crates/idg",
 ]
 
 [workspace.package]
@@ -74,7 +76,10 @@ bitflags = "2"
 rayon = "1"
 regex = "1"
 bincode = { version = "1", features = [] }
+crossbeam-channel = "0.5"
 ignore = "0.4"
+lru = "0.12"
+tempfile = "3"
 
 # CLI / frontends
 clap = { version = "4", features = ["derive", "env"] }
@@ -131,6 +136,8 @@ bonsai_lang_erlang = { path = "crates/lang_erlang" }
 bonsai_lang_solidity = { path = "crates/lang_solidity" }
 bonsai_adapters = { path = "crates/adapters" }
 bonsai_security = { path = "crates/security" }
+bonsai_factstore = { path = "crates/factstore" }
+bonsai_idg = { path = "crates/idg" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
