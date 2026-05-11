@@ -2650,6 +2650,136 @@ fn lineage_records_for_trace_id(records: &[TaintedCallEdge], trace_id: u64) -> O
     Some(lineage)
 }
 
+/// Replace the lineage-walk chain with a path that minimises the
+/// number of synthetic-edge hops (Phase 3c field-flow stitches,
+/// Phase 3d receiver-method propagation, Return back-edges — all
+/// sentinel `arg_idx == usize::MAX`). Only fires when the alternative
+/// strictly reduces synthetic-edge count AND covers at least as many
+/// distinct functions. Otherwise the original chain is returned.
+fn rewrite_chain_with_canonical_path(
+    primary: Vec<FuncId>,
+    all_records: &[TaintedCallEdge],
+    source_func: FuncId,
+    terminal_func: FuncId,
+) -> Vec<FuncId> {
+    let primary_synth = chain_synth_count(&primary, all_records);
+    if primary_synth == 0 {
+        return primary;
+    }
+    let Some(alt) = best_chain_through_real_edges(all_records, source_func, terminal_func) else {
+        return primary;
+    };
+    // Reject degenerate alternatives (shorter than primary).
+    if alt.len() < primary.len() {
+        return primary;
+    }
+    let alt_synth = chain_synth_count(&alt, all_records);
+    let primary_real = primary.len().saturating_sub(1).saturating_sub(primary_synth);
+    let alt_real = alt.len().saturating_sub(1).saturating_sub(alt_synth);
+    // Prefer chain with more real hops (more informative call
+    // sequence). On ties, prefer fewer synthetic hops. On further
+    // ties, keep the primary (parent_trace_id-derived chain).
+    let alt_is_better = alt_real > primary_real
+        || (alt_real == primary_real && alt_synth < primary_synth);
+    if alt_is_better {
+        alt
+    } else {
+        primary
+    }
+}
+
+fn chain_synth_count(chain: &[FuncId], all_records: &[TaintedCallEdge]) -> usize {
+    fn is_synthetic(rec: &TaintedCallEdge) -> bool {
+        rec.tainted_args
+            .first()
+            .map(|a| a.index == usize::MAX || a.index == 255)
+            .unwrap_or(false)
+    }
+    let mut count = 0;
+    for window in chain.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        let mut found_any = false;
+        let mut found_real = false;
+        for r in all_records {
+            if r.caller == a && r.callee == b {
+                found_any = true;
+                if !is_synthetic(r) {
+                    found_real = true;
+                    break;
+                }
+            }
+        }
+        if found_any && !found_real {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Search `all_records` for a path from `source_func` to
+/// `terminal_func` whose chain-quality score is best (lowest).
+/// Score = `100 * synthetic_hops − real_hops` — fewer synthetic
+/// edges wins outright; on ties, MORE real hops wins (longer chain
+/// is more informative when the synth count matches). Cap the
+/// search at `MAX_HOPS` per path so degenerate fanouts don't
+/// blow up the heap.
+fn best_chain_through_real_edges(
+    all_records: &[TaintedCallEdge],
+    source_func: FuncId,
+    terminal_func: FuncId,
+) -> Option<Vec<FuncId>> {
+    const MAX_HOPS: usize = 16;
+    fn is_synthetic(rec: &TaintedCallEdge) -> bool {
+        rec.tainted_args
+            .first()
+            .map(|a| a.index == usize::MAX || a.index == 255)
+            .unwrap_or(false)
+    }
+    fn score(synth: u32, real: u32) -> i64 {
+        100i64 * (synth as i64) - (real as i64)
+    }
+    let mut adj: AHashMap<FuncId, Vec<(FuncId, bool)>> = AHashMap::default();
+    for r in all_records {
+        adj.entry(r.caller).or_default().push((r.callee, is_synthetic(r)));
+    }
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    // State: (score, synth, real, path). Pop lowest score first.
+    let mut heap: BinaryHeap<Reverse<(i64, u32, u32, Vec<FuncId>)>> = BinaryHeap::new();
+    heap.push(Reverse((score(0, 0), 0, 0, vec![source_func])));
+    let mut best_score: AHashMap<FuncId, i64> = AHashMap::default();
+    best_score.insert(source_func, score(0, 0));
+    while let Some(Reverse((s, synth, real, path))) = heap.pop() {
+        let cur = *path.last().unwrap();
+        if cur == terminal_func && path.len() > 1 {
+            return Some(path);
+        }
+        if path.len() >= MAX_HOPS {
+            continue;
+        }
+        if best_score.get(&cur).copied().unwrap_or(i64::MAX) < s {
+            continue;
+        }
+        let Some(neighbors) = adj.get(&cur) else { continue };
+        for &(next_f, is_synth) in neighbors {
+            if path.contains(&next_f) {
+                continue;
+            }
+            let next_synth = synth + if is_synth { 1 } else { 0 };
+            let next_real = real + if is_synth { 0 } else { 1 };
+            let next_score = score(next_synth, next_real);
+            if best_score.get(&next_f).copied().unwrap_or(i64::MAX) <= next_score {
+                continue;
+            }
+            best_score.insert(next_f, next_score);
+            let mut next_path = path.clone();
+            next_path.push(next_f);
+            heap.push(Reverse((next_score, next_synth, next_real, next_path)));
+        }
+    }
+    None
+}
+
 fn chain_funcs_for_lineage(
     records: &[&TaintedCallEdge],
     source_func: FuncId,
@@ -3570,9 +3700,29 @@ where
                         }
                     }
                     let lineage_records = lineage_records_for_call(&graph.call_records, call);
-                    let lineage_chain = lineage_records
-                        .as_ref()
-                        .and_then(|records| chain_funcs_for_lineage(records, src_func_id, call.caller));
+                    let lineage_chain = lineage_records.as_ref().and_then(|records| {
+                        let primary =
+                            chain_funcs_for_lineage(records, src_func_id, call.caller)?;
+                        // Chain-quality upgrade: when the lineage walk
+                        // anchored on `parent_trace_id` goes through
+                        // synthetic edges (Phase 3c field-flow stitches,
+                        // Phase 3d receiver-method propagation, or
+                        // Return back-edges — all sentinel
+                        // `arg_idx == usize::MAX`), search the full
+                        // record set for an alternative path that has
+                        // fewer synthetic hops while covering at least
+                        // as many distinct functions. Picks the
+                        // canonical call sequence over data-flow
+                        // detours (e.g. Java
+                        // `handle → orchestrate → persist → run` over
+                        // `handle → orchestrate → cmd → run`).
+                        Some(rewrite_chain_with_canonical_path(
+                            primary,
+                            &graph.call_records,
+                            src_func_id,
+                            call.caller,
+                        ))
+                    });
                     let (Some(records), Some(chain_funcs)) = (lineage_records.as_ref(), lineage_chain) else {
                         continue;
                     };
