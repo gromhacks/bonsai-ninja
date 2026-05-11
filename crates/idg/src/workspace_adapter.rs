@@ -802,29 +802,29 @@ fn stitch_receiver_method_propagation(
                                 0,
                                 0,
                             ));
+                        // Super-chain pick: if the callee delegates
+                        // via `super` and an ancestor's method has
+                        // the actual body (field reads), emit ONE
+                        // link to the DEEPEST ancestor with real
+                        // body. The cross-call edge then renders the
+                        // canonical chain through the parent's
+                        // method (e.g. Ruby's
+                        // `persist → Repository.run` instead of
+                        // `persist → AuditedRepository.run` which
+                        // just delegates). Keeping a single link
+                        // avoids multiplying the finding count
+                        // (one finding per chain shape).
+                        let reader_func = super_chain_funcs
+                            .last()
+                            .copied()
+                            .unwrap_or(callee);
                         ws.field_flow_mut().push(crate::workspace::FieldFlowLink {
                             writer: caller,
-                            reader: callee,
+                            reader: reader_func,
                             writer_ws_node: recv_ws.0,
                             reader_ws_node: read_nodes.first().map(|w| w.0).unwrap_or(0),
                             via_span: recv_span,
                         });
-                        // Super-chain ancestors also receive the
-                        // tainted receiver. Emit a field_flow link
-                        // per ancestor so the chain renderer surfaces
-                        // the canonical super-resolved sequence
-                        // (e.g. Ruby `persist → AuditedRepository.run
-                        // → Repository.run` instead of just
-                        // `persist → AuditedRepository.run`).
-                        for ancestor_func in &super_chain_funcs {
-                            ws.field_flow_mut().push(crate::workspace::FieldFlowLink {
-                                writer: caller,
-                                reader: *ancestor_func,
-                                writer_ws_node: recv_ws.0,
-                                reader_ws_node: read_nodes.first().map(|w| w.0).unwrap_or(0),
-                                via_span: recv_span,
-                            });
-                        }
                         emitted_link_for_call = true;
                     }
                 }

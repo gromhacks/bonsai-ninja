@@ -68,14 +68,29 @@ EXPECTED_FINDINGS = {
     "lua": 3,
     "objc": 2,
     "perl": 3,
-    "php": 2,
+    # PHP: readline → shell_exec via the canonical
+    # `handle_request → orchestrate → persist → run → execute`
+    # chain (resolved through `Foo::wrap($x)->run`-style chained-
+    # method names once `bare_decl_name`'s `->` handling lets the
+    # IDG resolver match the trailing `run`), readline → echo XSS
+    # in `__module__`, and the inferred entry-point chain into the
+    # wrap/cmd/run cycle.
+    "php": 3,
     # Python reports the real command-injection/data-return rows
     # plus inferred entry-point rows on callable hops that
     # directly forward into os.system, expanded by anchor-aware
     # per-rule-match chains and cycle-collapsing chain
     # attribution.
     "python": 14,
-    "ruby": 2,
+    # Ruby: the bytes-blob-param `wrap → cmd → run → execute` chain,
+    # the inferred-entrypoint `initialize → cmd → run → execute` chain,
+    # the canonical `handle_request → orchestrate → persist → run →
+    # execute` chain from the stdin-gets source (surfaced after Phase
+    # 3d super-chain enrichment threaded `AuditedRepository.run`'s
+    # bare `super` delegation into `Repository.run`'s field-read body),
+    # and an inferred-entrypoint chain through the module-level
+    # `<lambda@22:22>` JOINER closure reaching the same execute sink.
+    "ruby": 4,
     # Solidity reports the external-call-data reentrancy path,
     # msg.sender/calldata event payload flows, and derived event
     # length payload flows from the same handle path.

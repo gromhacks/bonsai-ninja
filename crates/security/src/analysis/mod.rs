@@ -2765,8 +2765,8 @@ fn best_chain_through_real_edges(
             if path.contains(&next_f) {
                 continue;
             }
-            let next_synth = synth + if is_synth { 1 } else { 0 };
-            let next_real = real + if is_synth { 0 } else { 1 };
+            let next_synth = synth + u32::from(is_synth);
+            let next_real = real + u32::from(!is_synth);
             let next_score = score(next_synth, next_real);
             if best_score.get(&next_f).copied().unwrap_or(i64::MAX) <= next_score {
                 continue;
