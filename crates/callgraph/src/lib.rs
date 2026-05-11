@@ -821,27 +821,19 @@ fn collect_local_callable_bindings_into(
 ///
 /// Per `docs/contributing/design-patterns.mdx::Semantic Resolution Always`,
 /// resolution narrows by the caller's `Visibility` / `module_path`
-/// context. This is what prevents the canonical cross-TU
-/// regression: hiredis's `static error()` and Lua's
-/// `static error()` no longer collide on bare name because each
-/// is `Visibility::Private` and the resolver filters by
-/// `decl_file == caller_file`. Returns `None` (sound under-
-/// approximation) when no candidate matches the caller's scope.
-fn resolve_callable_symbol(
-    global: &GlobalIndex,
-    raw: &str,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-) -> Option<FuncId> {
-    resolve_callable_symbol_with_alias_index(global, raw, caller_decl, alias_targets, None)
-}
-
-/// Same as [`resolve_callable_symbol`] but threads a precomputed
-/// [`WorkspaceAliasIndex`] for the `Type::method` short-tail gate.
-/// `build_with_file_info` builds the index once at the start of the
-/// callgraph pass and passes `Some(&idx)`; standalone callers (legacy
-/// taint engine, individual `dump-resolve` lookups) pass `None` and
-/// pay the O(decls) scan that the helper falls back to.
+/// context. This is what prevents the canonical cross-TU regression
+/// where hiredis's `static error()` and Lua's `static error()`
+/// collide on bare name — each is `Visibility::Private` and the
+/// resolver filters by `decl_file == caller_file`. Returns `None`
+/// (sound under-approximation) when no candidate matches the caller's
+/// scope.
+///
+/// `alias_index` is a precomputed [`WorkspaceAliasIndex`] for the
+/// `Type::method` short-tail gate. `build_with_file_info` builds the
+/// index once at the start of the callgraph pass and passes
+/// `Some(&idx)`; standalone callers (legacy taint engine, individual
+/// `dump-resolve` lookups) pass `None` and pay the O(decls) scan that
+/// the helper falls back to.
 fn resolve_callable_symbol_with_alias_index(
     global: &GlobalIndex,
     raw: &str,
