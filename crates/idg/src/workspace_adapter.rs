@@ -390,6 +390,12 @@ fn names_match_for_callee(decl_name: &str, event_name: &str) -> bool {
         return true;
     }
     let mut tail = event_name;
+    // Strip PHP-style instance-method-chain prefix (`Foo::wrap($x)->run`
+    // → `run`). The `->` separator doesn't fall through the
+    // `.`/`:` split below, so check it first.
+    if let Some(idx) = tail.rfind("->") {
+        tail = &tail[idx + 2..];
+    }
     if let Some((_head, rest)) = tail.rsplit_once(|c: char| c == '.' || c == ':') {
         tail = rest;
     }
@@ -725,6 +731,39 @@ fn stitch_receiver_method_propagation(
                     read_nodes.push(*n);
                 }
             }
+            // Super-chain enrichment: if the callee's body is a thin
+            // override that delegates via `super` / `super()` (Ruby's
+            // bare-`super` keyword, Java/C# `super.method()`, etc.),
+            // its own read_nodes can be empty even though the actual
+            // method body lives in a parent class. Fold in read_nodes
+            // from same-name methods of ancestor classes so the
+            // receiver-bridge from the caller still bridges to a
+            // field read somewhere in the inheritance chain. We also
+            // track which ancestor funcs contributed so the
+            // field_flow link emission below records them as
+            // additional readers — that way the cross_call_edges_in_closure
+            // pass emits caller→ancestor-callee edges too, so the
+            // chain renderer surfaces the canonical super-resolved
+            // call sequence.
+            let delegates = callee_body_delegates_via_super(global, callee);
+            let mut super_chain_funcs: Vec<FuncId> = Vec::new();
+            if read_nodes.is_empty() || delegates {
+                let extras = collect_super_chain_read_nodes_and_funcs(
+                    ws,
+                    global,
+                    callee,
+                    &class_by_name,
+                    &field_names,
+                );
+                for (n, f) in extras {
+                    if !read_nodes.contains(&n) {
+                        read_nodes.push(n);
+                    }
+                    if !super_chain_funcs.contains(&f) && f != callee {
+                        super_chain_funcs.push(f);
+                    }
+                }
+            }
             if read_nodes.is_empty() {
                 continue;
             }
@@ -770,6 +809,22 @@ fn stitch_receiver_method_propagation(
                             reader_ws_node: read_nodes.first().map(|w| w.0).unwrap_or(0),
                             via_span: recv_span,
                         });
+                        // Super-chain ancestors also receive the
+                        // tainted receiver. Emit a field_flow link
+                        // per ancestor so the chain renderer surfaces
+                        // the canonical super-resolved sequence
+                        // (e.g. Ruby `persist → AuditedRepository.run
+                        // → Repository.run` instead of just
+                        // `persist → AuditedRepository.run`).
+                        for ancestor_func in &super_chain_funcs {
+                            ws.field_flow_mut().push(crate::workspace::FieldFlowLink {
+                                writer: caller,
+                                reader: *ancestor_func,
+                                writer_ws_node: recv_ws.0,
+                                reader_ws_node: read_nodes.first().map(|w| w.0).unwrap_or(0),
+                                via_span: recv_span,
+                            });
+                        }
                         emitted_link_for_call = true;
                     }
                 }
@@ -897,6 +952,143 @@ fn collect_field_read_nodes(
 /// load-bearing for the mega_flow chains; the worst-case over-link
 /// only propagates taint into fields the IDG can prove exist, so
 /// the practical inflation is bounded.
+/// True when `callee`'s body delegates via `super` / `super()` —
+/// the body either contains a `FlowEvent::Call { name: "super"|... }`
+/// event OR is essentially empty (no field reads, no recv slots) and
+/// inherits a same-name method from a base class. Used by Phase 3d
+/// to fold ancestor `read_nodes` into the override's bridge set.
+fn callee_body_delegates_via_super(global: &GlobalIndex, callee: FuncId) -> bool {
+    use bonsai_lang_api::FlowEvent;
+    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
+        return false;
+    };
+    fn walk(events: &[FlowEvent]) -> bool {
+        for e in events {
+            match e {
+                FlowEvent::Call { name, receiver, .. } => {
+                    if name == "super"
+                        || name.starts_with("super.")
+                        || name.starts_with("super(")
+                        || name.starts_with("super::")
+                        || receiver.as_deref() == Some("super")
+                    {
+                        return true;
+                    }
+                }
+                FlowEvent::Return { value_text, value_name, .. } => {
+                    if value_name.as_deref() == Some("super")
+                        || value_text
+                            .as_deref()
+                            .map(|s| {
+                                let t = s.trim();
+                                t == "super" || t.starts_with("super") && !t.contains(|c: char| c.is_ascii_alphanumeric() && c != 's' && c != 'u' && c != 'p' && c != 'e' && c != 'r')
+                            })
+                            .unwrap_or(false)
+                    {
+                        return true;
+                    }
+                }
+                FlowEvent::Branch { then_events, else_events, .. } => {
+                    if walk(then_events) || walk(else_events) {
+                        return true;
+                    }
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => {
+                    if walk(body) {
+                        return true;
+                    }
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if walk(body) || walk(catch_events) || walk(finally_events) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    walk(&decl.flow_events)
+}
+
+/// Collect `read_nodes` from every ancestor class's method of the
+/// same name as `callee`. The caller of `callee` may have only the
+/// override in its callgraph adjacency, but the actual taint flow
+/// reaches the parent body via `super`. Walks `decl.bases`
+/// transitively.
+fn collect_super_chain_read_nodes_and_funcs(
+    ws: &IdgWorkspace,
+    global: &GlobalIndex,
+    callee: FuncId,
+    class_by_name: &ahash::AHashMap<String, bonsai_common::SymbolId>,
+    field_names: &ahash::AHashSet<String>,
+) -> Vec<(crate::WsNodeId, FuncId)> {
+    let Some(callee_decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
+        return Vec::new();
+    };
+    let Some(parent_sym) = callee_decl.parent else {
+        return Vec::new();
+    };
+    let method_name = callee_decl.name.clone();
+    let mut out: Vec<(crate::WsNodeId, FuncId)> = Vec::new();
+    let mut visited: ahash::AHashSet<bonsai_common::SymbolId> = ahash::AHashSet::default();
+    visited.insert(parent_sym);
+    let mut frontier: Vec<bonsai_common::SymbolId> = Vec::new();
+    if let Some(parent_decl) = global.decl_of(parent_sym) {
+        for base_name in &parent_decl.bases {
+            if let Some(&base_sym) = class_by_name.get(base_name.as_str()) {
+                if visited.insert(base_sym) {
+                    frontier.push(base_sym);
+                }
+            }
+        }
+    }
+    while let Some(class_sym) = frontier.pop() {
+        // For every method in this class with the same name as
+        // `callee`, fold in its read_nodes.
+        for file in global.all_files() {
+            for decl in global.decls_in(file) {
+                if decl.parent != Some(class_sym) {
+                    continue;
+                }
+                if decl.name != method_name {
+                    continue;
+                }
+                let other = FuncId::new(decl.symbol.raw());
+                let mut nodes = collect_field_read_nodes(ws, other, field_names);
+                let recv = collect_recv_slot_nodes(ws, global, other);
+                for n in recv {
+                    if !nodes.contains(&n) {
+                        nodes.push(n);
+                    }
+                }
+                for n in nodes {
+                    if !out.iter().any(|(existing_n, _)| *existing_n == n) {
+                        out.push((n, other));
+                    }
+                }
+            }
+        }
+        if let Some(class_decl) = global.decl_of(class_sym) {
+            for base_name in &class_decl.bases {
+                if let Some(&base_sym) = class_by_name.get(base_name.as_str()) {
+                    if visited.insert(base_sym) {
+                        frontier.push(base_sym);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 fn collect_recv_slot_nodes(
     ws: &IdgWorkspace,
     global: &GlobalIndex,
@@ -1031,9 +1223,15 @@ fn bare_class_name(name: &str) -> &str {
 /// `method`). Mirrors `bonsai_callgraph::short_callee` semantics
 /// without the dependency cycle.
 fn bare_decl_name(name: &str) -> &str {
-    name.rsplit_once(|c: char| c == '.' || c == ':' || c == '\\')
+    let mut s = name;
+    // Strip PHP-style instance-method-chain suffix prefix
+    // (`Foo::wrap($x)->run` → `run`).
+    if let Some(idx) = s.rfind("->") {
+        s = &s[idx + 2..];
+    }
+    s.rsplit_once(|c: char| c == '.' || c == ':' || c == '\\')
         .map(|(_, tail)| tail)
-        .unwrap_or(name)
+        .unwrap_or(s)
 }
 
 /// Walk `events`, find every `FlowEvent::Call` whose callee name
