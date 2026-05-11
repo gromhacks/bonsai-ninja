@@ -560,6 +560,38 @@ where
             }
         }
     }
+    // Function-pointer / closure aliasing: when a decl's body
+    // contains `let f = some_func;` and later calls `f(...)`, the
+    // adapter records the call's `name` as `"f"`. The resolved
+    // callgraph already adds the edge through `local_bindings`, but
+    // the IDG `WorkspaceCalleeResolver.resolve` matches by callee
+    // name and would reject `f` against the decl name `some_func`.
+    // Mirror the alias-rename treatment: every local binding
+    // surfaced anywhere in the workspace contributes its lhs as an
+    // additional call-name for the callable's FuncId.
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if !matches!(
+                decl.kind,
+                bonsai_lang_api::DeclKind::Function
+                    | bonsai_lang_api::DeclKind::Method
+                    | bonsai_lang_api::DeclKind::Constructor
+            ) {
+                continue;
+            }
+            let bindings = bonsai_callgraph::collect_local_callable_bindings(
+                &decl.flow_events,
+                global,
+                decl,
+            );
+            for (alias, func) in bindings {
+                let entry = func_to_call_names.entry(func).or_default();
+                if !entry.contains(&alias) {
+                    entry.push(alias);
+                }
+            }
+        }
+    }
     let resolver = WorkspaceCalleeResolver {
         call_graph,
         func_to_name: &maps.func_to_name,

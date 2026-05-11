@@ -1298,7 +1298,35 @@ pub fn entry_taint_graph_from_idg(
         }
     }
     tainted_calls.extend(write_tainted_calls);
-    tainted_calls.sort_by_key(|c| (c.caller.raw(), c.call_span.start, c.call_span.end));
+    // Sort key: (caller, evidence_rank, span_start, span_end).
+    // `evidence_rank` puts the kind that carries concrete
+    // `tainted_args` BEFORE the synthetic kinds that don't, so when
+    // multiple tainted-calls overlap a sink span (e.g. a `Return`
+    // synthetic at the surrounding `return os.system(x)` statement
+    // and the inner `Call` to `os.system`), the dedup pass at the
+    // security-analysis layer picks the Call as the lineage anchor
+    // and surfaces `arg[0] x` instead of "tainted value".
+    fn evidence_rank(c: &crate::inter::TaintedCall) -> u8 {
+        match c.kind {
+            crate::inter::TaintedCallKind::Call => 0,
+            crate::inter::TaintedCallKind::Write => 1,
+            crate::inter::TaintedCallKind::Return => 2,
+        }
+    }
+    tainted_calls.sort_by(|a, b| {
+        (
+            a.caller.raw(),
+            evidence_rank(a),
+            a.call_span.start,
+            a.call_span.end,
+        )
+            .cmp(&(
+                b.caller.raw(),
+                evidence_rank(b),
+                b.call_span.start,
+                b.call_span.end,
+            ))
+    });
     graph.call_records = call_records;
     graph.tainted_calls = tainted_calls;
     graph.precision = worst;
