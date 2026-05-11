@@ -104,6 +104,7 @@ fn summary_decl(flow_events: Vec<FlowEvent>, has_implicit_returns: bool) -> Decl
         receiver_field_writes: Vec::new(),
         implicit_receiver_names: Vec::new(),
         receiver_state_sources: Vec::new(),
+        return_type: None,
     }
 }
 
@@ -116,6 +117,8 @@ fn terminal_assign_return_taint_requires_adapter_implicit_return_fact() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: Vec::new(),
+            declares_new_binding: false,
+        value_kind: None,
     }];
 
     let explicit_only = compute_function_summary(&summary_decl(flow_events.clone(), false));
@@ -362,6 +365,8 @@ fn assignment_guard_preserves_direct_carrier_taint_next_to_qualified_access() {
             "value".to_string(),
             "value.toUpperCase".to_string(),
         ],
+            declares_new_binding: false,
+        value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
     assert!(
@@ -380,6 +385,8 @@ fn assignment_guard_preserves_direct_sigil_alias_source() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: vec!["$_GET".to_string(), "$_GET.cmd".to_string(), "_GET".to_string()],
+            declares_new_binding: false,
+        value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
     assert!(
@@ -398,6 +405,8 @@ fn assignment_guard_rejects_direct_carrier_field_read() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: vec!["c".to_string(), "c.capacity".to_string(), "capacity".to_string()],
+            declares_new_binding: false,
+        value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
     assert!(
@@ -416,6 +425,8 @@ fn assignment_guard_still_rejects_sibling_field_promotion() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: vec!["data".to_string(), "data.other".to_string()],
+            declares_new_binding: false,
+        value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
     assert!(
@@ -613,6 +624,8 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
             source_call: Some("format".to_string()),
             source_call_args: Vec::new(),
             source_names: vec!["cmd".to_string()],
+                    declares_new_binding: false,
+            value_kind: None,
         },
         FlowEvent::Call {
             span: sink_span,
@@ -667,6 +680,8 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
             source_call: Some("String::new".to_string()),
             source_call_args: Vec::new(),
             source_names: vec!["String".to_string(), "new".to_string()],
+                    declares_new_binding: false,
+            value_kind: None,
         },
         FlowEvent::Assign {
             span: source_assign_span,
@@ -675,6 +690,8 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
             source_call: Some("stdin.lock().read_line".to_string()),
             source_call_args: vec!["&mut raw".to_string()],
             source_names: vec!["raw".to_string(), "stdin.lock().read_line".to_string()],
+                    declares_new_binding: false,
+            value_kind: None,
         },
         FlowEvent::Call {
             span: source_call_span,
@@ -691,6 +708,8 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: vec!["raw.trim".to_string()],
+                    declares_new_binding: false,
+            value_kind: None,
         },
         FlowEvent::Call {
             span: sink_span,
@@ -1289,6 +1308,8 @@ fn try_body_throws_tainted_via_assigned_then_raised() {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: vec!["cmd".to_string()],
+                    declares_new_binding: false,
+            value_kind: None,
         },
         FlowEvent::Throw {
             span,

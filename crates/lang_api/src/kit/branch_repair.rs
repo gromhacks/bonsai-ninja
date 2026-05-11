@@ -175,6 +175,8 @@ fn synthesize_first_else_assignment(
         source_call: None,
         source_call_args: Vec::new(),
         source_names: rhs_identifiers,
+        declares_new_binding: false,
+        value_kind: None,
     })
 }
 

@@ -217,6 +217,18 @@ pub struct Decl {
     /// can follow receiver-field/property reads without engine string hacks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub receiver_state_sources: Vec<String>,
+    /// Adapter-extracted return type for function-shaped decls.
+    /// Populated when the source has an explicit return-type
+    /// annotation (Python `-> T`, TypeScript `: T`, Rust `-> T`,
+    /// Java/C# return type, Kotlin `: T`, Swift `-> T`, Go return
+    /// type, Scala `: T`, Solidity `returns (T)`). Empty for
+    /// languages without explicit return types or when the
+    /// adapter hasn't been updated. The `apply_assign_call_result_types`
+    /// pass uses this to propagate the type onto the LHS of
+    /// `let y = f()` so subsequent `y.method()` calls resolve
+    /// against `T`'s methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,6 +334,27 @@ pub enum FlowEvent {
         /// expressions without requiring explicit AST evaluation.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         source_names: Vec<String>,
+        /// True when this assignment is a new local binding
+        /// (`let`/`var`/`val`/`const`/`my`/`our`/`local`/Python
+        /// first-assignment, etc.). Phase-2 scope-aware bindings
+        /// uses this to detect shadowing — a `let x` inside a
+        /// nested block introduces a fresh name binding rather
+        /// than mutating an outer `x`. Adapters set this when the
+        /// CST node-kind is unambiguously a declaration; for
+        /// re-assignments (`x = …` without a declaration keyword)
+        /// the field stays `false`. Default `false` keeps
+        /// pre-Phase-2 behaviour for adapters that haven't been
+        /// updated yet.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        declares_new_binding: bool,
+        /// Optional shape classification of the RHS for
+        /// Phase-5 constant-propagation. `None` keeps prior
+        /// behaviour (engine treats the RHS as `Unknown`).
+        /// `Some(AssignValueKind::Literal)` lets the transfer
+        /// pass skip name-bridging because the RHS doesn't
+        /// reference any tainted carrier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_kind: Option<AssignValueKind>,
     },
     Return {
         span: Span,
@@ -459,6 +492,32 @@ pub enum CallKind {
     Constructor,
     Macro,
     Indirect,
+}
+
+/// Shape classification of an assignment's RHS for Phase-5
+/// const-propagation. The adapter sets this when the CST shape
+/// is unambiguous; the engine uses it to skip name-bridging when
+/// the RHS can't carry taint (`Literal`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignValueKind {
+    /// Pure literal — number, string, boolean, char, null,
+    /// constant enum, array/list of literals. The RHS cannot
+    /// carry taint, so the engine can treat the write as a clean
+    /// overwrite that kills prior writers.
+    Literal,
+    /// RHS is a call expression. Whether it carries taint
+    /// depends on the callee's return-value summary; the engine
+    /// routes through CallRet → Write.
+    CallResult,
+    /// RHS is a compound expression (member access, binary op,
+    /// template literal, ternary, conditional, …). Engine
+    /// tokenises identifiers and bridges every carrier.
+    Compound,
+    /// RHS shape couldn't be classified (or the adapter doesn't
+    /// surface enough info). Engine treats as `Compound` for
+    /// safety.
+    Unknown,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

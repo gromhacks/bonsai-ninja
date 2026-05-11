@@ -199,6 +199,10 @@ impl LanguageAdapter for PythonAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `def f() -> T:` populates
+            // `Decl.return_type`, which `apply_assign_call_result_types`
+            // then propagates onto LHS type_aliases.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let aliases_by_span = collect_python_method_type_aliases(&tree, file, src);
             let param_binders_by_span = collect_python_param_binder_annotations(&tree, file, src);
             for decl in &mut idx.defs {
@@ -375,7 +379,7 @@ fn augment_python_comprehension_flow_events(events: &mut [bonsai_lang_api::FlowE
         match event {
             bonsai_lang_api::FlowEvent::Assign {
                 span, source_names, ..
-            } => {
+                    } => {
                 if let Some(rhs) = python_assignment_rhs_text(source, *span) {
                     for iterable in python_comprehension_iterables(&rhs) {
                         push_python_source_name(source_names, iterable);
@@ -632,6 +636,8 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
                         source_call: None,
                         source_call_args: Vec::new(),
                         source_names,
+                        declares_new_binding: false,
+                        value_kind: None,
                     });
                 }
                 for spread in python_dict_spreads(&rhs) {
@@ -644,7 +650,9 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
                                 source_call: None,
                                 source_call_args: Vec::new(),
                                 source_names: vec![format!("{spread}.{field}")],
-                            });
+                        declares_new_binding: false,
+                        value_kind: None,
+                    });
                             push_python_source_name(known_fields.entry(target.clone()).or_default(), field);
                         }
                     }

@@ -1,0 +1,24 @@
+[package]
+name = "bonsai_factstore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Memory-mapped, content-addressed fact store with workspace-wide string interning"
+
+[dependencies]
+ahash.workspace = true
+bonsai_common.workspace = true
+bonsai_hash.workspace = true
+crossbeam-channel.workspace = true
+lru.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

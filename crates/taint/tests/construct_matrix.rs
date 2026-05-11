@@ -30,6 +30,8 @@ fn assign(target: &str, source: Option<&str>) -> FlowEvent {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
     }
 }
 
@@ -41,6 +43,8 @@ fn assign_sources(target: &str, sources: &[&str]) -> FlowEvent {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: sources.iter().map(|source| (*source).to_string()).collect(),
+        declares_new_binding: false,
+        value_kind: None,
     }
 }
 

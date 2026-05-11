@@ -17,6 +17,7 @@ bonsai_index = { workspace = true }
 bonsai_cfg = { workspace = true }
 bonsai_abstract_interp = { workspace = true }
 bonsai_trace = { workspace = true }
+bonsai_idg = { workspace = true }
 parking_lot = { workspace = true }
 ahash = { workspace = true }
 

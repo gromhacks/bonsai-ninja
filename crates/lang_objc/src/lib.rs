@@ -215,6 +215,16 @@ impl LanguageAdapter for ObjCAdapter {
             // syntax shape.
             tag_objc_alloc_receiver_types(&mut decl.flow_events);
         }
+        // Repair catch-param bindings: the kit's generic extractor
+        // returns the first identifier descendant of `@catch
+        // (NSException *e)`, which is the type — we want the
+        // binding identifier.
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            let src = snapshot.text.as_bytes();
+            for decl in &mut decl_index.defs {
+                fix_objc_catch_params(&mut decl.flow_events, &tree, src);
+            }
+        }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -328,6 +338,99 @@ fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
         }
     }
 }
+
+/// Repair `catch_param` on ObjC `Try` events. The kit's generic
+/// extractor returns the first identifier descendant of `@catch
+/// (NSException *e)`, which is the type identifier. Re-extract the
+/// binding from the `parameter_declaration` → `declarator`
+/// chain.
+fn fix_objc_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree, src: &[u8]) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                ..
+            } => {
+                if let Some(node) = bonsai_lang_api::kit::node_at_span(
+                    tree.root_node(),
+                    *span,
+                    &["try_statement"],
+                ) {
+                    if let Some(name) = objc_catch_param_binding(node, src) {
+                        *catch_param = Some(name);
+                    }
+                }
+                fix_objc_catch_params(body, tree, src);
+                fix_objc_catch_params(catch_events, tree, src);
+                fix_objc_catch_params(finally_events, tree, src);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                fix_objc_catch_params(then_events, tree, src);
+                fix_objc_catch_params(else_events, tree, src);
+            }
+            FlowEvent::Loop { body, .. }
+            | FlowEvent::Defer { body, .. }
+            | FlowEvent::Using { body, .. } => {
+                fix_objc_catch_params(body, tree, src);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn objc_catch_param_binding(try_node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut tcur = try_node.walk();
+    for child in try_node.named_children(&mut tcur) {
+        if child.kind() != "catch_clause" {
+            continue;
+        }
+        // tree-sitter-objc flattens `@catch (T *name)` into a single
+        // `type_name` node that contains both the type and the
+        // identifier. The trailing identifier descendant is the
+        // binding.
+        let mut ccur = child.walk();
+        for sub in child.named_children(&mut ccur) {
+            if !matches!(sub.kind(), "type_name" | "parameter_list" | "parameter_declaration") {
+                continue;
+            }
+            // Walk every descendant; the binding is the last
+            // identifier (after the type).
+            if let Some(text) = last_identifier_text_in_subtree(sub, src) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn last_identifier_text_in_subtree(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut last: Option<Node<'_>> = None;
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if matches!(n.kind(), "identifier" | "field_identifier") {
+            // Pick the rightmost-by-byte identifier.
+            match last {
+                Some(prev) if prev.start_byte() >= n.start_byte() => {}
+                _ => last = Some(n),
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    last.map(|n| node_text(&n, src).trim().to_string())
+}
+
 
 /// Pull the leading `[Class alloc]` / `[Class new]` segment out of
 /// a chained call name like `[Box alloc].initWithP` so the outer

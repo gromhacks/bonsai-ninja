@@ -9,6 +9,8 @@
 use bonsai_common::Span;
 use serde::{Deserialize, Serialize};
 
+pub mod debug;
+
 /// Severity level for a [`Diagnostic`]. Ordered from least to most
 /// urgent; consumers typically filter via `>= Severity::Warning`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

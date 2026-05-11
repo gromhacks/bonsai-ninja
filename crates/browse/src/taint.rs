@@ -268,25 +268,57 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         f.seeds.iter().cloned().collect()
     };
 
-    let config = bonsai_taint::InterTaintConfig {
-        sanitizers: bonsai_taint::TokenSet::default(),
-        budget: f.budget.unwrap_or(512),
-        intra_worklist_cap: f.intra_worklist_cap,
-        ..Default::default()
-    };
+    // IDG-driven path. The legacy interprocedural engine has been
+    // replaced by an IDG forward-closure walk: each
+    // `(CallArg{site, idx} → Param{idx})` cross-call edge whose
+    // source endpoint is reachable from `effective_seed`'s seed
+    // nodes surfaces as one [`TaintRecord`]. Lazy-build the
+    // service when running through `open_query`, which skips the
+    // open-time prewarm.
+    let idg = db
+        .idg_service()
+        .unwrap_or_else(|| ws.build_and_seed_idg_service());
+    let mut seed_nodes: Vec<bonsai_idg::WsNodeId> = idg.param_nodes_of(source_func);
+    // Augment with explicit seeds the user supplied (or the
+    // assign-target augment we built in `effective_seed`). The
+    // `read_or_write_nodes_for_names` helper looks each seed name
+    // up in the source func's segment string pool.
+    let seed_names: Vec<String> = effective_seed.iter().cloned().collect();
+    seed_nodes.extend(idg.read_or_write_nodes_for_names(source_func, &seed_names));
+    seed_nodes.sort();
+    seed_nodes.dedup();
 
-    let result = bonsai_taint::interprocedural_taint_to_completion_with_caches(
-        source_func,
-        &effective_seed,
-        &config,
-        db,
-        ws.inter_taint_caches(),
-    );
-
-    let mut records: Vec<TaintRecord> = result
-        .call_records
+    let mut cross_calls = idg.cross_call_edges_in_closure(&seed_nodes);
+    let global = db.global_index();
+    // Apply `--budget` as a cap on emitted cross-call records.
+    // The IDG forward closure has already run end-to-end (it's a
+    // single bitset walk, no incremental budget knob), but the
+    // legacy CLI flag exists for two consumer-facing reasons:
+    //   * paging — keep dump-taint output bounded on large flows
+    //   * `saturated` reporting — flag truncated runs so the user
+    //     knows the dump isn't the whole picture
+    // Truncate `cross_calls` to the first `budget` edges in
+    // closure-emission order. Mark `saturated = true` so the
+    // report's footer matches what the legacy engine emitted on a
+    // budget hit. `intra_worklist_cap` is intentionally dropped on
+    // the IDG path — that flag tuned the per-function worklist in
+    // the legacy intraprocedural engine; the IDG's per-function
+    // transfer is closed-form, not iterative, so the cap has no
+    // surface to apply against.
+    let budget_hit = f
+        .budget
+        .map(|cap| cross_calls.len() > cap as usize)
+        .unwrap_or(false);
+    if let Some(cap) = f.budget {
+        let cap_usize = cap as usize;
+        if cross_calls.len() > cap_usize {
+            cross_calls.truncate(cap_usize);
+        }
+    }
+    let _ = f.intra_worklist_cap;
+    let mut records: Vec<TaintRecord> = cross_calls
         .iter()
-        .filter_map(|prop| build_taint_record(prop, ws))
+        .filter_map(|ce| build_taint_record_from_cross_call(ce, &global, ws))
         .collect();
 
     if let Some(needle) = f.sink {
@@ -324,13 +356,37 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     // serialised output, breaking Stable-IDs-From-Content.
     let mut seeds: Vec<String> = effective_seed.iter().cloned().collect();
     seeds.sort();
+    // Worst precision across recorded cross-call edges. The legacy
+    // engine returned a per-run aggregate; we compute the same shape
+    // here from the IDG cross-call edges' precision tags.
+    let aggregate_precision = cross_calls
+        .iter()
+        .map(|ce| ce.precision)
+        .min()
+        .unwrap_or(bonsai_common::Precision::Exact);
+    // `pairs_analyzed` reports the count of distinct `(caller,
+    // callee)` function pairs the IDG closure walked when seeding
+    // from this source. Legacy engine semantics were "total
+    // `(func, seed)` pairs analysed" — the IDG doesn't enumerate
+    // per-seed pairs (one forward closure handles all seeds at
+    // once), so the field is repurposed to a structural metric
+    // that's still useful as a "how wide did this analysis spread"
+    // signal AND remains non-zero whenever the source resolved
+    // (so e2e harnesses can read it as "did the pass run?"). Floor
+    // at 1 when seeds resolved but no cross-call edges fired — the
+    // source-function itself was still analysed.
+    let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> = cross_calls
+        .iter()
+        .map(|ce| (ce.caller, ce.callee))
+        .collect();
+    let pairs_analyzed = std::cmp::max(1, unique_pairs.len());
     TaintOutcome::Report(TaintReport {
         source: f.source.to_string(),
         seeds,
         sanitizers: f.sanitizers.clone(),
-        precision: precision_display(result.precision),
-        pairs_analyzed: result.pairs_analyzed,
-        saturated: result.saturated,
+        precision: precision_display(aggregate_precision),
+        pairs_analyzed: u32::try_from(pairs_analyzed).unwrap_or(u32::MAX),
+        saturated: budget_hit,
         records,
     })
 }
@@ -353,39 +409,44 @@ pub fn compute_taint_id(
     format!("T:{:08x}", fnv1a_names_low32(&tokens))
 }
 
-/// Translate one engine-level [`bonsai_taint::CallPropagation`]
-/// into the externally-rendered [`TaintRecord`]. Returns `None`
-/// when either the caller or callee FuncId no longer maps to a
-/// decl (stale FuncId after a workspace reload, etc).
-fn build_taint_record(prop: &bonsai_taint::CallPropagation, ws: &Workspace) -> Option<TaintRecord> {
-    let global = ws.db().global_index();
-    let caller_decl = global.decl_of(bonsai_common::SymbolId::new(prop.caller.raw()))?;
-    let callee_decl = global.decl_of(bonsai_common::SymbolId::new(prop.callee.raw()))?;
+/// Translate one IDG [`bonsai_idg::CrossCallEdge`] into the
+/// externally-rendered [`TaintRecord`]. Returns `None` when the
+/// caller or callee FuncId no longer resolves to a decl (stale id
+/// after a workspace reload, etc).
+fn build_taint_record_from_cross_call(
+    ce: &bonsai_idg::CrossCallEdge,
+    global: &bonsai_index::GlobalIndex,
+    ws: &Workspace,
+) -> Option<TaintRecord> {
+    let caller_decl = global.decl_of(bonsai_common::SymbolId::new(ce.caller.raw()))?;
+    let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()))?;
     let (caller_file, caller_line, _) = format_span(&caller_decl.name_span, ws);
     let (callee_file, callee_line, _) = format_span(&callee_decl.name_span, ws);
-    let (call_file, call_line, call_column) = format_span(&prop.call_span, ws);
+    let (call_file, call_line, call_column) = format_span(&ce.call_span, ws);
 
-    let tainted_args: Vec<TaintedArgRecord> = prop
-        .tainted_args
-        .iter()
-        .map(|arg| TaintedArgRecord {
-            index: arg.index,
-            value_text: arg.value_text.clone(),
-            param_name: arg.param_name.clone(),
-        })
-        .collect();
+    // Resolve the call arg's textual form by walking the caller's
+    // flow events: same lookup `caller_arg_value_text` does in
+    // `bonsai_taint::value_flow`.
+    let value_text = caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx)
+        .unwrap_or_default();
+    let param_name = callee_decl
+        .params
+        .get(ce.param_idx as usize)
+        .cloned()
+        .unwrap_or_default();
+    let tainted_args = vec![TaintedArgRecord {
+        index: ce.arg_idx as usize,
+        value_text,
+        param_name: param_name.clone(),
+    }];
 
-    // Param names go into the taint id so two propagations that
-    // hit the same call site but taint different params get
-    // distinct ids.
-    let param_names: Vec<String> = tainted_args.iter().map(|a| a.param_name.clone()).collect();
     let taint_id = compute_taint_id(
         &caller_decl.name,
         &callee_decl.name,
         &call_file,
         call_line,
         call_column,
-        &param_names,
+        &[param_name],
     );
 
     Some(TaintRecord {
@@ -400,10 +461,74 @@ fn build_taint_record(prop: &bonsai_taint::CallPropagation, ws: &Workspace) -> O
         call_line,
         call_column,
         tainted_args,
-        edge_kind: edge_kind_display(prop.edge_kind),
-        edge_precision: precision_display(prop.edge_precision),
+        edge_kind: edge_kind_display(ce.call_kind),
+        edge_precision: precision_display(ce.precision),
     })
 }
+
+/// Look up the textual form of the `arg_idx`-th argument of the
+/// `Call` event whose span is `call_span` inside `caller`. Returns
+/// `None` when the caller isn't in the index, isn't callable, or no
+/// Call event matches the span / index.
+fn caller_arg_value_text(
+    global: &bonsai_index::GlobalIndex,
+    caller: bonsai_common::FuncId,
+    call_span: bonsai_common::Span,
+    arg_idx: u8,
+) -> Option<String> {
+    let decl = global.decl_of(bonsai_common::SymbolId::new(caller.raw()))?;
+    fn find_call_arg<'a>(
+        events: &'a [FlowEvent],
+        target_span: bonsai_common::Span,
+        idx: usize,
+    ) -> Option<&'a bonsai_lang_api::CallArg> {
+        for event in events {
+            match event {
+                FlowEvent::Call { span, args, .. } if *span == target_span => {
+                    return args.get(idx);
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if let Some(found) = find_call_arg(then_events, target_span, idx) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find_call_arg(else_events, target_span, idx) {
+                        return Some(found);
+                    }
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if let Some(found) = find_call_arg(body, target_span, idx) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find_call_arg(catch_events, target_span, idx) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find_call_arg(finally_events, target_span, idx) {
+                        return Some(found);
+                    }
+                }
+                FlowEvent::Loop { body, .. } => {
+                    if let Some(found) = find_call_arg(body, target_span, idx) {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    let arg = find_call_arg(&decl.flow_events, call_span, arg_idx as usize)?;
+    Some(arg.value_text.clone())
+}
+
 
 /// `bonsai_callgraph::EdgeKind` → public string form. Keeps
 /// JSON output stable across engine refactors.

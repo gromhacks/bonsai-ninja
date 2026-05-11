@@ -211,7 +211,7 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                 source_call_args,
                 source_names,
                 ..
-            } => {
+                    } => {
                 // The walker may not have populated source_call when the
                 // RHS is a plain function-call expression; reconstruct it
                 // textually from the assignment span.
@@ -309,6 +309,8 @@ fn augment_erlang_record_param_patterns(decl: &mut bonsai_lang_api::Decl, src: &
                 source_call: None,
                 source_call_args: Vec::new(),
                 source_names: vec![format!("{param_name}.{field_name}")],
+                declares_new_binding: false,
+                value_kind: None,
             });
         }
     }
@@ -369,6 +371,8 @@ fn augment_erlang_record_flow_events(events: &mut Vec<FlowEvent>, src: &str) {
                         source_call: None,
                         source_call_args: Vec::new(),
                         source_names: erlang_value_source_names(&field_value),
+                        declares_new_binding: false,
+                        value_kind: None,
                     });
                 }
             }

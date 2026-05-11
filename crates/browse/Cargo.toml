@@ -16,6 +16,7 @@ bonsai_index = { workspace = true }
 bonsai_lang_api = { workspace = true }
 bonsai_resolve = { workspace = true }
 bonsai_taint = { workspace = true }
+bonsai_idg = { workspace = true }
 bonsai_workspace = { workspace = true }
 bonsai_inspect = { workspace = true }
 ahash = { workspace = true }

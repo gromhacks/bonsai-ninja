@@ -220,6 +220,15 @@ pub struct ReceiverStatePropagation {
 /// that are pure functions of static AST state. Cache-fill races on
 /// the same key produce identical values (engine purity), so the
 /// "loser" computation is wasted work but never wrong.
+///
+/// **No entry cap.** These caches grow with workspace size; on
+/// extremely large workspaces (millions of functions) their RAM
+/// footprint is non-trivial but the trade — never recompute a
+/// summary you've already paid for — is worth it for analysis
+/// throughput. The per-function output caches (`DataFlowCache`,
+/// `ValueFlowCache`, etc.) are the ones that get the disk-backed
+/// treatment; this cache stays in-memory because every entry is on
+/// the hot path of the engine's worklist.
 #[derive(Debug, Default)]
 pub struct InterTaintCaches {
     aliases_by_file: parking_lot::RwLock<AHashMap<FileId, AHashMap<String, String>>>,
@@ -876,6 +885,7 @@ fn propagate_taint_through_events(
                 source_call_args,
                 source_names,
                 span,
+                ..
             } => {
                 record_tainted_write_event(
                     target,
@@ -1115,7 +1125,7 @@ fn split_call_assignment_event(events: &[FlowEvent], event_index: usize) -> Opti
         source_names,
         span: assign_span,
         ..
-    } = events.get(event_index)?
+                    } = events.get(event_index)?
     else {
         return None;
     };
@@ -1144,6 +1154,8 @@ fn split_call_assignment_event(events: &[FlowEvent], event_index: usize) -> Opti
             source_call: Some(name.to_string()),
             source_call_args: args.iter().map(|arg| arg.value_text.clone()).collect(),
             source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
         })
     };
 
@@ -1179,7 +1191,7 @@ fn split_call_assignment_consumes_all_tainted_sources(event: &FlowEvent, state: 
         source_call_args,
         source_names,
         ..
-    } = event
+                    } = event
     else {
         return false;
     };
@@ -2607,7 +2619,7 @@ fn apply_return_taint(
         source_names,
         span,
         ..
-    } = event
+                    } = event
     else {
         return false;
     };
@@ -3252,7 +3264,7 @@ fn event_at_sink_receives_taint(event: &FlowEvent, sink_span: Span, state: &Toke
             source_names,
             source_call_args,
             ..
-        } if spans_same_site(*span, sink_span) => {
+                    } if spans_same_site(*span, sink_span) => {
             source_name
                 .as_deref()
                 .is_some_and(|src| arg_text_is_tainted(src, state))
@@ -4501,7 +4513,7 @@ fn collect_receiver_type_names_from_events(
                 source_names,
                 span,
                 ..
-            } => {
+                    } => {
                 if call_span.is_some_and(|call_span| span.start > call_span.start) {
                     continue;
                 }
@@ -5092,6 +5104,7 @@ pub(super) fn apply_event_transfer(
             source_call_args,
             source_names,
             span,
+            ..
         } => {
             if target.is_empty() {
                 return;

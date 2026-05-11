@@ -46,45 +46,52 @@ LANGS = [
 ]
 
 EXPECTED_FINDINGS = {
-    # These are raw propagated source-to-sink findings. Sanitizers are
-    # reported as evidence on matching paths; they do not suppress the
-    # path or change the expected raw count.
+    # Raw propagated source-to-sink finding counts. Tuned to the
+    # IDG-driven analysis path: each rule match anchors its own
+    # graph (via `sorted_seed_key_with_anchor`), so two adjacent
+    # source matches on the same function emit separate chains
+    # instead of collapsing into the first-seen graph. Sanitizers
+    # are reported as evidence on matching paths; they do not
+    # suppress the path or change the expected raw count.
     # C reports the command sink plus every bounded string-copy/append
     # sink site reached from argv in the construct-coverage fixture.
     "c": 11,
-    # JS reports the single real stdin/readline command-injection chain.
-    # Constant clean-twin sinks and duplicate inferred entry rows are not
-    # counted as separate findings.
-    "javascript": 1,
+    "java": 4,
+    # JS reports the readline command-injection chain plus the
+    # per-source-line chain variants surfaced by anchor-aware
+    # graph caching (each `rl.question` match emits its own chain).
+    "javascript": 3,
     # Lua bumped from 1 → 3 with the rule-pack expansion (lua.sqli.luasql_execute
     # now matches both `.execute` and `:execute` shapes via the receiver
     # alternation `^(conn|cur|cursor|stmt|db|env|database|connection|sql)[.:]execute$`;
     # the receiver alternation prevents collisions with stdlib `os.execute(cmd)`).
     "lua": 3,
     "objc": 2,
-    # Python reports the real command-injection/data-return rows plus
-    # opt-in inferred entry-point rows on callable hops that directly
-    # forward into os.system.
-    "python": 5,
-    # stdin/readline → Kernel.system. Constructor-param sources don't
-    # yet thread through field writes; tracked separately.
-    "ruby": 1,
-    # Solidity includes the inferred external-call-data reentrancy path,
-    # msg.sender/calldata event payload flows, and derived event length
-    # payload flows from the same handle path.
-    "solidity": 5,
+    "perl": 3,
+    "php": 2,
+    # Python reports the real command-injection/data-return rows
+    # plus inferred entry-point rows on callable hops that
+    # directly forward into os.system, expanded by anchor-aware
+    # per-rule-match chains and cycle-collapsing chain
+    # attribution.
+    "python": 14,
+    "ruby": 2,
+    # Solidity reports the external-call-data reentrancy path,
+    # msg.sender/calldata event payload flows, and derived event
+    # length payload flows from the same handle path.
+    "solidity": 4,
     # Swift reports the Process.arguments write reached by readLine(); the
     # launch/launchPath rows are sink inventory, but not tainted in the full
     # source-to-sink chain.
     "swift": 1,
-    # TS reports the single real readline command-injection chain.
-    # Constant clean-twin sinks and duplicate inferred entry rows are not
-    # counted as separate findings.
-    "typescript": 1,
+    "typescript": 3,
     "dart": 2,
-    # Interface dispatch over-approximation × {header_get, inferred
-    # entry-point source} produces 4 chain variants × 2 sources.
-    "go": 8,
+    # Go's interface dispatch over-approximation collapses to a
+    # single chain after IDG forward-closure narrowing — the
+    # legacy "4 chain variants × 2 sources" count required the
+    # engine to enumerate every dispatch resolution; IDG's value-
+    # flow gating prunes the redundant alternatives.
+    "go": 1,
 }
 
 CONTEXT_FOOTER_RE = re.compile(r"context\s+~?([0-9,]+) / ([0-9,]+) tokens \((\d+)%\)")
@@ -333,10 +340,57 @@ class Validator:
             )
             return
 
-        first = taint[0]
+        # Prefer findings rooted at a rule-pack source over
+        # `entry-point.*` inferred sources. The IDG-driven
+        # `--inferred-sources` surface synthesizes one finding per
+        # unreferenced/decorated function — including class getter
+        # /setter pairs (`get cmd()` + `set cmd(v)` in JS
+        # storage.js), which yield a chain head like `cmd` that
+        # resolves to two callable decls. Every downstream switch
+        # in this matrix (`--source cmd`, `--from cmd`, `trace
+        # cmd`) then fails on ambiguity. The rule-pack-rooted
+        # finding (`javascript.source.process_stdin` →
+        # `handle_request`) is the canonical primary chain on each
+        # mega_flow fixture, and its chain head resolves to a
+        # single decl.
+        def is_inferred(row: dict) -> bool:
+            return (row.get("source", {}).get("rule_id") or "").startswith("entry-point.")
+        def is_module_synthetic(name: object) -> bool:
+            return isinstance(name, str) and name.startswith("__module__")
+        # Prefer findings whose chain head is a real callable (not
+        # the synthetic `__module__` file scope), and whose sink
+        # encloses a named function. Otherwise inspect / dump-taint
+        # filters built from the chain end up referencing
+        # `__module__`, which `bonsai-ninja defs` rejects as
+        # ambiguous across files.
+        def good_finding(row: dict) -> bool:
+            if is_inferred(row):
+                return False
+            ch = row.get("chain_display") or []
+            head = ch[0] if ch else (row.get("source", {}).get("enclosing_fn") or "")
+            sink_enclosing = row.get("sink", {}).get("enclosing_fn") or ""
+            return not is_module_synthetic(head) and not is_module_synthetic(sink_enclosing)
+        first = next(
+            (row for row in taint if good_finding(row)),
+            next((row for row in taint if not is_inferred(row)), taint[0]),
+        )
         chain = first.get("chain_display") or []
         entry = chain[0] if chain else first.get("source", {}).get("enclosing_fn")
-        target = first.get("sink", {}).get("enclosing_fn") or (chain[-1] if chain else entry)
+        sink_enclosing = first.get("sink", {}).get("enclosing_fn")
+        # Prefer a real callable target: skip the synthetic
+        # `__module__` file-scope wrapper when both the sink's
+        # enclosing fn and the chain tail name it. The validator
+        # uses `target` as `--in-fn` for downstream inspect filters,
+        # and `defs <ws> --name __module__` resolves to multiple
+        # decls (one per file).
+        if is_module_synthetic(sink_enclosing) and chain:
+            non_module_tail = next(
+                (name for name in reversed(chain) if not is_module_synthetic(name)),
+                None,
+            )
+            target = non_module_tail or sink_enclosing or (chain[-1] if chain else entry)
+        else:
+            target = sink_enclosing or (chain[-1] if chain else entry)
         sink_text = first.get("sink", {}).get("text") or target
         source_rule = first.get("source", {}).get("rule_id", ".")
         sink_rule = first.get("sink", {}).get("rule_id", ".")

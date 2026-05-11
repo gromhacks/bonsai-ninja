@@ -11,6 +11,7 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FuncId, Precision, Span, SymbolId};
 use bonsai_db::AnalyzerDb;
+use bonsai_idg::IdgQueryService;
 use bonsai_lang_api::DeclKind;
 use serde::{Deserialize, Serialize};
 
@@ -234,6 +235,12 @@ pub fn value_flow_for_function(
 /// Same as `value_flow_for_function`, but threads a caller-provided
 /// `InterTaintCaches` so batch consumers (e.g. a workspace analysis)
 /// can amortise summary computation across many entry functions.
+///
+/// IDG-aware: when the workspace has seeded an [`IdgQueryService`]
+/// onto `db`, the propagation step is satisfied by walking the IDG's
+/// pre-built cross-file edge index instead of running the legacy
+/// per-source engine. The `caches` argument is preserved for the
+/// fallback path; the IDG path ignores it.
 #[must_use]
 pub fn value_flow_for_function_with_caches(
     entry_func: FuncId,
@@ -253,6 +260,13 @@ pub fn value_flow_for_function_with_caches(
         DeclKind::Function | DeclKind::Method | DeclKind::Constructor
     ) {
         return ValueFlowGraph::new();
+    }
+
+    // IDG-backed path: when the workspace has seeded the IDG service,
+    // the cross-call propagation step is a closure walk on the
+    // pre-built workspace IDG. No per-source interprocedural worklist.
+    if let Some(idg) = db.idg_service() {
+        return build_graph_from_idg(entry_func, &decl, &idg, &global);
     }
 
     // Self-provenance seed — every param + assign target in the body
@@ -282,9 +296,236 @@ fn build_graph_from_result(
     entry_decl: &bonsai_lang_api::Decl,
     result: &InterTaintResult,
 ) -> ValueFlowGraph {
-    let mut graph = ValueFlowGraph::new();
+    let (mut graph, mut node_index) = build_intra_entry_graph(entry_func, entry_decl);
     graph.precision = result.precision;
     graph.saturated = result.saturated;
+
+    // Walk every recorded propagation. Each `CallPropagation` says:
+    // "in the caller, value X (at call_span) flowed into the callee's
+    // parameter P." That's exactly one ValueFlowEdge.
+    for propagation in &result.call_records {
+        for tainted in &propagation.tainted_args {
+            let from_key = (propagation.caller, tainted.value_text.clone());
+            let from_node = node_index.get(&from_key).cloned().unwrap_or_else(|| {
+                let synthesised = ValueFlowNode {
+                    func: propagation.caller,
+                    span: propagation.call_span,
+                    value_text: tainted.value_text.clone(),
+                    kind: ValueFlowNodeKind::CallArg,
+                };
+                node_index.insert(from_key.clone(), synthesised.clone());
+                synthesised
+            });
+            let to_key = (propagation.callee, tainted.param_name.clone());
+            let to_node = node_index.get(&to_key).cloned().unwrap_or_else(|| {
+                let synthesised = ValueFlowNode {
+                    func: propagation.callee,
+                    span: propagation.call_span,
+                    value_text: tainted.param_name.clone(),
+                    kind: ValueFlowNodeKind::Param,
+                };
+                node_index.insert(to_key.clone(), synthesised.clone());
+                synthesised
+            });
+            graph.add_edge(ValueFlowEdge {
+                from: from_node,
+                to: to_node,
+                precision: propagation.edge_precision,
+                via_span: propagation.call_span,
+            });
+        }
+    }
+    graph
+}
+
+/// IDG-driven graph builder. Replaces the per-source interprocedural
+/// engine with a forward closure on the pre-built workspace IDG.
+///
+/// The graph is identical in shape to the engine-driven path:
+/// 1. Intra-entry decl walk emits Param / Assign / Return nodes (and
+///    intra-entry edges) — shared with the legacy path via
+///    [`build_intra_entry_graph`].
+/// 2. Cross-call edges are read from
+///    [`IdgQueryService::cross_call_edges_in_closure`]. Each row
+///    becomes one `ValueFlowEdge` from the caller's CallArg / origin
+///    node into the callee's Param node.
+fn build_graph_from_idg(
+    entry_func: FuncId,
+    entry_decl: &bonsai_lang_api::Decl,
+    idg: &IdgQueryService,
+    global: &bonsai_index::GlobalIndex,
+) -> ValueFlowGraph {
+    let (mut graph, mut node_index) = build_intra_entry_graph(entry_func, entry_decl);
+
+    // Forward closure from entry's params. The IDG transfer pass
+    // already wired Param→Read→Write chains intra-procedurally and
+    // CallArg→Param + Return→CallRet edges across calls, so the
+    // closure encodes every transitive propagation reachable from
+    // the entry's locals.
+    let seeds = idg.param_nodes_of(entry_func);
+    if seeds.is_empty() {
+        return graph;
+    }
+    let cross_calls = idg.cross_call_edges_in_closure(&seeds);
+
+    // Pre-register every callee's `Param` node before we start
+    // emitting edges. Without this, iteration order matters: if a
+    // `helper → deeper` edge is processed before the matching
+    // `entry → helper` edge, the helper-side endpoint gets
+    // classified as `CallArg` (because no Param entry exists yet),
+    // and the later `entry → helper` edge finds that CallArg in
+    // the index and wires its destination there instead of
+    // synthesising a fresh Param. Pre-seeding guarantees every
+    // (callee_func, param_name) is a Param node regardless of order.
+    for ce in &cross_calls {
+        let param_name = callee_param_name(global, ce.callee, ce.param_idx).unwrap_or_default();
+        if param_name.is_empty() {
+            continue;
+        }
+        let to_key = (ce.callee, param_name.clone());
+        node_index.entry(to_key).or_insert_with(|| {
+            let node = ValueFlowNode {
+                func: ce.callee,
+                span: ce.call_span,
+                value_text: param_name.clone(),
+                kind: ValueFlowNodeKind::Param,
+            };
+            graph.nodes.insert(node.clone());
+            node
+        });
+    }
+
+    // Worst precision observed across cross-call edges drives the
+    // graph-level precision tag (matches engine semantics).
+    let mut worst = graph.precision;
+    for ce in &cross_calls {
+        worst = worst.meet(ce.precision);
+        // Caller-side from node: prefer prior origin / assign target /
+        // call-arg with matching (caller, value_text) so lineage chains
+        // back. value_text comes from the caller's flow event at the
+        // call span, indexed by arg position.
+        let value_text =
+            caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx).unwrap_or_default();
+        let from_key = (ce.caller, value_text.clone());
+        let from_node = node_index.get(&from_key).cloned().unwrap_or_else(|| {
+            let synthesised = ValueFlowNode {
+                func: ce.caller,
+                span: ce.call_span,
+                value_text: value_text.clone(),
+                kind: ValueFlowNodeKind::CallArg,
+            };
+            node_index.insert(from_key.clone(), synthesised.clone());
+            synthesised
+        });
+        // Callee-side to node: param's name comes from callee_decl.params[param_idx].
+        let param_name = callee_param_name(global, ce.callee, ce.param_idx).unwrap_or_default();
+        let to_key = (ce.callee, param_name.clone());
+        let to_node = node_index.get(&to_key).cloned().unwrap_or_else(|| {
+            let synthesised = ValueFlowNode {
+                func: ce.callee,
+                span: ce.call_span,
+                value_text: param_name.clone(),
+                kind: ValueFlowNodeKind::Param,
+            };
+            node_index.insert(to_key.clone(), synthesised.clone());
+            synthesised
+        });
+        graph.add_edge(ValueFlowEdge {
+            from: from_node,
+            to: to_node,
+            precision: ce.precision,
+            via_span: ce.call_span,
+        });
+    }
+    graph.precision = worst;
+    graph
+}
+
+/// Look up the textual form of the `arg_idx`-th argument of the
+/// `Call` event whose span is `call_span` inside `caller`. Returns
+/// `None` when the caller isn't in the index, isn't callable, or
+/// no Call event matches the span / index.
+fn caller_arg_value_text(
+    global: &bonsai_index::GlobalIndex,
+    caller: FuncId,
+    call_span: Span,
+    arg_idx: u8,
+) -> Option<String> {
+    let decl = global.decl_of(SymbolId::new(caller.raw()))?;
+    use bonsai_lang_api::FlowEvent;
+    fn find_call_arg<'a>(
+        events: &'a [FlowEvent],
+        target_span: Span,
+        idx: usize,
+    ) -> Option<&'a bonsai_lang_api::CallArg> {
+        for event in events {
+            match event {
+                FlowEvent::Call { span, args, .. } if *span == target_span => {
+                    return args.get(idx);
+                }
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if let Some(found) = find_call_arg(then_events, target_span, idx) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find_call_arg(else_events, target_span, idx) {
+                        return Some(found);
+                    }
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if let Some(found) = find_call_arg(body, target_span, idx) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find_call_arg(catch_events, target_span, idx) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find_call_arg(finally_events, target_span, idx) {
+                        return Some(found);
+                    }
+                }
+                FlowEvent::Loop { body, .. } => {
+                    if let Some(found) = find_call_arg(body, target_span, idx) {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    let arg = find_call_arg(&decl.flow_events, call_span, arg_idx as usize)?;
+    Some(arg.value_text.clone())
+}
+
+/// Look up the name of the `param_idx`-th parameter of `callee`.
+fn callee_param_name(
+    global: &bonsai_index::GlobalIndex,
+    callee: FuncId,
+    param_idx: u8,
+) -> Option<String> {
+    let decl = global.decl_of(SymbolId::new(callee.raw()))?;
+    decl.params.get(param_idx as usize).cloned()
+}
+
+/// Shared "intra-entry" graph builder used by both the legacy
+/// engine-driven and the IDG-driven paths. Emits the entry's
+/// own Param, AssignTarget, and Return nodes plus their intra-
+/// procedural edges, returning the partially populated graph plus
+/// a `(FuncId, value_text) → ValueFlowNode` index that the call-edge
+/// passes use to chain CallArgs back to their lineage origins.
+fn build_intra_entry_graph(
+    entry_func: FuncId,
+    entry_decl: &bonsai_lang_api::Decl,
+) -> (ValueFlowGraph, AHashMap<(FuncId, String), ValueFlowNode>) {
+    let mut graph = ValueFlowGraph::new();
 
     // Seed nodes: entry's params get their own ValueFlowNode at the
     // function's entry span. We register them unconditionally so the
@@ -472,11 +713,12 @@ fn build_graph_from_result(
         }
     }
 
-    // Index existing nodes by (func, value_text) so we can stitch
-    // call-arg edges to prior assign-target / param nodes carrying
-    // the same name. Without this, the assign-target `x` and the
-    // call-arg `x` are distinct node identities (different spans)
-    // and the forward-closure breaks at the call boundary.
+    // Index existing nodes by (func, value_text) so the call-edge
+    // pass can stitch CallArgs back to prior origin / assign-target /
+    // param nodes carrying the same name. Without this, the
+    // assign-target `x` and the call-arg `x` would have distinct
+    // identities (different spans) and the forward-closure would
+    // break at the call boundary.
     let mut node_index: AHashMap<(FuncId, String), ValueFlowNode> = AHashMap::default();
     for node in &graph.nodes {
         node_index
@@ -484,54 +726,7 @@ fn build_graph_from_result(
             .or_insert_with(|| node.clone());
     }
 
-    // Walk every recorded propagation. Each `CallPropagation` says:
-    // "in the caller, value X (at call_span) flowed into the callee's
-    // parameter P." That's exactly one ValueFlowEdge.
-    for propagation in &result.call_records {
-        for tainted in &propagation.tainted_args {
-            // Caller-side `from` node — prefer an existing node with
-            // matching (caller, value_text) so the arg's lineage
-            // chains back to its prior binding (param / assign
-            // target). Falls back to a fresh CallArg node when no
-            // prior binding exists (e.g. literal operand or
-            // member-access expression).
-            let from_key = (propagation.caller, tainted.value_text.clone());
-            let from_node = node_index.get(&from_key).cloned().unwrap_or_else(|| {
-                let synthesised = ValueFlowNode {
-                    func: propagation.caller,
-                    span: propagation.call_span,
-                    value_text: tainted.value_text.clone(),
-                    kind: ValueFlowNodeKind::CallArg,
-                };
-                node_index.insert(from_key.clone(), synthesised.clone());
-                synthesised
-            });
-            // Callee-side `to` node — the param binding receiving
-            // the value. We don't have the param's exact span here
-            // (it's in the callee's decl, not in this propagation
-            // record), so anchor on the call span as the
-            // observation point.
-            let to_key = (propagation.callee, tainted.param_name.clone());
-            let to_node = node_index.get(&to_key).cloned().unwrap_or_else(|| {
-                let synthesised = ValueFlowNode {
-                    func: propagation.callee,
-                    span: propagation.call_span,
-                    value_text: tainted.param_name.clone(),
-                    kind: ValueFlowNodeKind::Param,
-                };
-                node_index.insert(to_key.clone(), synthesised.clone());
-                synthesised
-            });
-            graph.add_edge(ValueFlowEdge {
-                from: from_node,
-                to: to_node,
-                precision: propagation.edge_precision,
-                via_span: propagation.call_span,
-            });
-        }
-    }
-
-    graph
+    (graph, node_index)
 }
 
 #[cfg(test)]

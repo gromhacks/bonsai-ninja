@@ -1,0 +1,30 @@
+[package]
+name = "bonsai_idg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Workspace-wide Interprocedural Dataflow Graph (IFDS-style) — single graph that all bonsai-ninja consumers query"
+
+[dependencies]
+ahash.workspace = true
+bincode.workspace = true
+bonsai_callgraph.workspace = true
+bonsai_common.workspace = true
+bonsai_diagnostics.workspace = true
+bonsai_factstore.workspace = true
+bonsai_hash.workspace = true
+bonsai_index.workspace = true
+bonsai_lang_api.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

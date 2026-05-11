@@ -1,7 +1,7 @@
 //! `Workspace::open_with_options` prewarms the workspace-wide
 //! value-flow cache when `prewarm_value_flow` is on, and the same
 //! option turns it off for `query_only` callers. Sidecar round-trips
-//! via the conventional `.bonsai/value_flow.v2.bin` path.
+//! via the conventional `.bonsai/value_flow.v3.factstore` path.
 
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
 use bonsai_workspace::{Workspace, WorkspaceOpenOptions};
@@ -143,7 +143,7 @@ fn value_flow_sidecar_round_trips_via_query_only() {
     let _ = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
         .expect("first open succeeds");
 
-    let sidecar = root.join(".bonsai").join("value_flow.v2.bin");
+    let sidecar = root.join(".bonsai").join("value_flow.v3.factstore");
     assert!(sidecar.exists(), "default open should write the value-flow sidecar");
 
     // Second open in `query_only` mode hydrates from the sidecar.

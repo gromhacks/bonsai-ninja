@@ -556,6 +556,24 @@ where
         pack,
         &taint_sink_sites,
     ));
+    // Sort findings_raw deterministically before grouping. Without
+    // this, AHashSet-driven iteration upstream can flip which
+    // finding becomes a group's primary vs additional source between
+    // back-to-back runs of the same workspace, producing different
+    // `S:` ids each time and breaking the json/sarif coherence
+    // guard. The sort key combines source rule + sink rule + sink
+    // location + finding_id so identical (source-rule, sink-site)
+    // pairs always pick the same primary.
+    findings_raw.sort_by(|a, b| {
+        let af = &a.finding;
+        let bf = &b.finding;
+        af.source.rule_id.cmp(&bf.source.rule_id)
+            .then_with(|| af.sink.rule_id.cmp(&bf.sink.rule_id))
+            .then_with(|| af.sink.file.cmp(&bf.sink.file))
+            .then_with(|| af.sink.line.cmp(&bf.sink.line))
+            .then_with(|| af.sink.column.cmp(&bf.sink.column))
+            .then_with(|| af.finding_id.cmp(&bf.finding_id))
+    });
     let mut findings = combine_findings_by_source_flow(findings_raw);
     if let Some(max_precision) = options.max_precision {
         findings.retain(|combined| finding_precision_within(&combined.finding.precision, max_precision));
@@ -722,7 +740,16 @@ where
                         .value_flow()
                         .graph_for_with_caches(start, ws.db(), source_graph_caches);
                     let seeds = source_seed_set(pack, hit, decl, Some(value_flow.as_ref()));
-                    let graph_key = (start, sorted_seed_key(&seeds));
+                    let output_arg_names = output_arg_names_for_match(pack, hit, decl);
+                    let anchor = if rule_match_kind_is_param(pack, &hit.rule_id) {
+                        None
+                    } else {
+                        Some(hit.span)
+                    };
+                    let graph_key = (
+                        start,
+                        sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names),
+                    );
                     // L1: per-invocation map. Drop the read guard
                     // before any potential write upgrade.
                     let cached = local_graphs.read().get(&graph_key).cloned();
@@ -737,13 +764,15 @@ where
                             .or_insert(arc.clone());
                         return (*arc).clone();
                     }
-                    // Compute, publish to both layers.
                     let computed = Arc::new(exact_source_seed_graph(
                         start,
                         &seeds,
                         &source_graph_config,
                         ws.db(),
                         source_graph_caches,
+                        ws,
+                        anchor,
+                        &output_arg_names,
                     ));
                     let canonical = workspace_taint_index.insert_if_absent(
                         start,
@@ -2644,7 +2673,39 @@ fn chain_funcs_for_lineage(
     if funcs.last().copied() != Some(terminal_func) {
         return None;
     }
-    Some(funcs)
+    // Collapse synthetic `Return → CallRet` round trips that bring
+    // the chain back to a function it already visited. Each
+    // `arg_idx = u8::MAX` edge in `records` adds a "callee returned
+    // to caller" hop, so chains like `handle → transform → handle`
+    // (the `g1_c_return` shape: source seeds in `handle`, sink
+    // also in `handle`, the chain goes out to `transform` and
+    // returns) and `handleRequest → updateUser → handleRequest`
+    // (the SDK Java micro case) walk the same physical call site
+    // twice on paper. Dedup adjacent revisits so the chain reads
+    // as the real distinct-frame path, while still rejecting true
+    // cycles (`A → B → A → B`) where a function recurs after
+    // intervening frames have advanced past it.
+    let mut seen: AHashSet<FuncId> = AHashSet::with_capacity(funcs.len());
+    let mut deduped: Vec<FuncId> = Vec::with_capacity(funcs.len());
+    for f in funcs.iter().copied() {
+        if deduped.last().copied() == Some(f) {
+            continue;
+        }
+        if deduped.contains(&f) && deduped.last().copied() != Some(f) {
+            // Function reappears non-adjacently after intervening
+            // hops — pop hops until we're back at the prior visit
+            // of `f`, treating the intermediate frames as a
+            // round-trip artefact (synthetic Return inflated the
+            // chain). The chain semantically ends at this revisit.
+            while deduped.last().copied() != Some(f) {
+                deduped.pop();
+            }
+            continue;
+        }
+        deduped.push(f);
+        seen.insert(f);
+    }
+    Some(deduped)
 }
 
 fn propagation_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> TaintPropagationStep {
@@ -2868,10 +2929,31 @@ fn combine_findings_by_source_flow(findings: Vec<FindingWithChain>) -> Vec<Combi
     let mut groups: Vec<CombinedFindingWithChain> = Vec::new();
     let mut index: AHashMap<String, usize> = AHashMap::new();
 
+    bonsai_diagnostics::debug_log!(
+        "find-group",
+        "combining {} raw finding(s) into groups",
+        findings.len()
+    );
     for item in findings {
         let key = combined_finding_key(&item);
         let member_id = item.finding.finding_id.clone();
+        bonsai_diagnostics::debug_log!(
+            "find-group",
+            "  finding {} src={} sink={}@{}:{} -> key={:?}",
+            member_id,
+            item.finding.source.rule_id,
+            item.finding.sink.rule_id,
+            item.finding.sink.file,
+            item.finding.sink.line,
+            key
+        );
         if let Some(&idx) = index.get(&key) {
+            bonsai_diagnostics::debug_log!(
+                "find-group",
+                "    -> merge into existing group #{} (primary={})",
+                idx,
+                groups[idx].finding.finding_id
+            );
             merge_finding_into_group(&mut groups[idx], item.finding, member_id);
             continue;
         }
@@ -3099,7 +3181,7 @@ fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 fn build_findings_chain_aware<F>(
     ws: &Workspace,
-    sources: &[RuleMatch],
+    source_hits: &[RuleMatch],
     sinks: &[RuleMatch],
     sanitizers: &[RuleMatch],
     pack: &Rulepack,
@@ -3160,7 +3242,7 @@ where
         };
         sink_by_func.entry(sink_func_id).or_default().push(snk);
     }
-    if sources.is_empty() || sink_by_func.is_empty() {
+    if source_hits.is_empty() || sink_by_func.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -3171,12 +3253,12 @@ where
     // RwLock-backed and order-independent (cache-fill races on the
     // same key produce identical values — see `InterTaintCaches`
     // doc), so the fan-out is a pure scheduling change. Input
-    // ordering is preserved: `sources` is sorted upstream
+    // ordering is preserved: `source_hits` is sorted upstream
     // (`sort_matches`) and `par_iter().filter_map().collect()` is
     // order-preserving, so downstream `idx`-keyed dedup
     // (`emitted_for_source_sink_flow`) sees identical idx values.
     use rayon::prelude::*;
-    let source_entries: Vec<(&RuleMatch, FuncId, TokenSet)> = sources
+    let source_entries: Vec<(&RuleMatch, FuncId, TokenSet)> = source_hits
         .par_iter()
         .filter_map(|src| {
             let src_key = match_func_key(src)?;
@@ -3361,7 +3443,19 @@ where
                 AHashSet::new();
             for &idx in indices {
                 let (src, _, seeds) = &source_work[idx];
-                let graph_key = (src_func_id, sorted_seed_key(seeds));
+                let output_arg_names = global
+                    .decl_of(SymbolId::new(src_func_id.raw()))
+                    .map(|d| output_arg_names_for_match(pack, src, d))
+                    .unwrap_or_default();
+                let anchor = if rule_match_kind_is_param(pack, &src.rule_id) {
+                    None
+                } else {
+                    Some(src.span)
+                };
+                let graph_key = (
+                    src_func_id,
+                    sorted_seed_key_with_anchor(seeds, anchor, &output_arg_names),
+                );
                 // Lookup order:
                 //   1. per-invocation `exact_graphs` (lock-free probe path)
                 //   2. workspace-wide taint index (cross-invocation cache)
@@ -3386,6 +3480,9 @@ where
                         &config,
                         ws.db(),
                         taint_caches,
+                        ws,
+                        anchor,
+                        &output_arg_names,
                     ));
                     // Stage 6: publish to the workspace index first
                     // so concurrent invocations can pick it up.
@@ -3437,7 +3534,24 @@ where
                     } else if !tainted_call_matches_sink(call, snk) {
                         continue;
                     }
-                    if call.tainted_args.is_empty() && call.tainted_receiver.is_none() {
+                    // Return / Write tainted-call rows are emitted
+                    // as evidence that *the function's return slot
+                    // / write target* received tainted data — they
+                    // don't carry tainted_args because there is no
+                    // "argument" to flag, the dataflow happened on
+                    // the return expression itself. Skip the
+                    // empty-args/receiver guard for those kinds so
+                    // a `MatchKind::Return` sink rule (or
+                    // `MatchKind::Write`) can still fire on the
+                    // span the IDG closure proved tainted.
+                    let kind_emits_synthetic_evidence = matches!(
+                        call.kind,
+                        bonsai_taint::TaintedCallKind::Return | bonsai_taint::TaintedCallKind::Write
+                    );
+                    if !kind_emits_synthetic_evidence
+                        && call.tainted_args.is_empty()
+                        && call.tainted_receiver.is_none()
+                    {
                         continue;
                     }
                     let Some(sink_rule) = pack.find_rule_by_id(&snk.rule_id) else {
@@ -3532,34 +3646,76 @@ fn sorted_seed_key(seeds: &TokenSet) -> Vec<String> {
     sorted
 }
 
+/// Variant of [`sorted_seed_key`] that additionally encodes the
+/// anchor span and the configured output-arg name list into the
+/// cache key. The taint-graph cache is keyed on `(FuncId, Vec<String>)`,
+/// and the IDG-driven seed builder threads `anchor`/`output_arg_names`
+/// into the per-source graph computation — but the resulting graph
+/// can differ between two source matches on the same function with
+/// the same name seeds but different anchor spans (e.g. two
+/// `req.getParameter("…")` calls on adjacent lines produce different
+/// IDG seed-node sets, hence different forward closures). Without
+/// the anchor in the key, the first insert wins and the second
+/// match wedges into the wrong cached graph — that's the divergence
+/// behind the CLI/SDK parity gap on Java micro. Prefixing the key
+/// with `__anchor@file:start..end` is a no-op when anchor is `None`
+/// (kind: param sources fall through to name-based seeding).
+fn sorted_seed_key_with_anchor(
+    seeds: &TokenSet,
+    anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+) -> Vec<String> {
+    let mut sorted = sorted_seed_key(seeds);
+    if let Some(span) = anchor {
+        sorted.push(format!(
+            "__anchor@{}:{}..{}",
+            span.file.raw(),
+            span.start,
+            span.end,
+        ));
+    }
+    if !output_arg_names.is_empty() {
+        let mut args: Vec<String> = output_arg_names.to_vec();
+        args.sort();
+        sorted.push(format!("__output_args@{}", args.join(",")));
+    }
+    sorted
+}
+
 fn exact_source_seed_graph(
     source_func: FuncId,
     seeds: &TokenSet,
     config: &InterTaintConfig,
     db: &bonsai_db::AnalyzerDb,
-    caches: &InterTaintCaches,
+    _caches: &InterTaintCaches,
+    ws: &Workspace,
+    source_anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
 ) -> EntryTaintGraph {
-    let result =
-        bonsai_taint::interprocedural_taint_to_completion_with_caches(source_func, seeds, config, db, caches);
-    EntryTaintGraph {
-        call_records: result
-            .call_records
-            .iter()
-            .map(|record| TaintedCallEdge {
-                trace_id: record.trace_id,
-                parent_trace_id: record.parent_trace_id,
-                caller: record.caller,
-                callee: record.callee,
-                call_span: record.call_span,
-                tainted_args: record.tainted_args.clone(),
-                precision: record.edge_precision,
-            })
-            .collect(),
-        tainted_calls: result.tainted_calls,
-        precision: result.precision,
-        saturated: result.saturated,
-        pairs_analyzed: result.pairs_analyzed,
-    }
+    // IDG-driven path. Phase 8's SSA-style CFG narrowing produces
+    // correct findings for straight-line, branched, side-effecting,
+    // sigil-aliased, and method-receiver flows. Callback /
+    // higher-order-function flows are handled by the IDG builder's
+    // callback-binding stitching pass (Phase 3 callback resolution),
+    // which adds synthetic `CallArg → bound-func.Param` edges for
+    // every Call whose callee name matches a function parameter,
+    // walking the callgraph to find each caller's binding. The
+    // rulepack's `taint_receiver_from_args` overlays are applied as
+    // a closure post-pass so receiver-state inheritance survives
+    // the migration without hardcoding mutator method names in the
+    // IDG transfer pass.
+    let idg = db
+        .idg_service()
+        .unwrap_or_else(|| ws.build_and_seed_idg_service());
+    bonsai_taint::entry_taint_graph_from_idg(
+        source_func,
+        seeds,
+        source_anchor,
+        output_arg_names,
+        &config.receiver_state_propagations,
+        db,
+        idg.as_ref(),
+    )
 }
 
 fn source_seed_reaches_return(
@@ -3583,10 +3739,9 @@ fn source_seed_reaches_return(
     if !returning_names.is_empty() && seeds.iter().any(|s| returning_names.contains(s)) {
         return true;
     }
-    // Engine fallback for cold caches (`query_only` callers without
-    // a sidecar) and for the rare graphs whose Return-node tagging
-    // is best-effort. The fallback consults the workspace inter-
-    // taint singleton so the resolver memo + alias maps survive.
+    // Engine fallback path. The engine's seed-by-name semantics
+    // matches the source_seed_set output exactly; switching this
+    // to IDG would require span-based seeding (Phase 8 follow-on).
     let config = InterTaintConfig {
         sanitizers: TokenSet::default(),
         budget: 64,
@@ -3687,6 +3842,108 @@ fn match_func_key(hit: &RuleMatch) -> Option<(String, String, String)> {
     Some((hit.language.clone(), hit.file.clone(), hit.enclosing_fn.clone()?))
 }
 
+/// True iff `rule_id` resolves to a rule whose match kind binds to
+/// the declaration site itself (`kind: param`) rather than a call /
+/// read / write expression. The IDG seeding falls back from
+/// span-anchored to param-based for these rules — anchoring at a
+/// `kind: param` span is meaningless because the match span is the
+/// parameter identifier in the function signature, not an
+/// expression with associated IDG nodes.
+fn rule_match_kind_is_param(pack: &Rulepack, rule_id: &str) -> bool {
+    pack.find_rule_by_id(rule_id)
+        .map(|r| matches!(r.match_spec.kind, crate::rule::MatchKind::Param))
+        .unwrap_or(false)
+}
+
+/// Resolve the source rule's `source_output_args` indices to the
+/// concrete carrier names at the source's call site. For
+/// `fgets(buf, sz, stdin)` with `output_args=[0]`, returns
+/// `["buf"]` — the IDG seeder then includes post-call reads/writes
+/// of `buf` so the side-effect taint flows into downstream consumers.
+fn output_arg_names_for_match(
+    pack: &Rulepack,
+    src: &RuleMatch,
+    decl: &bonsai_lang_api::Decl,
+) -> Vec<String> {
+    use bonsai_lang_api::FlowEvent;
+    let Some(rule) = pack.find_rule_by_id(&src.rule_id) else {
+        return Vec::new();
+    };
+    let Some(semantics) = rule.taint_semantics.as_ref() else {
+        return Vec::new();
+    };
+    if semantics.source_output_args.is_empty() {
+        return Vec::new();
+    }
+    fn find_call<'a>(
+        events: &'a [FlowEvent],
+        target: bonsai_common::Span,
+    ) -> Option<&'a FlowEvent> {
+        for event in events {
+            match event {
+                FlowEvent::Call { span, .. } if *span == target => return Some(event),
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
+                    if let Some(v) = find_call(then_events, target) {
+                        return Some(v);
+                    }
+                    if let Some(v) = find_call(else_events, target) {
+                        return Some(v);
+                    }
+                }
+                FlowEvent::Try {
+                    body,
+                    catch_events,
+                    finally_events,
+                    ..
+                } => {
+                    if let Some(v) = find_call(body, target) {
+                        return Some(v);
+                    }
+                    if let Some(v) = find_call(catch_events, target) {
+                        return Some(v);
+                    }
+                    if let Some(v) = find_call(finally_events, target) {
+                        return Some(v);
+                    }
+                }
+                FlowEvent::Loop { body, .. }
+                | FlowEvent::Defer { body, .. }
+                | FlowEvent::Using { body, .. } => {
+                    if let Some(v) = find_call(body, target) {
+                        return Some(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    let Some(FlowEvent::Call { args, .. }) = find_call(&decl.flow_events, src.span) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for &idx in &semantics.source_output_args {
+        let Some(arg) = args.get(idx) else { continue };
+        if let Some(name) = arg.place.as_deref() {
+            if !name.is_empty() {
+                out.push(name.to_string());
+            }
+        }
+        for n in &arg.source_names {
+            if !n.is_empty() {
+                out.push(n.clone());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn source_seed_set(
     pack: &Rulepack,
     src: &RuleMatch,
@@ -3742,6 +3999,7 @@ fn collect_source_seed_targets(
                 source_call,
                 source_names,
                 source_call_args,
+                ..
             } => {
                 let source_text_matches = source_name
                     .as_deref()

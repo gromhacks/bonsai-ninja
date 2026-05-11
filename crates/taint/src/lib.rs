@@ -45,10 +45,10 @@ pub use inter::{
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
-    merge_into, name_reachable_through_chain_kinded, name_reachable_through_file_kinded,
-    name_reachable_through_func_kinded, taint_facts_and_graph_for_entry,
-    taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry,
-    EntryTaintGraph, FactKind, KindedTokens, TaintedCallEdge, TokenSet,
+    entry_taint_graph_from_idg, merge_into, name_reachable_through_chain_kinded,
+    name_reachable_through_file_kinded, name_reachable_through_func_kinded,
+    taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches,
+    taint_facts_for_entry, EntryTaintGraph, FactKind, KindedTokens, TaintedCallEdge, TokenSet,
 };
 pub use value_flow::{
     value_flow_for_function, value_flow_for_function_with_caches, LatticeMode, ProvenanceMarker,

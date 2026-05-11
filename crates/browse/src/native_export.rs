@@ -1384,7 +1384,7 @@ fn flow_reads_token(events: &[FlowEvent], token: &str) -> bool {
                 source_names,
                 source_call_args,
                 ..
-            } => {
+                    } => {
                 if source_name.as_deref() == Some(token)
                     || source_names.iter().any(|name| name == token)
                     || source_call_args.iter().any(|arg| arg.trim() == token)
@@ -1486,7 +1486,7 @@ fn collect_receiver_field_writes_from_events(
                 source_name,
                 source_names,
                 ..
-            } => {
+                    } => {
                 if receiver_field_target(target)
                     && (source_name
                         .as_deref()
@@ -1653,7 +1653,7 @@ fn collect_callee_symbols(
                 source_call,
                 source_names,
                 ..
-            } => {
+                    } => {
                 if let Some(name) = source_name.as_deref() {
                     collect_callable_name_symbols(name, global, caller, alias_map, out);
                 }
@@ -1869,3 +1869,4 @@ fn collect_call_edges_for_export(
         }
     }
 }
+

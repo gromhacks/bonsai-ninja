@@ -41,6 +41,18 @@ pub const LANG_ID: LanguageId = LanguageId::new("typescript");
 const PACK_NAME: &str = "typescript";
 const HANDLER: GrammarHandler = GrammarHandler {
     call_kinds: &["new_expression"],
+    // TypeScript exposes `abstract class Foo` under
+    // `abstract_class_declaration` — the GENERIC_HANDLER default
+    // only covers `class_declaration`, so without this override
+    // abstract base classes are missed at decl-emission time, and
+    // every subclass ends up with `decl.parent = None`. That
+    // breaks Phase 3c/3d field-flow stitching: the inheritance
+    // walk has no class to attach `BaseRepository` to.
+    class_kinds: &[
+        "class_declaration",
+        "abstract_class_declaration",
+        "interface_declaration",
+    ],
     ..with_fn_kinds_and_implicit_receivers(
         &[
             "function_declaration",

@@ -223,6 +223,7 @@ impl ResolvedCallGraph {
         L: Fn(FileId) -> &'static [&'static str],
     {
         let mut cg = CallGraph::new();
+        let alias_index = WorkspaceAliasIndex::build(global);
         for file in global.all_files() {
             let aliases = aliases_for_file(file);
             let file_alias_targets = alias_targets_for_file(file);
@@ -236,11 +237,12 @@ impl ResolvedCallGraph {
                 }
                 let from = FuncId::new(decl.symbol.raw());
                 let alias_targets = alias_targets_for_decl(&file_alias_targets, decl);
-                let local_bindings = collect_local_callable_bindings_with_aliases(
+                let local_bindings = collect_local_callable_bindings_with_alias_index(
                     &decl.flow_events,
                     global,
                     decl,
                     &alias_targets,
+                    &alias_index,
                 );
                 add_resolved_call_edges(
                     &decl.flow_events,
@@ -252,6 +254,7 @@ impl ResolvedCallGraph {
                     &local_bindings,
                     &path_for_file,
                     export_aliases,
+                    &alias_index,
                     &mut cg,
                 );
             }
@@ -282,6 +285,7 @@ impl ResolvedCallGraph {
 /// call site. Recurses through every structural variant (`Branch`,
 /// `Loop`, `Try`, `Defer`, `Using`).
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
+#[allow(clippy::too_many_arguments)] // stable parameter list — recursion calls hold it stable
 fn add_resolved_call_edges(
     events: &[FlowEvent],
     from: FuncId,
@@ -292,6 +296,7 @@ fn add_resolved_call_edges(
     local_bindings: &AHashMap<String, FuncId>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     caller_export_aliases: &[&'static str],
+    alias_index: &WorkspaceAliasIndex,
     cg: &mut CallGraph,
 ) {
     for event in events {
@@ -366,20 +371,70 @@ fn add_resolved_call_edges(
                     }
                 }
                 if candidates.is_empty() && !unresolved_method_receiver {
-                    if colon_remote_call(name) || qualified_module_alias_call(name, aliases) {
-                        continue;
+                    // Bare-name fallback: try the short tail (and the
+                    // alias-rewrite of it) BEFORE the colon-remote /
+                    // module-alias bail-out. Erlang `module:function`
+                    // and Elixir `Module.function` calls don't carry
+                    // an `import` directive — the short tail is the
+                    // only way to find the workspace decl. Visibility
+                    // narrowing in `resolve_callable_with_context`
+                    // still gates the candidate, so this doesn't
+                    // leak unrelated bare-name matches.
+                    //
+                    // For Rust-style `Type::method` qualified calls,
+                    // allow the bare-tail fallback ONLY when the
+                    // qualifier (`Type`) resolves through the
+                    // workspace's alias_targets to an in-workspace
+                    // class / module. External types
+                    // (`Command::new` → `std::process::Command`)
+                    // would otherwise collapse onto a user-defined
+                    // `Repository::new` that shares the bare suffix,
+                    // fabricating cross-call edges. Module-alias
+                    // calls like `store::persist` (where `store`
+                    // aliases the workspace `storage` module) still
+                    // get the short fallback.
+                    let qualified_owner_in_workspace = if let Some(idx) = name.find("::") {
+                        let qualifier = &name[..idx];
+                        let qualifier_resolves = alias_targets
+                            .get(qualifier)
+                            .map(|t| match t {
+                                AliasTarget::Namespace { module } => is_workspace_alias_target(alias_index, module),
+                                AliasTarget::Member { module, member } => {
+                                    // For Member-form aliases the local
+                                    // name typically rebinds to
+                                    // `module::member` (e.g.
+                                    // `use crate::storage as store` →
+                                    // store → Member { module="crate",
+                                    // member="storage" }). Honour both
+                                    // segments so `store::persist`
+                                    // resolves through the workspace.
+                                    is_workspace_alias_target(alias_index, module)
+                                        || is_workspace_alias_target(alias_index, member)
+                                }
+                                AliasTarget::Type { .. } => true,
+                            })
+                            .unwrap_or(false);
+                        qualifier_resolves
+                    } else {
+                        // No `::` — receiver / dotted form. Existing
+                        // behaviour applies.
+                        true
+                    };
+                    if qualified_owner_in_workspace {
+                        let resolved_name = aliases.get(short).map(String::as_str).unwrap_or(short);
+                        if resolved_name != name.as_str() {
+                            candidates = collect_callable_targets_with_context_and_aliases(
+                                global,
+                                resolved_name,
+                                caller_decl,
+                                alias_targets,
+                            );
+                        }
                     }
-                    let resolved_name = aliases.get(short).map(String::as_str).unwrap_or(short);
-                    // The full-name lookup at line 227 has already
-                    // run; only retry when alias rewriting produced
-                    // a different name to look up.
-                    if resolved_name != name.as_str() {
-                        candidates = collect_callable_targets_with_context_and_aliases(
-                            global,
-                            resolved_name,
-                            caller_decl,
-                            alias_targets,
-                        );
+                    if candidates.is_empty()
+                        && (colon_remote_call(name) || qualified_module_alias_call(name, aliases))
+                    {
+                        continue;
                     }
                 }
                 if !candidates.is_empty() {
@@ -427,6 +482,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    alias_index,
                     cg,
                 );
                 add_resolved_call_edges(
@@ -439,6 +495,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    alias_index,
                     cg,
                 );
             }
@@ -453,6 +510,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    alias_index,
                     cg,
                 );
             }
@@ -472,6 +530,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    alias_index,
                     cg,
                 );
                 add_resolved_call_edges(
@@ -484,6 +543,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    alias_index,
                     cg,
                 );
                 add_resolved_call_edges(
@@ -496,6 +556,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    alias_index,
                     cg,
                 );
             }
@@ -510,6 +571,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    alias_index,
                     cg,
                 );
             }
@@ -619,7 +681,33 @@ pub fn collect_local_callable_bindings_with_aliases(
     alias_targets: &AHashMap<String, AliasTarget>,
 ) -> AHashMap<String, FuncId> {
     let mut bindings = AHashMap::new();
-    collect_local_callable_bindings_into(events, global, caller_decl, alias_targets, &mut bindings);
+    collect_local_callable_bindings_into(events, global, caller_decl, alias_targets, None, &mut bindings);
+    bindings
+}
+
+/// Same shape as [`collect_local_callable_bindings_with_aliases`]
+/// but threads a precomputed [`WorkspaceAliasIndex`] for the
+/// `Type::method` short-tail gate. `build_with_file_info` calls
+/// this so the index is built once per callgraph build rather
+/// than once per decl. External callers stick with the public
+/// non-indexed variant above; the indexed form is internal to the
+/// callgraph crate.
+fn collect_local_callable_bindings_with_alias_index(
+    events: &[FlowEvent],
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    alias_index: &WorkspaceAliasIndex,
+) -> AHashMap<String, FuncId> {
+    let mut bindings = AHashMap::new();
+    collect_local_callable_bindings_into(
+        events,
+        global,
+        caller_decl,
+        alias_targets,
+        Some(alias_index),
+        &mut bindings,
+    );
     bindings
 }
 
@@ -628,6 +716,7 @@ fn collect_local_callable_bindings_into(
     global: &GlobalIndex,
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
+    alias_index: Option<&WorkspaceAliasIndex>,
     bindings: &mut AHashMap<String, FuncId>,
 ) {
     for event in events {
@@ -638,7 +727,7 @@ fn collect_local_callable_bindings_into(
                 source_call,
                 source_names,
                 ..
-            } => {
+                    } => {
                 // Skip RHS that is itself a call — we only bind names
                 // pointing at a callable (e.g. `let f = some_func`).
                 if source_call.is_some() {
@@ -646,10 +735,24 @@ fn collect_local_callable_bindings_into(
                 }
                 if let Some(sym) = source_name
                     .as_deref()
-                    .and_then(|name| resolve_callable_symbol(global, name, caller_decl, alias_targets))
+                    .and_then(|name| {
+                        resolve_callable_symbol_with_alias_index(
+                            global,
+                            name,
+                            caller_decl,
+                            alias_targets,
+                            alias_index,
+                        )
+                    })
                     .or_else(|| {
                         source_names.iter().find_map(|name| {
-                            resolve_callable_symbol(global, name, caller_decl, alias_targets)
+                            resolve_callable_symbol_with_alias_index(
+                                global,
+                                name,
+                                caller_decl,
+                                alias_targets,
+                                alias_index,
+                            )
                         })
                     })
                 {
@@ -666,6 +769,7 @@ fn collect_local_callable_bindings_into(
                     global,
                     caller_decl,
                     alias_targets,
+                    alias_index,
                     bindings,
                 );
                 collect_local_callable_bindings_into(
@@ -673,11 +777,12 @@ fn collect_local_callable_bindings_into(
                     global,
                     caller_decl,
                     alias_targets,
+                    alias_index,
                     bindings,
                 );
             }
             FlowEvent::Loop { body, .. } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, bindings);
+                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, alias_index, bindings);
             }
             FlowEvent::Try {
                 body,
@@ -685,12 +790,13 @@ fn collect_local_callable_bindings_into(
                 finally_events,
                 ..
             } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, bindings);
+                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, alias_index, bindings);
                 collect_local_callable_bindings_into(
                     catch_events,
                     global,
                     caller_decl,
                     alias_targets,
+                    alias_index,
                     bindings,
                 );
                 collect_local_callable_bindings_into(
@@ -698,11 +804,12 @@ fn collect_local_callable_bindings_into(
                     global,
                     caller_decl,
                     alias_targets,
+                    alias_index,
                     bindings,
                 );
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, bindings);
+                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, alias_index, bindings);
             }
             _ => {}
         }
@@ -726,6 +833,22 @@ fn resolve_callable_symbol(
     caller_decl: &Decl,
     alias_targets: &AHashMap<String, AliasTarget>,
 ) -> Option<FuncId> {
+    resolve_callable_symbol_with_alias_index(global, raw, caller_decl, alias_targets, None)
+}
+
+/// Same as [`resolve_callable_symbol`] but threads a precomputed
+/// [`WorkspaceAliasIndex`] for the `Type::method` short-tail gate.
+/// `build_with_file_info` builds the index once at the start of the
+/// callgraph pass and passes `Some(&idx)`; standalone callers (legacy
+/// taint engine, individual `dump-resolve` lookups) pass `None` and
+/// pay the O(decls) scan that the helper falls back to.
+fn resolve_callable_symbol_with_alias_index(
+    global: &GlobalIndex,
+    raw: &str,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    alias_index: Option<&WorkspaceAliasIndex>,
+) -> Option<FuncId> {
     let variants = callable_reference_variants(raw);
     if variants.is_empty() {
         return None;
@@ -733,6 +856,14 @@ fn resolve_callable_symbol(
     let caller_file = caller_decl_file(global, caller_decl)?;
     let caller_module = caller_decl.module_path.clone();
     let ctx = ResolveContext::new(caller_file, &caller_module).with_alias_map(alias_targets);
+    let owned_index: Option<WorkspaceAliasIndex> = if alias_index.is_none() {
+        Some(WorkspaceAliasIndex::build(global))
+    } else {
+        None
+    };
+    let alias_index: &WorkspaceAliasIndex = alias_index
+        .or(owned_index.as_ref())
+        .expect("alias_index built above when not supplied");
     for variant in variants {
         let trimmed = variant
             .trim()
@@ -741,7 +872,35 @@ fn resolve_callable_symbol(
             continue;
         }
         let short = short_callee(trimmed);
-        for candidate in [trimmed, short] {
+        // Try the qualified variant first. For Rust-style
+        // `Type::method` qualified calls, allow the bare-tail
+        // fallback ONLY when the qualifier resolves to an in-
+        // workspace alias target; otherwise external types like
+        // `Command::new` (`Command` aliases `std::process::Command`)
+        // would collapse onto a user-defined `Repository::new`
+        // that shares the bare suffix `new`.
+        let allow_short_fallback = if let Some(idx) = trimmed.find("::") {
+            let qualifier = &trimmed[..idx];
+            alias_targets
+                .get(qualifier)
+                .map(|t| match t {
+                    AliasTarget::Namespace { module } => is_workspace_alias_target(alias_index, module),
+                    AliasTarget::Member { module, member } => {
+                        is_workspace_alias_target(alias_index, module)
+                            || is_workspace_alias_target(alias_index, member)
+                    }
+                    AliasTarget::Type { .. } => true,
+                })
+                .unwrap_or(false)
+        } else {
+            true
+        };
+        let candidates: &[&str] = if allow_short_fallback {
+            &[trimmed, short]
+        } else {
+            &[trimmed]
+        };
+        for candidate in candidates {
             let resolved = resolve_callable_with_context(global, candidate, &ctx);
             if let [func] = resolved.as_slice() {
                 return Some(*func);
@@ -1151,7 +1310,7 @@ fn collect_assigned_receiver_type_names(
                 source_names,
                 span,
                 ..
-            } => {
+                    } => {
                 if call_span.is_some_and(|call_span| span.start > call_span.start) {
                     continue;
                 }
@@ -1503,7 +1662,32 @@ pub fn collect_call_event_targets_with_context_and_aliases(
             alias_targets,
         );
         let short = short_callee(name);
-        if targets.is_empty() && short != name {
+        // For Rust-style `Type::method` qualified calls, allow the
+        // bare-tail fallback ONLY when the qualifier resolves to
+        // an in-workspace alias. See the matching guard at the
+        // build-time call site above for the full rationale.
+        // The legacy taint engine still routes through this entry
+        // and doesn't share the callgraph build's WorkspaceAliasIndex,
+        // so we build a local one — call-frequency here is bounded
+        // by the legacy engine's per-source pass.
+        let local_alias_index = WorkspaceAliasIndex::build(global);
+        let allow_short_fallback = if let Some(idx) = name.find("::") {
+            let qualifier = &name[..idx];
+            alias_targets
+                .get(qualifier)
+                .map(|t| match t {
+                    AliasTarget::Namespace { module } => is_workspace_alias_target(&local_alias_index, module),
+                    AliasTarget::Member { module, member } => {
+                        is_workspace_alias_target(&local_alias_index, module)
+                            || is_workspace_alias_target(&local_alias_index, member)
+                    }
+                    AliasTarget::Type { .. } => true,
+                })
+                .unwrap_or(false)
+        } else {
+            true
+        };
+        if targets.is_empty() && short != name && allow_short_fallback {
             targets = collect_callable_targets_with_context_and_aliases(
                 global,
                 short,
@@ -1544,6 +1728,97 @@ fn collect_callable_targets_exact(global: &GlobalIndex, name: &str) -> Vec<FuncI
 #[must_use]
 pub fn short_callee(name: &str) -> &str {
     short_qualified_tail(name)
+}
+
+/// Precomputed index used by [`is_workspace_alias_target`] so the
+/// `Type::method` short-tail gate doesn't pay an O(decls) scan per
+/// call site. The two sets are built once per callgraph build (or
+/// once per `resolve_callable_symbol` call when entered standalone)
+/// and trusted across every alias lookup inside that pass.
+///
+/// * `class_names` — every `DeclKind::Class` decl's bare name.
+///   Covers `AliasTarget::Type` rebindings (`let r: Repository`)
+///   and Rust-style `Foo::method` where `Foo` is a user struct.
+/// * `module_canonicals` — every decl's `module_path.segments`
+///   joined with both `::` and `.` separators, so alias targets
+///   spelled `crate::storage`, `storage`, or `app.storage` all
+///   resolve. Stored as `(canonical, leading_segment)` so the
+///   suffix-match in `is_workspace_alias_target` doesn't have to
+///   call `ends_with(&format!(...))` per candidate.
+#[derive(Default)]
+struct WorkspaceAliasIndex {
+    class_names: ahash::AHashSet<String>,
+    /// Pairs of (canonical_module_path, language_separator).
+    /// canonical is the joined module path, separator is `::` or
+    /// `.` depending on which form the adapter records.
+    module_canonicals: ahash::AHashSet<String>,
+}
+
+impl WorkspaceAliasIndex {
+    fn build(global: &GlobalIndex) -> Self {
+        let mut class_names: ahash::AHashSet<String> = ahash::AHashSet::default();
+        let mut module_canonicals: ahash::AHashSet<String> = ahash::AHashSet::default();
+        for file in global.all_files() {
+            for decl in global.decls_in(file) {
+                if matches!(decl.kind, DeclKind::Class) {
+                    class_names.insert(decl.name.clone());
+                }
+                if !decl.module_path.is_empty() {
+                    let segs = &decl.module_path.segments;
+                    module_canonicals.insert(segs.join("::"));
+                    module_canonicals.insert(segs.join("."));
+                }
+            }
+        }
+        Self {
+            class_names,
+            module_canonicals,
+        }
+    }
+
+    fn contains(&self, module: &str) -> bool {
+        let trimmed = module.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if self.class_names.contains(trimmed) {
+            return true;
+        }
+        let stripped = trimmed
+            .trim_start_matches("crate::")
+            .trim_start_matches("crate.");
+        if self.module_canonicals.contains(trimmed) || self.module_canonicals.contains(stripped) {
+            return true;
+        }
+        // Suffix-match: alias targets like `app` should also hit
+        // `crate::app` / `pkg.app.sub`. Iterate the precomputed
+        // canonical set and check ::trimmed / .trimmed suffixes.
+        // O(canonicals) but bounded by file count, not decl count,
+        // and each contains-check is hash-table-fast.
+        let needle_cc = format!("::{trimmed}");
+        let needle_dot = format!(".{trimmed}");
+        let needle_cc_stripped = format!("::{stripped}");
+        let needle_dot_stripped = format!(".{stripped}");
+        for canonical in &self.module_canonicals {
+            if canonical.ends_with(&needle_cc)
+                || canonical.ends_with(&needle_dot)
+                || canonical.ends_with(&needle_cc_stripped)
+                || canonical.ends_with(&needle_dot_stripped)
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// True when `module` names something the workspace recognises —
+/// either a known module path or a declared type / class name.
+/// Memoised against a precomputed [`WorkspaceAliasIndex`] so the
+/// short-tail gate is O(1) per call instead of O(decls). See the
+/// index's docs for the rationale.
+fn is_workspace_alias_target(idx: &WorkspaceAliasIndex, module: &str) -> bool {
+    idx.contains(module)
 }
 
 /// True when `call_name` resolves to `target_func` from `caller_decl`'s

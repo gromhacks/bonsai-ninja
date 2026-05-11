@@ -20,6 +20,8 @@ bonsai_abstract_interp = { workspace = true }
 bonsai_callgraph = { workspace = true }
 bonsai_resolve = { workspace = true }
 bonsai_taint = { workspace = true }
+bonsai_factstore = { workspace = true }
+bonsai_idg = { workspace = true }
 rayon = { workspace = true }
 bincode = { workspace = true }
 serde = { workspace = true }
@@ -30,6 +32,7 @@ tracing = { workspace = true }
 ignore = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 bonsai_trace = { workspace = true }
 bonsai_lang_c = { workspace = true }
 bonsai_lang_cpp = { workspace = true }

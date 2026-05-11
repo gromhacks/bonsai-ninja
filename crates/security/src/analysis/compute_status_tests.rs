@@ -6,6 +6,7 @@
 use super::*;
 use crate::finding::FindingMatch;
 use crate::loader::LanguagePack;
+use bonsai_taint::TaintedCallKind;
 
 fn sanitizer(tag: Option<&str>) -> FindingMatch {
     FindingMatch {
