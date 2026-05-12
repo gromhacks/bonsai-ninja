@@ -148,17 +148,15 @@ impl ValueFlowCache {
         let hit = reader.get(u64::from(func.raw())).ok().flatten()?;
         let pool = reader.string_pool().ok()?;
         let entry = decode_value_flow_entry(&hit.payload, &pool).ok()?;
-        let arc_graph = Arc::new(entry.graph);
-        let arc_returning = Arc::new(entry.returning_seeds);
-        let mut inner = self.inner.write();
-        inner.graphs.entry(func).or_insert_with(|| arc_graph.clone());
-        inner
-            .returning_seeds
-            .entry(func)
-            .or_insert_with(|| arc_returning.clone());
-        // Re-fetch in case a peer thread won the insert race so we
-        // return the canonical Arc rather than our local one.
-        Some(inner.graphs.get(&func).cloned().unwrap_or(arc_graph))
+        // CodeQL-style read path: factstore = source of truth post-prewarm.
+        // Return the freshly decoded `Arc` without writing back into
+        // `inner.graphs`/`returning_seeds`, so a long-running security
+        // scan over a workspace the size of Redis `src/` (5k functions)
+        // stays at flat in-memory cost instead of accumulating one
+        // entry per lazy fault. The mmap'd factstore + OS page cache
+        // handle the working set.
+        let _ = (&entry.returning_seeds,); // present in disk entry; consumers re-read on demand
+        Some(Arc::new(entry.graph))
     }
 
     /// Set of seed names whose forward closure in `func`'s

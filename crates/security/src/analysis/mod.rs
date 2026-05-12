@@ -711,15 +711,15 @@ where
         label: "enumerating source paths",
         total: source_hits.len() as u64,
     });
-    // Workspace-wide taint-graph index (Stage 6). Lifted out of the
-    // per-invocation map so re-running source-analysis with a
-    // different `--tag` filter against the same workspace +
-    // rulepack reuses cached graphs. Per-invocation
-    // `local_graphs` map kept as L1 to avoid re-cloning Arcs from
-    // the workspace cache for in-pass duplicates.
+    // Stream-only scan: each `(source, seed_shape)` graph is built,
+    // drained into one or more `SourceAnalysisCandidate`s, and then
+    // dropped on the next loop iteration. The `TaintGraphIndex` is
+    // probed first so any graph already computed earlier in the same
+    // run is reused without recomputing — but graphs computed by this
+    // path are not written back, because the workspace index is not
+    // persisted to disk and unbounded in-memory accumulation OOM'd
+    // multi-thousand-source scans (e.g. Redis `src/`).
     let workspace_taint_index = ws.taint_index();
-    let local_graphs: parking_lot::RwLock<AHashMap<(FuncId, Vec<String>), Arc<EntryTaintGraph>>> =
-        parking_lot::RwLock::new(AHashMap::new());
     use rayon::prelude::*;
     // Per-thread `seen` Vecs merged at the end so the parallel
     // collect doesn't serialise on a global set lock; the second
@@ -751,21 +751,15 @@ where
                         start,
                         sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names),
                     );
-                    // L1: per-invocation map. Drop the read guard
-                    // before any potential write upgrade.
-                    let cached = local_graphs.read().get(&graph_key).cloned();
-                    if let Some(arc) = cached {
-                        return (*arc).clone();
-                    }
-                    // L2: workspace-wide TaintGraphIndex.
+                    // Probe the workspace index for a graph computed
+                    // earlier in this run. On miss, compute fresh and
+                    // drop the `Arc` at end-of-iteration without
+                    // writing back — see the stream-only rationale on
+                    // the `workspace_taint_index` binding above.
                     if let Some(arc) = workspace_taint_index.get(start, &graph_key.1) {
-                        local_graphs
-                            .write()
-                            .entry(graph_key.clone())
-                            .or_insert(arc.clone());
                         return (*arc).clone();
                     }
-                    let computed = Arc::new(exact_source_seed_graph(
+                    let computed = exact_source_seed_graph(
                         start,
                         &seeds,
                         &source_graph_config,
@@ -774,11 +768,8 @@ where
                         ws,
                         anchor,
                         &output_arg_names,
-                    ));
-                    let canonical =
-                        workspace_taint_index.insert_if_absent(start, graph_key.1.clone(), computed);
-                    local_graphs.write().entry(graph_key).or_insert(canonical.clone());
-                    (*canonical).clone()
+                    );
+                    computed
                 })
                 .unwrap_or_else(|| ws.dataflow().graph_for(start, ws.db()).as_ref().clone());
             let lineages = enumerate_tainted_source_lineages(&graph.call_records, start, 6, 24);
@@ -3577,11 +3568,17 @@ where
     // `parking_lot::RwLock` still owns the dedup so rayon workers
     // probe locally before falling back to the workspace index.
     let workspace_taint_index = ws.taint_index();
-    // Per-invocation fallback map for the rare case where the
-    // workspace index is opted out (e.g. clear_for_config invalidated
-    // mid-scan). Same shape as Stage 1's design.
-    let exact_graphs: parking_lot::RwLock<AHashMap<(FuncId, Vec<String>), std::sync::Arc<EntryTaintGraph>>> =
-        parking_lot::RwLock::new(AHashMap::new());
+    // Stream-only scan: per-`(source_func, seed_shape)` graphs are
+    // computed, drained into `FindingWithChain`s, and dropped before
+    // the next source is processed. Previously this layer accumulated
+    // every graph in both an L1 `exact_graphs` and the workspace-wide
+    // `TaintGraphIndex` so a future run could reuse them, but neither
+    // is persisted to disk so the only effect was unbounded peak RAM
+    // — a 100K-LOC C codebase (Redis) accumulated 3 GB+ in this map
+    // before OOMing. Recomputing per run is a non-issue when the rest
+    // of the pipeline (`DataFlowCache`, `ValueFlowCache`) already
+    // memoises the heavy lifting and the matcher work below is bounded
+    // by the source-match cardinality.
     // AHashMap iteration order is hash-randomized per process. Sort
     // by FuncId.raw() so the per-source-group analysis order and
     // resulting finding fingerprints are stable across runs.
@@ -3616,42 +3613,32 @@ where
                     src_func_id,
                     sorted_seed_key_with_anchor(seeds, anchor, &output_arg_names),
                 );
-                // Lookup order:
-                //   1. per-invocation `exact_graphs` (lock-free probe path)
-                //   2. workspace-wide taint index (cross-invocation cache)
-                //   3. compute, populate both layers
-                // Read guards are scoped to a single statement to
-                // avoid the parking_lot read→write deadlock that
-                // tripped Stage 1.
-                let cached = exact_graphs.read().get(&graph_key).cloned();
-                let graph: std::sync::Arc<EntryTaintGraph> = if let Some(hit) = cached {
-                    hit
-                } else if let Some(hit) = workspace_taint_index.get(src_func_id, &graph_key.1) {
-                    // Hydrate the local map so subsequent probes hit
-                    // the lock-free path.
-                    let mut write = exact_graphs.write();
-                    write.entry(graph_key.clone()).or_insert(hit).clone()
-                } else {
-                    let computed = std::sync::Arc::new(exact_source_seed_graph(
-                        src_func_id,
-                        seeds,
-                        &config,
-                        ws.db(),
-                        taint_caches,
-                        ws,
-                        anchor,
-                        &output_arg_names,
-                    ));
-                    // Stage 6: publish to the workspace index first
-                    // so concurrent invocations can pick it up.
-                    let canonical = workspace_taint_index.insert_if_absent(
-                        src_func_id,
-                        graph_key.1.clone(),
-                        computed.clone(),
-                    );
-                    let mut write = exact_graphs.write();
-                    write.entry(graph_key).or_insert(canonical).clone()
-                };
+                // Stream-only: compute the per-`(source_func, seed_shape)`
+                // graph, use it to enumerate findings, then drop the
+                // `Arc` at the end of this iteration. Workspace-wide
+                // `TaintGraphIndex` isn't persisted, and the L1 fallback
+                // map was unbounded growth on large codebases. Within
+                // one source group several matches may share the same
+                // `graph_key`; the workspace cache (which still
+                // contains entries from earlier in this same run) is
+                // probed first so we don't redo the work, but we do
+                // not write back to it from this stream-only path.
+                let _ = &graph_key; // borrow keeps `seeds`/`anchor` ownership clear
+                let graph: std::sync::Arc<EntryTaintGraph> =
+                    if let Some(hit) = workspace_taint_index.get(src_func_id, &graph_key.1) {
+                        hit
+                    } else {
+                        std::sync::Arc::new(exact_source_seed_graph(
+                            src_func_id,
+                            seeds,
+                            &config,
+                            ws.db(),
+                            taint_caches,
+                            ws,
+                            anchor,
+                            &output_arg_names,
+                        ))
+                    };
                 if graph.tainted_calls.is_empty() {
                     continue;
                 }
