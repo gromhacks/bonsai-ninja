@@ -23,10 +23,7 @@ fn ws_with_python(file: &str, src: &str) -> Workspace {
 
 #[test]
 fn workspace_exposes_inter_taint_singleton_starts_empty() {
-    let ws = ws_with_python(
-        "app.py",
-        "def main():\n    x = input()\n    print(x)\n",
-    );
+    let ws = ws_with_python("app.py", "def main():\n    x = input()\n    print(x)\n");
     assert!(
         ws.inter_taint_caches().is_empty(),
         "fresh workspace must hand out an empty inter-taint cache"
@@ -68,18 +65,12 @@ def main():\n    x = get_input()\n    print(x)\n",
     // Editing the file (writing the same path with a different text)
     // must flush the workspace's inter-taint singleton so subsequent
     // queries see resolver/alias state derived from current AST.
-    let body =
-        "def get_input():\n    return raw_input()\n\n\
+    let body = "def get_input():\n    return raw_input()\n\n\
 def main():\n    x = get_input()\n    print(x)\n";
     ws.vfs().write("app.py".to_string(), Arc::<str>::from(body));
     // The public path that wires invalidation is `Workspace::ingest_dir`.
     // Mirror that hook here directly:
-    let prev_id = ws
-        .vfs()
-        .all_files()
-        .into_iter()
-        .next()
-        .expect("file present");
+    let prev_id = ws.vfs().all_files().into_iter().next().expect("file present");
     ws.db().invalidate_file(prev_id);
     ws.dataflow().invalidate_file(prev_id);
     ws.value_flow().clear();

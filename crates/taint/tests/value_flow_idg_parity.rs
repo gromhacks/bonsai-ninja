@@ -86,8 +86,7 @@ fn assert_idg_legacy_parity(src: &str, entry: &str, seeds: &[&str]) {
     // Legacy run: db with no IDG seeded — value_flow falls through to
     // the engine path.
     let legacy_db = build_db(adapter.clone(), &[("a.py", src)]);
-    let entry_func =
-        func_id_or_none(&legacy_db, entry).unwrap_or_else(|| panic!("entry `{entry}` indexes"));
+    let entry_func = func_id_or_none(&legacy_db, entry).unwrap_or_else(|| panic!("entry `{entry}` indexes"));
     let legacy_graph = value_flow_for_function(entry_func, &legacy_db, &InterTaintConfig::default());
     let legacy_reached = callee_param_pairs_from_graph(&legacy_graph, entry_func, seeds);
 
@@ -104,8 +103,10 @@ fn assert_idg_legacy_parity(src: &str, entry: &str, seeds: &[&str]) {
     // would also fail when one path discovers a wider set; we accept
     // IDG ⊇ legacy to allow the IDG to surface additional flows the
     // engine pruned, but every legacy edge must survive.)
-    let missing: Vec<&(FuncId, String)> =
-        legacy_reached.iter().filter(|p| !idg_reached.contains(*p)).collect();
+    let missing: Vec<&(FuncId, String)> = legacy_reached
+        .iter()
+        .filter(|p| !idg_reached.contains(*p))
+        .collect();
     assert!(
         missing.is_empty(),
         "IDG-backed value_flow must reach every callee param the legacy engine reached.\n\

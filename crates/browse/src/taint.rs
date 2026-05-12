@@ -133,7 +133,7 @@ fn file_matches_qualifier(decl_file: &str, qualifier: &str) -> bool {
         return true;
     }
     let decl_basename = decl_file
-        .rsplit_once(|c: char| c == '/' || c == '\\')
+        .rsplit_once(['/', '\\'])
         .map(|(_, tail)| tail)
         .unwrap_or(decl_file);
     decl_basename == qualifier
@@ -163,14 +163,23 @@ struct SourceSpec<'a> {
 /// `:`.
 fn split_source_spec(spec: &str) -> SourceSpec<'_> {
     let Some(name_idx) = spec.rfind(':') else {
-        return SourceSpec { name: spec, ..Default::default() };
+        return SourceSpec {
+            name: spec,
+            ..Default::default()
+        };
     };
     let (head, name) = (&spec[..name_idx], &spec[name_idx + 1..]);
     if name.is_empty() || head.is_empty() {
-        return SourceSpec { name: spec, ..Default::default() };
+        return SourceSpec {
+            name: spec,
+            ..Default::default()
+        };
     }
     if name.contains('/') || name.contains('\\') {
-        return SourceSpec { name: spec, ..Default::default() };
+        return SourceSpec {
+            name: spec,
+            ..Default::default()
+        };
     }
     let (file, line) = match head.rsplit_once(':') {
         Some((path, maybe_line)) if !path.is_empty() => match maybe_line.parse::<u32>() {
@@ -375,10 +384,8 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     // (so e2e harnesses can read it as "did the pass run?"). Floor
     // at 1 when seeds resolved but no cross-call edges fired — the
     // source-function itself was still analysed.
-    let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> = cross_calls
-        .iter()
-        .map(|ce| (ce.caller, ce.callee))
-        .collect();
+    let unique_pairs: ahash::AHashSet<(bonsai_common::FuncId, bonsai_common::FuncId)> =
+        cross_calls.iter().map(|ce| (ce.caller, ce.callee)).collect();
     let pairs_analyzed = std::cmp::max(1, unique_pairs.len());
     TaintOutcome::Report(TaintReport {
         source: f.source.to_string(),
@@ -427,8 +434,7 @@ fn build_taint_record_from_cross_call(
     // Resolve the call arg's textual form by walking the caller's
     // flow events: same lookup `caller_arg_value_text` does in
     // `bonsai_taint::value_flow`.
-    let value_text = caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx)
-        .unwrap_or_default();
+    let value_text = caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx).unwrap_or_default();
     let param_name = callee_decl
         .params
         .get(ce.param_idx as usize)
@@ -528,7 +534,6 @@ fn caller_arg_value_text(
     let arg = find_call_arg(&decl.flow_events, call_span, arg_idx as usize)?;
     Some(arg.value_text.clone())
 }
-
 
 /// `bonsai_callgraph::EdgeKind` → public string form. Keeps
 /// JSON output stable across engine refactors.

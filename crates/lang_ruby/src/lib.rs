@@ -761,7 +761,10 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
 fn inside_ruby_executable_scope(node: tree_sitter::Node<'_>) -> bool {
     let mut parent = node.parent();
     while let Some(current) = parent {
-        if matches!(current.kind(), "method" | "singleton_method" | "block" | "do_block") {
+        if matches!(
+            current.kind(),
+            "method" | "singleton_method" | "block" | "do_block"
+        ) {
             return true;
         }
         parent = current.parent();

@@ -79,6 +79,9 @@ impl LanguageAdapter for ScalaAdapter {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `def f(): T = ...` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let arm_spans = collect_scala_match_arm_spans(&tree, src, file);
             for decl in &mut idx.defs {
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
@@ -117,14 +120,12 @@ impl LanguageAdapter for ScalaAdapter {
                 if let Some((_, owner_span, owner_kind)) =
                     method_owners.iter().find(|(span, _, _)| *span == decl.span)
                 {
-                    if let Some((_, owner_symbol)) =
-                        class_symbols.iter().find(|(span, _)| span == owner_span)
+                    if let Some((_, owner_symbol)) = class_symbols.iter().find(|(span, _)| span == owner_span)
                     {
                         decl.parent = Some(*owner_symbol);
                         decl.kind = DeclKind::Method;
                         if *owner_kind != "object_definition" && decl.implicit_receiver_names.is_empty() {
-                            decl.implicit_receiver_names =
-                                vec!["this".to_string(), "super".to_string()];
+                            decl.implicit_receiver_names = vec!["this".to_string(), "super".to_string()];
                         }
                     }
                     if let Some(field_aliases) = class_field_aliases
@@ -233,9 +234,7 @@ fn collect_scala_class_field_aliases(
             // Don't descend into method bodies — local vals are
             // covered by the per-method `collect_param_type_aliases`
             // pass and would pollute the class-scope set.
-            if node != class_node
-                && matches!(node.kind(), "function_definition" | "function_declaration")
-            {
+            if node != class_node && matches!(node.kind(), "function_definition" | "function_declaration") {
                 continue;
             }
             if matches!(node.kind(), "val_definition" | "var_definition") {

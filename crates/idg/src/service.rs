@@ -204,11 +204,7 @@ impl IdgQueryService {
     /// Names are looked up via the segment's persisted string pool
     /// (populated at merge time from each function's transfer
     /// output's name pool). Empty pool → empty result.
-    pub fn read_or_write_nodes_for_names(
-        &self,
-        func: FuncId,
-        seed_names: &[String],
-    ) -> Vec<WsNodeId> {
+    pub fn read_or_write_nodes_for_names(&self, func: FuncId, seed_names: &[String]) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let Some(seg_id) = self.workspace.segment_for_func(func) else {
             return Vec::new();
@@ -276,8 +272,7 @@ impl IdgQueryService {
         let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
             return Vec::new();
         };
-        let want: ahash::AHashSet<&str> =
-            names.iter().map(|n| n.as_str()).collect();
+        let want: ahash::AHashSet<&str> = names.iter().map(|n| n.as_str()).collect();
         let mut out = Vec::new();
         for (idx, param_name) in decl.params.iter().enumerate() {
             if !want.contains(param_name.as_str()) {
@@ -342,11 +337,7 @@ impl IdgQueryService {
     /// - `Place::CallRet { site }` when `site` overlaps.
     /// - `Place::CallArg { site, .. }` when `site` overlaps.
     /// - `Place::Throw`/`Catch` when their event spans overlap.
-    pub fn source_seed_nodes_at_span(
-        &self,
-        func: FuncId,
-        match_span: Span,
-    ) -> Vec<WsNodeId> {
+    pub fn source_seed_nodes_at_span(&self, func: FuncId, match_span: Span) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let Some(seg_id) = self.workspace.segment_for_func(func) else {
             return Vec::new();
@@ -378,14 +369,11 @@ impl IdgQueryService {
         // call". Approximated by also gating the skip on
         // `match_span.start == ret_site.start` so wide anchors
         // (function bodies) don't trip it.
-        let mut sibling_arg_sites: ahash::AHashSet<bonsai_common::Span> =
-            ahash::AHashSet::default();
+        let mut sibling_arg_sites: ahash::AHashSet<bonsai_common::Span> = ahash::AHashSet::default();
         for place in &segment.places.places {
             if let Place::CallRet { site } = place {
                 let ret_span = site.0;
-                if spans_overlap(ret_span, match_span)
-                    && ret_span.start == match_span.start
-                {
+                if spans_overlap(ret_span, match_span) && ret_span.start == match_span.start {
                     sibling_arg_sites.insert(ret_span);
                 }
             }
@@ -427,13 +415,9 @@ impl IdgQueryService {
     ///
     /// Result is sorted by `(caller_func, call_span.start, arg_idx)`
     /// for deterministic grouping.
-    pub fn tainted_call_args_in_closure(
-        &self,
-        seeds: &[WsNodeId],
-    ) -> Vec<(FuncId, Span, u8)> {
+    pub fn tainted_call_args_in_closure(&self, seeds: &[WsNodeId]) -> Vec<(FuncId, Span, u8)> {
         let unified = self.ensure_unified();
-        let closure: AHashSet<WsNodeId> =
-            self.forward_closure(seeds).into_iter().collect();
+        let closure: AHashSet<WsNodeId> = self.forward_closure(seeds).into_iter().collect();
         let mut out = Vec::new();
         for ws_node in &closure {
             let Some(&(seg_id, local)) = unified.reverse.get(ws_node.0 as usize) else {
@@ -462,12 +446,7 @@ impl IdgQueryService {
     /// security analysis when a source rule has `output_args` —
     /// fgets(buf, ...) writes back to `buf`, so post-call reads of
     /// `buf` are the seed-bearing nodes.
-    pub fn nodes_for_name_after_span(
-        &self,
-        func: FuncId,
-        name: &str,
-        cutoff: Span,
-    ) -> Vec<WsNodeId> {
+    pub fn nodes_for_name_after_span(&self, func: FuncId, name: &str, cutoff: Span) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let Some(seg_id) = self.workspace.segment_for_func(func) else {
             return Vec::new();
@@ -523,12 +502,7 @@ impl IdgQueryService {
     /// every Write(`name`)→consumer edge in the segment, the
     /// destination consumer is post-`cutoff` if its anchored call
     /// span sorts after `cutoff`.
-    pub fn name_consumer_nodes_after_span(
-        &self,
-        func: FuncId,
-        name: &str,
-        cutoff: Span,
-    ) -> Vec<WsNodeId> {
+    pub fn name_consumer_nodes_after_span(&self, func: FuncId, name: &str, cutoff: Span) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let Some(seg_id) = self.workspace.segment_for_func(func) else {
             return Vec::new();
@@ -541,8 +515,7 @@ impl IdgQueryService {
         };
         // Find every node whose Place is a Write or Read of `name`
         // (path empty) — these are the bridge_read fan-in points.
-        let mut name_source_local: ahash::AHashSet<crate::node::NodeId> =
-            ahash::AHashSet::default();
+        let mut name_source_local: ahash::AHashSet<crate::node::NodeId> = ahash::AHashSet::default();
         for (pid_idx, place) in segment.places.places.iter().enumerate() {
             let matches = matches!(place, Place::Read { name: n, path } if path.is_empty() && *n == strid)
                 || matches!(place, Place::Write { name: n, path, .. } if path.is_empty() && *n == strid);
@@ -635,8 +608,7 @@ impl IdgQueryService {
     /// list.
     pub fn cross_call_edges_in_closure(&self, seeds: &[WsNodeId]) -> Vec<CrossCallEdge> {
         let unified = self.ensure_unified();
-        let closure: AHashSet<WsNodeId> =
-            self.forward_closure(seeds).into_iter().collect();
+        let closure: AHashSet<WsNodeId> = self.forward_closure(seeds).into_iter().collect();
         let mut out = Vec::new();
 
         // 1. Intra-segment edges: same-file caller/callee pairs.
@@ -686,20 +658,17 @@ impl IdgQueryService {
         // 2. Cross-file edges for the genuinely cross-segment
         // caller/callee pairs.
         for cfe in &self.workspace.cross_file().edges {
-            let Some(&from_ws) = unified.forward.get(&(cfe.from_segment, cfe.edge.from))
-            else {
+            let Some(&from_ws) = unified.forward.get(&(cfe.from_segment, cfe.edge.from)) else {
                 continue;
             };
             if !closure.contains(&from_ws) {
                 continue;
             }
-            let from_seg = match self.workspace.segment(cfe.from_segment) {
-                Some(s) => s,
-                None => continue,
+            let Some(from_seg) = self.workspace.segment(cfe.from_segment) else {
+                continue;
             };
-            let to_seg = match self.workspace.segment(cfe.to_segment) {
-                Some(s) => s,
-                None => continue,
+            let Some(to_seg) = self.workspace.segment(cfe.to_segment) else {
+                continue;
             };
             if let Some(row) = lift_call_arg_edge(from_seg, to_seg, &cfe.edge) {
                 out.push(row);
@@ -747,13 +716,11 @@ impl IdgQueryService {
             let seg_idx = seg_id.0 as usize;
             let seg_id = SegmentId(seg_idx as u32);
             for edge in &segment.edges {
-                let from_ws = match forward.get(&(seg_id, edge.from)) {
-                    Some(&w) => w,
-                    None => continue,
+                let Some(&from_ws) = forward.get(&(seg_id, edge.from)) else {
+                    continue;
                 };
-                let to_ws = match forward.get(&(seg_id, edge.to)) {
-                    Some(&w) => w,
-                    None => continue,
+                let Some(&to_ws) = forward.get(&(seg_id, edge.to)) else {
+                    continue;
                 };
                 edges.push(IdgEdge {
                     from: NodeId(from_ws.0),
@@ -766,13 +733,11 @@ impl IdgQueryService {
         // segment ids on each endpoint, so we look up the local
         // node id within each segment.
         for cfe in &self.workspace.cross_file().edges {
-            let from_ws = match forward.get(&(cfe.from_segment, cfe.edge.from)) {
-                Some(&w) => w,
-                None => continue,
+            let Some(&from_ws) = forward.get(&(cfe.from_segment, cfe.edge.from)) else {
+                continue;
             };
-            let to_ws = match forward.get(&(cfe.to_segment, cfe.edge.to)) {
-                Some(&w) => w,
-                None => continue,
+            let Some(&to_ws) = forward.get(&(cfe.to_segment, cfe.edge.to)) else {
+                continue;
             };
             edges.push(IdgEdge {
                 from: NodeId(from_ws.0),
@@ -795,9 +760,7 @@ impl IdgQueryService {
     /// that don't carry one — Param, Return, Read/Write of a bare
     /// name).
     fn build_point_ref(&self, func: FuncId, place: &Place) -> PointRef {
-        let decl = self
-            .global
-            .decl_of(bonsai_common::SymbolId::new(func.raw()));
+        let decl = self.global.decl_of(bonsai_common::SymbolId::new(func.raw()));
         let default_span = decl
             .map(|d| d.name_span)
             .unwrap_or_else(|| Span::empty(bonsai_common::FileId::INVALID, 0));
@@ -1143,9 +1106,9 @@ mod tests {
         let f_params = svc.param_nodes_of(f_id);
         let edges = svc.cross_call_edges_in_closure(&f_params);
         assert!(
-            edges.iter().any(|e| {
-                e.caller == f_id && e.callee == g_id && e.arg_idx == 0 && e.param_idx == 0
-            }),
+            edges
+                .iter()
+                .any(|e| { e.caller == f_id && e.callee == g_id && e.arg_idx == 0 && e.param_idx == 0 }),
             "expected one CallArg→Param edge for f→g, got {edges:?}",
         );
     }

@@ -19,11 +19,11 @@ bonsai-ninja index ./src --watch
 | Flag | Default | Description |
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root to analyze. |
-| `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and rewrite `.bonsai/dataflow.v2.bin`. |
+| `--watch` | false | Keep running, poll the source tree, hot-reload saved changes into the live workspace, and rewrite `.bonsai/dataflow.v3.factstore`. |
 | `--interval-ms <N>` | 750 | Poll interval for `--watch`. Values below 100 ms are clamped to 100 ms. |
 
 Normal `index` runs are already incremental across processes: the command
-loads `.bonsai/dataflow.v2.bin`, validates cached entries by source
+loads `.bonsai/dataflow.v3.factstore`, validates cached entries by source
 content and dependency hashes, computes only missing or stale dataflow
 facts, and writes the sidecar back. `--watch` keeps the same workspace
 alive so saved file edits reparse only changed files.
@@ -225,7 +225,7 @@ bonsai-ninja cache rebuild ./src
 |---|---:|---|
 | `stats <WORKSPACE>` | None | Print cache configuration, sidecar path, sidecar size, and entry count when present. |
 | `clear <WORKSPACE>` | None | Remove `.bonsai/` artifacts for the workspace. |
-| `rebuild <WORKSPACE>` | None | Delete and rebuild `.bonsai/dataflow.v2.bin`. |
+| `rebuild <WORKSPACE>` | None | Delete and rebuild `.bonsai/dataflow.v3.factstore`. |
 | `--dataflow-only` | false | For `clear`, remove only the persisted dataflow sidecar. |
 
 ## Browse Commands

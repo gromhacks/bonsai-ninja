@@ -506,11 +506,7 @@ fn caller_arg_value_text(
 }
 
 /// Look up the name of the `param_idx`-th parameter of `callee`.
-fn callee_param_name(
-    global: &bonsai_index::GlobalIndex,
-    callee: FuncId,
-    param_idx: u8,
-) -> Option<String> {
+fn callee_param_name(global: &bonsai_index::GlobalIndex, callee: FuncId, param_idx: u8) -> Option<String> {
     let decl = global.decl_of(SymbolId::new(callee.raw()))?;
     decl.params.get(param_idx as usize).cloned()
 }
@@ -633,10 +629,7 @@ fn build_intra_entry_graph(
     // and an edge from the matching `value_name` origin (param or
     // assign target) to the Return. Recurses into Branch / Try /
     // Switch sub-events so nested returns are captured.
-    fn collect_return_events<'a>(
-        events: &'a [FlowEvent],
-        out: &mut Vec<(&'a Span, &'a str, &'a str)>,
-    ) {
+    fn collect_return_events<'a>(events: &'a [FlowEvent], out: &mut Vec<(&'a Span, &'a str, &'a str)>) {
         for event in events {
             match event {
                 FlowEvent::Return {

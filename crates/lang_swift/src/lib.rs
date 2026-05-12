@@ -96,6 +96,9 @@ impl LanguageAdapter for SwiftAdapter {
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `func f() -> T {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let arm_spans = collect_swift_switch_arm_spans(&tree, src, file);
             for decl in &mut idx.defs {
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);

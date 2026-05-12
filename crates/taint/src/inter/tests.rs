@@ -117,7 +117,7 @@ fn terminal_assign_return_taint_requires_adapter_implicit_return_fact() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: Vec::new(),
-            declares_new_binding: false,
+        declares_new_binding: false,
         value_kind: None,
     }];
 
@@ -365,7 +365,7 @@ fn assignment_guard_preserves_direct_carrier_taint_next_to_qualified_access() {
             "value".to_string(),
             "value.toUpperCase".to_string(),
         ],
-            declares_new_binding: false,
+        declares_new_binding: false,
         value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
@@ -385,7 +385,7 @@ fn assignment_guard_preserves_direct_sigil_alias_source() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: vec!["$_GET".to_string(), "$_GET.cmd".to_string(), "_GET".to_string()],
-            declares_new_binding: false,
+        declares_new_binding: false,
         value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
@@ -405,7 +405,7 @@ fn assignment_guard_rejects_direct_carrier_field_read() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: vec!["c".to_string(), "c.capacity".to_string(), "capacity".to_string()],
-            declares_new_binding: false,
+        declares_new_binding: false,
         value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
@@ -425,7 +425,7 @@ fn assignment_guard_still_rejects_sibling_field_promotion() {
         source_call: None,
         source_call_args: Vec::new(),
         source_names: vec!["data".to_string(), "data.other".to_string()],
-            declares_new_binding: false,
+        declares_new_binding: false,
         value_kind: None,
     };
     apply_event_transfer(&event, &mut state, &InterTaintConfig::default(), None, None);
@@ -624,7 +624,7 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
             source_call: Some("format".to_string()),
             source_call_args: Vec::new(),
             source_names: vec!["cmd".to_string()],
-                    declares_new_binding: false,
+            declares_new_binding: false,
             value_kind: None,
         },
         FlowEvent::Call {
@@ -658,7 +658,12 @@ fn unresolved_call_assignment_with_source_operands_preserves_taint() {
         const_bindings: &const_bindings,
         caller: func_id_of(&db, "placeholder"),
     };
-    let (_, found) = walk_events_for_sink(&events, seed(&["cmd"]), &ctx, &parking_lot::RwLock::new(AHashMap::new()));
+    let (_, found) = walk_events_for_sink(
+        &events,
+        seed(&["cmd"]),
+        &ctx,
+        &parking_lot::RwLock::new(AHashMap::new()),
+    );
     assert!(
         found,
         "unresolved formatter-style assignment must use source_names before evaluating the sink"
@@ -680,7 +685,7 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
             source_call: Some("String::new".to_string()),
             source_call_args: Vec::new(),
             source_names: vec!["String".to_string(), "new".to_string()],
-                    declares_new_binding: false,
+            declares_new_binding: false,
             value_kind: None,
         },
         FlowEvent::Assign {
@@ -690,7 +695,7 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
             source_call: Some("stdin.lock().read_line".to_string()),
             source_call_args: vec!["&mut raw".to_string()],
             source_names: vec!["raw".to_string(), "stdin.lock().read_line".to_string()],
-                    declares_new_binding: false,
+            declares_new_binding: false,
             value_kind: None,
         },
         FlowEvent::Call {
@@ -708,7 +713,7 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: vec!["raw.trim".to_string()],
-                    declares_new_binding: false,
+            declares_new_binding: false,
             value_kind: None,
         },
         FlowEvent::Call {
@@ -742,7 +747,12 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
         const_bindings: &const_bindings,
         caller: func_id_of(&db, "placeholder"),
     };
-    let (_, found) = walk_events_for_sink(&events, TokenSet::default(), &ctx, &parking_lot::RwLock::new(AHashMap::new()));
+    let (_, found) = walk_events_for_sink(
+        &events,
+        TokenSet::default(),
+        &ctx,
+        &parking_lot::RwLock::new(AHashMap::new()),
+    );
     assert!(
         found,
         "configured source-output calls must introduce taint at the call site, after earlier clean initializers"
@@ -1214,13 +1224,8 @@ fn budgeted_run_can_resume_to_completion() {
         ..Default::default()
     };
     let caches = InterTaintCaches::default();
-    let result = interprocedural_taint_to_completion_with_caches(
-        entry,
-        &seed(&["user_input"]),
-        &config,
-        &db,
-        &caches,
-    );
+    let result =
+        interprocedural_taint_to_completion_with_caches(entry, &seed(&["user_input"]), &config, &db, &caches);
     assert!(!result.saturated);
     assert!(result.continuation.is_none());
     assert!(
@@ -1253,13 +1258,8 @@ fn to_completion_has_no_hidden_pair_ceiling() {
         ..Default::default()
     };
     let caches = InterTaintCaches::default();
-    let result = interprocedural_taint_to_completion_with_caches(
-        entry,
-        &seed(&["user_input"]),
-        &config,
-        &db,
-        &caches,
-    );
+    let result =
+        interprocedural_taint_to_completion_with_caches(entry, &seed(&["user_input"]), &config, &db, &caches);
     assert!(!result.saturated);
     assert!(result.continuation.is_none());
     assert!(
@@ -1308,7 +1308,7 @@ fn try_body_throws_tainted_via_assigned_then_raised() {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: vec!["cmd".to_string()],
-                    declares_new_binding: false,
+            declares_new_binding: false,
             value_kind: None,
         },
         FlowEvent::Throw {

@@ -139,7 +139,7 @@ mod tests {
     use std::path::Path;
 
     fn write_test_store(path: &Path, entries: &[(u64, u64, &[u8])]) {
-        let mut w = FactStoreWriter::create(path, 0, 0).expect("create");
+        let w = FactStoreWriter::create(path, 0, 0).expect("create");
         for &(key, body_hash, payload) in entries {
             w.add(key, body_hash, payload).expect("add");
         }
@@ -180,25 +180,14 @@ mod tests {
             CacheGet::Absent => {}
             other => panic!("expected Absent, got {other:?}"),
         }
-        assert!(cache
-            .get_or_decode(999, sum_decoder)
-            .expect("ok")
-            .is_none());
+        assert!(cache.get_or_decode(999, sum_decoder).expect("ok").is_none());
     }
 
     #[test]
     fn evicted_entries_re_decode_correctly() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.bin");
-        write_test_store(
-            &path,
-            &[
-                (1, 0, &[1]),
-                (2, 0, &[2]),
-                (3, 0, &[3]),
-                (4, 0, &[4]),
-            ],
-        );
+        write_test_store(&path, &[(1, 0, &[1]), (2, 0, &[2]), (3, 0, &[3]), (4, 0, &[4])]);
         let reader = FactStoreReader::open(&path, 0, 0).expect("open");
         let cache: FactCache<u32> = FactCache::new(reader, NonZeroUsize::new(2).unwrap());
         let _a = cache.get_or_decode(1, sum_decoder).expect("ok");
@@ -230,9 +219,7 @@ mod tests {
         use std::thread;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.bin");
-        let entries: Vec<(u64, u64, &[u8])> = (0..32u64)
-            .map(|i| (i, i, b"x" as &[u8]))
-            .collect();
+        let entries: Vec<(u64, u64, &[u8])> = (0..32u64).map(|i| (i, i, b"x" as &[u8])).collect();
         write_test_store(&path, &entries);
         let reader = FactStoreReader::open(&path, 0, 0).expect("open");
         let cache: StdArc<FactCache<u32>> =
@@ -242,10 +229,7 @@ mod tests {
             let cache = StdArc::clone(&cache);
             handles.push(thread::spawn(move || {
                 for k in 0..32u64 {
-                    let v = cache
-                        .get_or_decode(k, sum_decoder)
-                        .expect("ok")
-                        .expect("hit");
+                    let v = cache.get_or_decode(k, sum_decoder).expect("ok").expect("hit");
                     assert_eq!(*v, u32::from(b'x'));
                 }
             }));

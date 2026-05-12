@@ -50,7 +50,7 @@ fn write_reopen_query_with_interned_strings() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tiny.bin");
 
-    let mut writer = FactStoreWriter::create(&path, /* table */ 1, /* pipeline */ 0xCAFE).expect("create");
+    let writer = FactStoreWriter::create(&path, /* table */ 1, /* pipeline */ 0xCAFE).expect("create");
     let validate = writer.intern("validate_input");
     let helper = writer.intern("helper");
     let sink = writer.intern("sink");
@@ -65,8 +65,12 @@ fn write_reopen_query_with_interned_strings() {
         edges: vec![(helper, sink)],
     };
 
-    writer.add(/* func 1 */ 1, /* body_hash */ 0xAA, &g_entry.encode()).expect("add");
-    writer.add(/* func 2 */ 2, /* body_hash */ 0xBB, &g_helper.encode()).expect("add");
+    writer
+        .add(/* func 1 */ 1, /* body_hash */ 0xAA, &g_entry.encode())
+        .expect("add");
+    writer
+        .add(/* func 2 */ 2, /* body_hash */ 0xBB, &g_helper.encode())
+        .expect("add");
     writer.finish().expect("finish");
 
     // Reopen — verify section-bounds + sort invariants survived.
@@ -97,7 +101,7 @@ fn cache_layer_handles_repeated_lookups_efficiently() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tiny.bin");
 
-    let mut writer = FactStoreWriter::create(&path, 0, 0).expect("create");
+    let writer = FactStoreWriter::create(&path, 0, 0).expect("create");
     for i in 0..100u64 {
         let g = TinyGraph {
             name_id: 0,
@@ -108,8 +112,7 @@ fn cache_layer_handles_repeated_lookups_efficiently() {
     writer.finish().expect("finish");
 
     let reader = FactStoreReader::open(&path, 0, 0).expect("open");
-    let cache: FactCache<TinyGraph> =
-        FactCache::new(reader, NonZeroUsize::new(16).unwrap());
+    let cache: FactCache<TinyGraph> = FactCache::new(reader, NonZeroUsize::new(16).unwrap());
 
     // First lookup of each key: miss → decode → insert. Capture the
     // resulting Arcs so we can verify a second lookup hits the cache.
@@ -150,7 +153,7 @@ fn pipeline_hash_mismatch_is_a_typed_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tiny.bin");
 
-    let mut w = FactStoreWriter::create(&path, /* table */ 1, /* pipeline */ 0xAAAA).expect("create");
+    let w = FactStoreWriter::create(&path, /* table */ 1, /* pipeline */ 0xAAAA).expect("create");
     w.add(1, 0, b"payload").expect("add");
     w.finish().expect("finish");
 
@@ -169,7 +172,7 @@ fn iter_streams_every_entry() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tiny.bin");
 
-    let mut w = FactStoreWriter::create(&path, 0, 0).expect("create");
+    let w = FactStoreWriter::create(&path, 0, 0).expect("create");
     for i in 0..50u64 {
         w.add(i, i * 11, &i.to_le_bytes()).expect("add");
     }

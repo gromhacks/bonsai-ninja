@@ -232,7 +232,7 @@ impl NameInterner {
 pub fn transfer_function_for(decl: &Decl) -> TransferOutput {
     let func = FuncId::new(decl.symbol.raw());
     let mut out = TransferOutput::new(func);
-    out.params = decl.params.clone();
+    out.params.clone_from(&decl.params);
     let mut ctx = TransferCtx {
         out: &mut out,
         last_writer: ahash::AHashMap::new(),
@@ -397,7 +397,7 @@ impl<'a> TransferCtx<'a> {
         // still need to see the base's tainted state. Without this
         // fallback, `obj.cmd = tainted; sink(obj.user)` drops taint
         // because `obj.user` has no specific writer.
-        if let Some((base, _)) = name.split_once(|c: char| matches!(c, '.' | '[')) {
+        if let Some((base, _)) = name.split_once(['.', '[']) {
             let base = base.trim();
             if !base.is_empty() && base != name {
                 let base_sid = self.intern_name(base);
@@ -456,7 +456,7 @@ impl<'a> TransferCtx<'a> {
         if !writers.contains(&node) {
             writers.push(node);
         }
-        let stripped = name.trim_start_matches(|c| matches!(c, '$' | '@' | '%' | '&'));
+        let stripped = name.trim_start_matches(['$', '@', '%', '&']);
         if !stripped.is_empty() && stripped != name {
             let alias_sid = self.intern_name(stripped);
             let alias_writers = self.last_writer.entry(alias_sid).or_default();
@@ -476,11 +476,10 @@ impl<'a> TransferCtx<'a> {
     fn commit_writer(&mut self, name: &str, node: NodeId) {
         let sid = self.intern_name(name);
         self.last_writer.insert(sid, smallvec::smallvec![node]);
-        let stripped = name.trim_start_matches(|c| matches!(c, '$' | '@' | '%' | '&'));
+        let stripped = name.trim_start_matches(['$', '@', '%', '&']);
         if !stripped.is_empty() && stripped != name {
             let alias_sid = self.intern_name(stripped);
-            self.last_writer
-                .insert(alias_sid, smallvec::smallvec![node]);
+            self.last_writer.insert(alias_sid, smallvec::smallvec![node]);
         }
     }
 
@@ -527,7 +526,15 @@ fn walk_event(event: &FlowEvent, ctx: &mut TransferCtx<'_>) {
             receiver_types,
             call_kind,
             args,
-        } => walk_call(*span, name, receiver.as_deref(), receiver_types, *call_kind, args, ctx),
+        } => walk_call(
+            *span,
+            name,
+            receiver.as_deref(),
+            receiver_types,
+            *call_kind,
+            args,
+            ctx,
+        ),
         FlowEvent::Return {
             span,
             value_name,
@@ -643,24 +650,8 @@ fn walk_event(event: &FlowEvent, ctx: &mut TransferCtx<'_>) {
             // fixpoint convergence is unnecessary because the IDG
             // is a structural reachability graph and union is
             // monotonic.
-            let entry = ctx.last_writer.clone();
             walk_events(body, ctx);
-            let after_first = ctx.last_writer.clone();
-            // Restore entry, then walk again — but UNION the
-            // entry+after_first into ctx so the second walk's reads
-            // see writers from the first iteration AND pre-loop.
-            for (name, writers) in after_first {
-                let merged = ctx.last_writer.entry(name).or_default();
-                for w in writers {
-                    if !merged.contains(&w) {
-                        merged.push(w);
-                    }
-                }
-            }
             walk_events(body, ctx);
-            // After loop, last_writer holds the union of pre-loop
-            // and body writers — correct for "loop ran 0+ times".
-            let _ = entry;
         }
         FlowEvent::Try {
             span,
@@ -769,9 +760,7 @@ fn classify_branch_condition(cond: &str) -> BranchConditionKind {
     }
     let kind = match s {
         "true" | "True" | "TRUE" | "1" => BranchConditionKind::AlwaysTrue,
-        "false" | "False" | "FALSE" | "0" | "nil" | "null" | "None" => {
-            BranchConditionKind::AlwaysFalse
-        }
+        "false" | "False" | "FALSE" | "0" | "nil" | "null" | "None" => BranchConditionKind::AlwaysFalse,
         _ => BranchConditionKind::Unknown,
     };
     match (kind, negations % 2 == 0) {
@@ -822,7 +811,7 @@ fn walk_assign(
         // of `target` after this point see the literal write.
         ctx.commit_writer(target, write_node);
         if is_field_write {
-            if let Some((base, _)) = target.split_once(|c: char| matches!(c, '.' | '[')) {
+            if let Some((base, _)) = target.split_once(['.', '[']) {
                 let base = base.trim();
                 if !base.is_empty() {
                     ctx.union_writer(base, write_node);
@@ -866,10 +855,7 @@ fn walk_assign(
             let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
             for (idx, arg) in source_call_args.iter().enumerate() {
                 let arg_idx = u8::try_from(idx).unwrap_or(u8::MAX);
-                let arg_node = ctx.intern_node(Place::CallArg {
-                    site,
-                    idx: arg_idx,
-                });
+                let arg_node = ctx.intern_node(Place::CallArg { site, idx: arg_idx });
                 arg_nodes.push(arg_node);
                 if !arg.is_empty() {
                     ctx.bridge_read(
@@ -928,7 +914,7 @@ fn walk_assign(
     // the base via taint-on-read; the IDG mirrors that with a union
     // commit on the base name.
     if is_field_write {
-        if let Some((base, _)) = target.split_once(|c: char| matches!(c, '.' | '[')) {
+        if let Some((base, _)) = target.split_once(['.', '[']) {
             let base = base.trim();
             if !base.is_empty() {
                 ctx.union_writer(base, write_node);
@@ -966,10 +952,7 @@ fn walk_call(
     let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
     for (idx, arg) in args.iter().enumerate() {
         let arg_idx = u8::try_from(idx).unwrap_or(u8::MAX);
-        let arg_node = ctx.intern_node(Place::CallArg {
-            site,
-            idx: arg_idx,
-        });
+        let arg_node = ctx.intern_node(Place::CallArg { site, idx: arg_idx });
         arg_nodes.push(arg_node);
         // Suppress the regular input edge for write-only args:
         // those positions are overwritten by the call, not read.
@@ -1028,8 +1011,8 @@ fn walk_call(
         // pattern where the param identifier (`token`) is only
         // recoverable via value_text tokenisation.
         let value_text_starts_with_bracket = arg.value_text.trim_start().starts_with('[');
-        let need_tokenise_fallback = emitted.is_empty()
-            || (value_text_starts_with_bracket && arg.place.is_none());
+        let need_tokenise_fallback =
+            emitted.is_empty() || (value_text_starts_with_bracket && arg.place.is_none());
         if need_tokenise_fallback && !arg.value_text.is_empty() {
             for token in extract_identifiers_outside_strings(&arg.value_text) {
                 if token.is_empty() {
@@ -1063,10 +1046,7 @@ fn walk_call(
             // Use a synthetic receiver slot. Pick a high arg index
             // (u8::MAX) so we don't collide with positional arg
             // indices the call may have.
-            let recv_slot = ctx.intern_node(Place::CallArg {
-                site,
-                idx: u8::MAX,
-            });
+            let recv_slot = ctx.intern_node(Place::CallArg { site, idx: u8::MAX });
             // Tokenise the receiver expression — it may be a bare
             // name (`t`) or a chain (`obj.field`); both cases
             // surface the relevant identifiers.
@@ -1101,35 +1081,29 @@ fn walk_call(
     // hot path. Sink-style side-effects (fgets / read / getline)
     // get their data from external file descriptors, not from other
     // args, so no input-to-output edges are emitted there.
-    let pipe_input_indices: ahash::AHashSet<u8> =
-        pipe_input_args_for(name, receiver, arg_nodes.len())
-            .iter()
-            .copied()
-            .collect();
+    let pipe_input_indices: ahash::AHashSet<u8> = pipe_input_args_for(name, receiver, arg_nodes.len())
+        .iter()
+        .copied()
+        .collect();
     for (out_idx, _kind) in &side_effects {
         let out_idx = *out_idx;
         let Some(arg_node) = arg_nodes.get(out_idx as usize).copied() else {
             continue;
         };
-        let arg = match args.get(out_idx as usize) {
-            Some(a) => a,
-            None => continue,
+        let Some(arg) = args.get(out_idx as usize) else {
+            continue;
         };
         // Resolve the carrier name: prefer arg.place; fall back to
         // arg.value_text if it's a bare identifier (some adapters
         // populate value_text but not place).
-        let carrier = arg
-            .place
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .or_else(|| {
-                let trimmed = arg.value_text.trim();
-                if is_bare_identifier(trimmed) {
-                    Some(trimmed)
-                } else {
-                    None
-                }
-            });
+        let carrier = arg.place.as_deref().filter(|p| !p.is_empty()).or_else(|| {
+            let trimmed = arg.value_text.trim();
+            if is_bare_identifier(trimmed) {
+                Some(trimmed)
+            } else {
+                None
+            }
+        });
         let Some(name_str) = carrier else { continue };
         let write_node = ctx.write_node(name_str, span);
         ctx.commit_writer(name_str, write_node);
@@ -1210,10 +1184,7 @@ fn walk_call(
                 let arg_zero = match emitted_arg_zero {
                     Some(n) => n,
                     None => {
-                        let n = ctx.intern_node(Place::CallArg {
-                            site,
-                            idx: 0,
-                        });
+                        let n = ctx.intern_node(Place::CallArg { site, idx: 0 });
                         emitted_arg_zero = Some(n);
                         n
                     }
@@ -1258,12 +1229,7 @@ fn walk_call(
 
 /// Walk a `Throw` event. Emits `Read(value_name) → Throw(ty)` edge
 /// and records the throw site for Phase 3 cross-function stitching.
-fn walk_throw(
-    span: Span,
-    value_name: Option<&str>,
-    thrown_type: Option<&str>,
-    ctx: &mut TransferCtx<'_>,
-) {
+fn walk_throw(span: Span, value_name: Option<&str>, thrown_type: Option<&str>, ctx: &mut TransferCtx<'_>) {
     let ty_id = thrown_type.map(|t| TypeId(ctx.intern_name(t)));
     let throw_place = match ty_id {
         Some(ty) => Place::Throw { ty },
@@ -1501,7 +1467,6 @@ pub(crate) enum SideEffectKind {
     /// otherwise composes with the prior value. The input edge
     /// remains so the prior taint flows into the new write.
     /// `strcat`, `strncat`.
-    #[allow(dead_code)]
     ReadWrite,
 }
 
@@ -1536,12 +1501,7 @@ pub(crate) fn pipe_input_args_for(
 ) -> smallvec::SmallVec<[u8; 4]> {
     let mut out: smallvec::SmallVec<[u8; 4]> = smallvec::SmallVec::new();
     if receiver.is_some_and(|r| {
-        !r.is_empty()
-            && r != "stdio"
-            && r != "stdlib"
-            && r != "io"
-            && r != "std"
-            && r != "fs"
+        !r.is_empty() && r != "stdio" && r != "stdlib" && r != "io" && r != "std" && r != "fs"
     }) {
         return out;
     }
@@ -1596,12 +1556,7 @@ pub(crate) fn side_effect_output_args_for(
     // Reject method calls on user-defined objects — these
     // knowledge-base entries are for free C-like functions.
     if receiver.is_some_and(|r| {
-        !r.is_empty()
-            && r != "stdio"
-            && r != "stdlib"
-            && r != "io"
-            && r != "std"
-            && r != "fs"
+        !r.is_empty() && r != "stdio" && r != "stdlib" && r != "io" && r != "std" && r != "fs"
     }) {
         return out;
     }
@@ -1715,22 +1670,14 @@ pub(crate) fn extract_identifiers_outside_strings(text: &str) -> Vec<String> {
 /// covers the common path. The replacement preserves source
 /// length so any downstream span reasoning stays consistent.
 fn strip_typeof_subexpressions(text: &str) -> String {
-    const KEYWORDS: &[&str] = &[
-        "sizeof",
-        "alignof",
-        "_Alignof",
-        "typeof",
-        "__typeof__",
-    ];
+    const KEYWORDS: &[&str] = &["sizeof", "alignof", "_Alignof", "typeof", "__typeof__"];
     let bytes = text.as_bytes();
     let mut out: Vec<u8> = bytes.to_vec();
     let mut i = 0;
     while i < bytes.len() {
         // Identifier-shaped prefix at byte i?
         let start = i;
-        while i < bytes.len()
-            && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric())
-        {
+        while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
             i += 1;
         }
         let ident = &bytes[start..i];
@@ -1813,9 +1760,7 @@ fn is_bare_identifier(s: &str) -> bool {
 /// over many functions sequentially. Each output carries its own
 /// name pool ([`TransferOutput::names`]) so the segment merge can
 /// remap StrIds independently per function.
-pub fn transfer_for_many<'d>(
-    decls: impl IntoIterator<Item = &'d Decl>,
-) -> Vec<TransferOutput> {
+pub fn transfer_for_many<'d>(decls: impl IntoIterator<Item = &'d Decl>) -> Vec<TransferOutput> {
     decls.into_iter().map(transfer_function_for).collect()
 }
 
@@ -1830,7 +1775,7 @@ pub fn func_id_of(decl: &Arc<Decl>) -> FuncId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bonsai_common::{FileId, SymbolId, Span as CommonSpan};
+    use bonsai_common::{FileId, Span as CommonSpan, SymbolId};
     use bonsai_lang_api::{CallArg, ModulePath, Visibility};
 
     fn span(lo: u64, hi: u64) -> CommonSpan {
@@ -1908,9 +1853,9 @@ mod tests {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }];
+            declares_new_binding: false,
+            value_kind: None,
+        }];
         let out = transfer_function_for(&decl);
         // One IntraAssign edge: `Read(x) → Write(y, span=20..30)`.
         // The CFG-narrowing transfer pass routes any subsequent
@@ -1930,9 +1875,9 @@ mod tests {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: vec!["x".to_string(), "y".to_string()],
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }];
+            declares_new_binding: false,
+            value_kind: None,
+        }];
         let out = transfer_function_for(&decl);
         // Two IntraAssign edges: one per source name into Write(z).
         assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraAssign), 2);
@@ -1948,9 +1893,9 @@ mod tests {
             source_call: Some("transform".to_string()),
             source_call_args: vec!["x".to_string()],
             source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }];
+            declares_new_binding: false,
+            value_kind: None,
+        }];
         let out = transfer_function_for(&decl);
         // Read(x) → CallArg(site, 0)
         assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraRead), 1);
@@ -1977,9 +1922,9 @@ mod tests {
                 source_call: None,
                 source_call_args: Vec::new(),
                 source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    },
+                declares_new_binding: false,
+                value_kind: None,
+            },
             // sink_a(t)
             FlowEvent::Call {
                 span: span(25, 40),
@@ -2003,9 +1948,9 @@ mod tests {
                 source_call: None,
                 source_call_args: Vec::new(),
                 source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    },
+                declares_new_binding: false,
+                value_kind: None,
+            },
             // sink_b(t)
             FlowEvent::Call {
                 span: span(60, 75),
@@ -2236,9 +2181,9 @@ mod tests {
                 source_call: None,
                 source_call_args: Vec::new(),
                 source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }],
+                declares_new_binding: false,
+                value_kind: None,
+            }],
             else_events: vec![FlowEvent::Assign {
                 span: span(30, 40),
                 target: "x".to_string(),
@@ -2246,9 +2191,9 @@ mod tests {
                 source_call: None,
                 source_call_args: Vec::new(),
                 source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }],
+                declares_new_binding: false,
+                value_kind: None,
+            }],
         }];
         let out = transfer_function_for(&decl);
         // Each arm emits one IntraAssign edge (Read(src) →
@@ -2271,9 +2216,9 @@ mod tests {
                 source_call: None,
                 source_call_args: Vec::new(),
                 source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }],
+                declares_new_binding: false,
+                value_kind: None,
+            }],
         }];
         let out = transfer_function_for(&decl);
         // Body's assign produces ONE Write(x, span) and the loop
@@ -2361,9 +2306,9 @@ mod tests {
             source_call: None,
             source_call_args: Vec::new(),
             source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }];
+            declares_new_binding: false,
+            value_kind: None,
+        }];
         let out = transfer_function_for(&decl);
         // The source-name → target edge should be an IntraFieldWrite,
         // not a plain IntraAssign, because the target is a field path.

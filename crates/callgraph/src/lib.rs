@@ -8,21 +8,21 @@
 pub mod chains;
 
 pub use chains::{
-    downstream_funcs_set, enumerate_chains_resolved, is_precise_chain, ChainTruncation,
-    ResolvedChain,
+    downstream_funcs_set, enumerate_chains_resolved, is_precise_chain, ChainTruncation, ResolvedChain,
 };
 
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::{callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId};
+use bonsai_common::{
+    callable_reference_variants, short_qualified_tail, FileId, FuncId, Precision, Span, SymbolId,
+};
 use bonsai_index::GlobalIndex;
 use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent};
 use bonsai_resolve::{
     callee_without_call_args, collect_method_candidates_for_class, enclosing_class_for_decl,
     export_name_variants, extend_alias_targets_with_declared_types, is_super_receiver,
-    module_target_matches_decl_module_path, module_target_matches_path,
-    namespace_alias_target_tail, prune_receiver_type_names_for_dispatch, push_unique_func,
-    push_unique_string, qualified_module_alias_call, resolve_callable_with_context, resolve_class,
-    ResolveContext,
+    module_target_matches_decl_module_path, module_target_matches_path, namespace_alias_target_tail,
+    prune_receiver_type_names_for_dispatch, push_unique_func, push_unique_string,
+    qualified_module_alias_call, resolve_callable_with_context, resolve_class, ResolveContext,
 };
 use serde::{Deserialize, Serialize};
 
@@ -333,8 +333,7 @@ fn add_resolved_call_edges(
                     );
                 }
                 if candidates.is_empty() {
-                    if let Some((alias_target, alias_tail)) =
-                        namespace_alias_target_tail(name, alias_targets)
+                    if let Some((alias_target, alias_tail)) = namespace_alias_target_tail(name, alias_targets)
                     {
                         candidates = collect_workspace_module_targets(
                             global,
@@ -398,7 +397,9 @@ fn add_resolved_call_edges(
                         let qualifier_resolves = alias_targets
                             .get(qualifier)
                             .map(|t| match t {
-                                AliasTarget::Namespace { module } => is_workspace_alias_target(alias_index, module),
+                                AliasTarget::Namespace { module } => {
+                                    is_workspace_alias_target(alias_index, module)
+                                }
                                 AliasTarget::Member { module, member } => {
                                     // For Member-form aliases the local
                                     // name typically rebinds to
@@ -632,9 +633,7 @@ fn resolve_callable_arg(
         return Vec::new();
     }
     for variant in &variants {
-        let trimmed = variant
-            .trim()
-            .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+        let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
         if trimmed.is_empty() {
             continue;
         }
@@ -727,7 +726,7 @@ fn collect_local_callable_bindings_into(
                 source_call,
                 source_names,
                 ..
-                    } => {
+            } => {
                 // Skip RHS that is itself a call — we only bind names
                 // pointing at a callable (e.g. `let f = some_func`).
                 if source_call.is_some() {
@@ -782,7 +781,14 @@ fn collect_local_callable_bindings_into(
                 );
             }
             FlowEvent::Loop { body, .. } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, alias_index, bindings);
+                collect_local_callable_bindings_into(
+                    body,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    alias_index,
+                    bindings,
+                );
             }
             FlowEvent::Try {
                 body,
@@ -790,7 +796,14 @@ fn collect_local_callable_bindings_into(
                 finally_events,
                 ..
             } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, alias_index, bindings);
+                collect_local_callable_bindings_into(
+                    body,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    alias_index,
+                    bindings,
+                );
                 collect_local_callable_bindings_into(
                     catch_events,
                     global,
@@ -809,7 +822,14 @@ fn collect_local_callable_bindings_into(
                 );
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_local_callable_bindings_into(body, global, caller_decl, alias_targets, alias_index, bindings);
+                collect_local_callable_bindings_into(
+                    body,
+                    global,
+                    caller_decl,
+                    alias_targets,
+                    alias_index,
+                    bindings,
+                );
             }
             _ => {}
         }
@@ -857,9 +877,7 @@ fn resolve_callable_symbol_with_alias_index(
         .or(owned_index.as_ref())
         .expect("alias_index built above when not supplied");
     for variant in variants {
-        let trimmed = variant
-            .trim()
-            .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+        let trimmed = variant.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
         if trimmed.is_empty() {
             continue;
         }
@@ -932,22 +950,14 @@ fn collect_receiver_method_targets(
     let mut receiver_type_names = receiver_types.to_vec();
     if receiver_type_names.is_empty() {
         receiver_type_names = receiver_type_names_for_expr(caller_decl, alias_targets, receiver);
-        for type_name in assigned_receiver_type_names(
-            global,
-            caller_decl,
-            alias_targets,
-            receiver,
-            Some(call_span),
-        ) {
+        for type_name in
+            assigned_receiver_type_names(global, caller_decl, alias_targets, receiver, Some(call_span))
+        {
             push_unique_string(&mut receiver_type_names, type_name);
         }
-        for type_name in receiver_call_return_type_names(
-            global,
-            caller_decl,
-            alias_targets,
-            receiver,
-            Some(call_span),
-        ) {
+        for type_name in
+            receiver_call_return_type_names(global, caller_decl, alias_targets, receiver, Some(call_span))
+        {
             push_unique_string(&mut receiver_type_names, type_name);
         }
     }
@@ -1015,7 +1025,6 @@ fn collect_super_method_targets(
     }
     targets
 }
-
 
 fn receiver_call_return_type_names(
     global: &GlobalIndex,
@@ -1094,7 +1103,6 @@ fn receiver_inner_call_name(receiver: &str) -> Option<String> {
     Some(callee.to_string())
 }
 
-
 fn receiver_name_from_call_name(call_name: &str) -> Option<&str> {
     call_name
         .rsplit_once('.')
@@ -1168,11 +1176,32 @@ fn collect_constructed_return_type_names_from_events(
                 else_events,
                 ..
             } => {
-                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, then_events, out);
-                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, else_events, out);
+                collect_constructed_return_type_names_from_events(
+                    global,
+                    ctx,
+                    decl,
+                    late_static_type,
+                    then_events,
+                    out,
+                );
+                collect_constructed_return_type_names_from_events(
+                    global,
+                    ctx,
+                    decl,
+                    late_static_type,
+                    else_events,
+                    out,
+                );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, body, out);
+                collect_constructed_return_type_names_from_events(
+                    global,
+                    ctx,
+                    decl,
+                    late_static_type,
+                    body,
+                    out,
+                );
             }
             FlowEvent::Try {
                 body,
@@ -1180,9 +1209,30 @@ fn collect_constructed_return_type_names_from_events(
                 finally_events,
                 ..
             } => {
-                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, body, out);
-                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, catch_events, out);
-                collect_constructed_return_type_names_from_events(global, ctx, decl, late_static_type, finally_events, out);
+                collect_constructed_return_type_names_from_events(
+                    global,
+                    ctx,
+                    decl,
+                    late_static_type,
+                    body,
+                    out,
+                );
+                collect_constructed_return_type_names_from_events(
+                    global,
+                    ctx,
+                    decl,
+                    late_static_type,
+                    catch_events,
+                    out,
+                );
+                collect_constructed_return_type_names_from_events(
+                    global,
+                    ctx,
+                    decl,
+                    late_static_type,
+                    finally_events,
+                    out,
+                );
             }
             _ => {}
         }
@@ -1213,11 +1263,6 @@ fn constructed_return_type_from_text(
     }
     (!resolve_class(global, candidate, ctx).is_empty()).then(|| short_callee(candidate).to_string())
 }
-
-
-
-
-
 
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
     let normalized = normalize_receiver_alias_text(receiver);
@@ -1302,7 +1347,7 @@ fn collect_assigned_receiver_type_names(
                 source_names,
                 span,
                 ..
-                    } => {
+            } => {
                 if call_span.is_some_and(|call_span| span.start > call_span.start) {
                     continue;
                 }
@@ -1441,7 +1486,6 @@ fn alias_targets_for_decl(
     map
 }
 
-
 /// Receiver-alias normalisation used at callgraph build time.
 /// Strips outer parentheses (`(repo).run()` → `repo.run()`),
 /// reference sigils (`&str`, `*const T`), and rewrites C/C++/PHP
@@ -1475,7 +1519,6 @@ fn colon_remote_call(name: &str) -> bool {
     name.contains(':') && !name.contains("::")
 }
 
-
 fn qualified_alias_target_tail<'a>(
     name: &'a str,
     aliases: &'a AHashMap<String, String>,
@@ -1483,7 +1526,6 @@ fn qualified_alias_target_tail<'a>(
     let (head, tail) = name.split_once(&['.', ':'][..])?;
     aliases.get(head).map(String::as_str).map(|target| (target, tail))
 }
-
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
 /// Resolve a `module.fn` call where `module` is a local alias for a
@@ -1544,7 +1586,6 @@ fn collect_workspace_module_targets(
 // `bonsai_resolve` and is re-used here so callgraph and taint
 // share the same canonical match. See `bonsai_resolve` for the
 // suffix-aware semantic.
-
 
 // Path / module-shape helpers live in `bonsai_resolve` so the
 // callgraph and taint engine share one source of truth.
@@ -1620,8 +1661,8 @@ pub fn collect_call_event_targets_with_context_and_aliases(
     if !exact_targets.is_empty() {
         return exact_targets;
     }
-    let folded_receiver =
-        receiver_name_from_call_name(name).filter(|candidate| folded_call_name_receiver_is_instance(name, candidate));
+    let folded_receiver = receiver_name_from_call_name(name)
+        .filter(|candidate| folded_call_name_receiver_is_instance(name, candidate));
     let semantic_receiver = receiver.or(folded_receiver);
     let mut targets = collect_receiver_method_targets(
         global,
@@ -1647,12 +1688,7 @@ pub fn collect_call_event_targets_with_context_and_aliases(
         }
     }
     if targets.is_empty() && !(call_kind == CallKind::Method && semantic_receiver.is_some()) {
-        targets = collect_callable_targets_with_context_and_aliases(
-            global,
-            name,
-            caller_decl,
-            alias_targets,
-        );
+        targets = collect_callable_targets_with_context_and_aliases(global, name, caller_decl, alias_targets);
         let short = short_callee(name);
         // For Rust-style `Type::method` qualified calls, allow the
         // bare-tail fallback ONLY when the qualifier resolves to
@@ -1668,7 +1704,9 @@ pub fn collect_call_event_targets_with_context_and_aliases(
             alias_targets
                 .get(qualifier)
                 .map(|t| match t {
-                    AliasTarget::Namespace { module } => is_workspace_alias_target(&local_alias_index, module),
+                    AliasTarget::Namespace { module } => {
+                        is_workspace_alias_target(&local_alias_index, module)
+                    }
                     AliasTarget::Member { module, member } => {
                         is_workspace_alias_target(&local_alias_index, module)
                             || is_workspace_alias_target(&local_alias_index, member)
@@ -1680,12 +1718,8 @@ pub fn collect_call_event_targets_with_context_and_aliases(
             true
         };
         if targets.is_empty() && short != name && allow_short_fallback {
-            targets = collect_callable_targets_with_context_and_aliases(
-                global,
-                short,
-                caller_decl,
-                alias_targets,
-            );
+            targets =
+                collect_callable_targets_with_context_and_aliases(global, short, caller_decl, alias_targets);
         }
     }
     targets
@@ -1776,9 +1810,7 @@ impl WorkspaceAliasIndex {
         if self.class_names.contains(trimmed) {
             return true;
         }
-        let stripped = trimmed
-            .trim_start_matches("crate::")
-            .trim_start_matches("crate.");
+        let stripped = trimmed.trim_start_matches("crate::").trim_start_matches("crate.");
         if self.module_canonicals.contains(trimmed) || self.module_canonicals.contains(stripped) {
             return true;
         }
@@ -1843,8 +1875,7 @@ pub fn call_resolves_to_func(
     let mut candidates =
         collect_callable_targets_with_context_and_aliases(global, call_name, caller_decl, aliases);
     if candidates.is_empty() && short != call_name {
-        candidates =
-            collect_callable_targets_with_context_and_aliases(global, short, caller_decl, aliases);
+        candidates = collect_callable_targets_with_context_and_aliases(global, short, caller_decl, aliases);
     }
     candidates.contains(&target_func)
 }

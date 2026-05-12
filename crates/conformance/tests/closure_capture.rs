@@ -55,9 +55,7 @@ fn references_name(events: &[FlowEvent], name: &str) -> bool {
                 else_events,
                 ..
             } => &[then_events.as_slice(), else_events.as_slice()],
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if references_name(body, name) {
                     return true;
                 }
@@ -217,10 +215,7 @@ fn closure_capture_inlined_across_languages() {
             failures.push(format!("{}: no adapter found", case.lang));
             continue;
         };
-        let ws = bonsai_testkit::workspace_with(
-            vec![adapter],
-            &[(case.fixture_path, case.fixture_source)],
-        );
+        let ws = bonsai_testkit::workspace_with(vec![adapter], &[(case.fixture_path, case.fixture_source)]);
         let Some(decl) = find_decl(&ws, case.function_name) else {
             failures.push(format!(
                 "{}: function `{}` not found",

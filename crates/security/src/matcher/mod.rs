@@ -1214,23 +1214,24 @@ fn scan_missing_batch(
             // expected target callee? The intra-procedural check
             // Cross-proc BFS only runs when the rule opts in via
             // `match.search_depth > 0`.
-            let target_present = facts.calls.iter().any(|call| {
-                callee_or_alias_matches(
-                    &call.callee,
-                    &call.receiver_types,
-                    prepared.name,
-                    prepared.attribute,
-                    prepared.regex.as_ref(),
-                    &facts.alias_map,
-                )
-                .is_some()
-                    && prepared.call_context_allows(
+            let target_present =
+                facts.calls.iter().any(|call| {
+                    callee_or_alias_matches(
                         &call.callee,
                         &call.receiver_types,
+                        prepared.name,
+                        prepared.attribute,
+                        prepared.regex.as_ref(),
                         &facts.alias_map,
-                        file_packages.as_ref(),
                     )
-            }) || missing_target_in_reachable_callees(ws, file, decl, prepared, &import_aliases);
+                    .is_some()
+                        && prepared.call_context_allows(
+                            &call.callee,
+                            &call.receiver_types,
+                            &facts.alias_map,
+                            file_packages.as_ref(),
+                        )
+                }) || missing_target_in_reachable_callees(ws, file, decl, prepared, &import_aliases);
             if target_present {
                 continue;
             }
@@ -1467,9 +1468,9 @@ fn file_alias_map(ws: &Workspace, file: FileId) -> std::collections::HashMap<Str
 // byte-identical file in two workspaces returns the same package
 // set (which is correct — the package set is purely a function of
 // the file's import declarations).
-static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<
-    parking_lot::RwLock<AHashMap<(FileId, u64, u64), Arc<AHashSet<String>>>>,
-> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
+type FilePackageSetMap = AHashMap<(FileId, u64, u64), Arc<AHashSet<String>>>;
+static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<parking_lot::RwLock<FilePackageSetMap>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
 /// Build the set of canonical package names imported by `file`.
 /// Pre-enumerates every prefix shape an import target could match
@@ -1560,9 +1561,9 @@ struct FileDeclFactsBundle {
 // no state in the cached bundle other than what's derived from
 // `decl.flow_events` + content_hash, so two workspaces with
 // byte-identical files produce byte-identical bundles.
-static DECL_FACTS_CACHE: std::sync::LazyLock<
-    parking_lot::RwLock<AHashMap<(FileId, u64, u64), Arc<FileDeclFactsBundle>>>,
-> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
+type FileDeclFactsMap = AHashMap<(FileId, u64, u64), Arc<FileDeclFactsBundle>>;
+static DECL_FACTS_CACHE: std::sync::LazyLock<parking_lot::RwLock<FileDeclFactsMap>> =
+    std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
 /// Return the per-decl matcher fact bundle for `file`. Builds the
 /// bundle on miss; cached on `(file, version, text_hash)` so source
@@ -4088,14 +4089,6 @@ fn unquote_literal(value: &str) -> Option<&str> {
 /// set. The matcher uses this to recognise constructor calls written
 /// without `new` (e.g. `MyClass(x)` in Python / Ruby) when applying
 /// `kind: new` rules.
-// `build_enclosing_decl_index` and `lookup_enclosing_decl_name`
-// were earlier per-batch helpers; their span-sorted binary-search
-// index is now provided by the workspace-cached
-// `bonsai_workspace::enclosing_index::EnclosingIndex` so the
-// build cost is paid once per `(FileId, version)` rather than per
-// matcher pass per `cmd_security` subcommand. Consumers route
-// through `ws.enclosing_index().entries_for(...)`.
-
 fn collect_constructor_names(global: &bonsai_index::GlobalIndex) -> AHashSet<String> {
     let mut names = AHashSet::new();
     for file in global.all_files() {
@@ -4693,9 +4686,9 @@ fn collect_callee_symbols(
 /// point.
 fn assignment_exports_callable_names(target: &str, export_aliases: &[&'static str]) -> bool {
     let target = target.trim();
-    export_aliases.iter().any(|alias| {
-        target == *alias || target.starts_with(&format!("{alias}."))
-    })
+    export_aliases
+        .iter()
+        .any(|alias| target == *alias || target.starts_with(&format!("{alias}.")))
 }
 
 #[cfg(test)]

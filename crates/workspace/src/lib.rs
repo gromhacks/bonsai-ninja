@@ -35,18 +35,18 @@ use bonsai_lang_api::{Decl, DeclKind, LanguageRegistry};
 use bonsai_taint::{InterTaintCaches, KindedTokens};
 use bonsai_trace::{finalize, FinalizeCtx, TraceQuery, TraceQueryKind, TraceResult};
 use bonsai_vfs::Vfs;
+use class_index::ClassMemberIndex;
 use cross_module::CrossModuleTracer;
 use dataflow::DataFlowCache;
-use flow_ids::FlowIdCache;
-use class_index::ClassMemberIndex;
 use decl_name_index::DeclNameIndex;
 use enclosing_index::EnclosingIndex;
-use taint_index::TaintGraphIndex;
-use transitive_callers::TransitiveCallersIndex;
+use flow_ids::FlowIdCache;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
+use taint_index::TaintGraphIndex;
 use thiserror::Error;
+use transitive_callers::TransitiveCallersIndex;
 use value_flow::ValueFlowCache;
 
 pub use cross_module::CrossModuleOptions;
@@ -561,11 +561,9 @@ impl Workspace {
         // reuses them to keep its name filter from rejecting
         // alias-rewritten call sites.
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_aliases(
-            global.as_ref(),
-            cg.as_ref(),
-            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
-        );
+        let ws = bonsai_idg::workspace_adapter::build_with_aliases(global.as_ref(), cg.as_ref(), |file| {
+            bonsai_resolve::alias_map_for_file(&db.imports_for(file))
+        });
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
         service
@@ -707,12 +705,12 @@ impl Workspace {
                 // store. Peak RAM is bounded by the in-flight rayon
                 // chunk — this is the OOM fix for the dataflow cache.
                 let factstore_sidecar = DataFlowCache::factstore_sidecar_path(root);
-                if let Err(err) =
-                    ws.inner
-                        .dataflow
-                        .prewarm_to_disk(&factstore_sidecar, ws.db(), |_| {
-                            on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
-                        })
+                if let Err(err) = ws
+                    .inner
+                    .dataflow
+                    .prewarm_to_disk(&factstore_sidecar, ws.db(), |_| {
+                        on_event(WorkspaceOpenEvent::DataflowEntryBuilt);
+                    })
                 {
                     tracing::warn!(
                         path = %factstore_sidecar.display(),
@@ -760,10 +758,10 @@ impl Workspace {
                 // rather than the workspace size — this is the
                 // OWASP-class memory fix.
                 let sidecar = ValueFlowCache::sidecar_path(root);
-                if let Err(err) = ws
-                    .inner
-                    .value_flow
-                    .prewarm_to_disk(&sidecar, ws.db(), &ws.inner.inter_taint)
+                if let Err(err) =
+                    ws.inner
+                        .value_flow
+                        .prewarm_to_disk(&sidecar, ws.db(), &ws.inner.inter_taint)
                 {
                     tracing::warn!(
                         path = %sidecar.display(),
@@ -794,12 +792,11 @@ impl Workspace {
             let sidecar = FlowIdCache::sidecar_path(root);
             // Try to hydrate from any existing sidecar before recomputing.
             let _ = ws.inner.flow_ids.load_from_disk(&sidecar);
-            if let Err(err) = ws.inner.flow_ids.prewarm_to_disk(
-                &sidecar,
-                ws.db(),
-                ws.vfs(),
-                |_| {},
-            ) {
+            if let Err(err) = ws
+                .inner
+                .flow_ids
+                .prewarm_to_disk(&sidecar, ws.db(), ws.vfs(), |_| {})
+            {
                 tracing::warn!(
                     path = %sidecar.display(),
                     error = %err,

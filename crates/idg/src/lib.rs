@@ -91,7 +91,9 @@ pub use builder::{stitch_idg, CalleeResolver, FuncToSegment, ResolvedCallee};
 pub use csr::EdgeCsr;
 pub use query::ReachabilityIndex;
 pub use service::{CrossCallEdge, IdgQueryService, PointKind, PointRef, WsNodeId};
-pub use transfer::{transfer_function_for, transfer_for_many, CallSiteRef, NameInterner, ThrowSite, TransferOutput};
+pub use transfer::{
+    transfer_for_many, transfer_function_for, CallSiteRef, NameInterner, ThrowSite, TransferOutput,
+};
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 
 pub use edge::{EdgeMeta, IdgEdge, IdgEdgeKind};

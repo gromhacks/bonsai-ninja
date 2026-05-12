@@ -54,7 +54,7 @@
 //! synchronously.
 
 use crate::error::{FactStoreError, FactStoreResult};
-use crate::format::{Header, IndexEntry, FORMAT_VERSION, HEADER_SIZE, INDEX_ENTRY_SIZE, MAGIC};
+use crate::format::{Header, IndexEntry, FORMAT_VERSION, HEADER_SIZE, MAGIC};
 use crate::string_pool::{StrId, StringPoolBuilder};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use std::ffi::OsString;
@@ -151,14 +151,8 @@ impl FactStoreWriter {
         let handle = std::thread::Builder::new()
             .name("factstore-writer".to_string())
             .spawn(move || {
-                let outcome = run_writer_thread(
-                    file,
-                    receiver,
-                    table_id,
-                    pipeline_hash,
-                    tmp_path,
-                    target_path,
-                );
+                let outcome =
+                    run_writer_thread(file, receiver, table_id, pipeline_hash, tmp_path, target_path);
                 if let Err(err) = outcome {
                     // The Finish path already replies through the
                     // one-shot. This branch covers a write error in
@@ -257,16 +251,13 @@ impl FactStoreWriter {
         let string_offsets = pool.offsets_bytes();
         let string_count = pool.len() as u64;
 
-        let reply_rx_panic_safety =
-            self.finish_reply.lock().take().ok_or_else(|| {
-                FactStoreError::Io(std::io::Error::other(
-                    "factstore writer reply channel already consumed",
-                ))
-            })?;
-        let handle = self.writer_thread.lock().take().ok_or_else(|| {
+        let reply_rx_panic_safety = self.finish_reply.lock().take().ok_or_else(|| {
             FactStoreError::Io(std::io::Error::other(
-                "factstore writer thread already joined",
+                "factstore writer reply channel already consumed",
             ))
+        })?;
+        let handle = self.writer_thread.lock().take().ok_or_else(|| {
+            FactStoreError::Io(std::io::Error::other("factstore writer thread already joined"))
         })?;
 
         // Build a fresh oneshot for the Finish command's reply.
@@ -305,11 +296,9 @@ impl FactStoreWriter {
             }),
         };
 
-        handle.join().map_err(|_| {
-            FactStoreError::Io(std::io::Error::other(
-                "factstore writer thread panicked",
-            ))
-        })?;
+        handle
+            .join()
+            .map_err(|_| FactStoreError::Io(std::io::Error::other("factstore writer thread panicked")))?;
         result
     }
 }
@@ -448,7 +437,9 @@ fn finalize_writer(
 
     // Flush the BufWriter and reclaim the underlying File so we can
     // seek back to byte 0 and patch the header.
-    let mut file = buf.into_inner().map_err(|err| FactStoreError::Io(err.into_error()))?;
+    let mut file = buf
+        .into_inner()
+        .map_err(|err| FactStoreError::Io(err.into_error()))?;
     let header = Header {
         magic: MAGIC,
         format_version: FORMAT_VERSION,
@@ -673,8 +664,3 @@ mod tests {
     }
 }
 
-// `INDEX_ENTRY_SIZE` is referenced by tests via the reader path;
-// pin the constant here so a future direct test can use it without
-// re-importing.
-#[allow(dead_code)]
-const _: usize = INDEX_ENTRY_SIZE;

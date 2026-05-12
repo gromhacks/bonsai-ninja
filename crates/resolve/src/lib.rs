@@ -393,10 +393,7 @@ fn method_parent_matches_receiver_type(
 /// Rust / C++'s `pipeline::orchestrate` yield the right tail
 /// (`orchestrate`) instead of being chopped at the first `:`. The
 /// dotted/colon fallback covers JS / Python / PHP shapes.
-fn rewrite_through_alias_map_with_target(
-    name: &str,
-    ctx: &ResolveContext<'_>,
-) -> Option<AliasRewrite> {
+fn rewrite_through_alias_map_with_target(name: &str, ctx: &ResolveContext<'_>) -> Option<AliasRewrite> {
     let map = ctx.alias_map?;
     // Whole-name alias: `req` → `flask.request`.
     if let Some(target) = map.get(name) {
@@ -440,9 +437,7 @@ struct AliasRewrite {
 impl AliasRewrite {
     fn from_target(target: &AliasTarget, rewritten: String) -> Self {
         let target_module = match target {
-            AliasTarget::Namespace { module } if !module.trim().is_empty() => {
-                Some(module.clone())
-            }
+            AliasTarget::Namespace { module } if !module.trim().is_empty() => Some(module.clone()),
             AliasTarget::Member { module, .. } if !module.trim().is_empty() => Some(module.clone()),
             _ => None,
         };
@@ -499,6 +494,7 @@ impl AliasTargetExt for AliasTarget {
 ///       (Java `com.example.Utils` vs decl module `com.example`,
 ///       since the class name lives in `decl.name`/`decl.parent`,
 ///       not the module_path).
+///
 ///    The drop is unconditional rather than driven by a
 ///    file-extension allow-list — the suffix match itself
 ///    enforces the constraint.
@@ -519,7 +515,7 @@ pub fn module_target_matches_decl_module_path(
     // needed here is on the alias text.
     let normalized: String = target_module.replace("::", ".");
     let target_segments: Vec<&str> = normalized
-        .split(|c: char| c == '.' || c == '/' || c == '\\')
+        .split(['.', '/', '\\'])
         .map(str::trim)
         .filter(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
         .collect();
@@ -557,11 +553,7 @@ fn try_suffix_match(target: &[&str], decl: &[String]) -> bool {
 /// matching leaf identifier — turning `Envelope::method` (where
 /// `Envelope` was a type-only import) into an entry pointing at
 /// some unrelated `method()` decl elsewhere in the workspace.
-fn candidate_in_alias_target(
-    global: &GlobalIndex,
-    func: bonsai_common::FuncId,
-    target_module: &str,
-) -> bool {
+fn candidate_in_alias_target(global: &GlobalIndex, func: bonsai_common::FuncId, target_module: &str) -> bool {
     let sym = SymbolId::new(func.raw());
     let Some(decl) = global.decl_of(sym) else {
         return false;
@@ -650,10 +642,7 @@ pub fn namespace_alias_target_tail<'a>(
 /// detect calls that must be expanded through the file's alias map
 /// before any direct candidate lookup.
 #[must_use]
-pub fn qualified_module_alias_call(
-    name: &str,
-    aliases: &AHashMap<String, String>,
-) -> bool {
+pub fn qualified_module_alias_call(name: &str, aliases: &AHashMap<String, String>) -> bool {
     let Some((head, _)) = split_qualified_head_tail(name) else {
         return false;
     };
@@ -667,10 +656,7 @@ pub fn qualified_module_alias_call(
 /// `[foo, exports.foo, module.exports.foo]`. Languages without the
 /// convention pass `&[]` and the result is a single-element vec.
 #[must_use]
-pub fn export_name_variants(
-    alias_tail: &str,
-    caller_export_aliases: &[&'static str],
-) -> Vec<String> {
+pub fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]) -> Vec<String> {
     let mut variants = vec![alias_tail.to_string()];
     for receiver in caller_export_aliases {
         variants.push(format!("{receiver}.{alias_tail}"));
@@ -703,7 +689,7 @@ pub fn is_super_receiver_with_tokens(receiver: &str, tokens: &[&str]) -> bool {
         .trim()
         .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
     let receiver = receiver.strip_suffix("()").unwrap_or(receiver).trim();
-    tokens.iter().any(|token| *token == receiver)
+    tokens.contains(&receiver)
 }
 
 /// True when `decl`'s parent in the global index is a class-like
@@ -1047,11 +1033,9 @@ pub fn resolve_class(
                     let mut candidates: Vec<SymbolId> = collect(tail);
                     if let Some(target_module) = rewrite.target_module.as_deref() {
                         candidates.retain(|sym| {
-                            global
-                                .decl_of(*sym)
-                                .is_some_and(|decl| {
-                                    module_target_matches_decl_module_path(target_module, &decl.module_path)
-                                })
+                            global.decl_of(*sym).is_some_and(|decl| {
+                                module_target_matches_decl_module_path(target_module, &decl.module_path)
+                            })
                         });
                     }
                     out.extend(candidates);
@@ -1359,10 +1343,7 @@ mod tests {
         // canonicalizes to `["storage"]`; the trailing-segment
         // drop is what closes the gap.
         let module = ModulePath::from_segments(["storage"]);
-        assert!(module_target_matches_decl_module_path(
-            "storage.dart",
-            &module
-        ));
+        assert!(module_target_matches_decl_module_path("storage.dart", &module));
     }
 
     #[test]
@@ -1371,10 +1352,7 @@ mod tests {
         // not match a decl in module `helpers` even though both
         // are workspace-internal.
         let module = ModulePath::from_segments(["helpers"]);
-        assert!(!module_target_matches_decl_module_path(
-            "Envelope",
-            &module
-        ));
+        assert!(!module_target_matches_decl_module_path("Envelope", &module));
     }
 
     #[test]

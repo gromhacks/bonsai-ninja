@@ -57,7 +57,7 @@ There is no CI database build step and no code upload. The release binary
 operates on your source tree and writes local cache state only when that
 helps performance.
 
-`bonsai-ninja index` is incremental: it reuses `.bonsai/dataflow.v2.bin`
+`bonsai-ninja index` is incremental: it reuses `.bonsai/dataflow.v3.factstore`
 across runs, validates cached facts by source-content hashes and
 dependency hashes, and recomputes only stale entries. For editor and
 agent workflows, `bonsai-ninja index --watch` stays running and

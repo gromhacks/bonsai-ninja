@@ -110,8 +110,8 @@ pub mod trace_render {
 /// Re-exported from `bonsai_workspace::WorkspaceOpenEvent` so SDK
 /// consumers and the workspace's own `open_with_options_and_events`
 /// path see the same variants. Earlier the SDK had a private copy
-/// + a hand-rolled prewarm pipeline; both have been collapsed onto
-/// the workspace's canonical implementation.
+/// plus a hand-rolled prewarm pipeline; both have been collapsed
+/// onto the workspace's canonical implementation.
 pub use bonsai_workspace::WorkspaceOpenEvent;
 
 /// SDK configuration and workspace factory.

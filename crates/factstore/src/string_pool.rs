@@ -85,8 +85,8 @@ impl StringPoolBuilder {
         }
         let id_usize = self.offsets.len();
         let id = u32::try_from(id_usize).expect("string pool overflow: > 2^32 unique strings");
-        let offset = u32::try_from(self.bytes.len())
-            .expect("string pool overflow: > 4 GiB of interned bytes");
+        let offset =
+            u32::try_from(self.bytes.len()).expect("string pool overflow: > 4 GiB of interned bytes");
         self.offsets.push(offset);
         self.bytes.extend_from_slice(s.as_bytes());
         self.by_str.insert(s.to_string(), id);
@@ -151,7 +151,8 @@ impl StringPoolBuilder {
             .offsets
             .get(idx + 1)
             .copied()
-            .unwrap_or_else(|| u32::try_from(self.bytes.len()).expect("u32 overflow")) as usize;
+            .unwrap_or_else(|| u32::try_from(self.bytes.len()).expect("u32 overflow"))
+            as usize;
         let bytes = self.bytes.get(start..end)?;
         // Safety: every byte we appended originated from `&str` so
         // the slice is valid UTF-8 by construction. We use the safe
@@ -207,9 +208,10 @@ impl<'mmap> StringPoolView<'mmap> {
         offsets_section: &'mmap [u8],
         count: u32,
     ) -> FactStoreResult<Self> {
-        let expected_offsets_len =
-            (count as usize).checked_add(1).and_then(|n| n.checked_mul(4))
-                .ok_or(FactStoreError::BadStringPool("offsets length overflow"))?;
+        let expected_offsets_len = (count as usize)
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(FactStoreError::BadStringPool("offsets length overflow"))?;
         if offsets_section.len() != expected_offsets_len {
             return Err(FactStoreError::BadStringPool(
                 "offsets section length disagrees with declared string count",
@@ -221,12 +223,9 @@ impl<'mmap> StringPoolView<'mmap> {
         let mut prev: u32 = 0;
         for i in 0..=count as usize {
             let raw = &offsets_section[i * 4..(i + 1) * 4];
-            let offset =
-                u32::from_le_bytes(raw.try_into().expect("4 bytes from a 4n slice"));
+            let offset = u32::from_le_bytes(raw.try_into().expect("4 bytes from a 4n slice"));
             if (offset as usize) > bytes_section.len() {
-                return Err(FactStoreError::BadStringPool(
-                    "offset points past bytes section",
-                ));
+                return Err(FactStoreError::BadStringPool("offset points past bytes section"));
             }
             if i > 0 && offset < prev {
                 return Err(FactStoreError::BadStringPool(

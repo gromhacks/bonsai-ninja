@@ -79,11 +79,7 @@ fn returning_seed_names_populates_for_returned_param() {
     // value-flow graph builder this set is silently empty for
     // every function.
     let root = tempdir_for_test("bonsai-vf-returning");
-    std::fs::write(
-        root.join("app.py"),
-        "def echo(x):\n    return x\n",
-    )
-    .expect("write fixture");
+    std::fs::write(root.join("app.py"), "def echo(x):\n    return x\n").expect("write fixture");
 
     let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
         .expect("open succeeds");
@@ -97,11 +93,9 @@ fn returning_seed_names_populates_for_returned_param() {
         .expect("echo decl present");
     let echo_func = bonsai_common::FuncId::new(echo_sym.raw());
 
-    let returning = ws.value_flow().returning_seed_names(
-        echo_func,
-        ws.db(),
-        ws.inter_taint_caches(),
-    );
+    let returning = ws
+        .value_flow()
+        .returning_seed_names(echo_func, ws.db(), ws.inter_taint_caches());
     assert!(
         returning.contains("x"),
         "echo(x) returns x — `x` must appear in returning_seed_names; got {:?}",
@@ -144,7 +138,10 @@ fn value_flow_sidecar_round_trips_via_query_only() {
         .expect("first open succeeds");
 
     let sidecar = root.join(".bonsai").join("value_flow.v3.factstore");
-    assert!(sidecar.exists(), "default open should write the value-flow sidecar");
+    assert!(
+        sidecar.exists(),
+        "default open should write the value-flow sidecar"
+    );
 
     // Second open in `query_only` mode hydrates from the sidecar.
     let ws2 = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::query_only())

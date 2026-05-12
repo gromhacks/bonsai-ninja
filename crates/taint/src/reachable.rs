@@ -315,7 +315,7 @@ fn collect_flow_event_tokens_kinded(events: &[FlowEvent], tokens: &mut KindedTok
                 source_call_args,
                 source_names,
                 ..
-                    } => {
+            } => {
                 tokens.insert(FactKind::Write, target);
                 if let Some(source) = source_name {
                     tokens.insert(FactKind::Read, source);
@@ -405,6 +405,7 @@ pub fn taint_facts_for_entry(entry_func: FuncId, db: &AnalyzerDb, _sanitizers: &
 ///   tokens, used so the persisted call graph captures every edge a
 ///   downstream analysis might want, even when a name was never an
 ///   assignment target.
+///
 /// One-off entry point that provisions a fresh `InterTaintCaches`.
 /// Workspace consumers should prefer
 /// [`taint_facts_and_graph_for_entry_with_caches`] so the engine's
@@ -519,11 +520,7 @@ pub fn taint_facts_and_graph_for_entry_with_caches(
             &graph_result
         } else {
             fact_result = crate::inter::interprocedural_taint_to_completion_with_caches(
-                entry_func,
-                &seed,
-                &config,
-                db,
-                &caches,
+                entry_func, &seed, &config, db, caches,
             );
             &fact_result
         };
@@ -571,7 +568,7 @@ pub(crate) fn collect_assign_targets(
                 source_call_args,
                 source_names,
                 ..
-                    } => {
+            } => {
                 if !target.is_empty() {
                     out.insert(target.clone());
                 }
@@ -668,7 +665,7 @@ fn collect_graph_seed_tokens(events: &[bonsai_lang_api::FlowEvent], out: &mut To
                 source_names,
                 source_call_args,
                 ..
-                    } => {
+            } => {
                 if let Some(name) = source_name.as_deref() {
                     insert_graph_seed(out, name);
                 }
@@ -823,7 +820,7 @@ fn collect_flow_facts(events: &[bonsai_lang_api::FlowEvent], facts: &mut KindedT
                 source_call_args,
                 source_names,
                 ..
-                    } => {
+            } => {
                 if !target.is_empty() {
                     facts.insert(FactKind::Write, target);
                 }
@@ -996,16 +993,11 @@ pub fn entry_taint_graph_from_idg(
             let detail: Vec<String> = closure
                 .iter()
                 .filter_map(|w| {
-                    idg.resolve_point(*w).map(|p| {
-                        format!("ws#{}={:?}@{}..{}", w.0, p.kind, p.span.start, p.span.end)
-                    })
+                    idg.resolve_point(*w)
+                        .map(|p| format!("ws#{}={:?}@{}..{}", w.0, p.kind, p.span.start, p.span.end))
                 })
                 .collect();
-            bonsai_diagnostics::debug_log!(
-                "idg-closure-detail",
-                "  closure_nodes: {:?}",
-                detail
-            );
+            bonsai_diagnostics::debug_log!("idg-closure-detail", "  closure_nodes: {:?}", detail);
         }
     }
 
@@ -1024,12 +1016,7 @@ pub fn entry_taint_graph_from_idg(
     // fixpoint — the (caller, span, receiver_name) seen-set bounds
     // it to a small constant number of rounds.
     if !receiver_state_propagations.is_empty() {
-        apply_receiver_state_fixpoint(
-            &mut seed_nodes,
-            receiver_state_propagations,
-            global.as_ref(),
-            idg,
-        );
+        apply_receiver_state_fixpoint(&mut seed_nodes, receiver_state_propagations, global.as_ref(), idg);
     }
 
     // Cross-call edges in closure → call_records. Sort
@@ -1052,12 +1039,14 @@ pub fn entry_taint_graph_from_idg(
             .map(|f| (f, distance_from(f, source_func, &edges)))
             .collect();
         let dist_map: ahash::AHashMap<FuncId, u32> = distances.into_iter().collect();
-        edges.sort_by_key(|ce| (
-            dist_map.get(&ce.caller).copied().unwrap_or(u32::MAX),
-            ce.caller.raw(),
-            ce.call_span.start,
-            ce.arg_idx,
-        ));
+        edges.sort_by_key(|ce| {
+            (
+                dist_map.get(&ce.caller).copied().unwrap_or(u32::MAX),
+                ce.caller.raw(),
+                ce.call_span.start,
+                ce.arg_idx,
+            )
+        });
         edges
     };
     let mut next_trace_id: u64 = 1;
@@ -1100,9 +1089,7 @@ pub fn entry_taint_graph_from_idg(
         let caller_decl = global.decl_of(bonsai_common::SymbolId::new(ce.caller.raw()));
         let callee_decl = global.decl_of(bonsai_common::SymbolId::new(ce.callee.raw()));
         let value_text = caller_decl
-            .and_then(|d| {
-                find_call_arg_value_text(&d.flow_events, ce.call_span, ce.arg_idx as usize)
-            })
+            .and_then(|d| find_call_arg_value_text(&d.flow_events, ce.call_span, ce.arg_idx as usize))
             .unwrap_or_default();
         let param_name = callee_decl
             .and_then(|d| d.params.get(ce.param_idx as usize).cloned())
@@ -1124,13 +1111,9 @@ pub fn entry_taint_graph_from_idg(
 
     // Tainted call sites in closure → tainted_calls.
     let tainted_args_by_site = idg.tainted_call_args_in_closure(&seed_nodes);
-    let mut by_site: ahash::AHashMap<(FuncId, bonsai_common::Span), Vec<u8>> =
-        ahash::AHashMap::new();
+    let mut by_site: ahash::AHashMap<(FuncId, bonsai_common::Span), Vec<u8>> = ahash::AHashMap::new();
     for (caller, call_span, arg_idx) in &tainted_args_by_site {
-        by_site
-            .entry((*caller, *call_span))
-            .or_default()
-            .push(*arg_idx);
+        by_site.entry((*caller, *call_span)).or_default().push(*arg_idx);
     }
 
     // Closure set for receiver-tainted check.
@@ -1141,8 +1124,7 @@ pub fn entry_taint_graph_from_idg(
         let Some(caller_decl) = global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
             return out;
         };
-        let candidate_names =
-            collect_caller_local_names(&caller_decl.flow_events, &caller_decl.params);
+        let candidate_names = collect_caller_local_names(&caller_decl.flow_events, &caller_decl.params);
         for name in candidate_names {
             let nodes = idg.read_or_write_nodes_for_names(caller, &[name.clone()]);
             if nodes.iter().any(|n| closure_set.contains(n)) {
@@ -1153,8 +1135,7 @@ pub fn entry_taint_graph_from_idg(
     };
 
     let mut tainted_calls: Vec<crate::inter::TaintedCall> = Vec::new();
-    let mut sorted_sites: Vec<((FuncId, bonsai_common::Span), Vec<u8>)> =
-        by_site.into_iter().collect();
+    let mut sorted_sites: Vec<((FuncId, bonsai_common::Span), Vec<u8>)> = by_site.into_iter().collect();
     // Tie-break on span.end too — two call sites in the same caller
     // can share a span.start when one is nested inside the other
     // (`Command::new(...).arg(...)` reaches the matcher as multiple
@@ -1166,9 +1147,8 @@ pub fn entry_taint_graph_from_idg(
     // off whichever call_records[0] sorts first.
     sorted_sites.sort_by_key(|((f, s), _)| (f.raw(), s.start, s.end));
     for ((caller, call_span), arg_indices) in sorted_sites {
-        let caller_decl = match global.decl_of(bonsai_common::SymbolId::new(caller.raw())) {
-            Some(d) => d,
-            None => continue,
+        let Some(caller_decl) = global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
+            continue;
         };
         let Some(call_event) = find_call_event(&caller_decl.flow_events, call_span) else {
             continue;
@@ -1447,7 +1427,7 @@ fn collect_tainted_writes(
                 source_call,
                 span,
                 ..
-                    } => {
+            } => {
                 if target.is_empty() {
                     continue;
                 }
@@ -1501,9 +1481,7 @@ fn collect_tainted_writes(
                 collect_tainted_writes(then_events, func, tainted_names, parent_trace_id, out);
                 collect_tainted_writes(else_events, func, tainted_names, parent_trace_id, out);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_tainted_writes(body, func, tainted_names, parent_trace_id, out);
             }
             FlowEvent::Try {
@@ -1521,10 +1499,7 @@ fn collect_tainted_writes(
     }
 }
 
-fn collect_return_spans(
-    events: &[bonsai_lang_api::FlowEvent],
-    out: &mut Vec<bonsai_common::Span>,
-) {
+fn collect_return_spans(events: &[bonsai_lang_api::FlowEvent], out: &mut Vec<bonsai_common::Span>) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
@@ -1537,9 +1512,7 @@ fn collect_return_spans(
                 collect_return_spans(then_events, out);
                 collect_return_spans(else_events, out);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_return_spans(body, out);
             }
             FlowEvent::Try {
@@ -1572,8 +1545,7 @@ fn apply_receiver_state_fixpoint(
     global: &bonsai_index::GlobalIndex,
     idg: &bonsai_idg::IdgQueryService,
 ) {
-    let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, String)> =
-        ahash::AHashSet::default();
+    let mut applied: ahash::AHashSet<(FuncId, bonsai_common::Span, String)> = ahash::AHashSet::default();
     bonsai_diagnostics::debug_log!(
         "recv-state",
         "fixpoint start: {} propagation rule(s)",
@@ -1591,19 +1563,16 @@ fn apply_receiver_state_fixpoint(
         // `seed_nodes` need a deterministic ordering or the
         // downstream chain enumeration produces different `S:` ids
         // between back-to-back invocations of the same workspace.
-        let mut by_caller: ahash::AHashMap<FuncId, Vec<bonsai_common::Span>> =
-            ahash::AHashMap::default();
+        let mut by_caller: ahash::AHashMap<FuncId, Vec<bonsai_common::Span>> = ahash::AHashMap::default();
         for (caller, call_span, _arg_idx) in &tainted {
             by_caller.entry(*caller).or_default().push(*call_span);
         }
-        let mut sorted_callers: Vec<(FuncId, Vec<bonsai_common::Span>)> =
-            by_caller.into_iter().collect();
+        let mut sorted_callers: Vec<(FuncId, Vec<bonsai_common::Span>)> = by_caller.into_iter().collect();
         sorted_callers.sort_by_key(|(f, _)| f.raw());
         for (caller, mut spans) in sorted_callers {
             spans.sort();
             spans.dedup();
-            let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(caller.raw()))
-            else {
+            let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
                 continue;
             };
             walk_call_events_for_propagation(
@@ -1663,11 +1632,7 @@ fn walk_call_events_for_propagation(
                 if !receiver_state_matches(propagations, name, receiver_types) {
                     continue;
                 }
-                let Some(receiver_name) = receiver
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|r| !r.is_empty())
-                else {
+                let Some(receiver_name) = receiver.as_deref().map(str::trim).filter(|r| !r.is_empty()) else {
                     continue;
                 };
                 let key = (caller, *span, receiver_name.to_string());
@@ -1680,11 +1645,7 @@ fn walk_call_events_for_propagation(
                 // next closure round walks forward through them
                 // and treats each as a tainted-arg for further
                 // rule chaining.
-                let mut added = idg.name_consumer_nodes_after_span(
-                    caller,
-                    receiver_name,
-                    *span,
-                );
+                let mut added = idg.name_consumer_nodes_after_span(caller, receiver_name, *span);
                 // Also seed every Read/Write ws_node for this
                 // receiver name. The matcher's `receiver_is_tainted`
                 // check (and the post-pass's `tainted_names_in_caller`
@@ -1695,12 +1656,7 @@ fn walk_call_events_for_propagation(
                 // "receiver tainted" for downstream sink rules even
                 // though the consumer-bridges above do reach further
                 // call sites.
-                added.extend(
-                    idg.read_or_write_nodes_for_names(
-                        caller,
-                        &[receiver_name.to_string()],
-                    ),
-                );
+                added.extend(idg.read_or_write_nodes_for_names(caller, &[receiver_name.to_string()]));
                 if added.is_empty() {
                     continue;
                 }
@@ -1733,9 +1689,7 @@ fn walk_call_events_for_propagation(
                     grew,
                 );
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 walk_call_events_for_propagation(
                     body,
                     caller,
@@ -1820,11 +1774,10 @@ fn receiver_state_matches(
         };
         let expected_tail = short_member_tail(expected);
         receiver_types.iter().any(|actual| {
-            let actual = actual.trim().trim_start_matches(|c: char| {
-                matches!(c, '&' | '*' | '?' | '!')
-            });
-            actual == expected
-                || short_member_tail(actual) == expected_tail
+            let actual = actual
+                .trim()
+                .trim_start_matches(['&', '*', '?', '!']);
+            actual == expected || short_member_tail(actual) == expected_tail
         })
     })
 }
@@ -1849,11 +1802,7 @@ fn short_member_tail(name: &str) -> &str {
 /// Compute the BFS distance from `source_func` to `target` over
 /// the cross-call edge graph. Returns `u32::MAX` for unreachable
 /// targets (those edges sort to the end of the topological order).
-fn distance_from(
-    target: FuncId,
-    source_func: FuncId,
-    edges: &[bonsai_idg::CrossCallEdge],
-) -> u32 {
+fn distance_from(target: FuncId, source_func: FuncId, edges: &[bonsai_idg::CrossCallEdge]) -> u32 {
     if target == source_func {
         return 0;
     }
@@ -1888,19 +1837,13 @@ fn distance_from(
 /// through Assign / Call / Return events. Used by
 /// [`entry_taint_graph_from_idg`] to enumerate candidate names for
 /// the receiver-tainted check.
-fn collect_caller_local_names(
-    events: &[bonsai_lang_api::FlowEvent],
-    params: &[String],
-) -> Vec<String> {
+fn collect_caller_local_names(events: &[bonsai_lang_api::FlowEvent], params: &[String]) -> Vec<String> {
     let mut out: ahash::AHashSet<String> = params.iter().filter(|p| !p.is_empty()).cloned().collect();
     walk_collect_names(events, &mut out);
     out.into_iter().collect()
 }
 
-fn walk_collect_names(
-    events: &[bonsai_lang_api::FlowEvent],
-    out: &mut ahash::AHashSet<String>,
-) {
+fn walk_collect_names(events: &[bonsai_lang_api::FlowEvent], out: &mut ahash::AHashSet<String>) {
     use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
@@ -1910,7 +1853,7 @@ fn walk_collect_names(
                 source_names,
                 source_call_args,
                 ..
-                    } => {
+            } => {
                 if !target.is_empty() {
                     out.insert(target.clone());
                 }
@@ -1969,9 +1912,7 @@ fn walk_collect_names(
                 walk_collect_names(catch_events, out);
                 walk_collect_names(finally_events, out);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 walk_collect_names(body, out);
             }
             _ => {}
@@ -2058,9 +1999,7 @@ fn find_call_event<'a>(
                     return Some(v);
                 }
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if let Some(v) = find_call_event(body, target_span) {
                     return Some(v);
                 }
@@ -2085,7 +2024,6 @@ fn find_call_arg_value_text(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2108,9 +2046,9 @@ mod tests {
             source_call: Some("pkg.transform".to_string()),
             source_call_args: vec!["user_input".to_string()],
             source_names: vec!["request.args".to_string(), "fallback".to_string()],
-                        declares_new_binding: false,
-                        value_kind: None,
-                    }];
+            declares_new_binding: false,
+            value_kind: None,
+        }];
 
         let mut kinded = KindedTokens::default();
         collect_flow_event_tokens_kinded(&events, &mut kinded);

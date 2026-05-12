@@ -65,11 +65,7 @@ impl DataFlowEntry {
     /// Recover the dependency `FileId` set from the persisted vec.
     #[must_use]
     pub fn dependency_set(&self) -> ahash::AHashSet<FileId> {
-        self.dependency_files
-            .iter()
-            .copied()
-            .map(FileId::new)
-            .collect()
+        self.dependency_files.iter().copied().map(FileId::new).collect()
     }
 }
 
@@ -121,7 +117,11 @@ mod tests {
     #[test]
     fn entry_with_facts_and_dependencies_roundtrips() {
         let mut facts = KindedTokens::default();
-        facts.by_kind.entry(bonsai_taint::FactKind::Decl).or_default().insert("foo".to_string());
+        facts
+            .by_kind
+            .entry(bonsai_taint::FactKind::Decl)
+            .or_default()
+            .insert("foo".to_string());
         let entry = DataFlowEntry::from_owned(
             facts,
             EntryTaintGraph::default(),

@@ -131,6 +131,10 @@ impl LanguageAdapter for GoAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parsed {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `func f() T {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            // Go uses `result` field for return type in the grammar.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let aliases_by_span = collect_go_method_type_aliases(&tree, file, src);
             let method_receivers_by_span = collect_go_method_receiver_types(&tree, file, src);
             let bases_by_span = collect_go_class_bases(&tree, file, src);
@@ -334,9 +338,7 @@ fn collect_go_method_receiver_types(tree: &Tree, file: FileId, src: &[u8]) -> Ve
 fn first_go_parameter_type(node: Node<'_>, src: &[u8]) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if child.kind() != "parameter_declaration"
-            && child.kind() != "variadic_parameter_declaration"
-        {
+        if child.kind() != "parameter_declaration" && child.kind() != "variadic_parameter_declaration" {
             continue;
         }
         let Some(type_node) = child.child_by_field_name("type") else {
@@ -507,8 +509,8 @@ fn go_parameter_decl_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeA
     // dispatch lookup; the qualified form is what the rule-matcher
     // chases through the alias map for the package gate
     // (`alias_map.get("gin")` → `Namespace{github.com/gin-gonic/gin}`).
-    let qualified = qualified_go_type_name(node_text(&type_node, src))
-        .filter(|qualified| qualified != &canonical);
+    let qualified =
+        qualified_go_type_name(node_text(&type_node, src)).filter(|qualified| qualified != &canonical);
     // A single `parameter_declaration` may bind multiple identifiers
     // sharing one type (`a, b string`). Iterate every identifier
     // child rather than just `child_by_field_name("name")`.

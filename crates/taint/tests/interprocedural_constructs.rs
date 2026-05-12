@@ -491,12 +491,7 @@ fn sink(_cmd: String) {}
     let entry = func_id(&db, "entry");
     let execute = func_id(&db, "execute");
     let sink_span = call_span(&db, execute, "sink", Some("cmd"));
-    let result = interprocedural_taint(
-        entry,
-        &seed(&["input"]),
-        &InterTaintConfig::default(),
-        &db,
-    );
+    let result = interprocedural_taint(entry, &seed(&["input"]), &InterTaintConfig::default(), &db);
     assert!(
         has_propagation(&result, "entry", "wrap", &db),
         "associated constructor wrapper must receive tainted input"

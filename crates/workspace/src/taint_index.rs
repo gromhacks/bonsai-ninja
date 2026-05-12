@@ -24,15 +24,12 @@ use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_factstore::{FactStoreReader, FactStoreWriter};
 use bonsai_taint::EntryTaintGraph;
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// On-disk snapshot version for the workspace-wide taint graph.
-/// v2 is the disk-backed factstore format; older v1 bincode sidecars
-/// (extension `.bin`) are still recognised by [`Self::load_from_disk`]
-/// for backward-compatible warm reopens but new writes use the
-/// factstore path.
+/// Disk format is the streaming factstore; bumping this invalidates
+/// every cached sidecar so consumers get a fresh build on next open.
 pub const TAINT_GRAPH_CACHE_VERSION: u32 = 2;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
@@ -57,7 +54,6 @@ fn taint_graph_pipeline_hash(config_fingerprint: u64) -> u64 {
         policy_lo ^ policy_hi ^ config_fingerprint
     }
 }
-
 
 /// Interned key for a sorted seed token set. Collisions are
 /// deliberately impossible: identical seed sets hash to the same
@@ -114,11 +110,7 @@ impl TaintGraphIndex {
     /// seed_key)`, decode the payload, verify the full key matches
     /// (guarding against the astronomical hash collision), and
     /// hydrate the in-memory map. Returns the cached graph on hit.
-    fn try_hydrate_from_disk(
-        &self,
-        source_func: FuncId,
-        seed_key: &[String],
-    ) -> Option<TaintGraphEntry> {
+    fn try_hydrate_from_disk(&self, source_func: FuncId, seed_key: &[String]) -> Option<TaintGraphEntry> {
         let reader = self.inner.read().disk.clone()?;
         let key = factstore_key(source_func, seed_key);
         let hit = reader.get(key).ok().flatten()?;
@@ -193,48 +185,15 @@ impl TaintGraphIndex {
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.read();
         let mem_empty = inner.by_source_seed.is_empty();
-        let disk_empty = inner.disk.as_ref().map_or(true, |r| r.is_empty());
+        let disk_empty = inner.disk.as_ref().is_none_or(|r| r.is_empty());
         mem_empty && disk_empty
     }
 
-    /// Conventional sidecar path under `<workspace>/.bonsai/`. v2
-    /// uses the `.factstore` extension; older `.bin` files are still
-    /// readable via [`Self::load_from_disk`] for backward compat.
+    /// Conventional sidecar path under `<workspace>/.bonsai/`.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
         workspace_bonsai_dir(workspace_root)
             .join(format!("taint_graph.v{TAINT_GRAPH_CACHE_VERSION}.factstore"))
-    }
-
-    /// Legacy bincode sidecar path (pre-v2). Read on warm-reopen so
-    /// older `.bonsai/` directories still hydrate; new writes always
-    /// go through the factstore path.
-    #[must_use]
-    pub fn legacy_sidecar_path(workspace_root: &Path) -> PathBuf {
-        workspace_bonsai_dir(workspace_root).join("taint_graph.v1.bin")
-    }
-
-    /// Snapshot every cached entry into a serialisable shape that
-    /// `bincode` can round-trip through disk. Used internally by
-    /// the legacy bincode load/save paths; new code persists via
-    /// the factstore.
-    #[allow(dead_code)]
-    fn snapshot(&self) -> SerializableTaintGraphSnapshot {
-        let inner = self.inner.read();
-        let entries: Vec<SerializableEntry> = inner
-            .by_source_seed
-            .iter()
-            .map(|((func, seeds), graph)| SerializableEntry {
-                func_raw: func.raw(),
-                seeds: seeds.clone(),
-                graph: (**graph).clone(),
-            })
-            .collect();
-        SerializableTaintGraphSnapshot {
-            version: TAINT_GRAPH_CACHE_VERSION,
-            config_fingerprint: inner.config_fingerprint,
-            entries,
-        }
     }
 
     /// Persist the index as a fact-store file. Streams the in-memory
@@ -287,7 +246,9 @@ impl TaintGraphIndex {
                 if written_keys.contains(&key) {
                     continue;
                 }
-                writer.add(key, hit.body_hash, &hit.payload).map_err(map_factstore_io)?;
+                writer
+                    .add(key, hit.body_hash, &hit.payload)
+                    .map_err(map_factstore_io)?;
                 written_keys.insert(key);
             }
         }
@@ -338,72 +299,12 @@ impl TaintGraphIndex {
         Ok(entries)
     }
 
-    /// Read a legacy bincode `.bin` sidecar (pre-v2). Used during
-    /// warm-reopen to keep older `.bonsai/` directories working.
-    /// New code should use the factstore path; this is a one-way
-    /// migration helper.
-    pub fn load_legacy_bincode(&self, path: &Path) -> std::io::Result<usize> {
-        if !path.exists() {
-            return Ok(0);
-        }
-        let bytes = std::fs::read(path)?;
-        let snap: SerializableTaintGraphSnapshot = match bincode::deserialize(&bytes) {
-            Ok(s) => s,
-            Err(error) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %error,
-                    "ignoring corrupt legacy taint-graph sidecar"
-                );
-                return Ok(0);
-            }
-        };
-        // Legacy sidecars carried `version = 1`; v2+ goes through the
-        // factstore path so anything else here is unexpected.
-        if snap.version != 1 {
-            return Ok(0);
-        }
-        let mut inner = self.inner.write();
-        inner.by_source_seed.clear();
-        inner.config_fingerprint = snap.config_fingerprint;
-        for entry in snap.entries {
-            inner.by_source_seed.insert(
-                (FuncId::new(entry.func_raw), entry.seeds),
-                Arc::new(entry.graph),
-            );
-        }
-        Ok(inner.by_source_seed.len())
-    }
 }
 
 /// Funnel `bonsai_factstore::FactStoreError` into `std::io::Error`.
 fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
     match err {
         bonsai_factstore::FactStoreError::Io(e) => e,
-        other => std::io::Error::new(std::io::ErrorKind::Other, other),
+        other => std::io::Error::other(other),
     }
 }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct SerializableTaintGraphSnapshot {
-    version: u32,
-    #[serde(default)]
-    config_fingerprint: u64,
-    entries: Vec<SerializableEntry>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct SerializableEntry {
-    func_raw: u32,
-    seeds: Vec<String>,
-    graph: EntryTaintGraph,
-}
-
-// The legacy `unique_taint_graph_tmp_path` helper was removed when
-// the bincode `save_to_disk` path migrated to
-// [`bonsai_factstore::FactStoreWriter`], which manages its own
-// atomic-rename tmp file naming. The legacy bincode types
-// `SerializableTaintGraphSnapshot` / `SerializableEntry` above are
-// retained for [`TaintGraphIndex::load_legacy_bincode`] back-compat
-// only.
-

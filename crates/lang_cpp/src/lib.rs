@@ -155,6 +155,9 @@ impl LanguageAdapter for CppAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `T foo() {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);
             let bases_by_span = collect_cpp_class_bases(&tree, file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &CPP_TYPE_ALIASES);
             for decl in &mut decl_index.defs {
@@ -495,8 +498,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
                 }
                 found
             });
-        let (Some(alias_name_node), Some(module_name_node)) = (alias_name_node, module_name_node)
-        else {
+        let (Some(alias_name_node), Some(module_name_node)) = (alias_name_node, module_name_node) else {
             continue;
         };
         let alias_name = node_text(&alias_name_node, src).trim().to_string();
@@ -534,11 +536,9 @@ fn fix_cpp_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree, 
                 catch_param,
                 ..
             } => {
-                if let Some(node) = bonsai_lang_api::kit::node_at_span(
-                    tree.root_node(),
-                    *span,
-                    &["try_statement"],
-                ) {
+                if let Some(node) =
+                    bonsai_lang_api::kit::node_at_span(tree.root_node(), *span, &["try_statement"])
+                {
                     if let Some(name) = cpp_catch_param_binding(node, src) {
                         *catch_param = Some(name);
                     }
@@ -555,9 +555,7 @@ fn fix_cpp_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree, 
                 fix_cpp_catch_params(then_events, tree, src);
                 fix_cpp_catch_params(else_events, tree, src);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 fix_cpp_catch_params(body, tree, src);
             }
             _ => {}

@@ -211,7 +211,7 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                 source_call_args,
                 source_names,
                 ..
-                    } => {
+            } => {
                 // The walker may not have populated source_call when the
                 // RHS is a plain function-call expression; reconstruct it
                 // textually from the assignment span.

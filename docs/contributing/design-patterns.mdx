@@ -319,9 +319,11 @@ graph walk. Every workspace cache follows the same shape:
    case; `query_only` callers skip the prewarm and let the first
    query lazy-build.
 2. **Sidecar persistence** — long-lived caches (`DataFlowCache`,
-   `ValueFlowCache`, `TaintGraphIndex`) save to
-   `<workspace>/.bonsai/<name>.v<version>.bin` via `bincode` with
-   atomic-rename + `MATCHER_POLICY_FINGERPRINT` validation.
+   `ValueFlowCache`, `TaintGraphIndex`) stream-write to
+   `<workspace>/.bonsai/<name>.v<version>.factstore` via
+   `bonsai_factstore::FactStoreWriter` with atomic-rename +
+   `MATCHER_POLICY_FINGERPRINT` validation. Streaming keeps peak
+   memory bounded by in-flight payload, not by the total cache.
 3. **`parking_lot` interior mutability** — `RwLock<Inner>` (for
    per-key maps) or `RwLock<Option<Arc<T>>>` (for singletons).
    Probe with a read lock; upgrade to write only on miss; check

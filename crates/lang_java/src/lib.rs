@@ -113,6 +113,9 @@ impl LanguageAdapter for JavaAdapter {
             return index;
         };
         let src = snapshot.text.as_bytes();
+        // Phase-6 return-type extraction: `T method() {}` populates
+        // `Decl.return_type` for `apply_assign_call_result_types`.
+        bonsai_lang_api::populate_decl_return_types(&mut index, &tree, src, &HANDLER);
         // Populate Throw::thrown_type and Try::catch_types from the
         // parse tree before downstream resolution. Done first so the
         // type info propagates through every later mutation.

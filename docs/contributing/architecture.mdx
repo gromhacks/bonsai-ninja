@@ -5,7 +5,7 @@ description: "The crate layout, dependency boundaries, and major data paths in b
 
 # Architecture
 
-bonsai-ninja is a 44-crate Rust workspace. The shape is concentric — each
+bonsai-ninja is a 46-crate Rust workspace. The shape is concentric — each
 layer leans on the ones below and never reaches up. New contributors usually
 work in one or two layers at a time, so this doc is organised the same way.
 
@@ -162,12 +162,13 @@ query path into a lookup against precomputed state:
 
 - `DataFlowCache` (`dataflow.rs`) — per-`FuncId` `KindedTokens` +
   `EntryTaintGraph` + transitive-dependency file set. Prewarmed at
-  open; persisted to `.bonsai/dataflow.v2.bin`.
+  open; persisted to `.bonsai/dataflow.v3.factstore` (legacy
+  `dataflow.v2.bin` is still readable for warm reopens).
 - `ValueFlowCache` (`value_flow.rs`) — per-`FuncId` seed-free
   `ValueFlowGraph` plus a `returning_seed_names` set
   (precomputed at graph-build time so security-analysis answers
   "does this seed reach a Return?" with a hash-set intersection).
-  Prewarmed at open; persisted to `.bonsai/value_flow.v2.bin`.
+  Prewarmed at open; persisted to `.bonsai/value_flow.v3.factstore`.
 - `FlowIdCache` (`flow_ids.rs`) — per-`FuncId` flow labels for
   browse-row F-IDs. Prewarmed at open; shares the workspace-cached
   resolved call graph via `seed_call_graph`.
@@ -175,7 +176,7 @@ query path into a lookup against precomputed state:
   `(source_func, sorted_seed_key) → Arc<EntryTaintGraph>`. Lifted
   out of the per-invocation map so a second `taint-analysis` /
   `source-analysis` run reuses the cached graph. Persisted to
-  `.bonsai/taint_graph.v1.bin` with version + fingerprint guard.
+  `.bonsai/taint_graph.v2.factstore` with version + fingerprint guard.
 - `TransitiveCallersIndex` (`transitive_callers.rs`) — depth-bounded
   caller closures on the resolved call graph. Rulepack-independent,
   so the closure survives across rulepack swaps.
@@ -271,7 +272,7 @@ When the CLI runs `index`:
    per-source runs.
 9. `DataFlowCache::prewarm_all` and `ValueFlowCache::prewarm_all`
    fan out across rayon, persist to
-   `.bonsai/dataflow.v2.bin` / `.bonsai/value_flow.v2.bin`.
+   `.bonsai/dataflow.v3.factstore` / `.bonsai/value_flow.v3.factstore`.
 10. `FlowIdCache::prewarm_all` materialises browse-row flow labels
     using the same shared call graph.
 

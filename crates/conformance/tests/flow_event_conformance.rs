@@ -123,9 +123,7 @@ fn walk_events(events: &[FlowEvent], pred: &dyn Fn(&FlowEvent) -> bool) -> bool 
                     return true;
                 }
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if walk_events(body, pred) {
                     return true;
                 }
@@ -191,16 +189,14 @@ fn matches_shape(event: &FlowEvent, shape: CanonicalShape, _ctx: &[FlowEvent]) -
         (
             CanonicalShape::CatchBind,
             FlowEvent::Try {
-                catch_param: Some(p),
-                ..
+                catch_param: Some(p), ..
             },
         ) => sigil_strip(p) == "e",
         (CanonicalShape::LoopBody, FlowEvent::Loop { body, .. }) => body_contains_call(body, "G"),
         (
             CanonicalShape::BareReturn,
             FlowEvent::Return {
-                value_name: Some(v),
-                ..
+                value_name: Some(v), ..
             },
         ) => {
             let stripped = sigil_strip(v);
@@ -222,7 +218,10 @@ fn sigil_strip(s: &str) -> &str {
 }
 
 fn body_contains_call(body: &[FlowEvent], callee: &str) -> bool {
-    walk_events(body, &|e| matches!(e, FlowEvent::Call { name, .. } if name == callee))
+    walk_events(
+        body,
+        &|e| matches!(e, FlowEvent::Call { name, .. } if name == callee),
+    )
 }
 
 fn fixture_for(lang: &str) -> Conformance {

@@ -18,6 +18,7 @@
 //!    - `caller.CallArg(site, i) → callee.Param(i)` per arg index
 //!      `i ∈ [0, args_count)`
 //!    - `callee.Return → caller.CallRet(site)`
+//!
 //!    Same-segment edges go in the segment's intra list; different-
 //!    segment edges go in the workspace cross-file index.
 //! 3. **Stitch each throw site**: for every callee whose recorded
@@ -89,11 +90,7 @@ pub trait CalleeResolver {
     /// Default implementation returns empty (no callback support);
     /// the workspace adapter overrides with callgraph-driven
     /// binding analysis.
-    fn callback_bindings(
-        &self,
-        _host: FuncId,
-        _param_idx: u8,
-    ) -> Vec<ResolvedCallee> {
+    fn callback_bindings(&self, _host: FuncId, _param_idx: u8) -> Vec<ResolvedCallee> {
         Vec::new()
     }
 }
@@ -140,8 +137,7 @@ pub fn stitch_idg(
     // callee's Place::Param / Place::Return nodes during stitching.
     // The transfer output already interned those places; we just
     // need to read them back when stitching cross-function edges.
-    let by_func: AHashMap<FuncId, TransferOutput> =
-        outputs.into_iter().map(|o| (o.func, o)).collect();
+    let by_func: AHashMap<FuncId, TransferOutput> = outputs.into_iter().map(|o| (o.func, o)).collect();
 
     // Group by segment so each segment gets a single `IdgSegment`
     // built from its functions' transfer outputs.
@@ -169,8 +165,7 @@ pub fn stitch_idg(
     // `F:`/`G:` ids on findings. Sort placeholders by their raw u32
     // (placeholders are 1:1 with FileId, which is a stable workspace
     // identifier) so segment registration is run-stable.
-    let mut sorted_by_seg: Vec<(SegmentId, &Vec<FuncId>)> =
-        by_seg.iter().map(|(s, f)| (*s, f)).collect();
+    let mut sorted_by_seg: Vec<(SegmentId, &Vec<FuncId>)> = by_seg.iter().map(|(s, f)| (*s, f)).collect();
     sorted_by_seg.sort_by_key(|(s, _)| s.0);
     for (seg_id_placeholder, funcs) in sorted_by_seg {
         let mut segment = IdgSegment::new();
@@ -179,9 +174,7 @@ pub fn stitch_idg(
         let mut sorted_funcs = funcs.clone();
         sorted_funcs.sort_by_key(|f| f.raw());
         for func in &sorted_funcs {
-            let out = by_func
-                .get(func)
-                .expect("by_func index built from same set");
+            let out = by_func.get(func).expect("by_func index built from same set");
             let remap = merge_transfer_into_segment(&mut segment, out);
             seg_remaps.insert(*func, (seg_id_placeholder, remap));
             segment.record_func(*func);
@@ -267,7 +260,7 @@ impl NodeRemap {
             // Grow on demand if the transfer added nodes after the
             // remap was sized.
             self.map
-                .extend(std::iter::repeat(NodeId::SENTINEL).take(i + 1 - self.map.len()));
+                .extend(std::iter::repeat_n(NodeId::SENTINEL, i + 1 - self.map.len()));
             self.map[i] = global;
         }
     }
@@ -349,20 +342,12 @@ fn build_strid_remap(
 
 /// Rewrite a [`Place`] so its embedded `StrId`s reference the
 /// segment-pool address space instead of the per-function pool.
-fn remap_place_strids(
-    place: &Place,
-    strid_remap: &[bonsai_factstore::StrId],
-) -> Place {
+fn remap_place_strids(place: &Place, strid_remap: &[bonsai_factstore::StrId]) -> Place {
     use crate::place::{FieldPath, TypeId};
     let map_one = |sid: bonsai_factstore::StrId| -> bonsai_factstore::StrId {
-        strid_remap
-            .get(sid as usize)
-            .copied()
-            .unwrap_or(sid)
+        strid_remap.get(sid as usize).copied().unwrap_or(sid)
     };
-    let map_path = |path: &FieldPath| -> FieldPath {
-        path.iter().map(|s| map_one(*s)).collect()
-    };
+    let map_path = |path: &FieldPath| -> FieldPath { path.iter().map(|s| map_one(*s)).collect() };
     match place {
         Place::Read { name, path } => Place::Read {
             name: map_one(*name),
@@ -423,35 +408,29 @@ fn stitch_call_site(
     // `callback_bindings` results so `run(executor, t)` /
     // `callback(value)` and `run(callback, t)` / `callback.call(value)`
     // both surface the cross-call edge to executor.
-    let callback_param_idx: Option<u8> = if let Some(recv) = site
-        .receiver
-        .as_deref()
-        .filter(|r| !r.is_empty())
-    {
-        // Receiver-form callback. The receiver text might be the
-        // param name directly (`cb.accept(...)` → receiver "cb")
-        // or a sigil'd form (`$cb` in perl). Strip leading `$`/`@`
-        // sigils before matching.
-        let stripped = recv.trim_start_matches(|c: char| matches!(c, '$' | '@' | '%' | '&'));
-        caller_params
-            .iter()
-            .position(|p| p == recv || p == stripped)
-            .and_then(|i| u8::try_from(i).ok())
-    } else {
-        // Free-call form: callee name itself is the param.
-        // Some adapters keep an explicit invocation marker on the
-        // name even without a receiver — elixir emits `cb.(value)`
-        // as `name="cb."` with no receiver. Strip a single trailing
-        // `.` / `()` punct before the match.
-        let bare_name = site
-            .callee_name
-            .trim_end_matches('.')
-            .trim_end_matches("()");
-        caller_params
-            .iter()
-            .position(|p| p == &site.callee_name || p == bare_name)
-            .and_then(|i| u8::try_from(i).ok())
-    };
+    let callback_param_idx: Option<u8> =
+        if let Some(recv) = site.receiver.as_deref().filter(|r| !r.is_empty()) {
+            // Receiver-form callback. The receiver text might be the
+            // param name directly (`cb.accept(...)` → receiver "cb")
+            // or a sigil'd form (`$cb` in perl). Strip leading `$`/`@`
+            // sigils before matching.
+            let stripped = recv.trim_start_matches(['$', '@', '%', '&']);
+            caller_params
+                .iter()
+                .position(|p| p == recv || p == stripped)
+                .and_then(|i| u8::try_from(i).ok())
+        } else {
+            // Free-call form: callee name itself is the param.
+            // Some adapters keep an explicit invocation marker on the
+            // name even without a receiver — elixir emits `cb.(value)`
+            // as `name="cb."` with no receiver. Strip a single trailing
+            // `.` / `()` punct before the match.
+            let bare_name = site.callee_name.trim_end_matches('.').trim_end_matches("()");
+            caller_params
+                .iter()
+                .position(|p| p == &site.callee_name || p == bare_name)
+                .and_then(|i| u8::try_from(i).ok())
+        };
     if let Some(param_idx) = callback_param_idx {
         for cand in resolver.callback_bindings(caller, param_idx) {
             if !candidates.iter().any(|c| c.func == cand.func) {
@@ -476,16 +455,16 @@ fn stitch_call_site(
         wired_any = true;
         // Find callee's local Place::Param(i) and Place::Return
         // nodes by looking them up in its segment.
-        let callee_segment = match ws.segment(*callee_seg) {
-            Some(s) => s,
-            None => continue,
+        let Some(callee_segment) = ws.segment(*callee_seg) else {
+            continue;
         };
         let callee_param_nodes = (0..site.args_count)
             .map(|i| {
                 let place = Place::Param { idx: i };
-                callee_segment.places.lookup(&place).and_then(|pid| {
-                    callee_segment.nodes.lookup(cand.func, pid)
-                })
+                callee_segment
+                    .places
+                    .lookup(&place)
+                    .and_then(|pid| callee_segment.nodes.lookup(cand.func, pid))
             })
             .collect::<Vec<_>>();
         let callee_return_node = callee_segment
@@ -499,12 +478,8 @@ fn stitch_call_site(
             let Some(callee_param_node) = callee_param else {
                 continue;
             };
-            let caller_call_arg = caller_remap.get(
-                site.call_arg_nodes
-                    .get(i)
-                    .copied()
-                    .unwrap_or(NodeId::SENTINEL),
-            );
+            let caller_call_arg =
+                caller_remap.get(site.call_arg_nodes.get(i).copied().unwrap_or(NodeId::SENTINEL));
             if caller_call_arg.is_sentinel() {
                 continue;
             }
@@ -570,12 +545,7 @@ fn stitch_call_site(
 /// edges go in the segment's intra-edge list (so closures don't
 /// need to walk the cross-file index for purely-local flows),
 /// cross-segment edges go in the workspace cross-file index.
-fn place_inter_edge(
-    from_seg: SegmentId,
-    to_seg: SegmentId,
-    edge: IdgEdge,
-    ws: &mut IdgWorkspace,
-) {
+fn place_inter_edge(from_seg: SegmentId, to_seg: SegmentId, edge: IdgEdge, ws: &mut IdgWorkspace) {
     if from_seg == to_seg {
         if let Some(seg) = ws.segment_mut(from_seg) {
             seg.add_edge(edge);
@@ -798,12 +768,7 @@ mod tests {
         //   g.Return → f.CallRet(site)        (1 edge)
         assert_eq!(ws.cross_file().len(), 2);
         // One InterCallArg + one InterReturn.
-        let kinds: Vec<IdgEdgeKind> = ws
-            .cross_file()
-            .edges
-            .iter()
-            .map(|e| e.edge.meta.kind)
-            .collect();
+        let kinds: Vec<IdgEdgeKind> = ws.cross_file().edges.iter().map(|e| e.edge.meta.kind).collect();
         assert!(kinds.contains(&IdgEdgeKind::InterCallArg));
         assert!(kinds.contains(&IdgEdgeKind::InterReturn));
     }
@@ -858,11 +823,7 @@ mod tests {
         f2s_map.insert(FuncId::new(3), SegmentId(2));
         let f2s = StaticF2S(f2s_map);
         let mut resolver = MockResolver::new();
-        resolver.add(
-            FuncId::new(1),
-            "method",
-            vec![FuncId::new(2), FuncId::new(3)],
-        );
+        resolver.add(FuncId::new(1), "method", vec![FuncId::new(2), FuncId::new(3)]);
 
         let ws = stitch_idg(outs, &resolver, &f2s);
         // Two candidates × at least 1 edge per candidate

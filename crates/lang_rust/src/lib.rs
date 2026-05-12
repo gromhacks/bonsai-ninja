@@ -194,6 +194,9 @@ impl LanguageAdapter for RustAdapter {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `fn f() -> T {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let arm_spans = collect_rust_match_arm_spans(&tree, src, file);
             let spawn_body_spans = collect_rust_spawn_body_spans(&tree, src, file);
             for decl in &mut idx.defs {
@@ -297,7 +300,7 @@ fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
                 source_names,
                 source_call_args,
                 ..
-                    } => {
+            } => {
                 for arg in source_call_args {
                     for capture in rust_format_named_captures(arg) {
                         if !source_names.iter().any(|existing| existing == &capture) {

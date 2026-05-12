@@ -67,8 +67,8 @@ pub(crate) fn save_callgraph_sidecar(
         files,
         graph: graph.clone(),
     };
-    let bytes = bincode::serialize(&snap)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let bytes =
+        bincode::serialize(&snap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;

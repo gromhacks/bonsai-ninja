@@ -45,8 +45,9 @@ fn find_decl(ws: &Workspace, name: &str) -> Option<Decl> {
 fn flow_events_contain(events: &[FlowEvent], shape: AsyncShape) -> bool {
     for ev in events {
         match (shape, ev) {
-            (AsyncShape::Await, FlowEvent::Await { .. })
-            | (AsyncShape::Yield, FlowEvent::Yield { .. }) => return true,
+            (AsyncShape::Await, FlowEvent::Await { .. }) | (AsyncShape::Yield, FlowEvent::Yield { .. }) => {
+                return true
+            }
             _ => {}
         }
         let nested: &[&[FlowEvent]] = match ev {
@@ -55,9 +56,7 @@ fn flow_events_contain(events: &[FlowEvent], shape: AsyncShape) -> bool {
                 else_events,
                 ..
             } => &[then_events.as_slice(), else_events.as_slice()],
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 if flow_events_contain(body, shape) {
                     return true;
                 }
@@ -232,10 +231,7 @@ fn async_yield_cross_language_coverage() {
             failures.push(format!("{}: no adapter found", case.lang));
             continue;
         };
-        let ws = bonsai_testkit::workspace_with(
-            vec![adapter],
-            &[(case.fixture_path, case.fixture_source)],
-        );
+        let ws = bonsai_testkit::workspace_with(vec![adapter], &[(case.fixture_path, case.fixture_source)]);
         let Some(decl) = find_decl(&ws, case.function_name) else {
             failures.push(format!(
                 "{}: function `{}` not found",

@@ -4,8 +4,8 @@ use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath,
-    Ref, RefKind,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
+    RefKind,
 };
 use tree_sitter::{Language, Tree};
 
@@ -262,7 +262,7 @@ fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str
                 target,
                 source_names,
                 ..
-                    } => {
+            } => {
                 if let Some(rhs) = assignment_rhs_text(source, *span) {
                     add_perl_collection_transform_sources(target, &rhs, source_names);
                 }
@@ -321,7 +321,7 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
                 source_call_args,
                 source_names,
                 ..
-                    } => {
+            } => {
                 if let Some(name) = source_name {
                     *name = normalize_perl_hash_deref_text(name);
                 }
@@ -394,7 +394,7 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
                 source_call_args: next_source_call_args,
                 source_names: next_source_names,
                 ..
-                    } = &events[event_idx]
+            } = &events[event_idx]
             else {
                 break;
             };
@@ -445,9 +445,9 @@ fn normalize_perl_hash_deref_flow_events(events: &mut Vec<FlowEvent>, source: &s
             source_call,
             source_call_args,
             source_names,
-                        declares_new_binding: false,
-                        value_kind: None,
-                    });
+            declares_new_binding: false,
+            value_kind: None,
+        });
     }
     *events = rewritten;
 }
@@ -531,9 +531,9 @@ fn perl_push_assignment(event: &FlowEvent) -> Option<FlowEvent> {
         source_call: None,
         source_call_args: Vec::new(),
         source_names,
-                        declares_new_binding: false,
-                        value_kind: None,
-                    })
+        declares_new_binding: false,
+        value_kind: None,
+    })
 }
 
 /// Return the trimmed RHS text of an assignment whose textual range
@@ -1032,9 +1032,9 @@ fn rewrite_perl_list_param_bindings(events: &mut Vec<FlowEvent>, source: &str) -
                 source_call: None,
                 source_call_args: Vec::new(),
                 source_names: vec![var, bare],
-                        declares_new_binding: false,
-                        value_kind: None,
-                    });
+                declares_new_binding: false,
+                value_kind: None,
+            });
         }
     }
     *events = rewritten;
@@ -1046,7 +1046,7 @@ fn rewrite_perl_list_param_bindings(events: &mut Vec<FlowEvent>, source: &str) -
 fn perl_list_binding_at(event: &FlowEvent, source: &str) -> Option<(bonsai_common::Span, Vec<String>)> {
     let FlowEvent::Assign {
         span, source_names, ..
-                    } = event
+    } = event
     else {
         return None;
     };
@@ -1120,7 +1120,7 @@ fn infer_perl_params_from_body(events: &[FlowEvent]) -> Vec<String> {
             source_name,
             source_names,
             ..
-                    } = event
+        } = event
         else {
             // Only look at the contiguous prefix of Assigns — any
             // non-Assign event marks the end of the parameter-

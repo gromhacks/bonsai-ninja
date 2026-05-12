@@ -192,8 +192,7 @@ fn workspace_open_progress() -> impl Fn(WorkspaceOpenEvent) + Sync {
             }
         }
         WorkspaceOpenEvent::FlowIdsPrewarmStarted => {
-            *flow_ids.lock().expect("flow-ids progress lock") =
-                Some(progress::spinner("building flow ids"));
+            *flow_ids.lock().expect("flow-ids progress lock") = Some(progress::spinner("building flow ids"));
         }
         WorkspaceOpenEvent::FlowIdsPrewarmFinished => {
             if let Some(bar) = flow_ids.lock().expect("flow-ids progress lock").take() {

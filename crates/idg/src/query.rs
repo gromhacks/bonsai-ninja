@@ -136,13 +136,7 @@ impl ReachabilityIndex {
 
     /// Convenience wrapper: compute the cut from `(src, sink)` and
     /// then enumerate up to `max_paths` paths inside it.
-    pub fn paths(
-        &self,
-        src: NodeId,
-        sink: NodeId,
-        max_paths: usize,
-        max_len: usize,
-    ) -> Vec<Vec<NodeId>> {
+    pub fn paths(&self, src: NodeId, sink: NodeId, max_paths: usize, max_len: usize) -> Vec<Vec<NodeId>> {
         let cut = self.cut(&[src], &[sink]);
         self.paths_in_cut(src, sink, &cut, max_paths, max_len)
     }
@@ -184,12 +178,7 @@ fn bitvector_closure(csr: &EdgeCsr, n_nodes: usize, seeds: &[NodeId]) -> NodeBit
 /// Bitvector bounded closure: same as [`bitvector_closure`] but
 /// stops after `k_hops` BFS steps. Used for `inspect --query`'s
 /// neighbourhood view.
-fn bitvector_bounded_closure(
-    csr: &EdgeCsr,
-    n_nodes: usize,
-    seeds: &[NodeId],
-    k_hops: usize,
-) -> NodeBitSet {
+fn bitvector_bounded_closure(csr: &EdgeCsr, n_nodes: usize, seeds: &[NodeId], k_hops: usize) -> NodeBitSet {
     let mut reached = NodeBitSet::from_seed(n_nodes, seeds);
     if k_hops == 0 {
         return reached;

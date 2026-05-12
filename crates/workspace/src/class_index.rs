@@ -54,11 +54,7 @@ impl ClassMemberIndex {
     /// Lookup `DeclKind::Constructor` decls on `class_sym`.
     pub fn constructors_of(&self, db: &AnalyzerDb, class_sym: SymbolId) -> Vec<FuncId> {
         let built = self.built(db);
-        built
-            .constructors
-            .get(&class_sym)
-            .cloned()
-            .unwrap_or_default()
+        built.constructors.get(&class_sym).cloned().unwrap_or_default()
     }
 
     /// Drop every cached entry. Triggered by file edits.
@@ -86,10 +82,7 @@ impl ClassMemberIndex {
                     continue;
                 }
                 let func = FuncId::new(decl.symbol.raw());
-                methods
-                    .entry((parent, decl.name.clone()))
-                    .or_default()
-                    .push(func);
+                methods.entry((parent, decl.name.clone())).or_default().push(func);
                 if matches!(decl.kind, DeclKind::Constructor) {
                     constructors.entry(parent).or_default().push(func);
                 }
@@ -103,7 +96,10 @@ impl ClassMemberIndex {
             vec.sort_by_key(|f| f.raw());
             vec.dedup();
         }
-        let arc = Arc::new(Built { methods, constructors });
+        let arc = Arc::new(Built {
+            methods,
+            constructors,
+        });
         let mut slot = self.inner.write();
         if let Some(existing) = slot.clone() {
             return existing;
@@ -117,4 +113,3 @@ impl ClassMemberIndex {
         self.inner.read().is_some()
     }
 }
-

@@ -28,7 +28,7 @@ fn collect_calls_includes_assignment_source_call_metadata() {
         source_call: Some("os.system".to_string()),
         source_call_args: vec!["cmd".to_string(), "env".to_string()],
         source_names: Vec::new(),
-            declares_new_binding: false,
+        declares_new_binding: false,
         value_kind: None,
     }];
 
@@ -56,7 +56,7 @@ fn assignment_source_call_facts_inherit_receiver_type_aliases() {
         source_call: Some("cookie.getValue".to_string()),
         source_call_args: Vec::new(),
         source_names: Vec::new(),
-            declares_new_binding: false,
+        declares_new_binding: false,
         value_kind: None,
     }];
     let mut calls = collect_calls(&events);

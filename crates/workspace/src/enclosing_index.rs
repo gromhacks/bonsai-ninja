@@ -38,12 +38,7 @@ impl EnclosingIndex {
 
     /// Look up the innermost decl whose body covers `pos` in `file`.
     /// Builds the per-file array on first access.
-    pub fn enclosing_for(
-        &self,
-        db: &AnalyzerDb,
-        file: FileId,
-        pos: u64,
-    ) -> Option<EnclosingEntry> {
+    pub fn enclosing_for(&self, db: &AnalyzerDb, file: FileId, pos: u64) -> Option<EnclosingEntry> {
         let entries = self.entries_for(db, file);
         if entries.is_empty() {
             return None;
@@ -62,12 +57,7 @@ impl EnclosingIndex {
 
     /// Just the name of the enclosing decl; convenience for
     /// callers that already have a position-only query path.
-    pub fn enclosing_name(
-        &self,
-        db: &AnalyzerDb,
-        file: FileId,
-        pos: u64,
-    ) -> Option<String> {
+    pub fn enclosing_name(&self, db: &AnalyzerDb, file: FileId, pos: u64) -> Option<String> {
         self.enclosing_for(db, file, pos).map(|e| e.name)
     }
 

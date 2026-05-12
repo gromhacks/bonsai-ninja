@@ -92,6 +92,9 @@ impl LanguageAdapter for KotlinAdapter {
         // we can avoid by hoisting.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `fun f(): T {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             // Kotlin's `object Foo { fun bar() { ... } }` parses as
             // `infix_expression` (with `object` as the operator) in
             // tree-sitter-kotlin, so the kit's class-kind detection
@@ -513,12 +516,7 @@ fn collect_kotlin_type_aliases(
 /// infix_expression span so any subsequent post-process keyed on
 /// span (e.g. `apply_class_field_type_aliases`) lines up.
 fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
-    let mut next_symbol_raw = idx
-        .defs
-        .iter()
-        .map(|d| d.symbol.raw())
-        .max()
-        .map_or(0, |m| m + 1);
+    let mut next_symbol_raw = idx.defs.iter().map(|d| d.symbol.raw()).max().map_or(0, |m| m + 1);
     for infix in collect_kinds(tree, &["infix_expression"]) {
         let mut cursor = infix.walk();
         let mut object_keyword = false;

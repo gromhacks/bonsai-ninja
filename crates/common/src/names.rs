@@ -119,8 +119,7 @@ pub const SELF_CONSTRUCTOR_HEADS: &[&str] = &["Self(", "Self {", "self(", "stati
 /// - `__construct` — PHP magic method.
 /// - `init` — Swift / Objective-C.
 /// - `new` — Ruby idiom, PHP factory convention.
-pub const CONSTRUCTOR_METHOD_NAMES: &[&str] =
-    &["__init__", "constructor", "__construct", "init", "new"];
+pub const CONSTRUCTOR_METHOD_NAMES: &[&str] = &["__init__", "constructor", "__construct", "init", "new"];
 
 /// True when `value_text` returns a self-typed constructor
 /// expression — Rust `Self(...)` / `Self { ... }` / `self(...)`,
@@ -133,10 +132,7 @@ pub const CONSTRUCTOR_METHOD_NAMES: &[&str] =
 pub fn value_text_returns_self_constructor(value_text: &str) -> bool {
     let mut text = value_text.trim();
     text = text.strip_prefix("return ").unwrap_or(text).trim();
-    if SELF_CONSTRUCTOR_HEADS
-        .iter()
-        .any(|head| text.starts_with(*head))
-    {
+    if SELF_CONSTRUCTOR_HEADS.iter().any(|head| text.starts_with(*head)) {
         return true;
     }
     matches!(

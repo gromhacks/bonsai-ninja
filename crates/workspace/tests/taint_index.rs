@@ -118,7 +118,9 @@ fn sidecar_round_trips_via_disk() {
     let restored = TaintGraphIndex::new();
     let loaded = restored.load_from_disk(&path).expect("load sidecar");
     assert_eq!(loaded, 2, "sidecar should restore both entries");
-    assert!(restored.get(FuncId::new(11), &["alpha".into(), "beta".into()]).is_some());
+    assert!(restored
+        .get(FuncId::new(11), &["alpha".into(), "beta".into()])
+        .is_some());
     assert!(restored.get(FuncId::new(22), &["gamma".into()]).is_some());
 }
 
@@ -143,4 +145,3 @@ fn sidecar_with_corrupt_bytes_is_ignored() {
     assert_eq!(loaded, 0);
     assert!(idx.is_empty());
 }
-
