@@ -84,11 +84,7 @@ impl FactStoreReader {
     /// invariants; mismatches surface as typed errors so callers can
     /// distinguish "the file was written for a different cache" from
     /// truly corrupt files.
-    pub fn open(
-        path: &Path,
-        expected_table_id: u32,
-        expected_pipeline_hash: u64,
-    ) -> FactStoreResult<Self> {
+    pub fn open(path: &Path, expected_table_id: u32, expected_pipeline_hash: u64) -> FactStoreResult<Self> {
         let file = File::open(path)?;
         let file_len = file.metadata()?.len();
         if file_len < HEADER_SIZE as u64 {
@@ -202,10 +198,9 @@ impl FactStoreReader {
         let Some(row) = binary_search_index(&self.index_bytes, count, key) else {
             return Ok(None);
         };
-        let entry = IndexEntry::from_bytes(
-            &self.index_bytes[row * INDEX_ENTRY_SIZE..(row + 1) * INDEX_ENTRY_SIZE],
-        )
-        .ok_or(FactStoreError::BadIndexEntry { row })?;
+        let entry =
+            IndexEntry::from_bytes(&self.index_bytes[row * INDEX_ENTRY_SIZE..(row + 1) * INDEX_ENTRY_SIZE])
+                .ok_or(FactStoreError::BadIndexEntry { row })?;
         let mut buf = vec![0u8; entry.payload_len as usize];
         read_exact_at(&self.file, entry.payload_offset, &mut buf)?;
         Ok(Some(LookupHit {
@@ -388,10 +383,10 @@ fn validate_index_sorted_and_bounded(header: &Header, index_bytes: &[u8]) -> Fac
         if i > 0 && entry.key < prev_key {
             return Err(FactStoreError::UnsortedIndex);
         }
-        let payload_end =
-            entry.payload_offset.checked_add(entry.payload_len as u64).ok_or(
-                FactStoreError::BadIndexEntry { row: i },
-            )?;
+        let payload_end = entry
+            .payload_offset
+            .checked_add(entry.payload_len as u64)
+            .ok_or(FactStoreError::BadIndexEntry { row: i })?;
         if entry.payload_offset < header.payload_offset || payload_end > payload_section_end {
             return Err(FactStoreError::BadIndexEntry { row: i });
         }
@@ -425,7 +420,7 @@ mod tests {
     use crate::writer::FactStoreWriter;
 
     fn write_test_store(path: &Path, table: u32, hash: u64, entries: &[(u64, u64, &[u8])]) {
-        let mut w = FactStoreWriter::create(path, table, hash).expect("create");
+        let w = FactStoreWriter::create(path, table, hash).expect("create");
         for &(key, body_hash, payload) in entries {
             w.add(key, body_hash, payload).expect("add");
         }
@@ -527,12 +522,7 @@ mod tests {
     fn iter_visits_entries_in_key_order() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.bin");
-        write_test_store(
-            &path,
-            0,
-            0,
-            &[(30, 0, b"c"), (10, 0, b"a"), (20, 0, b"b")],
-        );
+        write_test_store(&path, 0, 0, &[(30, 0, b"c"), (10, 0, b"a"), (20, 0, b"b")]);
         let r = FactStoreReader::open(&path, 0, 0).expect("open");
         let collected: Vec<(u64, Vec<u8>)> = r
             .iter()
@@ -543,11 +533,7 @@ mod tests {
             .collect();
         assert_eq!(
             collected,
-            vec![
-                (10, b"a".to_vec()),
-                (20, b"b".to_vec()),
-                (30, b"c".to_vec()),
-            ]
+            vec![(10, b"a".to_vec()), (20, b"b".to_vec()), (30, b"c".to_vec()),]
         );
     }
 
@@ -555,7 +541,7 @@ mod tests {
     fn string_pool_view_is_accessible_through_reader() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.bin");
-        let mut w = FactStoreWriter::create(&path, 0, 0).expect("create");
+        let w = FactStoreWriter::create(&path, 0, 0).expect("create");
         let a = w.intern("hello");
         let b = w.intern("world");
         w.add(1, 0, &[]).expect("add");
@@ -571,8 +557,7 @@ mod tests {
     fn binary_search_locates_first_and_last() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.bin");
-        let entries: Vec<(u64, u64, &[u8])> =
-            (0..1000u64).map(|i| (i * 2, i, b"x" as &[u8])).collect();
+        let entries: Vec<(u64, u64, &[u8])> = (0..1000u64).map(|i| (i * 2, i, b"x" as &[u8])).collect();
         write_test_store(&path, 0, 0, &entries);
         let r = FactStoreReader::open(&path, 0, 0).expect("open");
         assert_eq!(r.get(0).expect("ok").unwrap().body_hash, 0);
@@ -591,8 +576,7 @@ mod tests {
         use std::thread;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.bin");
-        let entries: Vec<(u64, u64, &[u8])> =
-            (0..256u64).map(|i| (i, i, b"payload" as &[u8])).collect();
+        let entries: Vec<(u64, u64, &[u8])> = (0..256u64).map(|i| (i, i, b"payload" as &[u8])).collect();
         write_test_store(&path, 0, 0, &entries);
         let r = Arc::new(FactStoreReader::open(&path, 0, 0).expect("open"));
         let mut handles = Vec::new();

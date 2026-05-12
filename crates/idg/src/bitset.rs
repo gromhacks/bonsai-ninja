@@ -116,10 +116,7 @@ impl NodeBitSet {
             .zip(other.bits.iter())
             .map(|(a, b)| a & b)
             .collect();
-        Self {
-            bits,
-            len: self.len,
-        }
+        Self { bits, len: self.len }
     }
 
     /// In-place difference: `self &= !other` (clears every bit set
@@ -141,10 +138,7 @@ impl NodeBitSet {
             .zip(other.bits.iter())
             .map(|(a, b)| a & !*b)
             .collect();
-        Self {
-            bits,
-            len: self.len,
-        }
+        Self { bits, len: self.len }
     }
 
     /// Number of bits currently set. Useful for progress / size

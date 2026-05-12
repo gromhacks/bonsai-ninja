@@ -370,13 +370,11 @@ mod tests {
         assert!(Place::read(0).is_named_storage());
         assert!(Place::write(0, span(0, 1)).is_named_storage());
         assert!(!Place::Return.is_named_storage());
-        assert!(
-            !Place::CallArg {
-                site: CallSiteId(span(0, 1)),
-                idx: 0,
-            }
-            .is_named_storage()
-        );
+        assert!(!Place::CallArg {
+            site: CallSiteId(span(0, 1)),
+            idx: 0,
+        }
+        .is_named_storage());
         assert!(!Place::Throw { ty: TypeId(0) }.is_named_storage());
     }
 

@@ -110,6 +110,9 @@ impl LanguageAdapter for CSharpAdapter {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `T Method() {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             for decl in &mut idx.defs {
                 populate_csharp_exception_types(&mut decl.flow_events, &tree, src);
             }

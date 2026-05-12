@@ -116,6 +116,9 @@ impl LanguageAdapter for TypeScriptAdapter {
         }
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `function f(): T {}` / `(): T => ...`
+            // populates `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);
             // Visibility from `public/protected/private` keywords, and parameter type aliases.
             let visibility_by_span =
                 collect_modifier_visibility(tree.root_node(), file, src, &TYPESCRIPT_VOCAB);

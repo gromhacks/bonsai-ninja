@@ -7,7 +7,9 @@
 //! source-node selection before it runs exact source-seeded taint
 //! paths.
 
-use crate::value_flow_disk::{decode as decode_value_flow_entry, encode as encode_value_flow_entry, ValueFlowEntry};
+use crate::value_flow_disk::{
+    decode as decode_value_flow_entry, encode as encode_value_flow_entry, ValueFlowEntry,
+};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FuncId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
@@ -149,10 +151,7 @@ impl ValueFlowCache {
         let arc_graph = Arc::new(entry.graph);
         let arc_returning = Arc::new(entry.returning_seeds);
         let mut inner = self.inner.write();
-        inner
-            .graphs
-            .entry(func)
-            .or_insert_with(|| arc_graph.clone());
+        inner.graphs.entry(func).or_insert_with(|| arc_graph.clone());
         inner
             .returning_seeds
             .entry(func)
@@ -297,12 +296,8 @@ impl ValueFlowCache {
             }
         });
         let written = writer.finish().map_err(map_factstore_io)?;
-        let reader = FactStoreReader::open(
-            path,
-            VALUE_FLOW_TABLE_ID,
-            value_flow_pipeline_hash(),
-        )
-        .map_err(map_factstore_io)?;
+        let reader = FactStoreReader::open(path, VALUE_FLOW_TABLE_ID, value_flow_pipeline_hash())
+            .map_err(map_factstore_io)?;
         let mut inner = self.inner.write();
         // Drop any stale in-memory entries; the disk store is the
         // single source of truth from here forward.
@@ -450,7 +445,7 @@ impl ValueFlowCache {
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.read();
         let mem_empty = inner.graphs.is_empty();
-        let disk_empty = inner.disk.as_ref().map_or(true, |r| r.is_empty());
+        let disk_empty = inner.disk.as_ref().is_none_or(|r| r.is_empty());
         mem_empty && disk_empty
     }
 
@@ -471,8 +466,7 @@ impl ValueFlowCache {
     /// recognised by the new reader and are ignored on load.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
-        workspace_bonsai_dir(workspace_root)
-            .join(format!("value_flow.v{VALUE_FLOW_CACHE_VERSION}.factstore"))
+        workspace_bonsai_dir(workspace_root).join(format!("value_flow.v{VALUE_FLOW_CACHE_VERSION}.factstore"))
     }
 
     /// Serialize all in-memory + disk-backed graphs to a fact-store
@@ -537,9 +531,8 @@ impl ValueFlowCache {
                 if written_keys.contains(&func) {
                     continue;
                 }
-                let entry = decode_value_flow_entry(&hit.payload, &pool).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                })?;
+                let entry = decode_value_flow_entry(&hit.payload, &pool)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
                 let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
                 writer
                     .add(u64::from(func.raw()), RESERVED_BODY_HASH, &payload)
@@ -575,11 +568,7 @@ impl ValueFlowCache {
         if !path.exists() {
             return Ok(0);
         }
-        let reader = match FactStoreReader::open(
-            path,
-            VALUE_FLOW_TABLE_ID,
-            value_flow_pipeline_hash(),
-        ) {
+        let reader = match FactStoreReader::open(path, VALUE_FLOW_TABLE_ID, value_flow_pipeline_hash()) {
             Ok(reader) => reader,
             Err(err) => {
                 tracing::warn!(
@@ -696,9 +685,10 @@ fn compute_returning_seed_names(graph: &ValueFlowGraph, func: FuncId) -> AHashSe
     // edges and we only care about origin names — not the full path.
     for origin in origin_nodes {
         let reach = graph.forward_closure(origin);
-        if reach.iter().any(|n| {
-            n.func == func && matches!(n.kind, ValueFlowNodeKind::Return)
-        }) {
+        if reach
+            .iter()
+            .any(|n| n.func == func && matches!(n.kind, ValueFlowNodeKind::Return))
+        {
             out.insert(origin.value_text.clone());
         }
     }
@@ -713,7 +703,7 @@ fn compute_returning_seed_names(graph: &ValueFlowGraph, func: FuncId) -> AHashSe
 fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
     match err {
         bonsai_factstore::FactStoreError::Io(e) => e,
-        other => std::io::Error::new(std::io::ErrorKind::Other, other),
+        other => std::io::Error::other(other),
     }
 }
 

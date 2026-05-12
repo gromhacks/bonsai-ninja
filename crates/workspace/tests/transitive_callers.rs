@@ -62,10 +62,7 @@ def top():\n    mid()\n",
 
 #[test]
 fn second_lookup_returns_same_arc() {
-    let ws = ws_with(
-        "app.py",
-        "def leaf():\n    pass\n\ndef caller():\n    leaf()\n",
-    );
+    let ws = ws_with("app.py", "def leaf():\n    pass\n\ndef caller():\n    leaf()\n");
     let cg = ws.cached_resolved_call_graph();
     let leaf = func_id(&ws, "leaf");
 

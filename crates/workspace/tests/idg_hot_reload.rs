@@ -43,9 +43,13 @@ fn idg_service_invalidated_then_rebuilt_after_file_edit() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create tmp dir");
 
-    write_file(&tmp, "app.py", "def f(x):\n    helper(x)\n\ndef helper(p):\n    sink(p)\n");
-    let ws = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default())
-        .expect("open ws");
+    write_file(
+        &tmp,
+        "app.py",
+        "def f(x):\n    helper(x)\n\ndef helper(p):\n    sink(p)\n",
+    );
+    let ws =
+        Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default()).expect("open ws");
 
     // First fetch: IDG is built and seeded by the open path.
     let svc1 = ws.db().idg_service().expect("idg seeded after open");
@@ -61,9 +65,7 @@ fn idg_service_invalidated_then_rebuilt_after_file_edit() {
         "app.py",
         "def f(x):\n    helper(x)\n    second(x)\n\ndef helper(p):\n    sink(p)\n\ndef second(q):\n    sink(q)\n",
     );
-    let _ = ws
-        .refresh_file_from_disk(&tmp.join("app.py"))
-        .expect("refresh");
+    let _ = ws.refresh_file_from_disk(&tmp.join("app.py")).expect("refresh");
 
     // After the edit the slot is dropped (`invalidate_idg_service`)
     // until the next caller asks for it.
@@ -102,8 +104,8 @@ fn idg_service_drops_when_workspace_root_invalidated() {
     std::fs::create_dir_all(&tmp).expect("create tmp dir");
     write_file(&tmp, "a.py", "def g(x):\n    return x\n");
 
-    let ws = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default())
-        .expect("open ws");
+    let ws =
+        Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default()).expect("open ws");
     assert!(ws.db().idg_service().is_some());
     ws.db().invalidate_idg_service();
     assert!(ws.db().idg_service().is_none());

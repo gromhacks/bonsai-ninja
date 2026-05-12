@@ -112,6 +112,9 @@ impl LanguageAdapter for DartAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let source_bytes = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `T foo() {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, source_bytes, &HANDLER);
             let aliases_by_span = collect_dart_method_type_aliases(&tree, file, source_bytes);
             for decl in &mut decl_index.defs {
                 if let Some(aliases) = aliases_by_span

@@ -111,24 +111,17 @@ impl CrossFileEdges {
 
     /// Append a cross-file edge. Updates both directional indexes.
     pub fn push(&mut self, edge: CrossFileEdge) {
-        let idx = u32::try_from(self.edges.len())
-            .expect("cross-file edge index overflow: > 2^32 edges");
+        let idx = u32::try_from(self.edges.len()).expect("cross-file edge index overflow: > 2^32 edges");
         self.by_from_segment
             .entry(edge.from_segment)
             .or_default()
             .push(idx);
-        self.by_to_segment
-            .entry(edge.to_segment)
-            .or_default()
-            .push(idx);
+        self.by_to_segment.entry(edge.to_segment).or_default().push(idx);
         self.edges.push(edge);
     }
 
     /// Iterate every cross-file edge whose source is in `seg`.
-    pub fn outgoing_from_segment(
-        &self,
-        seg: SegmentId,
-    ) -> impl Iterator<Item = &CrossFileEdge> + '_ {
+    pub fn outgoing_from_segment(&self, seg: SegmentId) -> impl Iterator<Item = &CrossFileEdge> + '_ {
         self.by_from_segment
             .get(&seg)
             .into_iter()
@@ -137,10 +130,7 @@ impl CrossFileEdges {
     }
 
     /// Iterate every cross-file edge whose destination is in `seg`.
-    pub fn incoming_to_segment(
-        &self,
-        seg: SegmentId,
-    ) -> impl Iterator<Item = &CrossFileEdge> + '_ {
+    pub fn incoming_to_segment(&self, seg: SegmentId) -> impl Iterator<Item = &CrossFileEdge> + '_ {
         self.by_to_segment
             .get(&seg)
             .into_iter()
@@ -214,14 +204,8 @@ impl CrossFileEdges {
         self.by_to_segment.clear();
         for (idx, edge) in self.edges.iter().enumerate() {
             let i = idx as u32;
-            self.by_from_segment
-                .entry(edge.from_segment)
-                .or_default()
-                .push(i);
-            self.by_to_segment
-                .entry(edge.to_segment)
-                .or_default()
-                .push(i);
+            self.by_from_segment.entry(edge.from_segment).or_default().push(i);
+            self.by_to_segment.entry(edge.to_segment).or_default().push(i);
         }
     }
 }
@@ -262,8 +246,7 @@ impl IdgWorkspace {
     /// Register `segment` with the workspace and return its
     /// [`SegmentId`]. Updates the `FuncId → SegmentId` index.
     pub fn register_segment(&mut self, segment: IdgSegment) -> SegmentId {
-        let raw = u32::try_from(self.segments.len())
-            .expect("segment index overflow: > 2^32 segments");
+        let raw = u32::try_from(self.segments.len()).expect("segment index overflow: > 2^32 segments");
         let id = SegmentId(raw);
         for func_raw in &segment.funcs {
             self.by_func.insert(*func_raw, id);

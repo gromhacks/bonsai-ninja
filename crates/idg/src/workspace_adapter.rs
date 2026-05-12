@@ -118,9 +118,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                     // doesn't match, an alias-name match is
                     // legitimate.
                     if let Some(call_names) = self.func_to_call_names.get(&edge.to) {
-                        matched = call_names
-                            .iter()
-                            .any(|n| names_match_for_callee(n, callee_name));
+                        matched = call_names.iter().any(|n| names_match_for_callee(n, callee_name));
                     }
                 }
                 if matched {
@@ -148,11 +146,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         out
     }
 
-    fn callback_bindings(
-        &self,
-        host: FuncId,
-        param_idx: u8,
-    ) -> Vec<ResolvedCallee> {
+    fn callback_bindings(&self, host: FuncId, param_idx: u8) -> Vec<ResolvedCallee> {
         // For every caller of `host`, walk its flow events looking
         // for Call sites that resolve to `host`, and pick the
         // argument at `param_idx`. The arg's text might be a
@@ -169,15 +163,12 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         let mut out: Vec<ResolvedCallee> = Vec::new();
         let mut seen: ahash::AHashSet<FuncId> = ahash::AHashSet::new();
         let bare_host = host_name
-            .rsplit_once(|c: char| c == '.' || c == ':')
+            .rsplit_once(['.', ':'])
             .map(|(_, tail)| tail.to_string())
             .unwrap_or_else(|| host_name.clone());
         for edge in self.call_graph.callers_of(host) {
             let caller = edge.from;
-            let Some(caller_decl) = self
-                .global
-                .decl_of(bonsai_common::SymbolId::new(caller.raw()))
-            else {
+            let Some(caller_decl) = self.global.decl_of(bonsai_common::SymbolId::new(caller.raw())) else {
                 continue;
             };
             // Find Call events in caller's flow events whose name
@@ -204,8 +195,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
                     continue;
                 }
                 for (&candidate_func, candidate_name) in self.func_to_name.iter() {
-                    if (candidate_name == bound_name
-                        || matches_qualified_tail(candidate_name, bound_name))
+                    if (candidate_name == bound_name || matches_qualified_tail(candidate_name, bound_name))
                         && seen.insert(candidate_func)
                     {
                         out.push(ResolvedCallee {
@@ -232,11 +222,7 @@ impl<'a> WorkspaceCalleeResolver<'a> {
     /// the base-class field-init body, so a tainted argument
     /// never reaches the field write and field-flow stitching has
     /// nothing to chain off.
-    fn resolve_class_constructor_fallback(
-        &self,
-        callee_name: &str,
-        out: &mut Vec<ResolvedCallee>,
-    ) {
+    fn resolve_class_constructor_fallback(&self, callee_name: &str, out: &mut Vec<ResolvedCallee>) {
         use bonsai_lang_api::DeclKind;
         let trimmed = callee_name.trim();
         if trimmed.is_empty() {
@@ -247,16 +233,13 @@ impl<'a> WorkspaceCalleeResolver<'a> {
             return;
         }
         let mut frontier: Vec<bonsai_common::SymbolId> = Vec::new();
-        let mut seen: ahash::AHashSet<bonsai_common::SymbolId> =
-            ahash::AHashSet::default();
+        let mut seen: ahash::AHashSet<bonsai_common::SymbolId> = ahash::AHashSet::default();
         let mut all_class_by_name: ahash::AHashMap<String, bonsai_common::SymbolId> =
             ahash::AHashMap::default();
         for file in self.global.all_files() {
             for decl in self.global.decls_in(file) {
                 if matches!(decl.kind, DeclKind::Class) {
-                    all_class_by_name
-                        .entry(decl.name.clone())
-                        .or_insert(decl.symbol);
+                    all_class_by_name.entry(decl.name.clone()).or_insert(decl.symbol);
                 }
             }
         }
@@ -276,12 +259,10 @@ impl<'a> WorkspaceCalleeResolver<'a> {
                         continue;
                     }
                     let is_ctor = matches!(decl.kind, DeclKind::Constructor)
-                        || (matches!(
-                            decl.kind,
-                            DeclKind::Function | DeclKind::Method
-                        ) && (decl.name == "constructor"
-                            || decl.name == "__init__"
-                            || decl.name == "initialize"));
+                        || (matches!(decl.kind, DeclKind::Function | DeclKind::Method)
+                            && (decl.name == "constructor"
+                                || decl.name == "__init__"
+                                || decl.name == "initialize"));
                     if !is_ctor {
                         continue;
                     }
@@ -372,7 +353,7 @@ fn matches_qualified_tail(name: &str, tail: &str) -> bool {
     if name == tail {
         return true;
     }
-    name.rsplit_once(|c: char| c == '.' || c == ':')
+    name.rsplit_once(['.', ':'])
         .map(|(_, suffix)| suffix == tail)
         .unwrap_or(false)
 }
@@ -396,7 +377,7 @@ fn names_match_for_callee(decl_name: &str, event_name: &str) -> bool {
     if let Some(idx) = tail.rfind("->") {
         tail = &tail[idx + 2..];
     }
-    if let Some((_head, rest)) = tail.rsplit_once(|c: char| c == '.' || c == ':') {
+    if let Some((_head, rest)) = tail.rsplit_once(['.', ':']) {
         tail = rest;
     }
     if let Some(idx) = tail.find('/') {
@@ -455,9 +436,7 @@ fn collect_arg_text_for_callee(
                 ..
             } => {
                 if let Some(callee) = source_call {
-                    if callee == host_name
-                        || matches_qualified_tail(callee, bare_host)
-                    {
+                    if callee == host_name || matches_qualified_tail(callee, bare_host) {
                         if let Some(text) = source_call_args.get(arg_idx) {
                             out.push(text.clone());
                         }
@@ -482,16 +461,13 @@ fn collect_arg_text_for_callee(
                 collect_arg_text_for_callee(catch_events, host_name, bare_host, arg_idx, out);
                 collect_arg_text_for_callee(finally_events, host_name, bare_host, arg_idx, out);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_arg_text_for_callee(body, host_name, bare_host, arg_idx, out);
             }
             _ => {}
         }
     }
 }
-
 
 /// `FuncToSegment` view onto the precomputed [`WorkspaceMaps`].
 struct WorkspaceFuncToSegment<'a> {
@@ -585,11 +561,7 @@ where
             ) {
                 continue;
             }
-            let bindings = bonsai_callgraph::collect_local_callable_bindings(
-                &decl.flow_events,
-                global,
-                decl,
-            );
+            let bindings = bonsai_callgraph::collect_local_callable_bindings(&decl.flow_events, global, decl);
             for (alias, func) in bindings {
                 let entry = func_to_call_names.entry(func).or_default();
                 if !entry.contains(&alias) {
@@ -631,9 +603,9 @@ fn stitch_receiver_method_propagation(
     global: &GlobalIndex,
     call_graph: &ResolvedCallGraph,
 ) {
+    use crate::edge::IdgEdgeKind;
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
-    use crate::edge::IdgEdgeKind;
     // Group decls by parent so we know each class's known fields.
     // Reuse the field-flow scoping (parent-only buckets) so we
     // don't over-link free functions. Walk the inheritance chain
@@ -649,7 +621,10 @@ fn stitch_receiver_method_propagation(
     let mut by_class: ahash::AHashMap<SymbolId, Vec<FuncId>> = ahash::AHashMap::default();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
-            if !matches!(decl.kind, DeclKind::Function | DeclKind::Method | DeclKind::Constructor) {
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
                 continue;
             }
             let Some(parent) = decl.parent else { continue };
@@ -725,7 +700,7 @@ fn stitch_receiver_method_propagation(
             // recv-slot needs to be tainted so the next Phase 3d
             // pair `(run, super.run)` finds the recv-slot in the
             // closure).
-            let recv_targets = collect_recv_slot_nodes(ws, global, callee);
+            let recv_targets = collect_recv_slot_nodes(ws, callee);
             for n in &recv_targets {
                 if !read_nodes.contains(n) {
                     read_nodes.push(*n);
@@ -797,11 +772,7 @@ fn stitch_receiver_method_propagation(
                     }
                     if !emitted_link_for_call {
                         let recv_span = ws_node_span(ws, recv_ws)
-                            .unwrap_or_else(|| bonsai_common::Span::new(
-                                bonsai_common::FileId::new(0),
-                                0,
-                                0,
-                            ));
+                            .unwrap_or_else(|| bonsai_common::Span::new(bonsai_common::FileId::new(0), 0, 0));
                         // Super-chain pick: if the callee delegates
                         // via `super` and an ancestor's method has
                         // the actual body (field reads), emit ONE
@@ -814,10 +785,7 @@ fn stitch_receiver_method_propagation(
                         // just delegates). Keeping a single link
                         // avoids multiplying the finding count
                         // (one finding per chain shape).
-                        let reader_func = super_chain_funcs
-                            .last()
-                            .copied()
-                            .unwrap_or(callee);
+                        let reader_func = super_chain_funcs.last().copied().unwrap_or(callee);
                         ws.field_flow_mut().push(crate::workspace::FieldFlowLink {
                             writer: caller,
                             reader: reader_func,
@@ -839,11 +807,7 @@ fn stitch_receiver_method_propagation(
 /// (so peer-class getters / property accessors expose their decl
 /// name as a field key — `def cmd` returning a tainted value
 /// surfaces "cmd" as a field-readable name on the class).
-fn collect_field_write_names(
-    ws: &IdgWorkspace,
-    func: FuncId,
-    out: &mut ahash::AHashSet<String>,
-) {
+fn collect_field_write_names(ws: &IdgWorkspace, func: FuncId, out: &mut ahash::AHashSet<String>) {
     use crate::place::Place;
     let Some(seg_id) = ws.segment_for_func(func) else {
         return;
@@ -975,20 +939,37 @@ fn callee_body_delegates_via_super(global: &GlobalIndex, callee: FuncId) -> bool
                         return true;
                     }
                 }
-                FlowEvent::Return { value_text, value_name, .. } => {
+                FlowEvent::Return {
+                    value_text,
+                    value_name,
+                    ..
+                } => {
                     if value_name.as_deref() == Some("super")
                         || value_text
                             .as_deref()
                             .map(|s| {
                                 let t = s.trim();
-                                t == "super" || t.starts_with("super") && !t.contains(|c: char| c.is_ascii_alphanumeric() && c != 's' && c != 'u' && c != 'p' && c != 'e' && c != 'r')
+                                t == "super"
+                                    || t.starts_with("super")
+                                        && !t.contains(|c: char| {
+                                            c.is_ascii_alphanumeric()
+                                                && c != 's'
+                                                && c != 'u'
+                                                && c != 'p'
+                                                && c != 'e'
+                                                && c != 'r'
+                                        })
                             })
                             .unwrap_or(false)
                     {
                         return true;
                     }
                 }
-                FlowEvent::Branch { then_events, else_events, .. } => {
+                FlowEvent::Branch {
+                    then_events,
+                    else_events,
+                    ..
+                } => {
                     if walk(then_events) || walk(else_events) {
                         return true;
                     }
@@ -1063,7 +1044,7 @@ fn collect_super_chain_read_nodes_and_funcs(
                 }
                 let other = FuncId::new(decl.symbol.raw());
                 let mut nodes = collect_field_read_nodes(ws, other, field_names);
-                let recv = collect_recv_slot_nodes(ws, global, other);
+                let recv = collect_recv_slot_nodes(ws, other);
                 for n in recv {
                     if !nodes.contains(&n) {
                         nodes.push(n);
@@ -1089,12 +1070,7 @@ fn collect_super_chain_read_nodes_and_funcs(
     out
 }
 
-fn collect_recv_slot_nodes(
-    ws: &IdgWorkspace,
-    global: &GlobalIndex,
-    func: FuncId,
-) -> Vec<crate::WsNodeId> {
-    let _ = global;
+fn collect_recv_slot_nodes(ws: &IdgWorkspace, func: FuncId) -> Vec<crate::WsNodeId> {
     use crate::place::Place;
     let Some(seg_id) = ws.segment_for_func(func) else {
         return Vec::new();
@@ -1137,8 +1113,8 @@ fn recv_slots_for_call_to(
     caller: FuncId,
     callee: FuncId,
 ) -> Vec<(crate::WsNodeId, Option<crate::WsNodeId>)> {
-    use bonsai_common::SymbolId;
     use crate::place::Place;
+    use bonsai_common::SymbolId;
     let mut out: Vec<(crate::WsNodeId, Option<crate::WsNodeId>)> = Vec::new();
     let Some(caller_decl) = global.decl_of(SymbolId::new(caller.raw())) else {
         return out;
@@ -1229,9 +1205,7 @@ fn bare_decl_name(name: &str) -> &str {
     if let Some(idx) = s.rfind("->") {
         s = &s[idx + 2..];
     }
-    s.rsplit_once(|c: char| c == '.' || c == ':' || c == '\\')
-        .map(|(_, tail)| tail)
-        .unwrap_or(s)
+    s.rsplit_once(['.', ':', '\\']).map(|(_, tail)| tail).unwrap_or(s)
 }
 
 /// Walk `events`, find every `FlowEvent::Call` whose callee name
@@ -1262,9 +1236,7 @@ fn collect_method_call_spans(
                 collect_method_call_spans(then_events, decl_name, bare, out);
                 collect_method_call_spans(else_events, decl_name, bare, out);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 collect_method_call_spans(body, decl_name, bare, out);
             }
             FlowEvent::Try {
@@ -1295,9 +1267,9 @@ fn collect_method_call_spans(
 /// land in the segment's intra-edge list; cross-segment pairs
 /// flow through `cross_file_mut`.
 fn stitch_receiver_field_flow(ws: &mut IdgWorkspace, global: &GlobalIndex) {
+    use crate::edge::IdgEdgeKind;
     use bonsai_common::SymbolId;
     use bonsai_lang_api::DeclKind;
-    use crate::edge::IdgEdgeKind;
     // Group function-shaped decls by parent symbol id. Decls
     // without a parent collapse into a single "no-parent" bucket
     // keyed by file (an adapter that doesn't surface class parents
@@ -1324,7 +1296,10 @@ fn stitch_receiver_field_flow(ws: &mut IdgWorkspace, global: &GlobalIndex) {
         .collect();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
-            if !matches!(decl.kind, DeclKind::Function | DeclKind::Method | DeclKind::Constructor) {
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
                 continue;
             }
             let func = FuncId::new(decl.symbol.raw());
@@ -1348,10 +1323,7 @@ fn stitch_receiver_field_flow(ws: &mut IdgWorkspace, global: &GlobalIndex) {
                         if !visited.insert(base_sym) {
                             continue;
                         }
-                        by_class
-                            .entry((Some(base_sym), file))
-                            .or_default()
-                            .push(func);
+                        by_class.entry((Some(base_sym), file)).or_default().push(func);
                         frontier.push(base_sym);
                     }
                 }
@@ -1359,8 +1331,7 @@ fn stitch_receiver_field_flow(ws: &mut IdgWorkspace, global: &GlobalIndex) {
         }
     }
     // Sort keys for determinism (ws_node ids are positional).
-    let mut sorted_keys: Vec<(Option<SymbolId>, bonsai_common::FileId)> =
-        by_class.keys().copied().collect();
+    let mut sorted_keys: Vec<(Option<SymbolId>, bonsai_common::FileId)> = by_class.keys().copied().collect();
     sorted_keys.sort_by_key(|(p, f)| (p.map(|s| s.raw()).unwrap_or(u32::MAX), f.raw()));
     for key in sorted_keys {
         // Skip parent-less buckets entirely — module-level free
@@ -1377,36 +1348,16 @@ fn stitch_receiver_field_flow(ws: &mut IdgWorkspace, global: &GlobalIndex) {
         let funcs = by_class.get(&key).cloned().unwrap_or_default();
         let mut funcs = funcs;
         funcs.sort_by_key(|f| f.raw());
-        // Phase-4 note: prior attempts to tighten cross-method field
-        // bucketing using the class's `receiver_field_writes`
-        // declared-name set regressed the Ruby mega_flow fixture.
-        // Ruby's adapter populates `receiver_field_writes` for *some*
-        // methods (constructors that assign `@cmd`) but the
-        // cross-method bucketing also needs to recognise reads of
-        // bare names that *aren't* in any constructor's
-        // FieldWrite list (locals reassigned to instance state
-        // mid-method). The legacy over-approximation handles these
-        // cases without per-adapter coverage. Keeping it.
-        //
-        // `collect_class_declared_fields` is preserved for future
-        // adapter-side tightening — once Ruby / Erlang / Elixir
-        // adapters provide complete receiver_field_writes coverage
-        // it can be re-enabled here.
-        let declared_fields: Option<&ahash::AHashSet<String>> = None;
-        let _ = collect_class_declared_fields;
-        // For each method, collect (canonical_field_name → write/read ws_nodes).
+        // Cross-method bucketing recognises reads of bare names that
+        // aren't in any constructor's FieldWrite list (locals
+        // reassigned to instance state mid-method). Over-approximate
+        // bucketing handles these cases without per-adapter coverage.
         let mut writes_by_field: ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>> =
             ahash::AHashMap::default();
         let mut reads_by_field: ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>> =
             ahash::AHashMap::default();
         for func in &funcs {
-            collect_field_nodes(
-                ws,
-                *func,
-                declared_fields,
-                &mut writes_by_field,
-                &mut reads_by_field,
-            );
+            collect_field_nodes(ws, *func, &mut writes_by_field, &mut reads_by_field);
         }
         // Property-getter return values that match a canonical
         // field name. C# / TypeScript / Python expose
@@ -1485,11 +1436,7 @@ fn stitch_receiver_field_flow(ws: &mut IdgWorkspace, global: &GlobalIndex) {
                     // and `param_idx = u8::MAX` so it can't be
                     // confused with a real positional-arg edge.
                     let writer_span = ws_node_span(ws, *w_ws)
-                        .unwrap_or_else(|| bonsai_common::Span::new(
-                            bonsai_common::FileId::new(0),
-                            0,
-                            0,
-                        ));
+                        .unwrap_or_else(|| bonsai_common::Span::new(bonsai_common::FileId::new(0), 0, 0));
                     ws.field_flow_mut().push(crate::workspace::FieldFlowLink {
                         writer: *w_func,
                         reader: *r_func,
@@ -1503,52 +1450,6 @@ fn stitch_receiver_field_flow(ws: &mut IdgWorkspace, global: &GlobalIndex) {
     }
 }
 
-/// Collect the canonical names of fields declared by any method of
-/// the class. Reads each method's `Decl.receiver_field_writes` and
-/// canonicalises the targets (stripping `self.` / `this.` / `$this->`
-/// / `@` / `$` prefixes). Returns `None` when no method populates
-/// `receiver_field_writes` at all — that's the signal to fall back to
-/// the over-approximate string-bucketing for languages whose adapters
-/// haven't been updated yet.
-fn collect_class_declared_fields(
-    global: &GlobalIndex,
-    funcs: &[FuncId],
-) -> Option<ahash::AHashSet<String>> {
-    let mut fields: ahash::AHashSet<String> = ahash::AHashSet::default();
-    let mut saw_any_decl_with_field_writes = false;
-    for func in funcs {
-        let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
-            continue;
-        };
-        if decl.receiver_field_writes.is_empty() {
-            continue;
-        }
-        saw_any_decl_with_field_writes = true;
-        for fw in &decl.receiver_field_writes {
-            // `target` is the adapter-normalised place key
-            // (`self.cmd`, `@cmd`, `$this->cmd`); pull off the
-            // canonical field name.
-            let canonical = canonical_field_name(&fw.target);
-            // Drop the leading `<receiver>.` prefix when the
-            // canonical name is still qualified
-            // (e.g. `self.cmd.sub` → canonical_field_name gives
-            // `cmd.sub`, which we further split to `cmd`).
-            let head = canonical.split('.').next().unwrap_or("").to_string();
-            if !head.is_empty() {
-                fields.insert(head);
-            }
-            if !canonical.is_empty() && canonical != fields.get(&canonical).cloned().unwrap_or_default() {
-                fields.insert(canonical);
-            }
-        }
-    }
-    if saw_any_decl_with_field_writes {
-        Some(fields)
-    } else {
-        None
-    }
-}
-
 /// Resolve every `Place::Write{name, path: empty}` and
 /// `Place::Read{name, path: empty}` ws_node in `func`'s segment
 /// into the right field-name bucket. Sigil-stripped aliases (`@cmd`
@@ -1557,16 +1458,9 @@ fn collect_class_declared_fields(
 /// canonical name so a Ruby `@cmd = X` writer matches a Python
 /// `self.cmd` reader's bare-field bucket when they live in peer
 /// methods of the same class.
-///
-/// `declared_fields` is the Phase-4 tightening: when `Some(set)`,
-/// only canonical names in the set bucket as field-flow candidates.
-/// `None` keeps the legacy over-approximate behaviour (every bare
-/// name buckets) for classes whose adapter hasn't populated
-/// `Decl.receiver_field_writes` yet.
 fn collect_field_nodes(
     ws: &IdgWorkspace,
     func: FuncId,
-    declared_fields: Option<&ahash::AHashSet<String>>,
     writes_by_field: &mut ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>>,
     reads_by_field: &mut ahash::AHashMap<String, Vec<(FuncId, crate::WsNodeId)>>,
 ) {
@@ -1634,18 +1528,8 @@ fn collect_field_nodes(
             }
             _ => continue,
         };
-        let _ = is_field_like_name;
         if canonical.is_empty() {
             continue;
-        }
-        // Phase-4 narrowing: skip buckets whose name isn't in the
-        // declared-field set (when one was provided). Keeps the
-        // legacy over-approximation when the adapter hasn't
-        // populated `Decl.receiver_field_writes` for the class.
-        if let Some(declared) = declared_fields {
-            if !declared.contains(&canonical) {
-                continue;
-            }
         }
         let pid = crate::node::PlaceId(pid_idx as u32);
         let Some(local) = segment.nodes.lookup(func, pid) else {
@@ -1660,10 +1544,7 @@ fn collect_field_nodes(
                 .or_default()
                 .push((func, ws_node));
         } else {
-            reads_by_field
-                .entry(canonical)
-                .or_default()
-                .push((func, ws_node));
+            reads_by_field.entry(canonical).or_default().push((func, ws_node));
         }
     }
 }
@@ -1674,7 +1555,11 @@ fn collect_field_nodes(
 /// the unified map — only [`IdgQueryService`] does, and the
 /// adapter runs before service construction. Falls through to the
 /// segment's nodes vector to recover the workspace position.
-fn ws_node_for(ws: &IdgWorkspace, seg_id: crate::SegmentId, local: crate::node::NodeId) -> Option<crate::WsNodeId> {
+fn ws_node_for(
+    ws: &IdgWorkspace,
+    seg_id: crate::SegmentId,
+    local: crate::node::NodeId,
+) -> Option<crate::WsNodeId> {
     // Walk segments in order, summing counts up to seg_id, and
     // adding the local node index. Mirrors `build_unified` in
     // [`IdgQueryService`] — both must agree on the address-space
@@ -1696,22 +1581,6 @@ fn ws_node_for(ws: &IdgWorkspace, seg_id: crate::SegmentId, local: crate::node::
 /// canonicalize it onto the bare `cmd` field key.
 fn is_implicit_receiver_name(name: &str) -> bool {
     matches!(name.trim(), "self" | "this" | "$this" | "Self")
-}
-
-/// True when `name` looks like an instance / class field — has a
-/// language-specific sigil (`@`, `$`, `&`) or qualified-receiver
-/// prefix (`self.`, `this.`, `@@`) that the cross-method stitcher
-/// should treat as a shared field. Bare locals (`token`, `temp`)
-/// are skipped because they're per-method scope, not class scope.
-fn is_field_like_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let first = name.chars().next().unwrap();
-    matches!(first, '@' | '$' | '&')
-        || name.starts_with("self.")
-        || name.starts_with("this.")
-        || name.starts_with("@@")
 }
 
 /// Strip language-specific sigils and receiver prefixes off a
@@ -1803,7 +1672,10 @@ fn ws_node_span(ws: &IdgWorkspace, ws_node: crate::WsNodeId) -> Option<bonsai_co
 /// the (segment, local) pair it lives in. Walks segments in order
 /// and subtracts each segment's node count until the offset
 /// places `ws_node` within the current segment.
-fn ws_node_to_local(ws: &IdgWorkspace, ws_node: crate::WsNodeId) -> Option<(crate::SegmentId, crate::node::NodeId)> {
+fn ws_node_to_local(
+    ws: &IdgWorkspace,
+    ws_node: crate::WsNodeId,
+) -> Option<(crate::SegmentId, crate::node::NodeId)> {
     let mut remaining = ws_node.0;
     for (seg_id, segment) in ws.segments() {
         let count = segment.nodes.len() as u32;

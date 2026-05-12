@@ -64,10 +64,7 @@ impl IdgEdgeKind {
     /// Phase 3 stitching. Lets queries filter intra-only flows.
     #[must_use]
     pub const fn is_inter(self) -> bool {
-        matches!(
-            self,
-            Self::InterCallArg | Self::InterReturn | Self::InterThrow
-        )
+        matches!(self, Self::InterCallArg | Self::InterReturn | Self::InterThrow)
     }
 
     /// True iff this kind is intra-procedural (one function only).

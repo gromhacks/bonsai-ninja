@@ -78,11 +78,7 @@ pub fn execute(cmd: String) {
     let entry = func(&db, "entry");
     let result = interprocedural_taint(entry, &seed(&["raw"]), &config(), &db);
 
-    let sink_taints: Vec<_> = result
-        .tainted_calls
-        .iter()
-        .filter(|c| c.name == "sink")
-        .collect();
+    let sink_taints: Vec<_> = result.tainted_calls.iter().filter(|c| c.name == "sink").collect();
     assert!(
         sink_taints
             .iter()
@@ -145,10 +141,7 @@ pub fn method(token: String) {
 "#;
     let db = ws(
         Arc::new(bonsai_lang_rust::RustAdapter::new()),
-        &[
-            ("src/main.rs", main_rs),
-            ("src/helpers.rs", helpers_rs),
-        ],
+        &[("src/main.rs", main_rs), ("src/helpers.rs", helpers_rs)],
     );
     let entry = func(&db, "entry");
     let result = interprocedural_taint(entry, &seed(&["value"]), &config(), &db);

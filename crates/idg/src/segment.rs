@@ -154,11 +154,10 @@ impl IdgSegment {
     /// entry, key 0, payload = bincode of self.
     pub fn write_to_path(&self, path: &Path, pipeline_hash: u64) -> IdgResult<()> {
         let writer = FactStoreWriter::create(path, IDG_SEGMENT_TABLE_ID, pipeline_hash)?;
-        let payload = bincode::serialize(self).map_err(|e| {
-            IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        })?;
+        let payload = bincode::serialize(self)
+            .map_err(|e| IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         writer.add(0, 0, &payload)?;
-        let _ = writer.finish()?;
+        writer.finish()?;
         Ok(())
     }
 
@@ -179,9 +178,8 @@ impl IdgSegment {
         let Some(hit) = reader.get(0)? else {
             return Ok(None);
         };
-        let mut segment: Self = bincode::deserialize(&hit.payload).map_err(|e| {
-            IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        })?;
+        let mut segment: Self = bincode::deserialize(&hit.payload)
+            .map_err(|e| IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         if segment.version != IDG_SEGMENT_VERSION {
             return Ok(None);
         }
@@ -269,10 +267,7 @@ mod tests {
         assert_eq!(restored.funcs, vec![7]);
         // Reverse-lookup maps must be rebuilt.
         assert_eq!(restored.places.lookup(&Place::Return), Some(pid_ret));
-        assert_eq!(
-            restored.nodes.lookup(FuncId::new(7), pid_param),
-            Some(n_param),
-        );
+        assert_eq!(restored.nodes.lookup(FuncId::new(7), pid_param), Some(n_param),);
     }
 
     #[test]

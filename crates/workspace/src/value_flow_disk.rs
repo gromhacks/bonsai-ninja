@@ -155,16 +155,8 @@ where
     let mut node_to_idx: AHashMap<ValueFlowNode, u32> = AHashMap::new();
     let mut nodes_in_order: Vec<ValueFlowNode> = Vec::new();
     record_node(&entry.graph.nodes, &mut node_to_idx, &mut nodes_in_order);
-    record_nodes_iter(
-        entry.graph.forward.keys(),
-        &mut node_to_idx,
-        &mut nodes_in_order,
-    );
-    record_nodes_iter(
-        entry.graph.backward.keys(),
-        &mut node_to_idx,
-        &mut nodes_in_order,
-    );
+    record_nodes_iter(entry.graph.forward.keys(), &mut node_to_idx, &mut nodes_in_order);
+    record_nodes_iter(entry.graph.backward.keys(), &mut node_to_idx, &mut nodes_in_order);
     for edge in entry.graph.forward.values().flat_map(|set| set.iter()) {
         record_one_node(&edge.from, &mut node_to_idx, &mut nodes_in_order);
         record_one_node(&edge.to, &mut node_to_idx, &mut nodes_in_order);
@@ -215,11 +207,7 @@ where
     let backward = build_adjacency(&entry.graph.backward, &node_to_idx, &edge_to_idx);
 
     // Step 4: returning seeds, interned and sorted.
-    let mut returning_seeds: Vec<u32> = entry
-        .returning_seeds
-        .iter()
-        .map(|s| intern(s))
-        .collect();
+    let mut returning_seeds: Vec<u32> = entry.returning_seeds.iter().map(|s| intern(s)).collect();
     returning_seeds.sort_unstable();
     returning_seeds.dedup();
 
@@ -234,11 +222,7 @@ where
     }
 }
 
-fn record_one_node(
-    n: &ValueFlowNode,
-    map: &mut AHashMap<ValueFlowNode, u32>,
-    out: &mut Vec<ValueFlowNode>,
-) {
+fn record_one_node(n: &ValueFlowNode, map: &mut AHashMap<ValueFlowNode, u32>, out: &mut Vec<ValueFlowNode>) {
     if !map.contains_key(n) {
         let idx = u32::try_from(map.len()).expect("> 2^32 unique nodes per graph");
         map.insert(n.clone(), idx);
@@ -256,11 +240,8 @@ fn record_node(
     }
 }
 
-fn record_nodes_iter<'a, I>(
-    iter: I,
-    map: &mut AHashMap<ValueFlowNode, u32>,
-    out: &mut Vec<ValueFlowNode>,
-) where
+fn record_nodes_iter<'a, I>(iter: I, map: &mut AHashMap<ValueFlowNode, u32>, out: &mut Vec<ValueFlowNode>)
+where
     I: IntoIterator<Item = &'a ValueFlowNode>,
 {
     for n in iter {
@@ -268,11 +249,7 @@ fn record_nodes_iter<'a, I>(
     }
 }
 
-fn record_one_edge(
-    e: &ValueFlowEdge,
-    map: &mut AHashMap<ValueFlowEdge, u32>,
-    out: &mut Vec<ValueFlowEdge>,
-) {
+fn record_one_edge(e: &ValueFlowEdge, map: &mut AHashMap<ValueFlowEdge, u32>, out: &mut Vec<ValueFlowEdge>) {
     if !map.contains_key(e) {
         let idx = u32::try_from(map.len()).expect("> 2^32 unique edges per graph");
         map.insert(e.clone(), idx);
@@ -319,13 +296,15 @@ impl OnDiskEntry {
                 func: FuncId::new(node.func),
                 span: Span::new(FileId::new(node.span_file), node.span_start, node.span_end),
                 value_text,
-                kind: decode_node_kind(node.kind).ok_or_else(|| DecodeError::Bincode(
-                    bincode::ErrorKind::Custom(format!(
-                        "unknown ValueFlowNodeKind discriminant {} at node {i}",
-                        node.kind
-                    ))
-                    .into(),
-                ))?,
+                kind: decode_node_kind(node.kind).ok_or_else(|| {
+                    DecodeError::Bincode(
+                        bincode::ErrorKind::Custom(format!(
+                            "unknown ValueFlowNodeKind discriminant {} at node {i}",
+                            node.kind
+                        ))
+                        .into(),
+                    )
+                })?,
             });
         }
 
@@ -379,14 +358,13 @@ impl OnDiskEntry {
                 .clone();
             let entry_set = graph.forward.entry(node).or_default();
             for edge_idx in edge_idxs {
-                let edge =
-                    edges
-                        .get(*edge_idx as usize)
-                        .ok_or(DecodeError::UnknownEdgeIdx {
-                            idx: *edge_idx,
-                            count: edges_count,
-                        })?
-                        .clone();
+                let edge = edges
+                    .get(*edge_idx as usize)
+                    .ok_or(DecodeError::UnknownEdgeIdx {
+                        idx: *edge_idx,
+                        count: edges_count,
+                    })?
+                    .clone();
                 entry_set.insert(edge);
             }
         }
@@ -400,14 +378,13 @@ impl OnDiskEntry {
                 .clone();
             let entry_set = graph.backward.entry(node).or_default();
             for edge_idx in edge_idxs {
-                let edge =
-                    edges
-                        .get(*edge_idx as usize)
-                        .ok_or(DecodeError::UnknownEdgeIdx {
-                            idx: *edge_idx,
-                            count: edges_count,
-                        })?
-                        .clone();
+                let edge = edges
+                    .get(*edge_idx as usize)
+                    .ok_or(DecodeError::UnknownEdgeIdx {
+                        idx: *edge_idx,
+                        count: edges_count,
+                    })?
+                    .clone();
                 entry_set.insert(edge);
             }
         }
@@ -464,7 +441,14 @@ mod tests {
         Span::new(FileId::new(file), start, end)
     }
 
-    fn node(func: u32, file: u32, start: u64, end: u64, text: &str, kind: ValueFlowNodeKind) -> ValueFlowNode {
+    fn node(
+        func: u32,
+        file: u32,
+        start: u64,
+        end: u64,
+        text: &str,
+        kind: ValueFlowNodeKind,
+    ) -> ValueFlowNode {
         ValueFlowNode {
             func: FuncId::new(func),
             span: span(file, start, end),

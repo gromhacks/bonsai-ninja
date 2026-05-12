@@ -285,11 +285,7 @@ pub(crate) type ResolvedCallSiteCache =
 /// — the second writer's `entry().or_insert_with` short-circuits
 /// to the first winner so the cached value is single-source-of-truth
 /// even under contention.
-fn cache_or_insert_with<K, V, F>(
-    map: &parking_lot::RwLock<AHashMap<K, V>>,
-    key: K,
-    init: F,
-) -> V
+fn cache_or_insert_with<K, V, F>(map: &parking_lot::RwLock<AHashMap<K, V>>, key: K, init: F) -> V
 where
     K: std::hash::Hash + Eq + Clone,
     V: Clone,
@@ -774,12 +770,7 @@ fn run_interprocedural_worklist(
             lineage_history: &lineage_history,
             resolved_calls: Some(resolved_calls_cache),
         };
-        propagate_taint_through_events(
-            &decl.flow_events,
-            &mut state,
-            &mut ctx,
-            &caches.summaries_by_func,
-        );
+        propagate_taint_through_events(&decl.flow_events, &mut state, &mut ctx, &caches.summaries_by_func);
 
         per_function.insert(key, intra);
     }
@@ -1125,7 +1116,7 @@ fn split_call_assignment_event(events: &[FlowEvent], event_index: usize) -> Opti
         source_names,
         span: assign_span,
         ..
-                    } = events.get(event_index)?
+    } = events.get(event_index)?
     else {
         return None;
     };
@@ -1154,8 +1145,8 @@ fn split_call_assignment_event(events: &[FlowEvent], event_index: usize) -> Opti
             source_call: Some(name.to_string()),
             source_call_args: args.iter().map(|arg| arg.value_text.clone()).collect(),
             source_names: source_names.clone(),
-                        declares_new_binding: false,
-                        value_kind: None,
+            declares_new_binding: false,
+            value_kind: None,
         })
     };
 
@@ -1191,7 +1182,7 @@ fn split_call_assignment_consumes_all_tainted_sources(event: &FlowEvent, state: 
         source_call_args,
         source_names,
         ..
-                    } = event
+    } = event
     else {
         return false;
     };
@@ -2009,7 +2000,7 @@ fn configured_source_output_call(
     !tainted_at_call.is_empty()
         && tainted_at_call
             .iter()
-        .all(|(idx, _)| shape.output_arg_indices.contains(idx))
+            .all(|(idx, _)| shape.output_arg_indices.contains(idx))
 }
 
 fn apply_configured_source_output_args(
@@ -2619,7 +2610,7 @@ fn apply_return_taint(
         source_names,
         span,
         ..
-                    } = event
+    } = event
     else {
         return false;
     };
@@ -3264,7 +3255,7 @@ fn event_at_sink_receives_taint(event: &FlowEvent, sink_span: Span, state: &Toke
             source_names,
             source_call_args,
             ..
-                    } if spans_same_site(*span, sink_span) => {
+        } if spans_same_site(*span, sink_span) => {
             source_name
                 .as_deref()
                 .is_some_and(|src| arg_text_is_tainted(src, state))
@@ -3316,10 +3307,7 @@ pub(super) fn call_receiver_from_name(name: &str) -> Option<String> {
     (!receiver.is_empty()).then(|| receiver.to_string())
 }
 
-fn implicit_receiver_from_call_name(
-    name: &str,
-    call_kind: bonsai_lang_api::CallKind,
-) -> Option<String> {
+fn implicit_receiver_from_call_name(name: &str, call_kind: bonsai_lang_api::CallKind) -> Option<String> {
     if call_kind != bonsai_lang_api::CallKind::Method {
         return None;
     }
@@ -3758,10 +3746,7 @@ fn resolve_call_candidates_with_caller_at(
         // the read guard's temporary at the `;` so the subsequent
         // `.write()` below can't deadlock on a same-thread
         // read→write upgrade (parking_lot RwLock is non-reentrant).
-        let cached = cache
-            .read()
-            .get(&(scope.caller, span))
-            .cloned();
+        let cached = cache.read().get(&(scope.caller, span)).cloned();
         if let Some(arc) = cached {
             return arc.iter().cloned().collect::<Vec<_>>();
         }
@@ -4031,14 +4016,9 @@ fn resolve_receiver_method_candidates(
         {
             push_unique_string(&mut type_names, type_name);
         }
-        for type_name in receiver_call_return_type_names(
-            caller_decl,
-            receiver,
-            call_span,
-            db,
-            caller,
-            alias_targets,
-        ) {
+        for type_name in
+            receiver_call_return_type_names(caller_decl, receiver, call_span, db, caller, alias_targets)
+        {
             push_unique_string(&mut type_names, type_name);
         }
     }
@@ -4216,7 +4196,6 @@ fn receiver_projects_implicit_receiver(receiver: &str) -> bool {
             .any(|token| receiver.starts_with(&format!("{token}.")))
 }
 
-
 fn resolve_super_method_candidates(
     db: &AnalyzerDb,
     caller: FuncId,
@@ -4243,7 +4222,6 @@ fn resolve_super_method_candidates(
     }
     out
 }
-
 
 fn inferred_receiver_type_names(
     caller_decl: &Decl,
@@ -4345,7 +4323,6 @@ fn receiver_inner_call_name(receiver: &str) -> Option<String> {
     }
     Some(callee.to_string())
 }
-
 
 fn collect_constructed_return_type_names(
     decl: &Decl,
@@ -4493,7 +4470,6 @@ fn constructed_return_type_from_text(
     }
 }
 
-
 fn collect_receiver_type_names_from_events(
     events: &[FlowEvent],
     receiver: &str,
@@ -4513,7 +4489,7 @@ fn collect_receiver_type_names_from_events(
                 source_names,
                 span,
                 ..
-                    } => {
+            } => {
                 if call_span.is_some_and(|call_span| span.start > call_span.start) {
                     continue;
                 }
@@ -4751,7 +4727,6 @@ fn alias_targets_for_decl(
     bonsai_lang_api::extend_alias_map_with_flow_events(&mut map, &decl.flow_events);
     map
 }
-
 
 /// Caller-side resolve context derived from `caller`. Returns the
 /// caller's declaring file and a borrow into its `Decl.module_path`,
@@ -4991,7 +4966,6 @@ fn is_single_colon_qualified(name: &str) -> bool {
     name.contains(':') && !name.contains("::")
 }
 
-
 fn qualified_alias_tail<'a>(name: &'a str, aliases: &AHashMap<String, String>) -> Option<&'a str> {
     let (head, tail) = split_qualified_head_tail(name)?;
     aliases.contains_key(head).then_some(tail)
@@ -5001,7 +4975,6 @@ fn alias_head_target<'a>(name: &'a str, aliases: &'a AHashMap<String, String>) -
     let (head, _) = split_qualified_head_tail(name)?;
     aliases.get(head).map(String::as_str)
 }
-
 
 fn resolve_workspace_module_targets(
     db: &AnalyzerDb,
@@ -5068,21 +5041,6 @@ fn resolve_workspace_module_targets(
     }
     out
 }
-
-// `module_target_matches_decl_module_path` lives in
-// `bonsai_resolve` so the callgraph, taint, and resolve passes
-// share one canonical alias-target match.
-
-/// Expand a bare alias-tail into every fully-qualified shape that
-/// resolves to the same callee. Each language declares its own
-/// export-receiver aliases via `LanguageCapabilities::module_export_aliases`
-/// (JS/TS: `["exports", "module.exports"]`; languages without this
-/// convention pass `&[]`). Mirrors callgraph's `export_name_variants`
-/// so both passes use one source of truth.
-
-// Path / module-shape helpers live in `bonsai_resolve` so the
-// callgraph and taint engine share one source of truth.
-
 
 /// Apply one event's taint transfer to `state`. Mirror of the
 /// per-event transfer function inside [`crate::intra`] — duplicated

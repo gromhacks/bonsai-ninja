@@ -188,19 +188,15 @@ fn single_file_workspace(probe: &CapabilityProbe) -> Workspace {
 fn capability_is_supported(cap: Capability, decls: &[Decl]) -> bool {
     match cap {
         Capability::ParamNames => decls.iter().any(|d| !d.params.is_empty()),
-        Capability::ParamAnnotations => decls.iter().any(|d| {
-            d.param_annotations
-                .iter()
-                .any(|annots| !annots.is_empty())
-        }),
+        Capability::ParamAnnotations => decls
+            .iter()
+            .any(|d| d.param_annotations.iter().any(|annots| !annots.is_empty())),
         Capability::ReceiverParamIndex => decls.iter().any(|d| d.receiver_param_index.is_some()),
         Capability::Bases => decls
             .iter()
             .any(|d| matches!(d.kind, DeclKind::Class) && !d.bases.is_empty()),
         Capability::ReceiverFieldWrites => decls.iter().any(|d| !d.receiver_field_writes.is_empty()),
-        Capability::ImplicitReceiverNames => {
-            decls.iter().any(|d| !d.implicit_receiver_names.is_empty())
-        }
+        Capability::ImplicitReceiverNames => decls.iter().any(|d| !d.implicit_receiver_names.is_empty()),
         Capability::TypeAliases => decls.iter().any(|d| !d.type_aliases.is_empty()),
         Capability::ImplicitReturns => decls.iter().any(|d| d.has_implicit_returns),
         Capability::CallReceiverTypes => decls
@@ -278,9 +274,9 @@ fn nested_event_groups(event: &FlowEvent) -> Option<Vec<&[FlowEvent]>> {
             else_events,
             ..
         } => Some(vec![then_events.as_slice(), else_events.as_slice()]),
-        FlowEvent::Loop { body, .. }
-        | FlowEvent::Defer { body, .. }
-        | FlowEvent::Using { body, .. } => Some(vec![body.as_slice()]),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            Some(vec![body.as_slice()])
+        }
         FlowEvent::Try {
             body,
             catch_events,
@@ -382,14 +378,8 @@ pub fn render_json(cells: &[Cell]) -> String {
 pub fn write_matrix_to_build(cells: &[Cell]) -> std::io::Result<()> {
     let build_dir = repo_root()?.join("build");
     std::fs::create_dir_all(&build_dir)?;
-    std::fs::write(
-        build_dir.join("capability-matrix.md"),
-        render_markdown(cells),
-    )?;
-    std::fs::write(
-        build_dir.join("capability-matrix.json"),
-        render_json(cells),
-    )?;
+    std::fs::write(build_dir.join("capability-matrix.md"), render_markdown(cells))?;
+    std::fs::write(build_dir.join("capability-matrix.json"), render_json(cells))?;
     Ok(())
 }
 
@@ -407,5 +397,5 @@ fn repo_root() -> std::io::Result<PathBuf> {
             break;
         }
     }
-    Ok(std::env::current_dir()?)
+    std::env::current_dir()
 }

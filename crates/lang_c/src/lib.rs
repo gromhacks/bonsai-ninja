@@ -93,8 +93,12 @@ impl LanguageAdapter for CAdapter {
         // the C adapter in lockstep with the rest per
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
-            let alias_map =
-                collect_param_type_aliases(&tree, file, snapshot.text.as_bytes(), &C_TYPE_ALIASES);
+            let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `T foo() {}` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            // C's `function_definition` uses the `type` field for return type.
+            bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);
+            let alias_map = collect_param_type_aliases(&tree, file, src, &C_TYPE_ALIASES);
             for decl in &mut decl_index.defs {
                 if let Some(aliases) = alias_map.get(&decl.span) {
                     decl.type_aliases = aliases.clone();

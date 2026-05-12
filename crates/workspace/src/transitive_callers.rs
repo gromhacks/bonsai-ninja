@@ -14,12 +14,14 @@ use bonsai_common::FuncId;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+type TransitiveCallersMap = AHashMap<(FuncId, u32), Arc<[FuncId]>>;
+
 /// Workspace-wide cache keyed on `(func, max_depth)`. Each entry is
 /// the deterministic-ordered transitive caller set for the function
 /// at the chosen depth.
 #[derive(Default, Debug)]
 pub struct TransitiveCallersIndex {
-    inner: RwLock<AHashMap<(FuncId, u32), Arc<[FuncId]>>>,
+    inner: RwLock<TransitiveCallersMap>,
 }
 
 impl TransitiveCallersIndex {
@@ -32,12 +34,7 @@ impl TransitiveCallersIndex {
     /// On miss, build using a BFS over the supplied resolved call
     /// graph and cache. The output is sorted by `FuncId.raw()` for
     /// stable downstream finding fingerprints.
-    pub fn callers_of(
-        &self,
-        cg: &ResolvedCallGraph,
-        func: FuncId,
-        max_depth: u32,
-    ) -> Arc<[FuncId]> {
+    pub fn callers_of(&self, cg: &ResolvedCallGraph, func: FuncId, max_depth: u32) -> Arc<[FuncId]> {
         let key = (func, max_depth);
         // Drop the read guard with `;` before any potential write
         // upgrade — Rust extends temporary lifetimes across an
@@ -68,11 +65,7 @@ impl TransitiveCallersIndex {
     }
 }
 
-fn compute_transitive_callers(
-    cg: &ResolvedCallGraph,
-    start: FuncId,
-    max_depth: u32,
-) -> Vec<FuncId> {
+fn compute_transitive_callers(cg: &ResolvedCallGraph, start: FuncId, max_depth: u32) -> Vec<FuncId> {
     if max_depth == 0 {
         return Vec::new();
     }

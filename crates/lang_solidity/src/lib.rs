@@ -160,6 +160,9 @@ impl LanguageAdapter for SolidityAdapter {
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            // Phase-6 return-type extraction: `function f() returns (T)` populates
+            // `Decl.return_type` for `apply_assign_call_result_types`.
+            bonsai_lang_api::populate_decl_return_types(&mut idx, &tree, src, &HANDLER);
             let vis_map = collect_modifier_visibility(tree.root_node(), file, src, &SOLIDITY_VOCAB);
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
@@ -418,9 +421,9 @@ fn synthesize_try_return_assigns(events: &mut Vec<FlowEvent>, src: &[u8]) {
                                     source_call: Some(source_call),
                                     source_call_args,
                                     source_names,
-                        declares_new_binding: false,
-                        value_kind: None,
-                    },
+                                    declares_new_binding: false,
+                                    value_kind: None,
+                                },
                             );
                         }
                     }
@@ -600,7 +603,10 @@ fn is_class_like(kind: DeclKind) -> bool {
 }
 
 fn is_callable_decl(kind: DeclKind) -> bool {
-    matches!(kind, DeclKind::Function | DeclKind::Method | DeclKind::Constructor)
+    matches!(
+        kind,
+        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+    )
 }
 
 fn span_contains(outer: Span, inner: Span) -> bool {
@@ -672,11 +678,7 @@ fn collect_solidity_state_variable_type_aliases(
 
 fn canonical_solidity_type_name(raw: &str) -> String {
     let trimmed = raw.trim();
-    let before_storage = trimmed
-        .split_whitespace()
-        .next()
-        .unwrap_or(trimmed)
-        .trim();
+    let before_storage = trimmed.split_whitespace().next().unwrap_or(trimmed).trim();
     before_storage
         .split('[')
         .next()
@@ -795,9 +797,10 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         // node. Preserve that as a member binding so typed receiver
         // resolution rewrites `B` to the imported contract `A`, not
         // to the module namespace.
-        if let (Some(imported_node), Some(symbol_alias)) =
-            (import_node.child_by_field_name("import_name"), module_alias.as_ref())
-        {
+        if let (Some(imported_node), Some(symbol_alias)) = (
+            import_node.child_by_field_name("import_name"),
+            module_alias.as_ref(),
+        ) {
             let original_name = node_text(&imported_node, src).trim().to_string();
             if !original_name.is_empty() && !symbol_alias.is_empty() {
                 imports.push(ImportSpec {

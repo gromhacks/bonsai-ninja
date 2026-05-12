@@ -319,9 +319,7 @@ fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
                 tag_objc_alloc_receiver_types(then_events);
                 tag_objc_alloc_receiver_types(else_events);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 tag_objc_alloc_receiver_types(body);
             }
             FlowEvent::Try {
@@ -356,11 +354,9 @@ fn fix_objc_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree,
                 catch_param,
                 ..
             } => {
-                if let Some(node) = bonsai_lang_api::kit::node_at_span(
-                    tree.root_node(),
-                    *span,
-                    &["try_statement"],
-                ) {
+                if let Some(node) =
+                    bonsai_lang_api::kit::node_at_span(tree.root_node(), *span, &["try_statement"])
+                {
                     if let Some(name) = objc_catch_param_binding(node, src) {
                         *catch_param = Some(name);
                     }
@@ -377,9 +373,7 @@ fn fix_objc_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree,
                 fix_objc_catch_params(then_events, tree, src);
                 fix_objc_catch_params(else_events, tree, src);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 fix_objc_catch_params(body, tree, src);
             }
             _ => {}
@@ -399,7 +393,10 @@ fn objc_catch_param_binding(try_node: Node<'_>, src: &[u8]) -> Option<String> {
         // binding.
         let mut ccur = child.walk();
         for sub in child.named_children(&mut ccur) {
-            if !matches!(sub.kind(), "type_name" | "parameter_list" | "parameter_declaration") {
+            if !matches!(
+                sub.kind(),
+                "type_name" | "parameter_list" | "parameter_declaration"
+            ) {
                 continue;
             }
             // Walk every descendant; the binding is the last
@@ -430,7 +427,6 @@ fn last_identifier_text_in_subtree(node: Node<'_>, src: &[u8]) -> Option<String>
     }
     last.map(|n| node_text(&n, src).trim().to_string())
 }
-
 
 /// Pull the leading `[Class alloc]` / `[Class new]` segment out of
 /// a chained call name like `[Box alloc].initWithP` so the outer
@@ -522,7 +518,9 @@ fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span,
             ) {
                 let raw = node_text(&child, src).trim().to_string();
                 for piece in raw.split(',') {
-                    let cleaned = piece.trim().trim_matches(|c: char| matches!(c, '<' | '>' | ':' | '*'));
+                    let cleaned = piece
+                        .trim()
+                        .trim_matches(|c: char| matches!(c, '<' | '>' | ':' | '*'));
                     if let Some(name) = canonical_objc_base_name(cleaned) {
                         if !bases.iter().any(|existing| existing == &name) {
                             bases.push(name);
@@ -535,9 +533,7 @@ fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span,
         if !bases.is_empty() {
             // Merge into an existing entry for the same span if the
             // adapter already collected partial info.
-            if let Some((_, existing)) =
-                out.iter_mut().find(|(span, _)| *span == class_span)
-            {
+            if let Some((_, existing)) = out.iter_mut().find(|(span, _)| *span == class_span) {
                 for base in bases {
                     if !existing.iter().any(|already| already == &base) {
                         existing.push(base);

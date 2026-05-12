@@ -196,7 +196,7 @@ fn augment_php_qualified_source_names(events: &mut [FlowEvent], source: &str) {
         match event {
             FlowEvent::Assign {
                 span, source_names, ..
-                    } => {
+            } => {
                 if let Some(rhs) = php_assignment_rhs_text(source, *span) {
                     for access in php_qualified_accesses(&rhs) {
                         push_unique_source(source_names, access.clone());

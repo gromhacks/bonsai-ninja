@@ -374,8 +374,7 @@ impl FlowIdCache {
     /// Conventional sidecar path under `workspace_root/.bonsai/`.
     #[must_use]
     pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
-        workspace_bonsai_dir(workspace_root)
-            .join(format!("flow_ids.v{FLOW_IDS_CACHE_VERSION}.factstore"))
+        workspace_bonsai_dir(workspace_root).join(format!("flow_ids.v{FLOW_IDS_CACHE_VERSION}.factstore"))
     }
 
     /// Open the factstore sidecar at `path` and swap it in as the
@@ -429,7 +428,7 @@ impl FlowIdCache {
 fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
     match err {
         bonsai_factstore::FactStoreError::Io(e) => e,
-        other => std::io::Error::new(std::io::ErrorKind::Other, other),
+        other => std::io::Error::other(other),
     }
 }
 

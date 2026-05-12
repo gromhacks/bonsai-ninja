@@ -27,10 +27,7 @@ fn class_member_index_returns_methods_by_name() {
     // Single-method fixture — the Python adapter sometimes loses
     // class parentage on the second method declaration; covering
     // that drift is a separate adapter-conformance concern.
-    let ws = ws_with(
-        "app.py",
-        "class Foo:\n    def alpha(self):\n        pass\n",
-    );
+    let ws = ws_with("app.py", "class Foo:\n    def alpha(self):\n        pass\n");
     let global = ws.db().global_index();
     let alpha_decl = global
         .find_by_name("alpha")
@@ -38,9 +35,7 @@ fn class_member_index_returns_methods_by_name() {
         .copied()
         .find_map(|s| global.decl_of(s).cloned())
         .expect("alpha method decl present");
-    let class_sym = alpha_decl
-        .parent
-        .expect("alpha must have a class parent");
+    let class_sym = alpha_decl.parent.expect("alpha must have a class parent");
     let alpha = ws.class_members().methods_of(ws.db(), class_sym, "alpha");
     assert_eq!(
         alpha.len(),
@@ -54,10 +49,7 @@ fn class_member_index_returns_methods_by_name() {
 
 #[test]
 fn class_member_index_constructors_lookup() {
-    let ws = ws_with(
-        "app.py",
-        "class Foo:\n    def __init__(self):\n        pass\n",
-    );
+    let ws = ws_with("app.py", "class Foo:\n    def __init__(self):\n        pass\n");
     let global = ws.db().global_index();
     let init_decl = global
         .find_by_name("__init__")
@@ -65,12 +57,9 @@ fn class_member_index_constructors_lookup() {
         .copied()
         .find_map(|s| global.decl_of(s).cloned())
         .expect("__init__ decl present");
-    let class_sym = init_decl
-        .parent
-        .expect("__init__ must have a class parent");
+    let class_sym = init_decl.parent.expect("__init__ must have a class parent");
     let constructors = ws.class_members().constructors_of(ws.db(), class_sym);
-    let methods_under_init_name =
-        ws.class_members().methods_of(ws.db(), class_sym, "__init__");
+    let methods_under_init_name = ws.class_members().methods_of(ws.db(), class_sym, "__init__");
     assert!(
         !constructors.is_empty() || !methods_under_init_name.is_empty(),
         "expected a constructor/__init__ entry on Foo"
@@ -79,10 +68,7 @@ fn class_member_index_constructors_lookup() {
 
 #[test]
 fn enclosing_index_finds_innermost_decl() {
-    let ws = ws_with(
-        "app.py",
-        "def alpha():\n    pass\n\ndef beta():\n    pass\n",
-    );
+    let ws = ws_with("app.py", "def alpha():\n    pass\n\ndef beta():\n    pass\n");
     let file = ws.vfs().all_files()[0];
     let global = ws.db().global_index();
     let alpha = global
@@ -92,11 +78,7 @@ fn enclosing_index_finds_innermost_decl() {
         .next()
         .expect("alpha decl");
     let alpha_decl = global.decl_of(alpha).expect("alpha decl present");
-    let body_pos = alpha_decl
-        .body_span
-        .unwrap_or(alpha_decl.span)
-        .start
-        + 1;
+    let body_pos = alpha_decl.body_span.unwrap_or(alpha_decl.span).start + 1;
     let entry = ws
         .enclosing_index()
         .enclosing_for(ws.db(), file, body_pos)
@@ -159,9 +141,7 @@ fn class_member_index_is_lazy() {
         .copied()
         .find_map(|s| global.decl_of(s).cloned())
         .expect("m method decl present");
-    let class_sym: SymbolId = m_decl
-        .parent
-        .expect("m must have a class parent");
+    let class_sym: SymbolId = m_decl.parent.expect("m must have a class parent");
     let _ = ws.class_members().methods_of(ws.db(), class_sym, "m");
     assert!(ws.class_members().is_built());
 }

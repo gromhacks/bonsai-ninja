@@ -51,7 +51,7 @@ Run `bonsai-ninja cache clear ./src --dataflow-only` to clear the dataflow sidec
 
 <Accordion title="How do I keep results current while editing?">
 
-Run `bonsai-ninja index ./src --watch`. It polls saved file changes, reparses changed files in place, tombstones deleted files, and rewrites `.bonsai/dataflow.v2.bin` after affected dataflow entries are rebuilt. SDK `Project` facades use the same refresh path before commands run.
+Run `bonsai-ninja index ./src --watch`. It polls saved file changes, reparses changed files in place, tombstones deleted files, and rewrites `.bonsai/dataflow.v3.factstore` after affected dataflow entries are rebuilt. SDK `Project` facades use the same refresh path before commands run.
 
 </Accordion>
 

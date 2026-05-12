@@ -655,9 +655,7 @@ impl<'a> TraceBuilder<'a> {
     }
 
     fn resolve_callable_arg(&self, raw: &str, caller: FuncId) -> Option<SymbolId> {
-        let trimmed = raw
-            .trim()
-            .trim_start_matches(bonsai_common::REFERENCE_SIGILS);
+        let trimmed = raw.trim().trim_start_matches(bonsai_common::REFERENCE_SIGILS);
         if trimmed.is_empty()
             || trimmed.starts_with('"')
             || trimmed.starts_with('\'')
@@ -1002,9 +1000,7 @@ impl<'a> TraceBuilder<'a> {
             .map(|adapter| adapter.capabilities().effective_constructor_method_names())
             .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
         for decl in global.decls_in(class_file) {
-            if names.iter().any(|name| *name == decl.name.as_str())
-                && decl.parent == Some(class_sym)
-            {
+            if names.contains(&decl.name.as_str()) && decl.parent == Some(class_sym) {
                 return Some(decl.symbol);
             }
         }

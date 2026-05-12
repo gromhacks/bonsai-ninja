@@ -1362,8 +1362,8 @@ fn walk_into(
                     source_call: source_call.clone(),
                     source_call_args: source_call_args.clone(),
                     source_names: source_names.clone(),
-                        declares_new_binding: false,
-                        value_kind: None,
+                    declares_new_binding: false,
+                    value_kind: None,
                 });
             }
             for extra_target in extra_lhs_binding_targets(&node, target_node, src, &target) {
@@ -1374,8 +1374,8 @@ fn walk_into(
                     source_call: source_call.clone(),
                     source_call_args: source_call_args.clone(),
                     source_names: source_names.clone(),
-                        declares_new_binding: false,
-                        value_kind: None,
+                    declares_new_binding: false,
+                    value_kind: None,
                 });
             }
             out.push(FlowEvent::Assign {
@@ -1852,9 +1852,7 @@ fn emit_using_as_pattern_assigns(
             .child_by_field_name("alias")
             .or_else(|| node.child_by_field_name("name"))?;
         match alias.kind() {
-            "identifier" | "simple_identifier" | "variable_name" | "name" | "type_identifier" => {
-                Some(alias)
-            }
+            "identifier" | "simple_identifier" | "variable_name" | "name" | "type_identifier" => Some(alias),
             _ => first_identifier_descendant(alias).or(Some(alias)),
         }
     }
@@ -1872,7 +1870,11 @@ fn emit_using_as_pattern_assigns(
         for child in node.named_children(&mut cursor) {
             if matches!(
                 child.kind(),
-                "call" | "call_expression" | "object_creation_expression" | "instance_expression" | "new_expression"
+                "call"
+                    | "call_expression"
+                    | "object_creation_expression"
+                    | "instance_expression"
+                    | "new_expression"
             ) {
                 return Some(child);
             }
@@ -1881,8 +1883,7 @@ fn emit_using_as_pattern_assigns(
     }
 
     let mut work = vec![node];
-    let mut emitted_spans: std::collections::HashSet<bonsai_common::Span> =
-        std::collections::HashSet::new();
+    let mut emitted_spans: std::collections::HashSet<bonsai_common::Span> = std::collections::HashSet::new();
     while let Some(current) = work.pop() {
         // Match only the binding shapes the main walker doesn't
         // already turn into `Assign` events. `variable_declarator`,
@@ -2562,7 +2563,8 @@ fn call_receiver_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
                 function
             };
             if MEMBER_EXPR_KINDS.contains(&inner.kind()) {
-                inner.child_by_field_name("object")
+                inner
+                    .child_by_field_name("object")
                     .or_else(|| inner.child_by_field_name("receiver"))
             } else {
                 None
@@ -3112,8 +3114,8 @@ fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> V
             source_call: None,
             source_call_args: Vec::new(),
             source_names: Vec::new(),
-                        declares_new_binding: false,
-                        value_kind: None,
+            declares_new_binding: false,
+            value_kind: None,
         })
         .collect()
 }
@@ -3187,8 +3189,8 @@ fn extract_rust_style_match_bindings(file: FileId, node: &Node<'_>, src: &[u8]) 
             source_call: None,
             source_call_args: Vec::new(),
             source_names: source_names.clone(),
-                        declares_new_binding: false,
-                        value_kind: None,
+            declares_new_binding: false,
+            value_kind: None,
         });
     }
     out
@@ -3255,8 +3257,8 @@ fn extract_comprehension_for_clause_assigns(file: FileId, clause: &Node<'_>, src
             source_call: None,
             source_call_args: Vec::new(),
             source_names: source_names.clone(),
-                        declares_new_binding: false,
-                        value_kind: None,
+            declares_new_binding: false,
+            value_kind: None,
         })
         .collect()
 }
@@ -3291,8 +3293,8 @@ fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) ->
             source_call: None,
             source_call_args: Vec::new(),
             source_names: source_names.clone(),
-                        declares_new_binding: false,
-                        value_kind: None,
+            declares_new_binding: false,
+            value_kind: None,
         })
         .collect()
 }
@@ -4410,7 +4412,7 @@ fn collect_receiver_field_writes_inner(
                 source_call_args,
                 source_names,
                 ..
-                    } => {
+            } => {
                 if !place_matches_receiver(target, receiver_names, receiver_prefixes) {
                     continue;
                 }
@@ -4576,7 +4578,7 @@ fn collect_receiver_state_sources_inner(
                 source_name,
                 source_names,
                 ..
-                    } => {
+            } => {
                 if let Some(source) = source_name {
                     collect_receiver_state_source_name(source, locals, implicit_receiver_names, out);
                 }
@@ -6895,8 +6897,8 @@ fn emit_inline_closure_param_bindings(
             source_call: None,
             source_call_args: Vec::new(),
             source_names: sources.clone(),
-                        declares_new_binding: false,
-                        value_kind: None,
+            declares_new_binding: false,
+            value_kind: None,
         });
     }
 }
@@ -7262,11 +7264,7 @@ pub fn apply_class_field_type_aliases(idx: &mut crate::DeclIndex) {
                     continue;
                 };
                 let key = (field_write.target.clone(), alias.type_name.clone());
-                if seen
-                    .entry(parent_sym)
-                    .or_default()
-                    .insert(key.clone())
-                {
+                if seen.entry(parent_sym).or_default().insert(key.clone()) {
                     by_class
                         .entry(parent_sym)
                         .or_default()
@@ -7460,9 +7458,7 @@ fn propose_call_result_type_aliases(
                 propose_call_result_type_aliases(then_events, returns, out);
                 propose_call_result_type_aliases(else_events, returns, out);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 propose_call_result_type_aliases(body, returns, out);
             }
             FlowEvent::Try {
@@ -7496,10 +7492,7 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
                 }
                 let kind = if source_call.is_some() {
                     crate::AssignValueKind::CallResult
-                } else if source_name.is_none()
-                    && source_names.is_empty()
-                    && source_call_args.is_empty()
-                {
+                } else if source_name.is_none() && source_names.is_empty() && source_call_args.is_empty() {
                     crate::AssignValueKind::Literal
                 } else {
                     crate::AssignValueKind::Compound
@@ -7514,9 +7507,7 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
                 classify_assign_value_kinds(then_events);
                 classify_assign_value_kinds(else_events);
             }
-            FlowEvent::Loop { body, .. }
-            | FlowEvent::Defer { body, .. }
-            | FlowEvent::Using { body, .. } => {
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
                 classify_assign_value_kinds(body);
             }
             FlowEvent::Try {
@@ -7560,8 +7551,7 @@ pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
     // calls and the workspace has hundreds of class decls.
     let mut by_symbol: ahash::AHashMap<bonsai_common::SymbolId, (String, Vec<String>)> =
         ahash::AHashMap::new();
-    let mut by_canonical_name: ahash::AHashMap<String, (String, Vec<String>)> =
-        ahash::AHashMap::new();
+    let mut by_canonical_name: ahash::AHashMap<String, (String, Vec<String>)> = ahash::AHashMap::new();
     for decl in &idx.defs {
         if !matches!(
             decl.kind,
@@ -7749,10 +7739,7 @@ fn receiver_types_for_expr(
     out
 }
 
-fn receiver_projected_type_name(
-    receiver: &str,
-    class_facts: &ClassFactsIndex<'_>,
-) -> Option<String> {
+fn receiver_projected_type_name(receiver: &str, class_facts: &ClassFactsIndex<'_>) -> Option<String> {
     let has_member_projection = receiver.contains('.')
         || receiver.contains("->")
         || receiver.contains("::")
@@ -7774,11 +7761,7 @@ fn receiver_projected_type_name(
         .map(|(name, _)| name.clone())
 }
 
-fn push_receiver_type_and_bases(
-    out: &mut Vec<String>,
-    ty: String,
-    class_facts: &ClassFactsIndex<'_>,
-) {
+fn push_receiver_type_and_bases(out: &mut Vec<String>, ty: String, class_facts: &ClassFactsIndex<'_>) {
     let mut seen = std::collections::BTreeSet::new();
     push_receiver_type_and_bases_inner(out, ty, class_facts, &mut seen);
 }

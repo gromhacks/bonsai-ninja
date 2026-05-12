@@ -16,8 +16,8 @@ use bonsai_common::{workspace_bonsai_dir, FileId, FuncId, SymbolId, MATCHER_POLI
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::DeclKind;
 use bonsai_taint::{
-    taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches,
-    EntryTaintGraph, InterTaintCaches, KindedTokens, TokenSet,
+    taint_facts_and_graph_for_entry, taint_facts_and_graph_for_entry_with_caches, EntryTaintGraph,
+    InterTaintCaches, KindedTokens, TokenSet,
 };
 use parking_lot::RwLock;
 use rayon::prelude::*;
@@ -217,19 +217,12 @@ impl DataFlowCache {
     /// `InterTaintCaches` when present. Falls through to a fresh
     /// per-call `InterTaintCaches::default()` for standalone
     /// callers (tests, one-shot SDK consumers).
-    fn compute_facts_and_graph(
-        &self,
-        func: FuncId,
-        db: &AnalyzerDb,
-    ) -> (KindedTokens, EntryTaintGraph) {
+    fn compute_facts_and_graph(&self, func: FuncId, db: &AnalyzerDb) -> (KindedTokens, EntryTaintGraph) {
         let seeded = self.seeded_inter_taint.read().clone();
         match seeded {
-            Some(caches) => taint_facts_and_graph_for_entry_with_caches(
-                func,
-                db,
-                &TokenSet::default(),
-                &caches,
-            ),
+            Some(caches) => {
+                taint_facts_and_graph_for_entry_with_caches(func, db, &TokenSet::default(), &caches)
+            }
             None => taint_facts_and_graph_for_entry(func, db, &TokenSet::default()),
         }
     }
@@ -279,10 +272,7 @@ impl DataFlowCache {
     /// `None` when there is no disk store, no entry for `func`, or the
     /// entry fails to decode (corrupt blob — caller falls through to
     /// recompute via the engine).
-    fn try_hydrate_from_disk(
-        &self,
-        func: FuncId,
-    ) -> Option<(Arc<KindedTokens>, Arc<EntryTaintGraph>)> {
+    fn try_hydrate_from_disk(&self, func: FuncId) -> Option<(Arc<KindedTokens>, Arc<EntryTaintGraph>)> {
         let reader = self.disk.read().clone()?;
         let hit = reader.get(u64::from(func.raw())).ok().flatten()?;
         let entry = crate::dataflow_disk::decode(&hit.payload).ok()?;
@@ -465,12 +455,7 @@ impl DataFlowCache {
     /// as the cache's disk store. After this call the in-memory
     /// caches are empty; subsequent `facts_for` / `graph_for` calls
     /// hydrate one entry at a time on demand.
-    pub fn prewarm_to_disk<F>(
-        &self,
-        path: &Path,
-        db: &AnalyzerDb,
-        on_each_done: F,
-    ) -> std::io::Result<usize>
+    pub fn prewarm_to_disk<F>(&self, path: &Path, db: &AnalyzerDb, on_each_done: F) -> std::io::Result<usize>
     where
         F: Fn(FuncId) + Sync + Send,
     {
@@ -626,7 +611,7 @@ impl DataFlowCache {
 
     pub fn is_empty(&self) -> bool {
         let mem_empty = self.inner.read().facts.is_empty();
-        let disk_empty = self.disk.read().as_ref().map_or(true, |r| r.is_empty());
+        let disk_empty = self.disk.read().as_ref().is_none_or(|r| r.is_empty());
         mem_empty && disk_empty
     }
 
@@ -1157,7 +1142,7 @@ fn current_file_hashes(db: &AnalyzerDb) -> AHashMap<FileId, u64> {
 fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
     match err {
         bonsai_factstore::FactStoreError::Io(e) => e,
-        other => std::io::Error::new(std::io::ErrorKind::Other, other),
+        other => std::io::Error::other(other),
     }
 }
 

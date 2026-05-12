@@ -4,16 +4,16 @@
 
 use bonsai_callgraph::EdgeKind as CallEdgeKind;
 use bonsai_common::{FileId, FuncId, Precision, Span};
+use bonsai_idg::dict::{NodeDict, PlaceDict};
+use bonsai_idg::edge::EdgeMeta;
 use bonsai_idg::edge::IdgEdgeKind;
+use bonsai_idg::node::{NodeId, PlaceId};
+use bonsai_idg::place::Place;
+use bonsai_idg::segment::IdgSegment;
 use bonsai_idg::{
     workspace::{CrossFileEdge, IdgWorkspace, SegmentId},
     IdgEdge, IdgError,
 };
-use bonsai_idg::dict::{NodeDict, PlaceDict};
-use bonsai_idg::edge::EdgeMeta;
-use bonsai_idg::node::{NodeId, PlaceId};
-use bonsai_idg::place::Place;
-use bonsai_idg::segment::IdgSegment;
 
 fn span(file: u32, lo: u64, hi: u64) -> Span {
     Span::new(FileId::new(file), lo, hi)
@@ -94,10 +94,7 @@ fn two_file_workspace_roundtrips_through_disk() {
 
     // Re-built segment dictionaries are usable post-deserialise.
     let seg_a_view = ws.segment(id_a).expect("A present");
-    assert_eq!(
-        seg_a_view.places.lookup(&Place::Param { idx: 0 }),
-        Some(p_param0)
-    );
+    assert_eq!(seg_a_view.places.lookup(&Place::Param { idx: 0 }), Some(p_param0));
     let seg_b_view = ws.segment(id_b).expect("B present");
     assert_eq!(seg_b_view.places.lookup(&Place::Return), Some(p_return));
     assert_eq!(
