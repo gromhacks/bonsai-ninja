@@ -148,14 +148,21 @@ impl ValueFlowCache {
         let hit = reader.get(u64::from(func.raw())).ok().flatten()?;
         let pool = reader.string_pool().ok()?;
         let entry = decode_value_flow_entry(&hit.payload, &pool).ok()?;
-        // CodeQL-style read path: factstore = source of truth post-prewarm.
-        // Return the freshly decoded `Arc` without writing back into
-        // `inner.graphs`/`returning_seeds`, so a long-running security
-        // scan over a workspace the size of Redis `src/` (5k functions)
-        // stays at flat in-memory cost instead of accumulating one
-        // entry per lazy fault. The mmap'd factstore + OS page cache
-        // handle the working set.
-        let _ = (&entry.returning_seeds,); // present in disk entry; consumers re-read on demand
+        // The `ValueFlowGraph` itself can be tens of KB to MB on
+        // large functions — that was the linear-growth source the
+        // Redis OOM fix targeted, so the freshly decoded graph is
+        // returned without inserting back into `inner.graphs`. The
+        // `returning_seeds` set, however, is just function-local seed
+        // names (a few entries, kilobytes at worst) and is the only
+        // path through which `returning_seed_names()` can answer
+        // without re-running the engine. Cache it so subsequent
+        // queries don't repeat the decode + graph rebuild.
+        let returning = Arc::new(entry.returning_seeds);
+        self.inner
+            .write()
+            .returning_seeds
+            .entry(func)
+            .or_insert(returning);
         Some(Arc::new(entry.graph))
     }
 
