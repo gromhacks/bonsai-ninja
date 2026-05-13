@@ -145,6 +145,12 @@ struct Inner {
     reachable_kinded: parking_lot::RwLock<AHashMap<FuncId, Arc<KindedTokens>>>,
     reparse_counter: Mutex<u64>,
     root_label: Mutex<String>,
+    /// Workspace root recorded at open time so the lazy IDG-build
+    /// path can persist its sidecar at `<root>/.bonsai/idg.v1.factstore`
+    /// without re-threading the path through every call site.
+    /// `None` for tests / synthetic workspaces that open without a
+    /// real on-disk root; persistence is skipped silently in that case.
+    idg_sidecar_root: Mutex<Option<std::path::PathBuf>>,
 }
 
 #[derive(Copy, Clone, Debug, Default, Serialize, Deserialize)]
@@ -321,6 +327,7 @@ impl Workspace {
                 reachable_kinded: parking_lot::RwLock::new(AHashMap::new()),
                 reparse_counter: Mutex::new(0),
                 root_label: Mutex::new(String::new()),
+                idg_sidecar_root: Mutex::new(None),
             }),
         }
     }
@@ -553,6 +560,30 @@ impl Workspace {
             return svc;
         }
         let global = self.inner.db.global_index();
+        // The IDG references symbols by their global-index id, which
+        // is content-derived: any file content change can renumber
+        // ids in the new run. Folding a workspace-wide content
+        // fingerprint into the pipeline hash makes the factstore
+        // header reject a sidecar whose source tree no longer
+        // matches, even when no `refresh_file_from_disk` ran inside
+        // bonsai-ninja (e.g. `git checkout` between two CLI calls).
+        let pipeline_hash = idg_pipeline_hash() ^ workspace_content_fingerprint(&self.inner.db);
+        // Try to hydrate the workspace IDG from the on-disk sidecar
+        // before paying for a fresh build. Cold rebuild on Redis `src/`
+        // takes >1 minute and dominates `bonsai-ninja security ...`
+        // latency; the sidecar reduces it to a single mmap + decode
+        // for subsequent invocations against the same content-hashed
+        // workspace.
+        if let Some(root) = self.root_path() {
+            let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
+            if let Ok(Some(loaded)) =
+                bonsai_idg::workspace::IdgWorkspace::load_from_disk(&sidecar, pipeline_hash)
+            {
+                let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(loaded), global.clone()));
+                self.inner.db.set_idg_service(service.clone());
+                return service;
+            }
+        }
         let cg = self.cached_resolved_call_graph();
         // Thread per-file alias maps into the IDG resolver so
         // `import { persist as persistEnvelope }` style alias
@@ -564,9 +595,48 @@ impl Workspace {
         let ws = bonsai_idg::workspace_adapter::build_with_aliases(global.as_ref(), cg.as_ref(), |file| {
             bonsai_resolve::alias_map_for_file(&db.imports_for(file))
         });
+        // Persist before constructing the query service so a subsequent
+        // open warm-starts. Failures (read-only filesystem, full disk)
+        // are tracing-logged but not surfaced — the in-memory IDG is
+        // still valid for this run.
+        if let Some(root) = self.root_path() {
+            let sidecar = bonsai_idg::workspace::idg_sidecar_path(&root);
+            if let Err(err) = ws.save_to_disk(&sidecar, pipeline_hash) {
+                tracing::warn!(
+                    path = %sidecar.display(),
+                    error = %err,
+                    "workspace IDG save_to_disk failed"
+                );
+            }
+        }
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
         service
+    }
+
+    /// Return the workspace root path if we have one to serialise
+    /// sidecars beside. Synthetic / in-memory workspaces (tests,
+    /// SDK ad-hoc opens) have no root; the IDG sidecar path then
+    /// resolves to `None` and persistence is skipped silently.
+    fn root_path(&self) -> Option<std::path::PathBuf> {
+        self.inner.idg_sidecar_root.lock().clone()
+    }
+
+    /// Record the workspace root so [`Self::build_and_seed_idg_service`]
+    /// can persist the IDG sidecar next to the other `.bonsai/` files.
+    /// Called by the `open*` family once the root path is known.
+    fn set_idg_sidecar_root(&self, root: &std::path::Path) {
+        *self.inner.idg_sidecar_root.lock() = Some(root.to_path_buf());
+    }
+
+    /// Drop the persisted IDG sidecar (if any) so a stale snapshot
+    /// can't survive a file edit. Best-effort: missing file and
+    /// permission errors are swallowed since the in-memory invalidation
+    /// is the authoritative source of truth.
+    fn delete_idg_sidecar(&self) {
+        if let Some(root) = self.root_path() {
+            let _ = std::fs::remove_file(bonsai_idg::workspace::idg_sidecar_path(&root));
+        }
     }
 
     /// Build a fully indexed workspace: ingest `root`, parallel-prewarm
@@ -623,6 +693,7 @@ impl Workspace {
     {
         use rayon::prelude::*;
         let ws = Self::new_with_open_options(registry, options);
+        ws.set_idg_sidecar_root(root);
         on_event(WorkspaceOpenEvent::IngestStarted);
         ws.ingest_dir(root)?;
         let files = ws.vfs().all_files();
@@ -868,6 +939,11 @@ impl Workspace {
                 // strategy. Phase 7 will refine this to per-file
                 // segment rebuild.
                 self.inner.db.invalidate_idg_service();
+                // File edits change segment contents and cross-file edges;
+                // the on-disk IDG sidecar must go with the in-memory slot
+                // so the next `build_and_seed_idg_service` rebuilds from
+                // scratch instead of restoring a stale snapshot.
+                self.delete_idg_sidecar();
                 // The workspace-wide inter-taint caches memoize
                 // resolver answers, alias maps, and function summaries
                 // — every entry is keyed off static AST state that
@@ -991,6 +1067,11 @@ impl Workspace {
         // Drop the IDG service so cross-file edges that originated
         // from the removed file aren't queried out of stale state.
         self.inner.db.invalidate_idg_service();
+        // File edits change segment contents and cross-file edges;
+        // the on-disk IDG sidecar must go with the in-memory slot so
+        // the next `build_and_seed_idg_service` rebuilds from scratch
+        // instead of restoring a stale snapshot.
+        self.delete_idg_sidecar();
         *self.inner.reparse_counter.lock() += 1;
         Some(file)
     }
@@ -1023,6 +1104,11 @@ impl Workspace {
         // Coarse drop matches the dataflow invalidation strategy —
         // next query lazy-rebuilds via `build_and_seed_idg_service`.
         self.inner.db.invalidate_idg_service();
+        // File edits change segment contents and cross-file edges;
+        // the on-disk IDG sidecar must go with the in-memory slot so
+        // the next `build_and_seed_idg_service` rebuilds from scratch
+        // instead of restoring a stale snapshot.
+        self.delete_idg_sidecar();
         *self.inner.reparse_counter.lock() += 1;
         id
     }
@@ -1423,6 +1509,52 @@ fn db_options_from_open_options(options: WorkspaceOpenOptions) -> AnalyzerDbOpti
     AnalyzerDbOptions {
         parse_timeout_ms: options.parse_timeout_ms,
     }
+}
+
+/// Pipeline-hash fingerprint stamped into the IDG sidecar header. The
+/// IDG depends on the matcher-policy fingerprint indirectly (via the
+/// alias-target resolver), so reusing the same fold as the dataflow
+/// sidecar keeps the two artifacts invalidated together on a rule-pack
+/// or engine-policy bump. XOR with a constant tag keeps the IDG hash
+/// space disjoint from the dataflow / value-flow sidecars'.
+fn idg_pipeline_hash() -> u64 {
+    let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
+    let lo = raw as u64;
+    let hi = (raw >> 64) as u64;
+    lo ^ hi ^ 0xBEEF_C0DE_DEAD_FACE_u64
+}
+
+/// Hash of every (path, content) pair in the VFS, folded into a
+/// single u64. Used by [`Workspace::build_and_seed_idg_service`] to
+/// detect out-of-band file edits between two CLI invocations:
+/// `bonsai-ninja index` writes the IDG sidecar with content fingerprint
+/// X, then a `git checkout` swaps file contents, then
+/// `bonsai-ninja security ...` opens the workspace, computes content
+/// fingerprint Y, and rejects the sidecar because the global-index
+/// symbol ids it references no longer match the current file tree.
+///
+/// Path-keyed (not FileId-keyed) because FileIds are process-local
+/// and unstable across runs. Sorted before folding so the result is
+/// independent of VFS enumeration order.
+fn workspace_content_fingerprint(db: &AnalyzerDb) -> u64 {
+    let mut entries: Vec<(String, u64)> = db
+        .vfs()
+        .all_files()
+        .into_iter()
+        .filter_map(|file| {
+            let path = db.vfs().path(file).ok()?.display().to_string();
+            let snap = db.vfs().snapshot(file).ok()?;
+            Some((path, fnv1a_bytes64(snap.text.as_bytes())))
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut buf = Vec::with_capacity(entries.len() * 32);
+    for (path, content) in &entries {
+        buf.extend_from_slice(path.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(&content.to_le_bytes());
+    }
+    fnv1a_bytes64(&buf)
 }
 
 struct SourceFileContent {

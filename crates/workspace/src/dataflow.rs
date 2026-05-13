@@ -279,26 +279,31 @@ impl DataFlowCache {
         let dependencies = entry.dependency_set();
         let facts = Arc::new(entry.facts);
         let graph = Arc::new(entry.graph);
-        // CodeQL-style read path: the factstore is the source of truth
-        // once `prewarm_to_disk` has populated it. Returning the freshly
-        // decoded `Arc` without writing back to `inner.facts`/`graphs`
-        // keeps the in-memory map at zero-growth — the working set is
-        // bounded by the active query's live borrows. Disk reads on
-        // mmap'd factstore pages are page-cache friendly, so repeated
-        // queries pay only the decode cost, not a fresh `taint_facts`
-        // pass. The metadata flags (fingerprints) still propagate so
-        // invalidation works.
-        {
-            let mut inner = self.inner.write();
-            if inner.sanitizer_fingerprint == 0 {
-                inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
-            }
-            if inner.matcher_policy_fingerprint == 0 {
-                inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
-            }
-            let _ = &dependencies; // declared for future per-file invalidation, not held in memory
+        let mut inner = self.inner.write();
+        if inner.sanitizer_fingerprint == 0 {
+            inner.sanitizer_fingerprint = EMPTY_SANITIZER_FINGERPRINT;
         }
-        Some((facts, graph))
+        if inner.matcher_policy_fingerprint == 0 {
+            inner.matcher_policy_fingerprint = MATCHER_POLICY_FINGERPRINT;
+        }
+        // `KindedTokens` and dependency sets are small (a few KB each)
+        // and the snapshot() / save_to_disk() bincode round-trip relies
+        // on `inner.facts` being populated, so we always cache those
+        // back. `inner.graphs`, on the other hand, holds an
+        // `Arc<EntryTaintGraph>` per function — those can be tens of
+        // KB to MB on big functions and were the linear-growth source
+        // that OOM'd Redis. Returning the freshly decoded graph
+        // without inserting keeps the in-memory `graphs` map empty
+        // post-prewarm: queries get a one-shot decoded `Arc` for the
+        // duration of the consumer's borrow and disk holds the
+        // canonical copy.
+        let canonical_facts = inner
+            .facts
+            .entry(func)
+            .or_insert_with(|| facts)
+            .clone();
+        inner.dependencies.entry(func).or_insert(dependencies);
+        Some((canonical_facts, graph))
     }
 
     pub fn graph_for(&self, func: FuncId, db: &AnalyzerDb) -> Arc<EntryTaintGraph> {

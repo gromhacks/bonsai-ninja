@@ -213,13 +213,17 @@ impl CrossFileEdges {
 /// Workspace-level IDG. Holds per-file segments, the cross-file
 /// edge index, and the `FuncId → SegmentId` lookup map.
 ///
-/// This is the in-memory aggregate; persistence is per-segment via
-/// [`crate::segment::IdgSegment::write_to_path`] plus the cross-file
-/// edge factstore (added in Phase 3 builder).
-#[derive(Default, Debug)]
+/// Persisted as a single factstore payload at `.bonsai/idg.v1.factstore`
+/// via [`Self::save_to_disk`]. The workspace open path tries
+/// [`Self::load_from_disk`] before triggering a full rebuild, so an
+/// already-indexed workspace skips the heavy
+/// `workspace_adapter::build_with_aliases` pass on every CLI invocation.
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IdgWorkspace {
     segments: Vec<IdgSegment>,
-    /// `FuncId.raw() → SegmentId`. Built by [`Self::register_segment`].
+    /// `FuncId.raw() → SegmentId`. Rebuilt from each segment's `funcs`
+    /// list after deserialisation; bincode skips it on the wire.
+    #[serde(skip)]
     by_func: AHashMap<u32, SegmentId>,
     /// Cross-file edges. Populated by the workspace builder
     /// (Phase 3).
@@ -328,6 +332,146 @@ impl IdgWorkspace {
     pub fn total_edge_count(&self) -> usize {
         self.intra_edge_count() + self.cross_file.len()
     }
+
+    /// Persist the entire workspace IDG to `path` as a streamed
+    /// factstore. Each segment is serialised as its own factstore
+    /// entry (key = segment index + 1) so peak RAM during persistence
+    /// is bounded by the largest single segment's bincode buffer, not
+    /// the whole IDG. A 100K-LOC C codebase's IDG can occupy several
+    /// GB in memory; the previous single-buffer `bincode::serialize`
+    /// path needed that much RAM again during the write, OOM'ing
+    /// processes that the in-memory build had already cleared.
+    ///
+    /// Entry 0 holds the per-workspace metadata
+    /// (`cross_file` edges + `field_flow` links + segment count). The
+    /// reader reconstructs `by_func` and the directional indexes from
+    /// the per-segment `funcs` lists during [`Self::load_from_disk`].
+    ///
+    /// `pipeline_hash` is folded into the factstore header so a
+    /// matcher-policy bump (or any consumer that wants the IDG
+    /// invalidated together) naturally rejects a stale sidecar.
+    pub fn save_to_disk(&self, path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<()> {
+        use bonsai_factstore::FactStoreWriter;
+        let entry_count = self.segments.len() + 1;
+        let writer = FactStoreWriter::create_with_capacity(
+            path,
+            IDG_WORKSPACE_TABLE_ID,
+            pipeline_hash,
+            entry_count,
+            entry_count.saturating_mul(64 * 1024),
+            entry_count.saturating_mul(64),
+        )?;
+        let metadata = IdgWorkspaceMetadata {
+            version: IDG_WORKSPACE_VERSION,
+            segment_count: self.segments.len() as u32,
+            cross_file: &self.cross_file,
+            field_flow: &self.field_flow,
+        };
+        let meta_bytes = bincode::serialize(&metadata).map_err(|e| {
+            crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        writer.add(0, IDG_WORKSPACE_VERSION as u64, &meta_bytes)?;
+        for (idx, segment) in self.segments.iter().enumerate() {
+            let segment_bytes = bincode::serialize(segment).map_err(|e| {
+                crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
+            writer.add((idx + 1) as u64, IDG_WORKSPACE_VERSION as u64, &segment_bytes)?;
+        }
+        writer.finish()?;
+        Ok(())
+    }
+
+    /// Load a workspace IDG from `path`. Returns `Ok(None)` for missing
+    /// files, version drift, or `pipeline_hash` mismatch — the caller
+    /// rebuilds in those cases. Returns `Err` for genuine I/O / decode
+    /// errors. After load, rebuilds the `FuncId → SegmentId` lookup
+    /// and each segment's reverse-lookup dictionaries.
+    pub fn load_from_disk(path: &std::path::Path, pipeline_hash: u64) -> crate::IdgResult<Option<Self>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let reader = match bonsai_factstore::FactStoreReader::open(
+            path,
+            IDG_WORKSPACE_TABLE_ID,
+            pipeline_hash,
+        ) {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+        let Some(metadata_hit) = reader.get(0)? else {
+            return Ok(None);
+        };
+        if metadata_hit.body_hash != IDG_WORKSPACE_VERSION as u64 {
+            return Ok(None);
+        }
+        let metadata: IdgWorkspaceMetadataOwned = bincode::deserialize(&metadata_hit.payload)
+            .map_err(|e| crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        if metadata.version != IDG_WORKSPACE_VERSION {
+            return Ok(None);
+        }
+        let mut ws = Self {
+            segments: Vec::with_capacity(metadata.segment_count as usize),
+            by_func: AHashMap::new(),
+            cross_file: metadata.cross_file,
+            field_flow: metadata.field_flow,
+        };
+        for idx in 0..metadata.segment_count {
+            let Some(hit) = reader.get((idx + 1) as u64)? else {
+                // Truncated sidecar — fail-closed so the caller rebuilds.
+                return Ok(None);
+            };
+            let mut segment: IdgSegment = bincode::deserialize(&hit.payload).map_err(|e| {
+                crate::IdgError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
+            segment.places.rebuild_lookup();
+            segment.nodes.rebuild_lookup();
+            segment.strings.rebuild_lookup();
+            let seg_id = SegmentId(idx);
+            for func_raw in &segment.funcs {
+                ws.by_func.insert(*func_raw, seg_id);
+            }
+            ws.segments.push(segment);
+        }
+        ws.cross_file.rebuild_indexes();
+        Ok(Some(ws))
+    }
+}
+
+/// Borrowed view of the per-workspace metadata written at entry 0 of
+/// the streamed IDG sidecar. Bincode `Serialize` borrows the source's
+/// cross-file and field-flow vecs directly, sparing a clone.
+#[derive(serde::Serialize)]
+struct IdgWorkspaceMetadata<'a> {
+    version: u32,
+    segment_count: u32,
+    cross_file: &'a CrossFileEdges,
+    field_flow: &'a Vec<FieldFlowLink>,
+}
+
+/// Owned mirror of [`IdgWorkspaceMetadata`] used by the load path.
+#[derive(serde::Deserialize)]
+struct IdgWorkspaceMetadataOwned {
+    version: u32,
+    segment_count: u32,
+    cross_file: CrossFileEdges,
+    field_flow: Vec<FieldFlowLink>,
+}
+
+/// Factstore table id for the workspace-wide IDG sidecar. Distinct
+/// from [`crate::segment::IDG_SEGMENT_TABLE_ID`] so a single `.bonsai/`
+/// directory can hold both formats without ambiguity.
+const IDG_WORKSPACE_TABLE_ID: u32 = 101;
+
+/// Wire-format version for the workspace IDG sidecar. Bump on any
+/// incompatible change to the persisted shape (e.g. new field on
+/// [`IdgSegment`], renamed enum variant in [`crate::place::Place`]).
+const IDG_WORKSPACE_VERSION: u32 = 1;
+
+/// Conventional sidecar path under `<workspace>/.bonsai/`.
+#[must_use]
+pub fn idg_sidecar_path(workspace_root: &std::path::Path) -> std::path::PathBuf {
+    bonsai_common::workspace_bonsai_dir(workspace_root)
+        .join(format!("idg.v{IDG_WORKSPACE_VERSION}.factstore"))
 }
 
 #[cfg(test)]
@@ -522,5 +666,61 @@ mod tests {
         // re-index helper. This test pins current behaviour so a
         // future change is intentional.
         assert_eq!(w.segment_for_func(FuncId::new(99)), None);
+    }
+
+    #[test]
+    fn save_load_round_trip_preserves_segments_and_indexes() {
+        let mut w = IdgWorkspace::new();
+        let mut seg_a = IdgSegment::new();
+        populate_segment(&mut seg_a, FuncId::new(11));
+        let mut seg_b = IdgSegment::new();
+        populate_segment(&mut seg_b, FuncId::new(22));
+        let id_a = w.register_segment(seg_a);
+        let id_b = w.register_segment(seg_b);
+        w.cross_file_mut().push(CrossFileEdge {
+            from_segment: id_a,
+            to_segment: id_b,
+            edge: IdgEdge::inter_call_arg(
+                NodeId(0),
+                NodeId(0),
+                span(),
+                Precision::Exact,
+                CallEdgeKind::Direct,
+            ),
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idg.factstore");
+        w.save_to_disk(&path, 0xDEAD_BEEF).expect("save succeeds");
+        let restored = IdgWorkspace::load_from_disk(&path, 0xDEAD_BEEF)
+            .expect("load Ok")
+            .expect("Some workspace");
+        assert_eq!(restored.segment_count(), 2);
+        assert_eq!(restored.segment_for_func(FuncId::new(11)), Some(id_a));
+        assert_eq!(restored.segment_for_func(FuncId::new(22)), Some(id_b));
+        assert_eq!(restored.cross_file().len(), 1);
+        assert_eq!(restored.cross_file().outgoing_from_segment(id_a).count(), 1);
+        assert_eq!(restored.intra_edge_count(), 2);
+    }
+
+    #[test]
+    fn load_rejects_pipeline_hash_mismatch() {
+        let mut w = IdgWorkspace::new();
+        let mut seg = IdgSegment::new();
+        populate_segment(&mut seg, FuncId::new(1));
+        w.register_segment(seg);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idg.factstore");
+        w.save_to_disk(&path, 1).expect("save");
+        // Different pipeline_hash → load returns None so caller rebuilds.
+        let loaded = IdgWorkspace::load_from_disk(&path, 2).expect("load Ok");
+        assert!(loaded.is_none(), "stale sidecar must be rejected");
+    }
+
+    #[test]
+    fn load_returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("does-not-exist.factstore");
+        let loaded = IdgWorkspace::load_from_disk(&path, 0).expect("load Ok");
+        assert!(loaded.is_none());
     }
 }
