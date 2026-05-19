@@ -786,11 +786,10 @@ fn flow_event_shape_conformance() {
             }
         }
     }
-    if !failures.is_empty() {
-        panic!(
-            "flow-event conformance gaps ({} total):\n{}",
-            failures.len(),
-            failures.join("\n")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "flow-event conformance gaps ({} total):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

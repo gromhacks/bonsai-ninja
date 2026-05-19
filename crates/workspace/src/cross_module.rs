@@ -1,24 +1,24 @@
 //! Cross-file / cross-module trace engine.
 //!
 //! Given a function, we walk its structured `flow_events` (produced by the
-//! adapter's grammar handler). For every `Call`, we resolve the callee
-//! across the workspace and recurse. For `Branch`, we emit a `BranchSplit`
-//! step and walk both sides as separate path ids. For `Loop`, we emit
-//! `LoopEnter` / `LoopExit` and walk the body once with an `Iterate` marker.
-//! For `Constructor` calls we route to the class's constructor method.
+//! adapter's grammar handler). For every ordinary `Call`, we consume the
+//! precomputed semantic resolved callgraph and recurse only when that graph
+//! proves the target. For `Branch`, we emit a `BranchSplit` step and walk
+//! both sides as separate path ids. For `Loop`, we emit `LoopEnter` /
+//! `LoopExit` and walk the body once with an `Iterate` marker.
 //! Higher-order callbacks are resolved by binding call-site arguments to
-//! parameter names in the callee's `Decl::params`.
+//! parameter names in the callee's `Decl::params`; unresolved calls are
+//! recorded as incompleteness, never widened into guessed targets.
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_abstract_interp::{RawStep, RawTrace, StepKind, TraceLimits};
+use bonsai_callgraph::{EdgeKind, ResolvedCallGraph};
 use bonsai_common::{FuncId, Precision, Span, SymbolId, TraceStepId};
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::{
     AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, LoopKind, TypeAliasBinding,
 };
-use bonsai_resolve::{
-    is_super_receiver, resolve_callable_with_context, resolve_class, visibility_allows, ResolveContext,
-};
+use bonsai_resolve::{resolve_callable_with_context, ResolveContext};
 
 #[derive(Copy, Clone, Debug)]
 pub struct CrossModuleOptions {
@@ -52,11 +52,13 @@ impl From<CrossModuleOptions> for TraceLimits {
 
 pub(crate) struct CrossModuleTracer<'a> {
     db: &'a AnalyzerDb,
+    call_graph: &'a ResolvedCallGraph,
     opts: CrossModuleOptions,
 }
 
 struct TraceBuilder<'a> {
     db: &'a AnalyzerDb,
+    call_graph: &'a ResolvedCallGraph,
     opts: CrossModuleOptions,
     out: RawTrace,
     next_step: u32,
@@ -85,20 +87,45 @@ struct CallSite<'a> {
     span: Span,
     name: &'a str,
     receiver: Option<&'a str>,
-    receiver_types: &'a [String],
     call_kind: CallKind,
     args: &'a [CallArg],
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SiteResolution {
+    Resolved(SymbolId),
+    Ambiguous { candidates: usize },
+    Unresolved,
+}
+
+fn semantic_receiver_callback_args<'a>(site: &'a CallSite<'_>) -> Vec<&'a CallArg> {
+    if site.receiver.is_none() {
+        return Vec::new();
+    }
+    let method = bonsai_lang_api::kit::short_name_of(site.name);
+    match method {
+        // Well-known collection/promise APIs whose first argument is a
+        // callback that the call semantically invokes.
+        "forEach" | "map" | "flatMap" | "filter" | "some" | "every" | "find" | "findIndex" | "reduce"
+        | "reduceRight" | "sort" | "then" | "catch" | "finally" => site.args.first().into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
 impl<'a> CrossModuleTracer<'a> {
     #[must_use]
-    pub(crate) fn new(db: &'a AnalyzerDb, opts: CrossModuleOptions) -> Self {
-        Self { db, opts }
+    pub(crate) fn new(
+        db: &'a AnalyzerDb,
+        call_graph: &'a ResolvedCallGraph,
+        opts: CrossModuleOptions,
+    ) -> Self {
+        Self { db, call_graph, opts }
     }
 
     pub(crate) fn trace(&self, start: SymbolId) -> RawTrace {
         let mut builder = TraceBuilder {
             db: self.db,
+            call_graph: self.call_graph,
             opts: self.opts,
             out: RawTrace::default(),
             next_step: 0,
@@ -115,7 +142,7 @@ impl<'a> CrossModuleTracer<'a> {
 impl<'a> TraceBuilder<'a> {
     fn emit(&mut self, kind: StepKind, func: FuncId, span: Span, precision: Precision, msg: String) -> bool {
         if self.next_step >= self.opts.max_steps {
-            self.out.truncated = true;
+            self.out.mark_truncated("max-steps");
             return false;
         }
         self.out.steps.push(RawStep {
@@ -140,7 +167,7 @@ impl<'a> TraceBuilder<'a> {
     /// callback-parameter values from the caller.
     fn expand(&mut self, symbol: SymbolId, args: &[CallArg], param_names: &[String], depth: u16) -> bool {
         if depth > self.opts.max_depth {
-            self.out.truncated = true;
+            self.out.mark_truncated("max-depth");
             return false;
         }
         if !self.stack_set.insert(symbol) {
@@ -229,7 +256,7 @@ impl<'a> TraceBuilder<'a> {
                 span,
                 name,
                 receiver,
-                receiver_types,
+                receiver_types: _,
                 call_kind,
                 args,
                 ..
@@ -238,7 +265,6 @@ impl<'a> TraceBuilder<'a> {
                     span: *span,
                     name,
                     receiver: receiver.as_deref(),
-                    receiver_types,
                     call_kind: *call_kind,
                     args,
                 },
@@ -255,7 +281,7 @@ impl<'a> TraceBuilder<'a> {
                     StepKind::BranchSplit,
                     func,
                     *span,
-                    Precision::OverApproximate,
+                    Precision::Exact,
                     "Branch split".into(),
                 ) {
                     return false;
@@ -273,7 +299,7 @@ impl<'a> TraceBuilder<'a> {
                         StepKind::BranchSplit,
                         func,
                         *span,
-                        Precision::OverApproximate,
+                        Precision::Exact,
                         "Else branch".into(),
                     ) {
                         return false;
@@ -321,7 +347,7 @@ impl<'a> TraceBuilder<'a> {
                     StepKind::BranchSplit,
                     func,
                     *span,
-                    Precision::OverApproximate,
+                    Precision::Exact,
                     enter_msg.into(),
                 ) {
                     return false;
@@ -381,13 +407,9 @@ impl<'a> TraceBuilder<'a> {
             FlowEvent::Return { span, .. } => {
                 self.emit(StepKind::Return, func, *span, Precision::Exact, "Return".into())
             }
-            FlowEvent::Throw { span, .. } => self.emit(
-                StepKind::Throw,
-                func,
-                *span,
-                Precision::OverApproximate,
-                "Throw".into(),
-            ),
+            FlowEvent::Throw { span, .. } => {
+                self.emit(StepKind::Throw, func, *span, Precision::Exact, "Throw".into())
+            }
             FlowEvent::Try {
                 span,
                 body,
@@ -521,58 +543,33 @@ impl<'a> TraceBuilder<'a> {
 
     fn emit_call(&mut self, site: CallSite<'_>, func: FuncId, depth: u16) -> bool {
         // Resolution order:
-        //   1. Active call-frame parameter binding (higher-order callback).
-        //   2. Active call-frame local binding.
-        //   3. Global class match -> route to that class's constructor.
-        //   4. Global callable match.
-        let callback_sym = self.frames.last().and_then(|f| {
-            f.callbacks
-                .get(site.name)
-                .or_else(|| f.locals.get(site.name))
-                .copied()
-        });
-
-        let global = self.db.global_index();
-        let caller_decl = global.decl_of(SymbolId::new(func.raw()));
-
-        let class_sym = if callback_sym.is_none() {
-            caller_decl.and_then(|decl| self.resolve_class_by_name(site.name, decl))
-        } else {
-            None
-        };
-        let class_ctor = class_sym.and_then(|c| self.find_constructor_for_class(c));
-
-        let receiver_sym = if callback_sym.is_none() && class_ctor.is_none() {
-            self.resolve_receiver_method(func, &site)
-        } else {
-            None
+        //   1. Resolved semantic callgraph edge for this exact call site.
+        //   2. Active call-frame parameter/local binding for context-sensitive
+        //      higher-order callbacks.
+        // Anything else is reported as incomplete instead of re-resolved by a
+        // trace-local fallback that could disagree with the callgraph.
+        let graph_resolution = self.resolve_callgraph_site(func, &site);
+        let graph_sym = match graph_resolution {
+            SiteResolution::Resolved(sym) if self.is_trace_expandable(sym) => Some(sym),
+            SiteResolution::Resolved(_) => None,
+            SiteResolution::Ambiguous { .. } | SiteResolution::Unresolved => None,
         };
 
-        let global_sym = if callback_sym.is_none() && class_ctor.is_none() && receiver_sym.is_none() {
-            caller_decl.and_then(|decl| self.resolve_callable_by_name(site.name, decl))
+        let callback_sym = if graph_sym.is_none() {
+            self.frames.last().and_then(|f| {
+                f.callbacks
+                    .get(site.name)
+                    .or_else(|| f.locals.get(site.name))
+                    .copied()
+                    .filter(|sym| self.is_trace_expandable(*sym))
+            })
         } else {
             None
         };
 
-        let (resolved_call, is_ctor_route) = match (callback_sym, class_ctor, receiver_sym, global_sym) {
-            (Some(s), _, _, _) => (Some(s), false),
-            (_, Some(s), _, _) => (Some(s), true),
-            (_, _, Some(s), _) => (Some(s), false),
-            (_, _, _, Some(s)) => (Some(s), false),
-            _ => (None, false),
-        };
-
-        let display_kind = if is_ctor_route {
-            CallKind::Constructor
-        } else {
-            site.call_kind
-        };
-        let precision = match (resolved_call, display_kind) {
-            (Some(_), CallKind::Constructor) => Precision::Exact,
-            (Some(_), _) => Precision::Narrowed,
-            (None, _) => Precision::Unknown,
-        };
-
+        let resolved_call = graph_sym.or(callback_sym);
+        let resolved_by_graph = graph_sym.is_some();
+        let display_kind = site.call_kind;
         let label = match display_kind {
             CallKind::Constructor => format!("New {}", site.name),
             CallKind::Method => format!("Method call {}", site.name),
@@ -580,25 +577,50 @@ impl<'a> TraceBuilder<'a> {
             CallKind::Indirect => format!("Indirect call {}", site.name),
             CallKind::Function => format!("Call {}", site.name),
         };
+
+        let Some(sym) = resolved_call else {
+            let call_name = site.name.trim();
+            let diagnostic = match graph_resolution {
+                SiteResolution::Ambiguous { candidates } => {
+                    self.out
+                        .mark_incomplete(format!("ambiguous-call:{call_name}:{candidates}"));
+                    format!("Ambiguous call {call_name}")
+                }
+                SiteResolution::Resolved(_) | SiteResolution::Unresolved => {
+                    self.out.mark_incomplete(format!("unresolved-call:{call_name}"));
+                    format!("Unresolved call {call_name}")
+                }
+            };
+            return self.emit(
+                StepKind::Diagnostic,
+                func,
+                site.span,
+                Precision::Exact,
+                diagnostic,
+            );
+        };
+
+        let precision = match display_kind {
+            CallKind::Constructor => Precision::Exact,
+            _ => Precision::Narrowed,
+        };
         if !self.emit(StepKind::Call, func, site.span, precision, label) {
             return false;
         }
 
-        if let Some(sym) = resolved_call {
-            if !self.expand(sym, site.args, &self.get_param_names(sym), depth + 1) {
-                return false;
-            }
-            let ret_label = if is_ctor_route {
-                format!("Return from new {}", site.name)
-            } else {
-                format!("Return from {}", site.name)
-            };
-            if !self.emit(StepKind::Return, func, site.span, Precision::Exact, ret_label) {
-                return false;
-            }
+        if !self.expand(sym, site.args, &self.get_param_names(sym), depth + 1) {
+            return false;
         }
-        if site.receiver.is_some() && display_kind == CallKind::Method {
-            for arg in site.args {
+        let ret_label = if display_kind == CallKind::Constructor {
+            format!("Return from new {}", site.name)
+        } else {
+            format!("Return from {}", site.name)
+        };
+        if !self.emit(StepKind::Return, func, site.span, Precision::Exact, ret_label) {
+            return false;
+        }
+        if display_kind == CallKind::Method && !resolved_by_graph {
+            for arg in semantic_receiver_callback_args(&site) {
                 let Some(callback) = self.resolve_callable_arg(&arg.value_text, func) else {
                     continue;
                 };
@@ -609,7 +631,7 @@ impl<'a> TraceBuilder<'a> {
                     StepKind::Return,
                     func,
                     site.span,
-                    Precision::OverApproximate,
+                    Precision::Narrowed,
                     format!("Return from callback {}", arg.value_text.trim()),
                 ) {
                     return false;
@@ -619,39 +641,41 @@ impl<'a> TraceBuilder<'a> {
         true
     }
 
-    fn resolve_receiver_method(&self, caller: FuncId, site: &CallSite<'_>) -> Option<SymbolId> {
-        if site.call_kind != CallKind::Method {
-            return None;
-        }
-        let receiver = site.receiver?;
-        let global = self.db.global_index();
-        let caller_decl = global.decl_of(SymbolId::new(caller.raw()))?;
-        let method_name = bonsai_lang_api::kit::short_name_of(site.name);
-        let alias_map = self.alias_map_for_decl(caller_decl);
-        if is_super_receiver(receiver) {
-            let hits = self.collect_super_method_candidates(caller_decl, &alias_map, method_name);
-            return self.best_symbol_candidate(hits, caller_decl);
-        }
-        let class_names = if site.receiver_types.is_empty() {
-            self.receiver_type_names(caller_decl, receiver)
-        } else {
-            site.receiver_types.to_vec()
-        };
-        if class_names.is_empty() {
-            return None;
-        }
-        let caller_file = global
-            .declaring_file(caller_decl.symbol)
-            .unwrap_or(caller_decl.span.file);
-        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(&alias_map);
+    fn resolve_callgraph_site(&self, caller: FuncId, site: &CallSite<'_>) -> SiteResolution {
         let mut out = Vec::new();
         let mut seen = AHashSet::new();
-        for class_name in class_names {
-            for class_sym in resolve_class(&global, &class_name, &ctx) {
-                self.collect_method_candidates_for_class(class_sym, method_name, &ctx, &mut seen, &mut out);
+        let callback_arg_spans: Vec<Span> = if site.call_kind == CallKind::Method {
+            semantic_receiver_callback_args(site)
+                .into_iter()
+                .map(|arg| arg.span)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for edge in self.call_graph.callees_of(caller) {
+            let same_site = edge.span == site.span
+                || (edge.kind == EdgeKind::Indirect && callback_arg_spans.contains(&edge.span));
+            if !edge.precision.is_semantic() || !same_site {
+                continue;
+            }
+            if seen.insert(edge.to) {
+                out.push(SymbolId::new(edge.to.raw()));
             }
         }
-        self.best_symbol_candidate(out, caller_decl)
+        match out.len() {
+            0 => SiteResolution::Unresolved,
+            1 => SiteResolution::Resolved(out[0]),
+            candidates => SiteResolution::Ambiguous { candidates },
+        }
+    }
+
+    fn is_trace_expandable(&self, symbol: SymbolId) -> bool {
+        self.db.global_index().decl_of(symbol).is_some_and(|decl| {
+            matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) && decl.body_span.is_some()
+        })
     }
 
     fn resolve_callable_arg(&self, raw: &str, caller: FuncId) -> Option<SymbolId> {
@@ -707,151 +731,6 @@ impl<'a> TraceBuilder<'a> {
             }
         }
         None
-    }
-
-    fn resolve_class_by_name(&self, raw: &str, caller_decl: &Decl) -> Option<SymbolId> {
-        let trimmed = raw.trim().trim_start_matches('&').trim_start_matches('*');
-        if trimmed.is_empty() {
-            return None;
-        }
-        let global = self.db.global_index();
-        let caller_file = global
-            .declaring_file(caller_decl.symbol)
-            .unwrap_or(caller_decl.span.file);
-        let alias_map = self.alias_map_for_decl(caller_decl);
-        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(&alias_map);
-        for candidate in callable_name_variants(trimmed) {
-            let hits = resolve_class(&global, &candidate, &ctx);
-            if let Some(sym) = self.best_symbol_candidate(hits, caller_decl) {
-                return Some(sym);
-            }
-        }
-        None
-    }
-
-    fn collect_method_candidates_for_class(
-        &self,
-        class_sym: SymbolId,
-        method_name: &str,
-        ctx: &ResolveContext<'_>,
-        seen: &mut AHashSet<SymbolId>,
-        out: &mut Vec<SymbolId>,
-    ) {
-        let mut seen_classes = AHashSet::new();
-        self.collect_method_candidates_for_class_inner(
-            class_sym,
-            method_name,
-            ctx,
-            seen,
-            &mut seen_classes,
-            out,
-        );
-    }
-
-    fn collect_method_candidates_for_class_inner(
-        &self,
-        class_sym: SymbolId,
-        method_name: &str,
-        ctx: &ResolveContext<'_>,
-        seen_methods: &mut AHashSet<SymbolId>,
-        seen_classes: &mut AHashSet<SymbolId>,
-        out: &mut Vec<SymbolId>,
-    ) {
-        if !seen_classes.insert(class_sym) {
-            return;
-        }
-        let global = self.db.global_index();
-        let Some(class_decl) = global.decl_of(class_sym) else {
-            return;
-        };
-        if !matches!(
-            class_decl.kind,
-            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-        ) {
-            return;
-        }
-        let Some(class_file) = global.declaring_file(class_sym) else {
-            return;
-        };
-        let mut matched_local_method = false;
-        for decl in global.decls_in(class_file) {
-            if decl.name != method_name || !self.is_callable(decl.symbol) {
-                continue;
-            }
-            if !visibility_allows(decl, class_file, &decl.module_path, ctx) {
-                continue;
-            }
-            if decl.parent == Some(class_sym) && seen_methods.insert(decl.symbol) {
-                matched_local_method = true;
-                out.push(decl.symbol);
-            }
-        }
-        if matched_local_method {
-            return;
-        }
-        for base in &class_decl.bases {
-            for base_sym in resolve_class(&global, base, ctx) {
-                self.collect_method_candidates_for_class_inner(
-                    base_sym,
-                    method_name,
-                    ctx,
-                    seen_methods,
-                    seen_classes,
-                    out,
-                );
-            }
-        }
-    }
-
-    fn collect_super_method_candidates(
-        &self,
-        caller_decl: &Decl,
-        alias_map: &AHashMap<String, AliasTarget>,
-        method_name: &str,
-    ) -> Vec<SymbolId> {
-        let global = self.db.global_index();
-        let Some(caller_file) = global.declaring_file(caller_decl.symbol) else {
-            return Vec::new();
-        };
-        let Some(class_decl) = enclosing_class_for_decl(&global, caller_decl) else {
-            return Vec::new();
-        };
-        let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_map);
-        let mut out = Vec::new();
-        let mut seen = AHashSet::new();
-        for base in &class_decl.bases {
-            for class_sym in resolve_class(&global, base, &ctx) {
-                self.collect_method_candidates_for_class(class_sym, method_name, &ctx, &mut seen, &mut out);
-            }
-        }
-        out
-    }
-
-    fn receiver_type_names(&self, caller_decl: &Decl, receiver: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        if let Some(type_name) = self.type_name_for_expr(receiver, caller_decl) {
-            push_unique_string(&mut out, type_name);
-        }
-        let normalized = normalize_receiver_alias_text(receiver);
-        let tail = bonsai_lang_api::kit::short_name_of(&normalized);
-        if tail.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
-            push_unique_string(&mut out, tail.to_string());
-        }
-        if matches!(tail, "self" | "this") {
-            let global = self.db.global_index();
-            if let Some(parent) = caller_decl.parent.and_then(|sym| global.decl_of(sym)) {
-                if matches!(
-                    parent.kind,
-                    DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-                ) {
-                    push_unique_string(&mut out, parent.name.clone());
-                    for base in &parent.bases {
-                        push_unique_string(&mut out, base.clone());
-                    }
-                }
-            }
-        }
-        out
     }
 
     fn type_name_for_expr(&self, expr: &str, caller_decl: &Decl) -> Option<String> {
@@ -981,42 +860,6 @@ impl<'a> TraceBuilder<'a> {
         Some(first)
     }
 
-    /// Locate a class's constructor, preferring an explicit
-    /// `DeclKind::Constructor` and falling back to the per-language
-    /// idiomatic name (`__init__`, `init`, `new`, …).
-    fn find_constructor_for_class(&self, class_sym: SymbolId) -> Option<SymbolId> {
-        let global = self.db.global_index();
-        let class_file = global.declaring_file(class_sym)?;
-        for decl in global.decls_in(class_file) {
-            if matches!(decl.kind, DeclKind::Constructor) && decl.parent == Some(class_sym) {
-                return Some(decl.symbol);
-            }
-        }
-        // Per-adapter constructor-name list when the adapter has
-        // narrowed it; falls through to the cross-language allowlist.
-        let names = self
-            .db
-            .adapter_for(class_file)
-            .map(|adapter| adapter.capabilities().effective_constructor_method_names())
-            .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
-        for decl in global.decls_in(class_file) {
-            if names.contains(&decl.name.as_str()) && decl.parent == Some(class_sym) {
-                return Some(decl.symbol);
-            }
-        }
-        None
-    }
-
-    /// True iff `sym` resolves to a callable decl.
-    fn is_callable(&self, sym: SymbolId) -> bool {
-        self.db.global_index().decl_of(sym).is_some_and(|decl| {
-            matches!(
-                decl.kind,
-                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
-            )
-        })
-    }
-
     /// Parameter-name list for `sym`, or empty if the symbol isn't
     /// a known decl.
     fn get_param_names(&self, sym: SymbolId) -> Vec<String> {
@@ -1026,27 +869,6 @@ impl<'a> TraceBuilder<'a> {
             .map(|decl: &Decl| decl.params.clone())
             .unwrap_or_default()
     }
-}
-
-// Super-receiver detection delegates to the canonical
-// `bonsai_resolve::is_super_receiver` so the cross-language token
-// set + adapter-narrowed slices stay in one place. Earlier this
-// file carried a private inline duplicate that drifted from the
-// canonical set (it didn't recognise Perl's `SUPER`); deleted in
-// favour of the shared primitive.
-
-fn enclosing_class_for_decl<'a>(global: &'a bonsai_index::GlobalIndex, decl: &Decl) -> Option<&'a Decl> {
-    if let Some(parent) = decl.parent {
-        if let Some(parent_decl) = global.decl_of(parent) {
-            if matches!(
-                parent_decl.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
-            ) {
-                return Some(parent_decl);
-            }
-        }
-    }
-    None
 }
 
 fn callable_name_variants(raw: &str) -> Vec<String> {

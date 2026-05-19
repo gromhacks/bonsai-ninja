@@ -6,6 +6,7 @@
   enabled: true
   language: elixir
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -40,6 +41,7 @@
   enabled: true
   language: elixir
   tag: weak-crypto
+  category: source-independent
   severity: medium
   cwe: [CWE-327]
   match:
@@ -76,6 +78,7 @@
   enabled: true
   language: elixir
   tag: weak-crypto
+  category: source-independent
   severity: high
   cwe: [CWE-327]
   match:
@@ -108,6 +111,7 @@
   enabled: true
   language: elixir
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:
@@ -128,6 +132,7 @@
   enabled: true
   language: elixir
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:
@@ -148,6 +153,7 @@
   enabled: true
   language: elixir
   tag: weak-randomness
+  category: source-independent
   severity: medium
   modules: [Enum]
   cwe: [CWE-330]

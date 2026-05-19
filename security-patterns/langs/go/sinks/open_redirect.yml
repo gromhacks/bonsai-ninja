@@ -15,6 +15,9 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.Redirect$
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: gin context redirect status url
     code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc redirect(c *gin.Context) {\n  target := \"/next\"\n  c.Redirect(302, target)\n}\n"
@@ -24,6 +27,14 @@
     code: "package main\nimport \"github.com/labstack/echo\"\nfunc redirect(ctx echo.Context) error {\n  target := ctx.QueryParam(\"next\")\n  return ctx.Redirect(302, target)\n}\n"
     expect_match_text:
     - ctx.Redirect
+  - name: literal redirect target negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func redirect(c *gin.Context) {
+        c.Redirect(302, "/home")
+      }
+    expect_no_match: true
   description: "gin/echo Context.Redirect(status, tainted URL) — review for external absolute URLs; relative-path redirects are usually safe. Merged collision aliases: go.open_redirect.framework_redirect, go.open_redirect.http_redirect."
   aliases:
   - go.open_redirect.framework_redirect

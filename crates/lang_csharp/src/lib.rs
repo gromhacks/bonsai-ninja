@@ -279,14 +279,33 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             .map(|alias_node| node_text(&alias_node, src).to_string());
         imports.push(ImportSpec {
             span: span_of(file, &using_node),
-            module,
+            module: module.clone(),
             alias,
             is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });
+        if csharp_using_is_static(&using_node, src) {
+            imports.push(ImportSpec {
+                span: span_of(file, &using_node),
+                module,
+                alias: None,
+                is_wildcard: true,
+                original_name: None,
+                scope: ImportScope::Local,
+            });
+        }
     }
     imports
+}
+
+fn csharp_using_is_static(using_node: &tree_sitter::Node<'_>, src: &[u8]) -> bool {
+    node_text(using_node, src)
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|window| window == ["using", "static"])
 }
 
 /// Walk every C# class-like declaration and pull `(name, type)`
@@ -778,3 +797,7 @@ fn extract_csharp_namespace(root: tree_sitter::Node<'_>, src: &[u8]) -> Option<V
     }
     None
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

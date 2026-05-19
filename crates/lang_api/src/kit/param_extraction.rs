@@ -351,6 +351,17 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
 /// Receiver parameters stay in the vector — they're identified separately
 /// via `Decl.receiver_param_index`, not by string-matching `self`/`this`.
 fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
+    if param.kind() == "self_parameter" {
+        param_names.push("self".to_string());
+        return;
+    }
+
+    let repeated_field_names = repeated_named_field_values(param, src, "name");
+    if repeated_field_names.len() > 1 {
+        param_names.extend(repeated_field_names);
+        return;
+    }
+
     // Bare identifier params: the param node itself carries the name.
     let bare_identifier_text = if looks_like_identifier(param.kind()) {
         Some(node_text(&param, src).to_string())
@@ -413,6 +424,29 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     if !trimmed_name.is_empty() && trimmed_name != "*" && trimmed_name != "&" {
         param_names.push(trimmed_name.to_string());
     }
+}
+
+fn repeated_named_field_values(node: Node<'_>, src: &[u8], field: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for idx in 0..node.child_count() {
+        let Ok(idx) = u32::try_from(idx) else {
+            continue;
+        };
+        let Some(child) = node.child(idx) else {
+            continue;
+        };
+        if node.field_name_for_child(idx) != Some(field) {
+            continue;
+        }
+        if !looks_like_identifier(child.kind()) {
+            continue;
+        }
+        let value = node_text(&child, src).trim();
+        if !value.is_empty() {
+            out.push(value.to_string());
+        }
+    }
+    out
 }
 
 /// Last identifier-shaped descendant of `node` in DFS order. Used as a

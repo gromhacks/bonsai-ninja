@@ -4,6 +4,7 @@
   enabled: true
   language: scala
   tag: race
+  category: source-independent
   severity: medium
   packages: [java.sql]
   cwe: [CWE-662, CWE-367]
@@ -26,6 +27,7 @@
   enabled: true
   language: scala
   tag: race
+  category: source-independent
   severity: medium
   packages: [java.sql]
   cwe: [CWE-662, CWE-367]

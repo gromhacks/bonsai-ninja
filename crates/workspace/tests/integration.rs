@@ -46,6 +46,31 @@ fn trace_rejects_ambiguous_entry_symbol() {
 }
 
 #[test]
+fn trace_accepts_file_qualified_ambiguous_entry_symbol() {
+    let ws = make_ws();
+    ws.vfs().write(
+        "/virtual/a.rs",
+        Arc::<str>::from("fn dup() { a_only(); }\nfn a_only() {}"),
+    );
+    ws.vfs().write(
+        "/virtual/b.rs",
+        Arc::<str>::from("fn dup() { b_only(); }\nfn b_only() {}"),
+    );
+
+    let trace = ws
+        .trace_from("/virtual/a.rs:1:dup")
+        .expect("file-qualified duplicate entry should resolve exactly");
+    assert!(
+        trace.steps.iter().any(|step| step.function == "a_only"),
+        "trace should follow the a.rs duplicate, not the b.rs duplicate"
+    );
+    assert!(
+        !trace.steps.iter().any(|step| step.function == "b_only"),
+        "file-qualified trace must not over-fan into the other duplicate"
+    );
+}
+
+#[test]
 fn edit_invalidates_only_touched_file() {
     let ws = make_ws();
     ws.vfs().write("/virtual/a.rs", Arc::<str>::from("fn a() {}"));
@@ -98,6 +123,23 @@ fn edit_invalidates_flow_id_cache() {
             "sink"
         )])],
         "the stale entry -> sink call edge must not survive edit invalidation"
+    );
+}
+
+#[test]
+fn edit_invalidates_cached_resolved_call_graph() {
+    let ws = make_ws();
+    let path = std::path::Path::new("/virtual/a.rs");
+    ws.vfs()
+        .write(path, Arc::<str>::from("fn entry() { sink(); }\nfn sink() {}\n"));
+    let before = ws.cached_resolved_call_graph();
+
+    ws.apply_edit(path, "fn entry() {}\nfn sink() {}\n".into());
+    let after = ws.cached_resolved_call_graph();
+
+    assert!(
+        !Arc::ptr_eq(&before, &after),
+        "file edits must drop the cached resolved call graph"
     );
 }
 

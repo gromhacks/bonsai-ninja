@@ -70,6 +70,12 @@ impl LanguageAdapter for ElixirAdapter {
             } else {
                 apply_elixir_module_identity(&mut decl_index, &module_spans);
             }
+            for decl in &mut decl_index.defs {
+                if let Some(params) = elixir_clause_param_slots(snapshot.text.as_ref(), decl.span, &decl.name)
+                {
+                    decl.params = params;
+                }
+            }
             let private_spans = collect_elixir_defp_spans(&tree, snapshot.text.as_bytes());
             for decl in &mut decl_index.defs {
                 let body_start = decl.body_span.map(|s| s.start).unwrap_or(decl.span.start);
@@ -232,6 +238,145 @@ fn innermost_module_for_span(modules: &[ElixirModuleSpan], span: bonsai_common::
         .map(|module| module.module.as_str())
 }
 
+fn elixir_clause_param_slots(src: &str, span: bonsai_common::Span, name: &str) -> Option<Vec<String>> {
+    let text = elixir_span_text(src, span)?;
+    let name_start = find_elixir_clause_name(text, name)?;
+    let after_name = &text[name_start + name.len()..];
+    let leading_ws = after_name.len().saturating_sub(after_name.trim_start().len());
+    let after_name = &after_name[leading_ws..];
+    if !after_name.starts_with('(') {
+        return Some(Vec::new());
+    }
+    let close = find_matching_elixir_delim(after_name, 0, '(', ')')?;
+    let args = split_elixir_top_level_args(&after_name[1..close]);
+    Some(
+        args.iter()
+            .enumerate()
+            .map(|(idx, arg)| elixir_pattern_param_name(arg).unwrap_or_else(|| format!("_arg{idx}")))
+            .collect(),
+    )
+}
+
+fn find_elixir_clause_name(text: &str, name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    text.match_indices(name).find_map(|(idx, _)| {
+        let before = text[..idx].chars().next_back();
+        let after = text[idx + name.len()..].chars().next();
+        let before_ok = before.is_none_or(|ch| !elixir_ident_char(ch));
+        let after_ok = after.is_none_or(|ch| !elixir_ident_char(ch));
+        (before_ok && after_ok).then_some(idx)
+    })
+}
+
+fn elixir_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn elixir_span_text(src: &str, span: bonsai_common::Span) -> Option<&str> {
+    let start = usize::try_from(span.start).ok()?.min(src.len());
+    let end = usize::try_from(span.end).ok()?.min(src.len());
+    if start >= end || !src.is_char_boundary(start) || !src.is_char_boundary(end) {
+        return None;
+    }
+    Some(&src[start..end])
+}
+
+fn elixir_pattern_param_name(arg: &str) -> Option<String> {
+    let mut token = String::new();
+    for ch in arg.chars().chain(std::iter::once(' ')) {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            token.push(ch);
+            continue;
+        }
+        if elixir_variable_name(&token) {
+            return Some(token);
+        }
+        token.clear();
+    }
+    None
+}
+
+fn elixir_variable_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_lowercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && !matches!(text, "do" | "end" | "fn" | "true" | "false" | "nil")
+}
+
+fn find_matching_elixir_delim(text: &str, open_idx: usize, open: char, close: char) -> Option<usize> {
+    if !text.is_char_boundary(open_idx) || !text[open_idx..].starts_with(open) {
+        return None;
+    }
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open_idx) {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == open {
+            depth = depth.saturating_add(1);
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+fn split_elixir_top_level_args(text: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut arg_start = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                args.push(text[arg_start..idx].trim().to_string());
+                arg_start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    args.push(text[arg_start..].trim().to_string());
+    args
+}
+
 /// Extract `alias`, `import`, `require`, `use` directives from an Elixir
 /// tree into the canonical `ImportSpec` shape.
 fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
@@ -296,12 +441,22 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
         imports.push(ImportSpec {
             span: span_of(file, &call_node),
-            module,
+            module: module.clone(),
             alias,
             is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });
+        if target_text == "import" {
+            imports.push(ImportSpec {
+                span: span_of(file, &call_node),
+                module,
+                alias: None,
+                is_wildcard: true,
+                original_name: None,
+                scope: ImportScope::Local,
+            });
+        }
     }
     imports
 }
@@ -347,3 +502,6 @@ fn collect_elixir_defp_spans(tree: &tree_sitter::Tree, src: &[u8]) -> Vec<(u64, 
     }
     defp_spans
 }
+
+#[cfg(test)]
+mod tests;

@@ -238,6 +238,29 @@
           field.file_name();
       }
   description: "axum multipart Field::file_name() — client-controlled Content-Disposition filename; taints path/file-upload sinks."
+- id: rust.actix.multipart_field_filename
+  enabled: true
+  language: rust
+  trust: remote
+  tag: http-input
+  payload_types: [path, multipart]
+  frameworks: [actix]
+  packages: [actix_multipart]
+  match:
+    kind: call
+    callee:
+      attribute: [ContentDisposition, get_filename]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: actix multipart content disposition filename
+    code: |
+      use actix_multipart::form::tempfile::TempFile;
+      fn example(cd: ContentDisposition) {
+          cd.get_filename();
+      }
+    expect_match_text: [cd.get_filename]
+  description: "actix_multipart ContentDisposition::get_filename() — client-controlled multipart filename; taints path/file-upload sinks."
 - id: rust.warp.filter_query
   enabled: true
   language: rust
@@ -686,3 +709,39 @@
     callee:
       attribute: [AsyncReadExt, read]
   description: "Disabled — `AsyncReadExt::read` covers both untrusted sockets and trusted local files; default-on would over-fire on every file/byte read. Enable for TCP/UDP-handler audits where the reader is known to be a network socket."
+
+- id: rust.source.async_graphql_context_args
+  enabled: true
+  language: rust
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  packages: [async_graphql]
+  imports:
+  - async_graphql
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])args$'
+  constraints:
+  - max_args: 0
+  - receiver_type_in: [Context]
+  match_examples:
+  - name: async graphql context args
+    code: |
+      use async_graphql::Context;
+      fn resolver(ctx: &Context) {
+          ctx.args();
+      }
+  - name: non graphql args helper negative
+    code: |
+      use async_graphql::Context;
+      struct Helper;
+      impl Helper {
+          fn args(&self) {}
+      }
+      fn helper(ctx: &Helper) {
+          ctx.args();
+      }
+    expect_no_match: true
+  description: "async-graphql Context::args() — resolver arguments supplied by the GraphQL caller. Receiver type is required so generic args() helpers stay clean."

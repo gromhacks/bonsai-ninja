@@ -11,9 +11,12 @@
 //! one dev-dep) so the resolver / global index / call graph all
 //! get exercised end-to-end.
 
-use crate::{compute_flow_id, enumerate_chains_resolved, BoundedCache, ChainCache, ChainTruncation};
+use crate::{
+    compute_flow_id, enumerate_chains_resolved, find_call_span_to_func_uncached, BoundedCache,
+    CallEdgeResolver, CallPathTruncation, ChainCache, ChainTruncation,
+};
 use bonsai_callgraph::collect_callable_targets;
-use bonsai_common::Span;
+use bonsai_common::{Span, SymbolId};
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_workspace::Workspace;
 use std::sync::Arc;
@@ -100,6 +103,65 @@ fn downstream_resolved_includes_direct_callees() {
     // `middle` calls `helper` and `sink` directly — both must appear.
     assert!(downstream.contains(&helper));
     assert!(downstream.contains(&sink));
+}
+
+#[test]
+fn call_path_enumeration_reports_depth_truncation() {
+    let ws = ws_with_python(
+        r"
+def root():
+    a()
+
+def a():
+    b()
+
+def b():
+    return 1
+",
+    );
+    let cache = ChainCache::new(&ws);
+    let root = func_id(&ws, "root");
+    let mut resolver = CallEdgeResolver::new(&ws);
+    let (paths, truncation) = resolver.enumerate_call_paths_from_with_truncation(&cache, &[root], 1, 16);
+
+    assert!(!paths.is_empty());
+    assert_eq!(
+        truncation,
+        CallPathTruncation::MaxExtraDepth,
+        "depth-limited downstream paths must report truncation"
+    );
+    assert!(truncation.is_truncated());
+    assert_eq!(truncation.label(), Some("downstream-depth cap"));
+}
+
+#[test]
+fn call_path_enumeration_reports_path_truncation() {
+    let ws = ws_with_python(
+        r"
+def root():
+    a()
+    b()
+
+def a():
+    return 1
+
+def b():
+    return 2
+",
+    );
+    let cache = ChainCache::new(&ws);
+    let root = func_id(&ws, "root");
+    let mut resolver = CallEdgeResolver::new(&ws);
+    let (paths, truncation) = resolver.enumerate_call_paths_from_with_truncation(&cache, &[root], 6, 1);
+
+    assert_eq!(paths.len(), 1, "path cap should keep one emitted path");
+    assert_eq!(
+        truncation,
+        CallPathTruncation::MaxPaths,
+        "path-limited downstream paths must report truncation"
+    );
+    assert!(truncation.is_truncated());
+    assert_eq!(truncation.label(), Some("downstream-path cap"));
 }
 
 #[test]
@@ -332,7 +394,6 @@ def entry(user_input):
     // TokenSet). The assertions below pin that contract.
     let cache = ChainCache::new(&ws);
     let _ = cache.taint_facts_for_entry(func_id(&ws, "entry"));
-    let _ = sanitizers; // silence unused-variable warning
 
     assert_eq!(
         ws.dataflow().pending_count_with_sanitizers(ws.db(), &sanitizers),
@@ -376,18 +437,12 @@ class C:
     }
 }
 
-/// Each enumerated chain must carry the worst-case precision
-/// across its edges (the `meet`). A chain that crosses even one
-/// `Virtual` / `OverApproximate` edge gets tagged
-/// `OverApproximate`; an all-`Direct` chain stays `Narrowed`.
-/// This is what the inspect renderer keys off of when surfacing
-/// `[precision: over-approximate]` in the FLOW header.
+/// Each enumerated chain must carry semantic precision across its
+/// edges. Ambiguous broad matches are not emitted as callgraph
+/// edges, so inspect chains stay exact/narrowed by construction.
 #[test]
 fn chain_precision_meets_along_path() {
     // `target` is unique → caller→target edge is Direct/Narrowed.
-    // Two top-level `m` decls in two files → driver→m edge is
-    // Virtual/OverApprox (post-543cd67 the resolver only fans out
-    // for bare-name lookups, not unannotated `x.m()` dispatches).
     let ws = ws_with_python(
         r"
 def target(): pass
@@ -422,29 +477,16 @@ def caller():
         chain.precision
     );
 
-    // Over-approximate path. `m` appears twice so the resolved
-    // graph has two distinct FuncIds for it; pick either and
-    // walk callers — the edge from `driver` is Virtual.
-    let m_candidates = collect_callable_targets(&ws.db().global_index(), "m");
-    assert_eq!(m_candidates.len(), 2, "fixture must have 2 `m` decls");
-    let (chains, _) = cache.chains_resolved(m_candidates[0], 32, 64);
-    let chain = chains
-        .iter()
-        .find(|c| c.funcs.len() >= 2)
-        .expect("expected driver → m chain");
-    assert_eq!(
-        chain.precision,
-        bonsai_common::Precision::OverApproximate,
-        "Virtual edge must propagate OverApproximate (got {:?})",
-        chain.precision
+    let driver = func_id(&ws, "driver");
+    let edges: Vec<_> = cache.resolved_graph().callees_of(driver).collect();
+    assert!(
+        edges.iter().all(|edge| edge.precision.is_semantic()),
+        "resolved graph must not expose over-approximate edges: {edges:?}"
     );
 }
 
-/// Spec compliance: when a call name resolves to multiple
-/// candidates the edge gets `EdgeKind::Virtual` /
-/// `Precision::OverApproximate` (spec §5 line 135). When it
-/// resolves to exactly one, the edge is
-/// `EdgeKind::Direct` / `Precision::Narrowed` (line 132).
+/// Spec compliance: unique resolution gets `EdgeKind::Direct` /
+/// `Precision::Narrowed`; ambiguous broad resolution is not emitted.
 #[test]
 fn resolved_graph_assigns_correct_precision() {
     // Build a graph where `caller` calls `target` and `target` is
@@ -463,12 +505,8 @@ def caller():
     assert_eq!(edges[0].kind, bonsai_callgraph::EdgeKind::Direct);
     assert_eq!(edges[0].precision, bonsai_common::Precision::Narrowed);
 
-    // Bare call to `m` resolves to two top-level candidates →
-    // Virtual/OverApproximate. The earlier `x.m()` shape was
-    // tightened (commit 543cd67) so receiver-typeless dispatches
-    // now drop ambiguous candidates rather than fan out; this
-    // version uses bare-name lookup which is still expected to
-    // fan out across same-named workspace candidates.
+    // A bare call with same-named candidates must not fan out into
+    // over-approximate virtual edges.
     let ws2 = ws_with_python(
         r"
 def m(): pass
@@ -488,13 +526,61 @@ def m_alias(): pass
     let driver = func_id(&ws2, "driver");
     let edges: Vec<_> = cache2.resolved_graph().callees_of(driver).collect();
     assert!(
-        edges.len() >= 2,
-        "expected >= 2 callees for driver -> m fan-out; got {}",
-        edges.len()
+        edges.iter().all(|edge| edge.precision.is_semantic()),
+        "ambiguous broad resolution must not expose over-approximate edges: {edges:?}"
     );
-    for e in edges {
-        assert_eq!(e.kind, bonsai_callgraph::EdgeKind::Virtual);
-        assert_eq!(e.precision, bonsai_common::Precision::OverApproximate);
+    assert!(edges.len() <= 1, "ambiguous call fanned out: {edges:?}");
+}
+
+#[test]
+fn call_span_resolution_uses_semantic_graph_edges_only() {
+    let ws = ws_with_python(
+        r"
+class A:
+    def load(self): pass
+
+class B:
+    def load(self): pass
+
+def driver(obj):
+    obj.load()
+",
+    );
+    let global = ws.db().global_index();
+    let targets = collect_callable_targets(&global, "load");
+    assert!(
+        targets.len() >= 2,
+        "fixture must expose duplicate method candidates"
+    );
+    let driver = func_id(&ws, "driver");
+    let caller_decl = global.decl_of(SymbolId::new(driver.raw())).expect("driver decl");
+    let semantic_targets: ahash::AHashSet<_> = ws
+        .resolved_call_graph()
+        .callees_of(driver)
+        .filter(|edge| edge.precision.is_semantic())
+        .map(|edge| edge.to)
+        .collect();
+    let non_semantic_targets: Vec<_> = targets
+        .iter()
+        .copied()
+        .filter(|target| !semantic_targets.contains(target))
+        .collect();
+    assert!(
+        !non_semantic_targets.is_empty(),
+        "ambiguous receiver call should leave at least one candidate without semantic edge"
+    );
+
+    let mut resolver = CallEdgeResolver::new(&ws);
+    for target in non_semantic_targets {
+        assert!(
+            find_call_span_to_func_uncached(&ws, caller_decl, target, "load").is_none(),
+            "uncached inspect resolver must not fallback to ambiguous name-only call-site evidence"
+        );
+        assert_eq!(
+            resolver.call_spans_for_chain(&[driver, target]),
+            vec![None, None],
+            "cached inspect resolver must not fallback to ambiguous name-only call-site evidence"
+        );
     }
 }
 

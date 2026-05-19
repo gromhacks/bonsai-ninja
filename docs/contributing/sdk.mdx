@@ -73,9 +73,9 @@ let bonsai = Bonsai::new()
 | `.with_parse_timeout(d)` | Override per-file parse timeout |
 | `.with_rulepack(path)` | Load a rulepack from disk |
 | `.with_loaded_rulepack(path, pack)` | Inject a pre-loaded `Rulepack` (saves a re-parse) |
-| `.index(root)` | Parse, index, prewarm dataflow, save sidecar |
+| `.index(root)` | Structural parse/index only; exact analyses compute requested scope later |
 | `.index_with_progress(root, callback)` | Same with `WorkspaceOpenEvent` callbacks |
-| `.open_query(root)` | Load sidecar, compute misses lazily |
+| `.open_query(root)` | Load sidecar, compute requested missing facts on demand |
 | `.open_with_options(root, opts)` | Explicit sidecar / prewarm control |
 | `.open_with_options_and_progress(root, opts, cb)` | Same plus progress callbacks |
 | `.cache(root)` | Rootless cache handle (clear, stats, default export cache) |
@@ -163,10 +163,25 @@ let imports = project.browse().imports(Default::default())?;
 let refs = project.browse().refs("symbol", Default::default())?;
 let strings = project.browse().strings(Default::default())?;
 let classes = project.browse().classes(Default::default())?;
+let tree = project.browse().tree(bonsai_sdk::TreeFilters {
+    max_finding_ids_per_file: Some(0),
+    max_flow_ids_per_file: Some(0),
+    max_cross_file_edges_per_file: Some(0),
+    ..Default::default()
+})?;
+let file = project.browse().read_file(bonsai_sdk::ReadFileFilters {
+    path: "auth/verify_token.py",
+    max_inlined_bodies: Some(0),
+    ..Default::default()
+})?;
 ```
 
-Each function takes a workspace + filter struct, returns a `Vec<*Out>` of
-stable-shaped browse results.
+Most functions take a workspace + filter struct and return a `Vec<*Out>` of
+stable-shaped browse results. `TreeOut` and `ReadFileOut` are connected
+views; both carry `analysis_complete` plus
+`analysis_incomplete_reasons`. They use semantic flow/call facts only;
+presentation caps such as tree depth/id limits or omitted inline bodies mark
+the output incomplete instead of broadening evidence.
 
 ### Dump (debugging / IR introspection)
 
@@ -182,6 +197,11 @@ let taint = project.dump().taint(bonsai_sdk::TaintFilters {
     ..Default::default()
 });
 ```
+
+`TaintReport` carries `analysis_complete` and
+`analysis_incomplete_reasons` alongside the propagation records so SDK
+callers do not have to infer completeness from `saturated` or precision
+labels.
 
 ### Export
 
@@ -237,15 +257,16 @@ let decl_names = ws.decl_name_index();    // lowercased decl-name table for insp
 `WorkspaceOpenOptions` controls which of these get prewarmed:
 
 ```rust
-WorkspaceOpenOptions::default() // prewarm dataflow + value_flow + flow_ids
+WorkspaceOpenOptions::default() // load fresh sidecars, compute requested facts on demand
 WorkspaceOpenOptions::query_only() // load sidecars but skip eager prewarm
 WorkspaceOpenOptions::parse_only() // diagnostics-only; no sidecars
+WorkspaceOpenOptions::full_prewarm() // explicit full sidecar rebuild/prewarm
 ```
 
-The `default` shape is what `bonsai-ninja index` runs. SDK callers
-that intend to issue many queries against the same workspace should
-prefer `default`; one-shot lookups against a previously-indexed
-workspace can use `query_only`.
+The structural `index` shape is what `bonsai-ninja index` runs by
+default. SDK callers that intentionally want an upfront full-workspace
+sidecar rebuild should call `open_with_options(root,
+WorkspaceOpenOptions::full_prewarm())` explicitly.
 
 `Workspace::ingest_dir` clears or invalidates every cache when a
 file edit lands, so subsequent queries observe current state.

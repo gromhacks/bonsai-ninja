@@ -3,6 +3,7 @@
   enabled: true
   language: typescript
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -21,6 +22,7 @@
   enabled: true
   language: typescript
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -39,6 +41,7 @@
   enabled: true
   language: typescript
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -57,6 +60,7 @@
   enabled: true
   language: typescript
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [request]
   cwe: [CWE-295]
@@ -77,6 +81,7 @@
   enabled: true
   language: typescript
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [grpc, "@grpc/grpc-js"]
   cwe: [CWE-319]

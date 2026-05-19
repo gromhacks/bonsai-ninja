@@ -4,6 +4,7 @@
   enabled: true
   language: perl
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: ["Digest::MD5"]
   cwe: [CWE-327]
@@ -25,6 +26,7 @@
   enabled: true
   language: perl
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: ["Digest::MD5"]
   cwe: [CWE-327]
@@ -46,6 +48,7 @@
   enabled: true
   language: perl
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: ["Digest::SHA"]
   cwe: [CWE-327]
@@ -67,6 +70,7 @@
   enabled: true
   language: perl
   tag: weak-crypto
+  category: source-independent
   severity: high
   packages: ["Crypt::DES"]
   cwe: [CWE-327]
@@ -88,6 +92,7 @@
   enabled: true
   language: perl
   tag: weak-crypto
+  category: source-independent
   severity: high
   packages: ["Crypt::RC4"]
   cwe: [CWE-327]
@@ -109,6 +114,7 @@
   enabled: true
   language: perl
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:

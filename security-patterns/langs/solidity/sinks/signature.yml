@@ -19,6 +19,7 @@
   enabled: true
   language: solidity
   tag: hash-collision
+  category: source-independent
   severity: medium
   cwe: [CWE-328]
   match:

@@ -359,6 +359,7 @@ dependencies = [
  "bonsai_lang_api",
  "parking_lot",
  "rayon",
+ "regex",
  "serde",
  "smallvec",
  "tempfile",
@@ -553,7 +554,10 @@ version = "0.1.0"
 dependencies = [
  "bonsai_common",
  "bonsai_conformance",
+ "bonsai_diagnostics",
  "bonsai_lang_api",
+ "bonsai_vfs",
+ "parking_lot",
  "tree-sitter",
 ]
 
@@ -655,9 +659,12 @@ version = "0.1.0"
 dependencies = [
  "bonsai_common",
  "bonsai_conformance",
+ "bonsai_diagnostics",
  "bonsai_lang_api",
  "bonsai_testkit",
+ "bonsai_vfs",
  "bonsai_workspace",
+ "parking_lot",
  "tree-sitter",
 ]
 
@@ -710,6 +717,7 @@ dependencies = [
  "bonsai_cfg",
  "bonsai_common",
  "bonsai_diagnostics",
+ "bonsai_hash",
  "bonsai_inspect",
  "bonsai_lang_api",
  "bonsai_security",
@@ -732,6 +740,7 @@ dependencies = [
  "bonsai_db",
  "bonsai_diagnostics",
  "bonsai_hash",
+ "bonsai_idg",
  "bonsai_index",
  "bonsai_inspect",
  "bonsai_lang_api",
@@ -807,6 +816,7 @@ dependencies = [
  "bonsai_vfs",
  "parking_lot",
  "rayon",
+ "regex",
  "serde",
 ]
 

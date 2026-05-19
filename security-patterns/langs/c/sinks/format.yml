@@ -71,6 +71,10 @@
   constraints:
   - arg_tainted:
       index: 1
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_start_arg_index: 1
   match_examples:
   - name: tainted format string
     code: |
@@ -98,6 +102,10 @@
   constraints:
   - arg_tainted:
       index: 2
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_start_arg_index: 2
   match_examples:
   - name: tainted format string
     code: |
@@ -181,6 +189,10 @@
   constraints:
   - arg_tainted:
       index: 1
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_start_arg_index: 1
   match_examples:
   - name: tainted format string
     code: |
@@ -208,6 +220,10 @@
   constraints:
   - arg_tainted:
       index: 2
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_start_arg_index: 2
   match_examples:
   - name: tainted format string
     code: |

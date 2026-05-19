@@ -4,7 +4,7 @@
 verify_token(Token) ->
     Query = ["SELECT user_id FROM tokens WHERE token = '", Token, "'"],
     %% sink: SQL injection via iolist concat
-    io:format("~s~n", [Query]),
+    epgsql:squery(conn, Query),
     1.
 
 run_admin_command(UserId, Action) ->

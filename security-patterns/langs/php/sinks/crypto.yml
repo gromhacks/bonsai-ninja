@@ -2,6 +2,7 @@
   enabled: true
   language: php
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe:
   - CWE-327
@@ -18,6 +19,7 @@
   enabled: true
   language: php
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe:
   - CWE-327
@@ -33,6 +35,7 @@
   enabled: true
   language: php
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe:
   - CWE-327
@@ -49,6 +52,7 @@
   enabled: true
   language: php
   tag: weak-crypto
+  category: source-independent
   severity: high
   cwe:
   - CWE-327
@@ -64,6 +68,7 @@
   enabled: true
   language: php
   tag: weak-crypto
+  category: source-independent
   severity: high
   cwe:
   - CWE-327
@@ -79,6 +84,7 @@
   enabled: true
   language: php
   tag: weak-crypto
+  category: source-independent
   severity: high
   cwe:
   - CWE-327
@@ -97,6 +103,7 @@
   enabled: true
   language: php
   tag: weak-randomness
+  category: source-independent
   severity: low
   cwe:
   - CWE-338
@@ -112,6 +119,7 @@
   enabled: true
   language: php
   tag: weak-randomness
+  category: source-independent
   severity: low
   cwe:
   - CWE-338
@@ -127,6 +135,7 @@
   enabled: true
   language: php
   tag: weak-randomness
+  category: source-independent
   severity: low
   cwe:
   - CWE-338

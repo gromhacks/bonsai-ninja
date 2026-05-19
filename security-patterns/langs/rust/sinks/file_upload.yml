@@ -1,7 +1,10 @@
 # Rust file-upload sinks — attacker-chosen filename flowing into a
 # filesystem path without allowlist / basename stripping.
 - id: rust.upload.actix_multipart_filename
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: rust.actix.multipart_field_filename
   language: rust
   tag: file-upload
   severity: medium
@@ -22,12 +25,15 @@
           let query = "user";
           ContentDisposition::get_filename(target);
       }
-  description: "actix_multipart Field ContentDisposition::get_filename — attacker-supplied filename; combined with fs::File::create enables path traversal + arbitrary file write."
+  description: "Disabled — ContentDisposition::get_filename is a client-controlled filename source; file-write/path sinks report the unsafe use."
 
   imports:
   - actix_multipart
 - id: rust.upload.axum_multipart_filename
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: rust.axum.multipart_field_file_name
   language: rust
   tag: file-upload
   severity: medium
@@ -46,7 +52,7 @@
           let query = "user";
           Field::file_name(target);
       }
-  description: "axum Multipart Field::file_name — attacker-supplied filename; flag when used in fs::File::create / Path::join without basename stripping."
+  description: "Disabled — Field::file_name is already modeled as rust.axum.multipart_field_file_name. Report only when the returned filename reaches a write/path sink."
 
 - id: rust.upload.rocket_tempfile_persist_to
   enabled: true

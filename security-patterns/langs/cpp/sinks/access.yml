@@ -9,6 +9,9 @@
     kind: call
     callee:
       attribute: [S3Client, GetObject]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -19,6 +22,13 @@
         const char *query = arg;
         S3Client::GetObject(arg);
       }
+  - name: literal s3 get object negative
+    code: |
+      #include <aws-sdk-cpp-s3.h>
+      void example() {
+        S3Client::GetObject("reports/fixed.csv");
+      }
+    expect_no_match: true
   description: "AWS SDK C++ S3Client::GetObject — tainted bucket/key selector reads arbitrary object data."
 
 - id: cpp.access.aws_s3_put_object
@@ -32,6 +42,9 @@
     kind: call
     callee:
       attribute: [S3Client, PutObject]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -42,6 +55,13 @@
         const char *query = arg;
         S3Client::PutObject(arg);
       }
+  - name: literal s3 put object negative
+    code: |
+      #include <aws-sdk-cpp-s3.h>
+      void example() {
+        S3Client::PutObject("reports/fixed.csv");
+      }
+    expect_no_match: true
   description: "AWS SDK C++ S3Client::PutObject — tainted bucket/key selector overwrites attacker-chosen object keys."
 
 - id: cpp.access.aws_secretsmanager_get_secret_value
@@ -55,6 +75,9 @@
     kind: call
     callee:
       attribute: [SecretsManagerClient, GetSecretValue]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -65,6 +88,13 @@
         const char *query = arg;
         SecretsManagerClient::GetSecretValue(arg);
       }
+  - name: literal secretsmanager get secret value negative
+    code: |
+      #include <aws-sdk-cpp-secretsmanager.h>
+      void example() {
+        SecretsManagerClient::GetSecretValue("app/prod/db");
+      }
+    expect_no_match: true
   description: "AWS SDK C++ SecretsManagerClient::GetSecretValue — tainted secret id reads arbitrary secret material."
 
 - id: cpp.access.azure_blob_download
@@ -78,6 +108,9 @@
     kind: call
     callee:
       attribute: [BlobClient, DownloadTo]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -88,6 +121,13 @@
         const char *query = arg;
         BlobClient::DownloadTo(arg);
       }
+  - name: literal azure blob download negative
+    code: |
+      #include <azure-storage-blobs-cpp.h>
+      void example() {
+        BlobClient::DownloadTo("/var/app/export/report.csv");
+      }
+    expect_no_match: true
   description: "Azure BlobClient::DownloadTo — tainted blob selector reads arbitrary object data."
 
 - id: cpp.access.azure_blob_upload
@@ -101,8 +141,11 @@
     kind: call
     callee:
       attribute: [BlockBlobClient, UploadFrom]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted azure blob upload source path
     code: |
       #include <azure-storage-blobs-cpp.h>
       void example() {
@@ -111,7 +154,13 @@
         const char *query = arg;
         BlockBlobClient::UploadFrom(arg);
       }
-  description: "Azure BlockBlobClient::UploadFrom — tainted blob selector writes attacker-chosen storage targets."
+  - name: literal azure blob upload path negative
+    code: |
+      void example() {
+        BlockBlobClient::UploadFrom("/var/app/export/report.csv");
+      }
+    expect_no_match: true
+  description: "Azure BlockBlobClient::UploadFrom(path) — tainted local file paths can upload arbitrary local files to cloud storage."
 
 - id: cpp.access.gcp_secretmanager_access_secret_version
   enabled: true
@@ -124,6 +173,9 @@
     kind: call
     callee:
       attribute: [SecretManagerServiceClient, AccessSecretVersion]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -134,4 +186,11 @@
         const char *query = arg;
         SecretManagerServiceClient::AccessSecretVersion(arg);
       }
+  - name: literal gcp secret version negative
+    code: |
+      #include <google-cloud-cpp.h>
+      void example() {
+        SecretManagerServiceClient::AccessSecretVersion("projects/app/secrets/db/versions/latest");
+      }
+    expect_no_match: true
   description: "google-cloud-cpp SecretManagerServiceClient::AccessSecretVersion — tainted resource name reads arbitrary secret versions."

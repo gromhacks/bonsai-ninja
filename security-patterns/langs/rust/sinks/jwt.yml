@@ -27,7 +27,9 @@
           jsonwebtoken::decode_header("header.payload.signature");
       }
     expect_no_match: true
-  description: "jsonwebtoken::decode_header — returns the JWT header (kid, alg) without signature verification; using the result for routing / key-lookup without later validating the signature = auth bypass."
+  description: "jsonwebtoken::decode_header — returns the JWT header (kid, alg) without
+    signature verification; using the result for routing / key-lookup without later
+    validating the signature = auth bypass."
 
 - id: rust.jwt.jsonwebtoken_dangerous_unsafe
   enabled: true
@@ -57,12 +59,15 @@
           jsonwebtoken::dangerous_insecure_decode("header.payload.signature");
       }
     expect_no_match: true
-  description: "jsonwebtoken::dangerous_insecure_decode — documented escape hatch that skips signature verification entirely; tainted JWT = auth bypass / forged claims."
+  description: "jsonwebtoken::dangerous_insecure_decode — documented escape hatch
+    that skips signature verification entirely; tainted JWT = auth bypass / forged
+    claims."
 
 - id: rust.jwt.jsonwebtoken_insecure_disable_signature
   enabled: true
   language: rust
   tag: jwt
+  category: source-independent
   severity: high
   packages: [jsonwebtoken]
   cwe: [CWE-347]
@@ -79,7 +84,8 @@
           let query = "user";
           Validation::insecure_disable_signature_validation(target);
       }
-  description: "jsonwebtoken Validation::insecure_disable_signature_validation — explicitly turns off signature check."
+  description: "jsonwebtoken Validation::insecure_disable_signature_validation — explicitly
+    turns off signature check."
 
 - id: rust.jwt.jsonwebtoken_decode
   enabled: true
@@ -110,7 +116,8 @@
           jsonwebtoken::decode("safe");
       }
     expect_no_match: true
-  description: "jsonwebtoken::decode — audit the Validation struct for disabled checks, alg=none, or mixed HMAC/RSA algorithm lists that enable alg-confusion."
+  description: "jsonwebtoken::decode — audit the Validation struct for disabled checks,
+    alg=none, or mixed HMAC/RSA algorithm lists that enable alg-confusion."
 
 - id: rust.jwt.josekit_decode
   enabled: true
@@ -140,4 +147,5 @@
           JwtPayload::deserialize("header.payload.signature");
       }
     expect_no_match: true
-  description: "josekit JwtPayload::deserialize — parses the JWT claims; flag if no upstream verify (JwsVerifier / JweDecrypter) is invoked on the same token."
+  description: "josekit JwtPayload::deserialize — parses the JWT claims; flag if no
+    upstream verify (JwsVerifier / JweDecrypter) is invoked on the same token."

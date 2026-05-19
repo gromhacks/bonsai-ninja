@@ -2,6 +2,7 @@
   enabled: true
   language: javascript
   tag: jwt
+  category: source-independent
   severity: high
   packages:
   - jsonwebtoken
@@ -15,18 +16,30 @@
       attribute:
       - jwt
       - sign
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: "(?i)algorithm\\s*[:=]\\s*['\\\"]none['\\\"]"
   match_examples:
   - name: sign none
     code: |
       const _u = require("jsonwebtoken");
       function demo(input, req, obj) {
-        return jwt.sign(input, { algorithm: 'none' });
+        return jwt.sign(input, null, { algorithm: 'none' });
       }
+  - name: sign hmac negative
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.sign(input, "secret", { algorithm: "HS256" });
+      }
+    expect_no_match: true
   description: "jwt.sign with algorithm 'none' — unsigned token, trivially forgeable."
 - id: javascript.jwt.verify_none_algorithm
   enabled: true
   language: javascript
   tag: jwt
+  category: source-independent
   severity: high
   packages:
   - jsonwebtoken
@@ -41,13 +54,24 @@
       attribute:
       - jwt
       - verify
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: "(?i)(algorithms\\s*[:=]\\s*\\[[^\\]]*['\\\"]none['\\\"]|ignoreExpiration\\s*[:=]\\s*true)"
   match_examples:
   - name: verify none algorithm
     code: |
       const _u = require("jsonwebtoken");
       function demo(input, req, obj) {
-        return jwt.verify(input, { algorithms: ['none'] });
+        return jwt.verify(input, "secret", { algorithms: ['none'] });
       }
+  - name: verify hmac negative
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.verify(input, "secret", { algorithms: ["HS256"] });
+      }
+    expect_no_match: true
   description: "jwt.verify(..., {algorithms: ['none']}) — accepts unsigned tokens. Merged aliases: javascript.jwt.verify_ignore_expiration, javascript.jwt.alg_confusion."
   aliases:
   - javascript.jwt.verify_ignore_expiration
@@ -85,6 +109,8 @@
       attribute:
       - jwt
       - decode
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: decode unsafe
     code: |
@@ -92,6 +118,13 @@
       function demo(input, req, obj) {
         return jwt.decode(input);
       }
+  - name: decode literal negative
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.decode("header.payload.signature");
+      }
+    expect_no_match: true
   description: "jwt.decode — parses the token without verifying the signature; never trust the payload."
 - id: javascript.jwt.jose_decode_jwt
   enabled: true
@@ -108,6 +141,8 @@
       attribute:
       - jose
       - decodeJwt
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: jose decode jwt
     code: |
@@ -115,6 +150,13 @@
       function demo(input, req, obj) {
         return jose.decodeJwt(input);
       }
+  - name: jose decode literal negative
+    code: |
+      const _u = require("jose");
+      function demo(input, req, obj) {
+        return jose.decodeJwt("header.payload.signature");
+      }
+    expect_no_match: true
   description: "jose.decodeJwt — header/claim inspection only, does not verify the signature."
 - id: javascript.jwt.jose_unsecured_decode
   enabled: true
@@ -131,6 +173,8 @@
       attribute:
       - UnsecuredJWT
       - decode
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: jose unsecured decode
     code: |
@@ -138,12 +182,20 @@
       function demo(input, req, obj) {
         return UnsecuredJWT.decode(input);
       }
+  - name: jose unsecured literal negative
+    code: |
+      const _u = require("jose");
+      function demo(input, req, obj) {
+        return UnsecuredJWT.decode("header.payload.signature");
+      }
+    expect_no_match: true
   description: "jose UnsecuredJWT.decode — explicitly reads unsecured (alg=none) tokens."
 
 - id: javascript.jwt.jose_jwt_verify_alg_none
   enabled: true
   language: javascript
   tag: jwt
+  category: source-independent
   severity: critical
   packages: [jose]
   imports: [jose]

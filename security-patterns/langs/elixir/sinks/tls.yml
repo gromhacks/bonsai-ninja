@@ -9,6 +9,7 @@
   enabled: true
   language: elixir
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -29,6 +30,7 @@
   enabled: true
   language: elixir
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [tesla]
   cwe: [CWE-295]

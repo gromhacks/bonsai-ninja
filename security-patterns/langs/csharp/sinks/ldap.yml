@@ -31,11 +31,18 @@
   match:
     kind: write
     target:
-      name: Filter
+      regex: ^(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+Filter$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: directory searcher filter property
     code: |
-      class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DirectorySearcher.Filter = input; } }
+      class App { void Test(string input) { DirectorySearcher.Filter = input; } }
+  - name: local filter variable negative
+    code: |
+      class App { void Test(string input) { var Filter = input; } }
+    expect_no_match: true
   description: "DirectorySearcher.Filter = tainted."
 
 - id: csharp.ldap.directorysearcher_findall

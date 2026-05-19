@@ -6,6 +6,7 @@
   enabled: true
   language: go
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:
@@ -28,6 +29,7 @@
   enabled: true
   language: go
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:
@@ -50,6 +52,7 @@
   enabled: true
   language: go
   tag: race
+  category: source-independent
   severity: medium
   packages: [sync]
   cwe: [CWE-833, CWE-667]
@@ -71,6 +74,7 @@
   enabled: true
   language: go
   tag: race
+  category: source-independent
   severity: medium
   packages: [database/sql]
   cwe: [CWE-662, CWE-367]
@@ -92,6 +96,7 @@
   enabled: true
   language: go
   tag: race
+  category: source-independent
   severity: medium
   packages: [database/sql]
   cwe: [CWE-662, CWE-367]

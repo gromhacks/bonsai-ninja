@@ -3,6 +3,7 @@
   enabled: true
   language: swift
   tag: cors
+  category: source-independent
   severity: medium
   packages: [vapor]
   cwe: [CWE-942]

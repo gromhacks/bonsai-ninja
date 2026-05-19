@@ -404,6 +404,7 @@
   enabled: true
   language: typescript
   tag: header-injection
+  category: source-independent
   severity: low
   packages:
   - '@nestjs/common'

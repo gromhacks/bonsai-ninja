@@ -489,6 +489,7 @@
   enabled: true
   language: java
   tag: xss
+  category: source-independent
   severity: high
   packages:
   - org.apache.wicket

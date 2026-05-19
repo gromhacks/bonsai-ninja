@@ -34,6 +34,8 @@ use crate::place::Place;
 use crate::query::ReachabilityIndex;
 use crate::workspace::{IdgWorkspace, SegmentId};
 
+const SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
+
 /// A renderable program point: the (function, span, place) triple
 /// every consumer eventually reports back to its UI / report layer.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -86,7 +88,7 @@ pub struct WsNodeId(pub u32);
 /// `(CallArg{site, arg_idx} → callee.Param{param_idx})` cross-file
 /// edge whose source endpoint is in the seed's forward closure
 /// surfaces as one [`CrossCallEdge`].
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CrossCallEdge {
     /// Function holding the call site.
     pub caller: FuncId,
@@ -117,7 +119,21 @@ struct UnifiedAddressSpace {
     reverse: Vec<(SegmentId, NodeId)>,
     /// Reachability index over the unified edge set.
     reach: ReachabilityIndex,
+    /// Precision-scoped reachability indexes. Each entry contains
+    /// only edges whose precision is at or below the key. Building
+    /// this once per requested precision lets exact/security/export
+    /// callers reuse the normal CSR closure kernel without checking
+    /// every edge's precision on every source query.
+    precision_reach: RwLock<AHashMap<Precision, Arc<ReachabilityIndex>>>,
+    /// Cross-call rows keyed by the workspace-global `from` node
+    /// that makes the row reachable. `cross_call_edges_in_closure`
+    /// is called once per exact source seed; pre-indexing here keeps
+    /// those queries proportional to the seed closure instead of
+    /// rescanning every segment edge and every cross-file edge.
+    cross_calls_by_from: RwLock<Option<Arc<CrossCallsByFrom>>>,
 }
+
+type CrossCallsByFrom = AHashMap<WsNodeId, Vec<CrossCallEdge>>;
 
 /// Service handle for IDG queries. Wraps an [`IdgWorkspace`] and a
 /// reference to the workspace's [`GlobalIndex`] (needed to
@@ -170,14 +186,50 @@ impl IdgQueryService {
         Some(self.build_point_ref(idg_node.func, place))
     }
 
-    /// Forward closure: which nodes are reachable from `seeds`?
+    /// Semantic forward closure: which nodes are reachable from `seeds`
+    /// through exact or narrowed edges?
+    ///
+    /// This is the default evidence-producing reachability surface.
+    /// Diagnostic callers that need to inspect weaker edges must call
+    /// [`Self::forward_closure_with_max_precision`] explicitly.
+    ///
     /// Returns the set of [`WsNodeId`]s in the closure (always
     /// includes the seeds themselves).
     pub fn forward_closure(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
+        self.forward_closure_with_max_precision(seeds, Some(SEMANTIC_MAX_PRECISION))
+    }
+
+    fn forward_closure_unfiltered(&self, seeds: &[WsNodeId]) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
         let bits = unified.reach.forward_closure(&seed_nodes);
         bits.iter().map(|n| WsNodeId(n.0)).collect()
+    }
+
+    /// Forward closure constrained to edges whose precision is at or
+    /// below `max_precision`. `None` is an explicit diagnostic
+    /// unfiltered closure and must not be used as user-visible
+    /// evidence.
+    ///
+    /// This is still exact for the requested precision scope: every
+    /// retained edge is explored to fixpoint, and every excluded edge
+    /// is outside the caller's declared precision contract.
+    pub fn forward_closure_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        max_precision: Option<Precision>,
+    ) -> Vec<WsNodeId> {
+        let Some(max_precision) = max_precision else {
+            return self.forward_closure_unfiltered(seeds);
+        };
+        let unified = self.ensure_unified();
+        let reach = self.ensure_precision_reach(&unified, max_precision);
+        let seed_nodes: Vec<NodeId> = seeds.iter().map(|w| NodeId(w.0)).collect();
+        reach
+            .forward_closure_nodes(&seed_nodes)
+            .into_iter()
+            .map(|n| WsNodeId(n.0))
+            .collect()
     }
 
     /// Backward closure: which nodes flow *into* `targets`?
@@ -195,8 +247,16 @@ impl IdgQueryService {
         unified.reach.reaches(NodeId(from.0), NodeId(to.0))
     }
 
-    /// Find every IDG node in `func` whose place is a bare-name
-    /// `Place::Read` or `Place::Write` matching one of `seed_names`.
+    /// Find every IDG node in `func` whose place is a `Place::Read`
+    /// or `Place::Write` matching one of `seed_names`.
+    ///
+    /// Bare seeds (`x`) match only bare reads/writes of `x`.
+    /// Wildcard descendant seeds (`x.*`) match only projected
+    /// reads/writes such as `x.y`, and exact projected seeds
+    /// (`x.y`) match that specific path. This keeps source rules
+    /// that intentionally mark a container's fields tainted from
+    /// promoting the whole container, while still letting a source
+    /// parameter like GraphQL `args` reach `args.q`.
     /// Lets consumers translate "user-provided seed names" into the
     /// IDG nodes those names address — used by browse-taint /
     /// security-analysis when the caller supplies explicit seeds.
@@ -213,22 +273,77 @@ impl IdgQueryService {
             return Vec::new();
         };
         let mut out = Vec::new();
-        // Build the lookup set once per call. Each Read uses
-        // `(name, path=[])` and is shared across uses, so a single
-        // lookup suffices. Writes use `(name, path=[], span)` per
-        // event — we scan the place dict for ALL spans matching
-        // each requested name.
-        let target_strids: ahash::AHashSet<bonsai_factstore::StrId> = seed_names
-            .iter()
-            .filter_map(|n| segment.strings.lookup(n))
-            .collect();
-        if target_strids.is_empty() {
+        let mut bare_strids: ahash::AHashSet<bonsai_factstore::StrId> = AHashSet::new();
+        let mut descendant_strids: ahash::AHashSet<bonsai_factstore::StrId> = AHashSet::new();
+        let mut descendant_bases: AHashSet<String> = AHashSet::new();
+        let mut exact_flat_paths: AHashSet<String> = AHashSet::new();
+        let mut exact_paths: Vec<(bonsai_factstore::StrId, Vec<bonsai_factstore::StrId>)> = Vec::new();
+        for seed in seed_names {
+            let seed = seed.trim();
+            if seed.is_empty() {
+                continue;
+            }
+            if let Some(base) = seed.strip_suffix(".*") {
+                let base = base.trim();
+                if let Some(strid) = segment.strings.lookup(base) {
+                    descendant_strids.insert(strid);
+                }
+                if !base.is_empty() {
+                    descendant_bases.insert(base.to_string());
+                }
+                continue;
+            }
+            if let Some((base, path)) = split_projected_seed(seed) {
+                exact_flat_paths.insert(format!("{base}.{}", path.join(".")));
+                let Some(base_strid) = segment.strings.lookup(base) else {
+                    continue;
+                };
+                let Some(path_strids) = path
+                    .iter()
+                    .map(|part| segment.strings.lookup(part))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                exact_paths.push((base_strid, path_strids));
+                continue;
+            }
+            if let Some(strid) = segment.strings.lookup(seed) {
+                bare_strids.insert(strid);
+            }
+        }
+        if bare_strids.is_empty()
+            && descendant_strids.is_empty()
+            && descendant_bases.is_empty()
+            && exact_paths.is_empty()
+            && exact_flat_paths.is_empty()
+        {
             return out;
         }
         for (pid_idx, place) in segment.places.places.iter().enumerate() {
             let matches = match place {
-                Place::Read { name, path } if path.is_empty() => target_strids.contains(name),
-                Place::Write { name, path, .. } if path.is_empty() => target_strids.contains(name),
+                Place::Read { name, path } if path.is_empty() => {
+                    bare_strids.contains(name)
+                        || flat_place_matches_projected_seed(
+                            segment.strings.get(*name),
+                            &descendant_bases,
+                            &exact_flat_paths,
+                        )
+                }
+                Place::Write { name, path, .. } if path.is_empty() => {
+                    bare_strids.contains(name)
+                        || flat_place_matches_projected_seed(
+                            segment.strings.get(*name),
+                            &descendant_bases,
+                            &exact_flat_paths,
+                        )
+                }
+                Place::Read { name, path } | Place::Write { name, path, .. } => {
+                    (!path.is_empty() && descendant_strids.contains(name))
+                        || exact_paths.iter().any(|(base, exact_path)| {
+                            base == name && exact_path.as_slice() == path.as_slice()
+                        })
+                }
                 _ => false,
             };
             if !matches {
@@ -236,9 +351,64 @@ impl IdgQueryService {
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
             if let Some(local_node) = segment.nodes.lookup(func, pid) {
-                if let Some(&ws_node) = unified.forward.get(&(seg_id, local_node)) {
+                if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                 }
+            }
+        }
+        out
+    }
+
+    /// Return the subset of `names` whose bare Read/Write node in
+    /// `func` is present in an already-computed reachability closure.
+    ///
+    /// This is the batched counterpart to repeatedly calling
+    /// [`Self::read_or_write_nodes_for_names`] for each local name.
+    /// Taint graph construction asks this for every receiver-bearing
+    /// call in a closure; scanning the segment's place dictionary
+    /// once per caller avoids an allocation-heavy name-by-name loop.
+    pub fn read_or_write_names_in_reachable_nodes(
+        &self,
+        func: FuncId,
+        names: &[String],
+        closure: &AHashSet<WsNodeId>,
+    ) -> AHashSet<String> {
+        let unified = self.ensure_unified();
+        let Some(seg_id) = self.workspace.segment_for_func(func) else {
+            return AHashSet::default();
+        };
+        let Some(segment) = self.workspace.segment(seg_id) else {
+            return AHashSet::default();
+        };
+        let mut target_by_strid: AHashMap<bonsai_factstore::StrId, String> = AHashMap::new();
+        for name in names {
+            if let Some(strid) = segment.strings.lookup(name) {
+                target_by_strid.entry(strid).or_insert_with(|| name.clone());
+            }
+        }
+        if target_by_strid.is_empty() {
+            return AHashSet::default();
+        }
+
+        let mut out = AHashSet::default();
+        for (pid_idx, place) in segment.places.places.iter().enumerate() {
+            let strid = match place {
+                Place::Read { name, path } if path.is_empty() => *name,
+                Place::Write { name, path, .. } if path.is_empty() => *name,
+                _ => continue,
+            };
+            let Some(source_name) = target_by_strid.get(&strid) else {
+                continue;
+            };
+            let pid = crate::node::PlaceId(pid_idx as u32);
+            let Some(local_node) = segment.nodes.lookup(func, pid) else {
+                continue;
+            };
+            let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) else {
+                continue;
+            };
+            if closure.contains(&ws_node) {
+                out.insert(source_name.clone());
             }
         }
         out
@@ -286,7 +456,7 @@ impl IdgQueryService {
             let Some(local_node) = segment.nodes.lookup(func, pid) else {
                 continue;
             };
-            if let Some(&ws_node) = unified.forward.get(&(seg_id, local_node)) {
+            if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                 out.push(ws_node);
             }
         }
@@ -318,7 +488,7 @@ impl IdgQueryService {
             let Some(local_node) = segment.nodes.lookup(func, pid) else {
                 break;
             };
-            if let Some(&ws_node) = unified.forward.get(&(seg_id, local_node)) {
+            if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                 out.push(ws_node);
             }
         }
@@ -396,7 +566,7 @@ impl IdgQueryService {
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
             if let Some(local_node) = segment.nodes.lookup(func, pid) {
-                if let Some(&ws_node) = unified.forward.get(&(seg_id, local_node)) {
+                if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                 }
             }
@@ -416,10 +586,29 @@ impl IdgQueryService {
     /// Result is sorted by `(caller_func, call_span.start, arg_idx)`
     /// for deterministic grouping.
     pub fn tainted_call_args_in_closure(&self, seeds: &[WsNodeId]) -> Vec<(FuncId, Span, u8)> {
+        self.tainted_call_args_in_closure_with_max_precision(seeds, Some(SEMANTIC_MAX_PRECISION))
+    }
+
+    /// Same as [`Self::tainted_call_args_in_closure`], but computes
+    /// the seed closure inside a precision scope.
+    pub fn tainted_call_args_in_closure_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        max_precision: Option<Precision>,
+    ) -> Vec<(FuncId, Span, u8)> {
+        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        self.tainted_call_args_in_reachable_nodes(&closure)
+    }
+
+    /// Same as [`Self::tainted_call_args_in_closure`], but consumes a
+    /// closure the caller already computed. Exact source graph
+    /// construction needs several views over the same reachability
+    /// set; accepting the closure avoids re-running the bitvector
+    /// fixpoint for every view.
+    pub fn tainted_call_args_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<(FuncId, Span, u8)> {
         let unified = self.ensure_unified();
-        let closure: AHashSet<WsNodeId> = self.forward_closure(seeds).into_iter().collect();
         let mut out = Vec::new();
-        for ws_node in &closure {
+        for ws_node in closure {
             let Some(&(seg_id, local)) = unified.reverse.get(ws_node.0 as usize) else {
                 continue;
             };
@@ -441,11 +630,64 @@ impl IdgQueryService {
         out
     }
 
+    /// Return the `CallRet` node for a call site in `func`, if the
+    /// transfer pass recorded one. Used by rulepack-declared
+    /// call-result passthrough semantics: a tainted `CallArg` at the
+    /// same site can seed the return node without hardcoding API
+    /// names into the IDG core.
+    pub fn call_ret_node_at_site(&self, func: FuncId, call_span: Span) -> Option<WsNodeId> {
+        let unified = self.ensure_unified();
+        let seg_id = self.workspace.segment_for_func(func)?;
+        let segment = self.workspace.segment(seg_id)?;
+        for (pid_idx, place) in segment.places.places.iter().enumerate() {
+            let Place::CallRet { site } = place else {
+                continue;
+            };
+            if site.0 != call_span {
+                continue;
+            }
+            let pid = crate::node::PlaceId(pid_idx as u32);
+            let local_node = segment.nodes.lookup(func, pid)?;
+            return Self::ws_node_for(&unified, seg_id, local_node);
+        }
+        None
+    }
+
+    /// Functions whose synthetic `Place::Return` node is in a
+    /// caller-provided reachability closure. This is the batched
+    /// counterpart to probing `return_node_of(func)` for every
+    /// function in the workspace.
+    pub fn funcs_with_return_nodes_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<FuncId> {
+        let unified = self.ensure_unified();
+        let mut out = Vec::new();
+        for ws_node in closure {
+            let Some(&(seg_id, local)) = unified.reverse.get(ws_node.0 as usize) else {
+                continue;
+            };
+            let Some(segment) = self.workspace.segment(seg_id) else {
+                continue;
+            };
+            let Some(node) = segment.nodes.get(local) else {
+                continue;
+            };
+            let Some(place) = segment.places.get(node.place) else {
+                continue;
+            };
+            if matches!(place, Place::Return) {
+                out.push(node.func);
+            }
+        }
+        out.sort_by_key(|f| f.raw());
+        out.dedup();
+        out
+    }
+
     /// Returns IDG nodes for `Place::Read{name}` / `Place::Write{name}`
-    /// in `func` that lie *after* `cutoff` in source order. Used by
-    /// security analysis when a source rule has `output_args` —
-    /// fgets(buf, ...) writes back to `buf`, so post-call reads of
-    /// `buf` are the seed-bearing nodes.
+    /// in `func` that lie *after* `cutoff` in source order. `name`
+    /// may be a bare storage name (`buf`) or an exact projected
+    /// storage path (`env.cmd`). Used by output-argument flow rules
+    /// after a tainted input reaches a call that mutates an output
+    /// carrier.
     pub fn nodes_for_name_after_span(&self, func: FuncId, name: &str, cutoff: Span) -> Vec<WsNodeId> {
         let unified = self.ensure_unified();
         let Some(seg_id) = self.workspace.segment_for_func(func) else {
@@ -454,9 +696,11 @@ impl IdgQueryService {
         let Some(segment) = self.workspace.segment(seg_id) else {
             return Vec::new();
         };
-        let Some(strid) = segment.strings.lookup(name) else {
+        let bare_strid = segment.strings.lookup(name);
+        let projected = projected_storage_path(segment, name);
+        if bare_strid.is_none() && projected.is_none() {
             return Vec::new();
-        };
+        }
         let mut out = Vec::new();
         for (pid_idx, place) in segment.places.places.iter().enumerate() {
             let matches = match place {
@@ -465,12 +709,19 @@ impl IdgQueryService {
                 // harmless when the only relevant flow is post-cutoff
                 // because pre-cutoff reads can't reach a seed nobody
                 // wrote yet).
-                Place::Read { name: n, path } if path.is_empty() && *n == strid => true,
+                Place::Read { name: n, path } => {
+                    bare_strid.is_some_and(|strid| path.is_empty() && *n == strid)
+                        || projected.as_ref().is_some_and(|(base, projected_path)| {
+                            *n == *base && path.as_slice() == projected_path.as_slice()
+                        })
+                }
                 // Writes are span-distinct — only writes after cutoff.
-                Place::Write { name: n, path, span }
-                    if path.is_empty() && *n == strid && span_after(*span, cutoff) =>
-                {
-                    true
+                Place::Write { name: n, path, span } => {
+                    span_after(*span, cutoff)
+                        && (bare_strid.is_some_and(|strid| path.is_empty() && *n == strid)
+                            || projected.as_ref().is_some_and(|(base, projected_path)| {
+                                *n == *base && path.as_slice() == projected_path.as_slice()
+                            }))
                 }
                 _ => false,
             };
@@ -479,7 +730,7 @@ impl IdgQueryService {
             }
             let pid = crate::node::PlaceId(pid_idx as u32);
             if let Some(local_node) = segment.nodes.lookup(func, pid) {
-                if let Some(&ws_node) = unified.forward.get(&(seg_id, local_node)) {
+                if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, local_node) {
                     out.push(ws_node);
                 }
             }
@@ -557,7 +808,7 @@ impl IdgQueryService {
             if !span_after(consumer_span, cutoff) {
                 continue;
             }
-            if let Some(&ws_node) = unified.forward.get(&(seg_id, edge.to)) {
+            if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.to) {
                 if seen.insert(ws_node) {
                     out.push(ws_node);
                 }
@@ -592,7 +843,7 @@ impl IdgQueryService {
         let segment = self.workspace.segment(seg_id)?;
         let pid = segment.places.lookup(&Place::Return)?;
         let local_node = segment.nodes.lookup(func, pid)?;
-        unified.forward.get(&(seg_id, local_node)).copied()
+        Self::ws_node_for(&unified, seg_id, local_node)
     }
 
     /// Enumerate every transitive cross-call propagation reachable
@@ -607,71 +858,46 @@ impl IdgQueryService {
     /// replacement for the legacy engine's `result.call_records`
     /// list.
     pub fn cross_call_edges_in_closure(&self, seeds: &[WsNodeId]) -> Vec<CrossCallEdge> {
+        self.cross_call_edges_in_closure_with_max_precision(seeds, Some(SEMANTIC_MAX_PRECISION))
+    }
+
+    /// Same as [`Self::cross_call_edges_in_closure`], but computes
+    /// the closure itself inside a precision scope. This is the
+    /// semantic flow surface used by review/security/export callers:
+    /// exact and semantically narrowed edges are walked to fixpoint,
+    /// while weaker diagnostic edges are not traversed.
+    pub fn cross_call_edges_in_closure_with_max_precision(
+        &self,
+        seeds: &[WsNodeId],
+        max_precision: Option<Precision>,
+    ) -> Vec<CrossCallEdge> {
+        let closure = self.forward_closure_with_max_precision(seeds, max_precision);
+        self.cross_call_edges_in_reachable_nodes_with_max_precision(&closure, max_precision)
+    }
+
+    /// Same as [`Self::cross_call_edges_in_closure`], but consumes a
+    /// closure the caller already computed.
+    pub fn cross_call_edges_in_reachable_nodes(&self, closure: &[WsNodeId]) -> Vec<CrossCallEdge> {
+        self.cross_call_edges_in_reachable_nodes_with_max_precision(closure, Some(SEMANTIC_MAX_PRECISION))
+    }
+
+    /// Same as [`Self::cross_call_edges_in_reachable_nodes`], but
+    /// drops cross-call rows outside the caller's precision scope.
+    pub fn cross_call_edges_in_reachable_nodes_with_max_precision(
+        &self,
+        closure: &[WsNodeId],
+        max_precision: Option<Precision>,
+    ) -> Vec<CrossCallEdge> {
         let unified = self.ensure_unified();
-        let closure: AHashSet<WsNodeId> = self.forward_closure(seeds).into_iter().collect();
+        let cross_calls_by_from = self.ensure_cross_calls_by_from(&unified);
         let mut out = Vec::new();
-
-        // 1. Intra-segment edges: same-file caller/callee pairs.
-        // The Phase 3 stitcher routes these through the segment's
-        // intra-edge list (see `place_inter_edge`); cross_file
-        // alone never sees them.
-        for (seg_id, segment) in self.workspace.segments() {
-            for edge in &segment.edges {
-                let Some(&from_ws) = unified.forward.get(&(seg_id, edge.from)) else {
-                    continue;
-                };
-                if !closure.contains(&from_ws) {
-                    continue;
+        for ws_node in closure {
+            if let Some(rows) = cross_calls_by_from.get(ws_node) {
+                if let Some(max_precision) = max_precision {
+                    out.extend(rows.iter().filter(|row| row.precision <= max_precision).copied());
+                } else {
+                    out.extend_from_slice(rows);
                 }
-                if let Some(row) = lift_call_arg_edge(segment, segment, edge) {
-                    out.push(row);
-                }
-            }
-        }
-
-        // 2b. Synthetic cross-method field-flow edges. Each link
-        // records that a writer-method's receiver-field write
-        // (Place::Write) feeds a reader-method's receiver-field
-        // read (Place::Read). Lift it into a CrossCallEdge with
-        // sentinel arg/param indices so downstream lineage walks
-        // can attribute the chain to (writer, reader) the same
-        // way they handle real call edges. Without this the
-        // forward closure correctly reaches the reader's CallArg
-        // but `chain_funcs_for_lineage` rejects the chain because
-        // no CrossCallEdge with `callee = reader` exists.
-        for link in self.workspace.field_flow() {
-            let writer_ws = WsNodeId(link.writer_ws_node);
-            if !closure.contains(&writer_ws) {
-                continue;
-            }
-            out.push(CrossCallEdge {
-                caller: link.writer,
-                callee: link.reader,
-                call_span: link.via_span,
-                arg_idx: u8::MAX,
-                param_idx: u8::MAX,
-                precision: bonsai_common::Precision::OverApproximate,
-                call_kind: bonsai_callgraph::EdgeKind::Indirect,
-            });
-        }
-
-        // 2. Cross-file edges for the genuinely cross-segment
-        // caller/callee pairs.
-        for cfe in &self.workspace.cross_file().edges {
-            let Some(&from_ws) = unified.forward.get(&(cfe.from_segment, cfe.edge.from)) else {
-                continue;
-            };
-            if !closure.contains(&from_ws) {
-                continue;
-            }
-            let Some(from_seg) = self.workspace.segment(cfe.from_segment) else {
-                continue;
-            };
-            let Some(to_seg) = self.workspace.segment(cfe.to_segment) else {
-                continue;
-            };
-            if let Some(row) = lift_call_arg_edge(from_seg, to_seg, &cfe.edge) {
-                out.push(row);
             }
         }
         out
@@ -685,9 +911,18 @@ impl IdgQueryService {
                 return Arc::clone(u);
             }
         }
-        let unified = self.build_unified();
-        let unified = Arc::new(unified);
-        *self.unified.write() = Some(Arc::clone(&unified));
+
+        // Only one worker should pay the workspace-wide materialisation
+        // cost. Source/security analysis can issue exact IDG queries from
+        // multiple Rayon workers; building outside the write lock let each
+        // worker race through `build_unified()` and discard all but one
+        // result, duplicating CPU and memory for broad scans.
+        let mut write = self.unified.write();
+        if let Some(u) = write.as_ref() {
+            return Arc::clone(u);
+        }
+        let unified = Arc::new(self.build_unified());
+        *write = Some(Arc::clone(&unified));
         unified
     }
 
@@ -696,7 +931,7 @@ impl IdgQueryService {
     fn build_unified(&self) -> UnifiedAddressSpace {
         let mut forward = AHashMap::new();
         let mut reverse = Vec::new();
-        let mut edges = Vec::new();
+        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(self.workspace.total_edge_count());
         // 1. Allocate a workspace-global id for every segment-local
         // node. Stable order: iterate segments by SegmentId, then
         // local node id ascending. That guarantees deterministic ws
@@ -722,11 +957,7 @@ impl IdgQueryService {
                 let Some(&to_ws) = forward.get(&(seg_id, edge.to)) else {
                     continue;
                 };
-                edges.push(IdgEdge {
-                    from: NodeId(from_ws.0),
-                    to: NodeId(to_ws.0),
-                    meta: edge.meta,
-                });
+                edges.push((from_ws.0, to_ws.0));
             }
         }
         // 3. Translate cross-file edges. The CrossFileEdge stores
@@ -739,20 +970,151 @@ impl IdgQueryService {
             let Some(&to_ws) = forward.get(&(cfe.to_segment, cfe.edge.to)) else {
                 continue;
             };
-            edges.push(IdgEdge {
-                from: NodeId(from_ws.0),
-                to: NodeId(to_ws.0),
-                meta: cfe.edge.meta,
-            });
+            edges.push((from_ws.0, to_ws.0));
         }
         // 4. Build the reachability index over the unified edges.
         let n_nodes = reverse.len();
-        let reach = ReachabilityIndex::new(n_nodes, &edges);
+        let reach = ReachabilityIndex::from_pairs(n_nodes, &edges);
         UnifiedAddressSpace {
             forward,
             reverse,
             reach,
+            precision_reach: RwLock::new(AHashMap::new()),
+            cross_calls_by_from: RwLock::new(None),
         }
+    }
+
+    fn ws_node_for(unified: &UnifiedAddressSpace, seg_id: SegmentId, local_node: NodeId) -> Option<WsNodeId> {
+        unified.forward.get(&(seg_id, local_node)).copied()
+    }
+
+    fn ensure_precision_reach(
+        &self,
+        unified: &Arc<UnifiedAddressSpace>,
+        max_precision: Precision,
+    ) -> Arc<ReachabilityIndex> {
+        {
+            let read = unified.precision_reach.read();
+            if let Some(reach) = read.get(&max_precision) {
+                return Arc::clone(reach);
+            }
+        }
+        let mut write = unified.precision_reach.write();
+        if let Some(reach) = write.get(&max_precision) {
+            return Arc::clone(reach);
+        }
+        let reach = Arc::new(self.build_precision_reach(unified, max_precision));
+        write.insert(max_precision, Arc::clone(&reach));
+        reach
+    }
+
+    fn build_precision_reach(
+        &self,
+        unified: &UnifiedAddressSpace,
+        max_precision: Precision,
+    ) -> ReachabilityIndex {
+        let mut edges: Vec<(u32, u32)> = Vec::with_capacity(self.workspace.total_edge_count());
+        for (seg_id, segment) in self.workspace.segments() {
+            let seg_id = SegmentId(seg_id.0);
+            for edge in &segment.edges {
+                if edge.meta.precision > max_precision {
+                    continue;
+                }
+                let Some(from_ws) = Self::ws_node_for(unified, seg_id, edge.from) else {
+                    continue;
+                };
+                let Some(to_ws) = Self::ws_node_for(unified, seg_id, edge.to) else {
+                    continue;
+                };
+                edges.push((from_ws.0, to_ws.0));
+            }
+        }
+        for cfe in &self.workspace.cross_file().edges {
+            if cfe.edge.meta.precision > max_precision {
+                continue;
+            }
+            let Some(from_ws) = Self::ws_node_for(unified, cfe.from_segment, cfe.edge.from) else {
+                continue;
+            };
+            let Some(to_ws) = Self::ws_node_for(unified, cfe.to_segment, cfe.edge.to) else {
+                continue;
+            };
+            edges.push((from_ws.0, to_ws.0));
+        }
+        ReachabilityIndex::from_pairs(unified.reverse.len(), &edges)
+    }
+
+    fn ensure_cross_calls_by_from(
+        &self,
+        unified: &Arc<UnifiedAddressSpace>,
+    ) -> Arc<AHashMap<WsNodeId, Vec<CrossCallEdge>>> {
+        {
+            let read = unified.cross_calls_by_from.read();
+            if let Some(rows) = read.as_ref() {
+                return Arc::clone(rows);
+            }
+        }
+        let mut write = unified.cross_calls_by_from.write();
+        if let Some(rows) = write.as_ref() {
+            return Arc::clone(rows);
+        }
+        let rows = Arc::new(self.build_cross_calls_by_from(unified));
+        *write = Some(Arc::clone(&rows));
+        rows
+    }
+
+    fn build_cross_calls_by_from(
+        &self,
+        unified: &UnifiedAddressSpace,
+    ) -> AHashMap<WsNodeId, Vec<CrossCallEdge>> {
+        let mut cross_calls_by_from: AHashMap<WsNodeId, Vec<CrossCallEdge>> = AHashMap::new();
+        for (seg_id, segment) in self.workspace.segments() {
+            let seg_id = SegmentId(seg_id.0);
+            for edge in &segment.edges {
+                let Some(from_ws) = Self::ws_node_for(unified, seg_id, edge.from) else {
+                    continue;
+                };
+                if let Some(row) = lift_call_arg_edge(segment, segment, edge) {
+                    cross_calls_by_from.entry(from_ws).or_default().push(row);
+                }
+            }
+        }
+        // Synthetic cross-method field-flow edges. Each link records
+        // that a writer-method receiver-field write feeds a
+        // reader-method receiver-field read. They are not part of the
+        // raw segment edge lists, but source/taint lineage consumers
+        // need them as cross-call rows when the writer node is in the
+        // seed closure.
+        for link in self.workspace.field_flow() {
+            let writer_ws = WsNodeId(link.writer_ws_node);
+            cross_calls_by_from
+                .entry(writer_ws)
+                .or_default()
+                .push(CrossCallEdge {
+                    caller: link.writer,
+                    callee: link.reader,
+                    call_span: link.via_span,
+                    arg_idx: u8::MAX,
+                    param_idx: u8::MAX,
+                    precision: link.precision,
+                    call_kind: bonsai_callgraph::EdgeKind::Indirect,
+                });
+        }
+        for cfe in &self.workspace.cross_file().edges {
+            let Some(from_ws) = Self::ws_node_for(unified, cfe.from_segment, cfe.edge.from) else {
+                continue;
+            };
+            let Some(from_seg) = self.workspace.segment(cfe.from_segment) else {
+                continue;
+            };
+            let Some(to_seg) = self.workspace.segment(cfe.to_segment) else {
+                continue;
+            };
+            if let Some(row) = lift_call_arg_edge(from_seg, to_seg, &cfe.edge) {
+                cross_calls_by_from.entry(from_ws).or_default().push(row);
+            }
+        }
+        cross_calls_by_from
     }
 
     /// Translate `(func, place)` to a [`PointRef`] by looking up the
@@ -764,6 +1126,34 @@ impl IdgQueryService {
         let default_span = decl
             .map(|d| d.name_span)
             .unwrap_or_else(|| Span::empty(bonsai_common::FileId::INVALID, 0));
+        let place_name = |name: bonsai_factstore::StrId,
+                          path: &smallvec::SmallVec<[bonsai_factstore::StrId; 4]>| {
+            let Some(base) = self
+                .workspace
+                .segment_for_func(func)
+                .and_then(|seg_id| self.workspace.segment(seg_id))
+                .and_then(|segment| segment.strings.get(name))
+            else {
+                return String::new();
+            };
+            if path.is_empty() {
+                return base.to_string();
+            }
+            let mut out = base.to_string();
+            if let Some(segment) = self
+                .workspace
+                .segment_for_func(func)
+                .and_then(|seg_id| self.workspace.segment(seg_id))
+            {
+                for part in path {
+                    if let Some(segment_part) = segment.strings.get(*part) {
+                        out.push('.');
+                        out.push_str(segment_part);
+                    }
+                }
+            }
+            out
+        };
         let (kind, name, span) = match place {
             Place::Param { idx } => (
                 PointKind::Param,
@@ -772,8 +1162,8 @@ impl IdgQueryService {
                 default_span,
             ),
             Place::Return => (PointKind::Return, String::new(), default_span),
-            Place::Read { .. } => (PointKind::Read, String::new(), default_span),
-            Place::Write { span, .. } => (PointKind::Write, String::new(), *span),
+            Place::Read { name, path } => (PointKind::Read, place_name(*name, path), default_span),
+            Place::Write { name, path, span } => (PointKind::Write, place_name(*name, path), *span),
             Place::CallArg { site, .. } => (PointKind::CallArg, String::new(), site.0),
             Place::CallRet { site } => (PointKind::CallRet, String::new(), site.0),
             _ => (PointKind::Other, String::new(), default_span),
@@ -785,6 +1175,59 @@ impl IdgQueryService {
             kind,
         }
     }
+}
+
+fn split_projected_seed(seed: &str) -> Option<(&str, Vec<&str>)> {
+    let (base, rest) = seed.split_once('.')?;
+    let base = base.trim();
+    if base.is_empty() {
+        return None;
+    }
+    let path: Vec<&str> = rest
+        .split('.')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && *part != "*")
+        .collect();
+    (!path.is_empty()).then_some((base, path))
+}
+
+fn projected_storage_path(
+    segment: &crate::segment::IdgSegment,
+    name: &str,
+) -> Option<(bonsai_factstore::StrId, Vec<bonsai_factstore::StrId>)> {
+    let normalised = normalise_projected_storage_text(name);
+    let (base, path) = split_projected_seed(&normalised)?;
+    let base_id = segment.strings.lookup(base)?;
+    let path_ids = path
+        .iter()
+        .map(|part| segment.strings.lookup(part))
+        .collect::<Option<Vec<_>>>()?;
+    Some((base_id, path_ids))
+}
+
+fn normalise_projected_storage_text(name: &str) -> String {
+    name.trim()
+        .trim_start_matches('&')
+        .trim_start_matches('*')
+        .replace("->", ".")
+}
+
+fn flat_place_matches_projected_seed(
+    place: Option<&str>,
+    descendant_bases: &AHashSet<String>,
+    exact_flat_paths: &AHashSet<String>,
+) -> bool {
+    let Some(place) = place.map(str::trim).filter(|place| !place.is_empty()) else {
+        return false;
+    };
+    if exact_flat_paths.contains(place) {
+        return true;
+    }
+    descendant_bases.iter().any(|base| {
+        place
+            .strip_prefix(base)
+            .is_some_and(|rest| rest.starts_with('.') || rest.starts_with('['))
+    })
 }
 
 /// True iff two source spans overlap (same file, range intersects).
@@ -800,9 +1243,9 @@ fn span_after(a: Span, b: Span) -> bool {
 }
 
 /// Lift one IDG edge into a [`CrossCallEdge`] row. Returns `None`
-/// when the edge isn't a `CallArg{site, idx} → Param{idx}` shape
-/// (e.g. `Return → CallRet` return-flow edges, or any intra-procedural
-/// non-call edge).
+/// when the edge isn't a `CallArg{site, idx} → Param{idx}` shape,
+/// a return/yield output edge, or any other cross-call propagation
+/// edge the lineage layer can report.
 fn lift_call_arg_edge(
     from_seg: &crate::segment::IdgSegment,
     to_seg: &crate::segment::IdgSegment,
@@ -826,10 +1269,28 @@ fn lift_call_arg_edge(
             });
         }
     }
-    // Return-value edge: callee's `Place::Return` flowing back to
-    // the caller's `Place::CallRet`. The lineage walker treats
-    // these as legitimate cross-method propagation steps so chain
-    // attribution works for call-RHS source patterns
+    // Field-argument edge: caller field writer → callee field read.
+    // The builder emits this when `callee(arg)` passes a container
+    // and the caller has a precise `arg.field` writer while the
+    // callee reads `param.field`. Treat it as a cross-call lineage
+    // hop without pretending the whole positional argument/parameter
+    // is tainted.
+    if edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg && from_node.func != to_node.func {
+        return Some(CrossCallEdge {
+            caller: from_node.func,
+            callee: to_node.func,
+            call_span: edge.meta.via_span,
+            arg_idx: u8::MAX,
+            param_idx: u8::MAX,
+            precision: edge.meta.precision,
+            call_kind: edge.meta.call_kind,
+        });
+    }
+    // Return-value edge: callee's `Place::Return` or generator
+    // `Place::Yield` flowing back to the caller's `Place::CallRet`.
+    // The lineage walker treats these as legitimate cross-method
+    // propagation steps so chain attribution works for call-RHS
+    // source patterns
     // (`cmd = mid(); os.system(cmd)` — mid's Return → top's
     // CallRet is the bridge from mid's body taint to top's
     // sink-relevant local). Encode the edge with `caller =
@@ -840,7 +1301,7 @@ fn lift_call_arg_edge(
     // `parent_trace_id` lookup returns None. Sentinel
     // `arg_idx = u8::MAX` / `param_idx = u8::MAX` distinguishes
     // the synthetic return row from real positional-arg edges.
-    if matches!(from_place, Place::Return) {
+    if matches!(from_place, Place::Return | Place::Yield) {
         if let Place::CallRet { site } = to_place {
             return Some(CrossCallEdge {
                 caller: from_node.func,
@@ -857,327 +1318,5 @@ fn lift_call_arg_edge(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::workspace_adapter;
-    use bonsai_callgraph::ResolvedCallGraph;
-    use bonsai_common::SymbolId;
-    use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, ModulePath, Visibility};
-
-    fn span(file: u32, start: u64, end: u64) -> Span {
-        Span::new(bonsai_common::FileId::new(file), start, end)
-    }
-
-    fn empty_decl(symbol: u32, file: u32, name: &str) -> Decl {
-        Decl {
-            symbol: SymbolId::new(symbol),
-            kind: DeclKind::Function,
-            name: name.to_string(),
-            qualified_name: None,
-            module_path: ModulePath::default(),
-            span: span(file, 0, 100),
-            name_span: span(file, 0, 10),
-            visibility: Visibility::Public,
-            parent: None,
-            body_span: Some(span(file, 10, 100)),
-            flow_events: Vec::new(),
-            has_implicit_returns: false,
-            params: Vec::new(),
-            param_annotations: Vec::new(),
-            type_aliases: Vec::new(),
-            bases: Vec::new(),
-            receiver_param_index: None,
-            receiver_field_writes: Vec::new(),
-            implicit_receiver_names: Vec::new(),
-            receiver_state_sources: Vec::new(),
-            return_type: None,
-        }
-    }
-
-    fn build(decls: Vec<Decl>) -> (Arc<GlobalIndex>, Arc<IdgWorkspace>) {
-        let mut by_file: AHashMap<bonsai_common::FileId, Vec<Decl>> = AHashMap::new();
-        for d in decls {
-            by_file.entry(d.span.file).or_default().push(d);
-        }
-        let mut idx = GlobalIndex::new();
-        for (file, defs) in by_file {
-            idx.insert(DeclIndex {
-                file,
-                defs,
-                refs: Vec::new(),
-                strings: Vec::new(),
-                comments: Vec::new(),
-            });
-        }
-        let cg = ResolvedCallGraph::build_with(&idx, |_| AHashMap::new());
-        let ws = workspace_adapter::build(&idx, &cg);
-        (Arc::new(idx), Arc::new(ws))
-    }
-
-    #[test]
-    fn empty_service_has_zero_segments() {
-        let idx = Arc::new(GlobalIndex::new());
-        let ws = Arc::new(IdgWorkspace::new());
-        let svc = IdgQueryService::new(ws, idx);
-        assert_eq!(svc.segment_count(), 0);
-        assert_eq!(svc.intra_edge_count(), 0);
-        assert_eq!(svc.cross_file_edge_count(), 0);
-    }
-
-    #[test]
-    fn unified_address_space_is_lazily_built() {
-        let mut decl = empty_decl(1, 0, "f");
-        decl.params = vec!["x".to_string()];
-        decl.flow_events = vec![FlowEvent::Return {
-            span: span(0, 20, 30),
-            value_name: Some("x".to_string()),
-            value_text: None,
-        }];
-        let (idx, ws) = build(vec![decl]);
-        let svc = IdgQueryService::new(ws, idx);
-        // Trigger materialisation.
-        let params = svc.param_nodes_of(FuncId::new(0));
-        assert!(!params.is_empty());
-    }
-
-    #[test]
-    fn forward_closure_from_param_reaches_return() {
-        // f(x) returns x — closure of param node should hit Return.
-        let mut decl = empty_decl(1, 0, "f");
-        decl.params = vec!["x".to_string()];
-        decl.flow_events = vec![FlowEvent::Return {
-            span: span(0, 20, 30),
-            value_name: Some("x".to_string()),
-            value_text: None,
-        }];
-        let (idx, ws) = build(vec![decl]);
-        let svc = IdgQueryService::new(ws, idx);
-        let func_id = FuncId::new(0);
-        let params = svc.param_nodes_of(func_id);
-        assert_eq!(params.len(), 1);
-        let ret = svc
-            .return_node_of(func_id)
-            .expect("Return node should exist for callable");
-        let closure = svc.forward_closure(&params);
-        assert!(closure.contains(&ret), "Param→Return closure missing Return");
-    }
-
-    #[test]
-    fn backward_closure_from_return_reaches_param() {
-        let mut decl = empty_decl(1, 0, "f");
-        decl.params = vec!["x".to_string()];
-        decl.flow_events = vec![FlowEvent::Return {
-            span: span(0, 20, 30),
-            value_name: Some("x".to_string()),
-            value_text: None,
-        }];
-        let (idx, ws) = build(vec![decl]);
-        let svc = IdgQueryService::new(ws, idx);
-        let func_id = FuncId::new(0);
-        let params = svc.param_nodes_of(func_id);
-        let ret = svc.return_node_of(func_id).unwrap();
-        let backward = svc.backward_closure(&[ret]);
-        for p in &params {
-            assert!(backward.contains(p), "backward(Return) missing param");
-        }
-    }
-
-    #[test]
-    fn reaches_is_consistent_with_forward_closure() {
-        let mut decl = empty_decl(1, 0, "f");
-        decl.params = vec!["x".to_string()];
-        decl.flow_events = vec![FlowEvent::Return {
-            span: span(0, 20, 30),
-            value_name: Some("x".to_string()),
-            value_text: None,
-        }];
-        let (idx, ws) = build(vec![decl]);
-        let svc = IdgQueryService::new(ws, idx);
-        let func_id = FuncId::new(0);
-        let params = svc.param_nodes_of(func_id);
-        let ret = svc.return_node_of(func_id).unwrap();
-        for p in &params {
-            assert!(svc.reaches(*p, ret));
-        }
-    }
-
-    #[test]
-    fn resolve_point_returns_param_for_param_node() {
-        let mut decl = empty_decl(1, 0, "f");
-        decl.params = vec!["arg0".to_string(), "arg1".to_string()];
-        let (idx, ws) = build(vec![decl]);
-        let svc = IdgQueryService::new(ws, idx);
-        let func_id = FuncId::new(0);
-        let params = svc.param_nodes_of(func_id);
-        assert_eq!(params.len(), 2);
-        let p0 = svc.resolve_point(params[0]).unwrap();
-        assert_eq!(p0.kind, PointKind::Param);
-        // Names match the decl's params.
-        assert_eq!(p0.func, func_id);
-        assert!(p0.name == "arg0" || p0.name == "arg1");
-    }
-
-    #[test]
-    fn read_or_write_nodes_for_names_locates_local_assign_target() {
-        // f(x) does `local = x; helper(local)`. Looking up "local"
-        // should find both the Write node from the assign and the
-        // Read node from the call arg — both interned in the segment
-        // string pool.
-        let mut f = empty_decl(1, 0, "f");
-        f.params = vec!["x".to_string()];
-        f.flow_events = vec![
-            FlowEvent::Assign {
-                span: span(0, 10, 20),
-                target: "local".to_string(),
-                source_name: Some("x".to_string()),
-                source_call: None,
-                source_call_args: Vec::new(),
-                source_names: Vec::new(),
-                declares_new_binding: false,
-                value_kind: None,
-            },
-            FlowEvent::Call {
-                span: span(0, 30, 40),
-                name: "helper".to_string(),
-                receiver: None,
-                receiver_types: Vec::new(),
-                call_kind: bonsai_lang_api::CallKind::Function,
-                args: vec![bonsai_lang_api::CallArg {
-                    span: span(0, 33, 38),
-                    name: None,
-                    value_text: "local".to_string(),
-                    place: Some("local".to_string()),
-                    source_names: Vec::new(),
-                }],
-            },
-        ];
-        let (idx, ws) = build(vec![f]);
-        let svc = IdgQueryService::new(ws, idx);
-        let func_for = |name: &str| {
-            for f in svc.global.all_files() {
-                for decl in svc.global.functions_in(f) {
-                    if decl.name == name {
-                        return FuncId::new(decl.symbol.raw());
-                    }
-                }
-            }
-            unreachable!("function {name} not in index")
-        };
-        let f_id = func_for("f");
-        let nodes = svc.read_or_write_nodes_for_names(f_id, &["local".to_string()]);
-        assert!(!nodes.is_empty(), "should locate IDG nodes for `local`");
-    }
-
-    #[test]
-    fn cross_call_edges_in_closure_reports_callarg_to_param() {
-        let mut f = empty_decl(1, 0, "f");
-        f.params = vec!["x".to_string()];
-        f.flow_events = vec![FlowEvent::Call {
-            span: span(0, 20, 30),
-            name: "g".to_string(),
-            receiver: None,
-            receiver_types: Vec::new(),
-            call_kind: bonsai_lang_api::CallKind::Function,
-            args: vec![bonsai_lang_api::CallArg {
-                span: span(0, 22, 23),
-                name: None,
-                value_text: "x".to_string(),
-                place: Some("x".to_string()),
-                source_names: Vec::new(),
-            }],
-        }];
-        let mut g = empty_decl(2, 1, "g");
-        g.params = vec!["arg".to_string()];
-        g.flow_events = Vec::new();
-        let (idx, ws) = build(vec![f, g]);
-        let svc = IdgQueryService::new(ws, idx);
-        let func_for = |name: &str| {
-            for f in svc.global.all_files() {
-                for decl in svc.global.functions_in(f) {
-                    if decl.name == name {
-                        return FuncId::new(decl.symbol.raw());
-                    }
-                }
-            }
-            unreachable!("function {name} not in index")
-        };
-        let f_id = func_for("f");
-        let g_id = func_for("g");
-        let f_params = svc.param_nodes_of(f_id);
-        let edges = svc.cross_call_edges_in_closure(&f_params);
-        assert!(
-            edges
-                .iter()
-                .any(|e| { e.caller == f_id && e.callee == g_id && e.arg_idx == 0 && e.param_idx == 0 }),
-            "expected one CallArg→Param edge for f→g, got {edges:?}",
-        );
-    }
-
-    #[test]
-    fn cross_call_edges_skip_unreachable_calls() {
-        // Closure starting from a node unrelated to any call site
-        // returns an empty list — proves the closure filter is wired.
-        let mut f = empty_decl(1, 0, "f");
-        f.params = vec!["x".to_string()];
-        let (idx, ws) = build(vec![f]);
-        let svc = IdgQueryService::new(ws, idx);
-        let edges = svc.cross_call_edges_in_closure(&[]);
-        assert!(edges.is_empty());
-    }
-
-    #[test]
-    fn cross_file_call_reaches_callee_from_caller_param() {
-        // f(x) calls g(x); g returns its arg. Closure of f's param
-        // should reach g's Return, then funnel back to f's CallRet
-        // node — proving cross-file edges are queryable.
-        let mut f = empty_decl(1, 0, "f");
-        f.params = vec!["x".to_string()];
-        f.flow_events = vec![FlowEvent::Call {
-            span: span(0, 20, 30),
-            name: "g".to_string(),
-            receiver: None,
-            receiver_types: Vec::new(),
-            call_kind: bonsai_lang_api::CallKind::Function,
-            args: vec![bonsai_lang_api::CallArg {
-                span: span(0, 22, 23),
-                name: None,
-                value_text: "x".to_string(),
-                place: Some("x".to_string()),
-                source_names: Vec::new(),
-            }],
-        }];
-        let mut g = empty_decl(2, 1, "g");
-        g.params = vec!["arg".to_string()];
-        g.flow_events = vec![FlowEvent::Return {
-            span: span(1, 50, 60),
-            value_name: Some("arg".to_string()),
-            value_text: None,
-        }];
-        let (idx, ws) = build(vec![f, g]);
-        let svc = IdgQueryService::new(ws, idx);
-
-        // GlobalIndex remaps symbols on insert. The first inserted
-        // file's first function gets FuncId 0, but order depends on
-        // hash-map iteration. Use the per-name lookup instead.
-        let func_for = |name: &str| {
-            for f in svc.global.all_files() {
-                for decl in svc.global.functions_in(f) {
-                    if decl.name == name {
-                        return FuncId::new(decl.symbol.raw());
-                    }
-                }
-            }
-            unreachable!("function {name} not in index")
-        };
-        let f_id = func_for("f");
-        let g_id = func_for("g");
-
-        let f_params = svc.param_nodes_of(f_id);
-        let g_return = svc.return_node_of(g_id).unwrap();
-        let closure = svc.forward_closure(&f_params);
-        assert!(
-            closure.contains(&g_return),
-            "f's param closure should reach g's Return via CallArg→Param→…→Return"
-        );
-    }
-}
+#[path = "service_tests.rs"]
+mod tests;

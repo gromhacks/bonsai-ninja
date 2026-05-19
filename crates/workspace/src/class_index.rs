@@ -5,10 +5,10 @@
 //! - `crates/resolve/src/lib.rs::resolve_callable_member_with_context`
 //! - `crates/workspace/src/cross_module.rs::collect_method_candidates_for_class_inner`
 //! - `crates/workspace/src/cross_module.rs::find_constructor_for_class`
-//! - `crates/workspace/src/lib.rs::find_constructor_symbol`
+//! - `crates/workspace/src/lib.rs::find_constructor_symbols`
 //!
-//! Each method-on-class lookup becomes O(1). Built lazily from the
-//! global index on first access; cleared on file edits.
+//! Each method-on-class lookup becomes O(1). Built from the global
+//! index on first access; cleared on file edits.
 
 use ahash::AHashMap;
 use bonsai_common::{FuncId, SymbolId};
@@ -27,10 +27,9 @@ struct Built {
     /// `(class_sym, method_name) → callable FuncIds`. Each entry is
     /// the candidates the resolver was scanning the class file for.
     methods: AHashMap<(SymbolId, String), Vec<FuncId>>,
-    /// `class_sym → constructor FuncId(s)`. The first
-    /// `DeclKind::Constructor` declared in the class wins;
-    /// fallbacks via per-language constructor names happen in the
-    /// caller.
+    /// `class_sym → constructor FuncId(s)`. All constructors are
+    /// retained so caller-side lookup can report overload ambiguity
+    /// instead of silently picking a workspace-order winner.
     constructors: AHashMap<SymbolId, Vec<FuncId>>,
 }
 

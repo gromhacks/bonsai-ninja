@@ -1,0 +1,150 @@
+use super::*;
+use bonsai_common::Precision;
+use bonsai_security::{TaintPropagationStep, TaintedArgInfo};
+
+fn site(rule_id: &str, text: &str, enclosing_fn: &str) -> FindingMatch {
+    FindingMatch {
+        rule_id: rule_id.to_string(),
+        file: "app.py".to_string(),
+        line: 1,
+        column: 1,
+        text: text.to_string(),
+        enclosing_fn: Some(enclosing_fn.to_string()),
+        tag: Some("command-injection".to_string()),
+        severity: Some(Severity::High),
+        category: None,
+        trust: None,
+        payload_types: Vec::new(),
+        tainted_args: vec![TaintedArgInfo {
+            index: 0,
+            value_text: text.to_string(),
+        }],
+        sanitised_arg_indices: Vec::new(),
+    }
+}
+
+fn combined() -> CombinedFindingWithChain {
+    CombinedFindingWithChain {
+        finding: Finding {
+            finding_id: "S:1".to_string(),
+            language: "python".to_string(),
+            source: site("python.flask.request_args", "request.args", "handle_request"),
+            sink: site("python.cmdi.os_system", "os.system(cmd)", "run_admin_command"),
+            sanitizers_seen: Vec::new(),
+            group_id: Some("G:1".to_string()),
+            representative_flow_id: Some("F:1".to_string()),
+            analysis_complete: true,
+            analysis_incomplete_reasons: Vec::new(),
+            chain_display: vec![
+                "handle_request".to_string(),
+                "update_user".to_string(),
+                "run_admin_command".to_string(),
+            ],
+            taint_path: vec![TaintPropagationStep {
+                caller: "handle_request".to_string(),
+                callee: "run_admin_command".to_string(),
+                file: "app.py".to_string(),
+                line: 2,
+                column: 1,
+                tainted_args: Vec::new(),
+            }],
+            tag: Some("command-injection".to_string()),
+            severity: Some(Severity::High),
+            precision: "exact".to_string(),
+            cwe: Vec::new(),
+            owasp: Vec::new(),
+            status: FindingStatus::Unsanitized,
+            from_test: false,
+        },
+        chain_funcs: Vec::new(),
+        additional_sources: Vec::new(),
+        additional_sinks: Vec::new(),
+        member_finding_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn zero_max_inlined_bodies_means_unbounded() {
+    assert_eq!(effective_max_inlined_bodies(None), 8);
+    assert_eq!(effective_max_inlined_bodies(Some(3)), 3);
+    assert_eq!(effective_max_inlined_bodies(Some(0)), usize::MAX);
+}
+
+#[test]
+fn read_file_from_to_filters_match_source_and_sink_sides() {
+    let finding = combined();
+
+    assert!(combined_finding_matches_filters(
+        &finding,
+        Some("request.args"),
+        Some("os.system")
+    ));
+    assert!(combined_finding_matches_filters(
+        &finding,
+        Some("handle_request"),
+        Some("run_admin_command")
+    ));
+    assert!(!combined_finding_matches_filters(
+        &finding,
+        Some("request.args"),
+        Some("sql.query")
+    ));
+    assert!(!combined_finding_matches_filters(
+        &finding,
+        Some("cookie"),
+        Some("os.system")
+    ));
+}
+
+#[test]
+fn read_file_taint_options_are_semantic_only() {
+    let defaulted = semantic_read_file_taint_options(TaintAnalysisOptions::default());
+    assert_eq!(defaulted.max_precision, Some(Precision::Narrowed));
+
+    let exact = semantic_read_file_taint_options(TaintAnalysisOptions {
+        max_precision: Some(Precision::Exact),
+        ..Default::default()
+    });
+    assert_eq!(exact.max_precision, Some(Precision::Exact));
+
+    let broad = semantic_read_file_taint_options(TaintAnalysisOptions {
+        max_precision: Some(Precision::OverApproximate),
+        ..Default::default()
+    });
+    assert_eq!(broad.max_precision, Some(Precision::Narrowed));
+}
+
+#[test]
+fn read_file_propagates_taint_analysis_errors() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "bonsai-read-file-taint-error-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).expect("create temp dir");
+    std::fs::write(root.join("app.py"), "def handle(x):\n    return x\n").expect("write fixture");
+
+    let ws = Workspace::index(&root, bonsai_adapters::all_languages_registry()).expect("index workspace");
+    let pack = Rulepack::default();
+    let err = read_file_with_taint_options(
+        &ws,
+        Some(&pack),
+        &ReadFileFilters {
+            path: "app.py",
+            ..Default::default()
+        },
+        TaintAnalysisOptions {
+            source: Some("[".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect_err("invalid taint-analysis filter should fail read-file");
+    assert!(
+        err.to_string().contains("invalid rule regex"),
+        "read-file must surface taint-analysis errors, got: {err}"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}

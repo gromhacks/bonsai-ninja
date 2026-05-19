@@ -121,6 +121,7 @@ fn documented_sink_tags() -> BTreeSet<&'static str> {
 
 fn documented_source_tags() -> BTreeSet<&'static str> {
     BTreeSet::from([
+        "archive-input",
         "block-context",
         "browser-input",
         "calldata",
@@ -880,6 +881,7 @@ fn canonical_sanitizer_tags_stay_canonical() {
         "open-redirect-sanitize",
         "passthrough-decode",
         "passthrough-encode",
+        "passthrough-transform",
         "password-verify",
         "path-sanitize",
         "rate-limit",
@@ -1346,5 +1348,126 @@ fn enabled_sink_rules_match_family_file() {
         invalid.is_empty(),
         "enabled sink rules drifted from their family taxonomy:\n{}",
         invalid.join("\n")
+    );
+}
+
+fn has_taint_predicate(rule: &Rule) -> bool {
+    rule.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            bonsai_security::rule::ConstraintKind::ArgTainted { .. }
+                | bonsai_security::rule::ConstraintKind::AnyArgTainted { .. }
+                | bonsai_security::rule::ConstraintKind::ReceiverTainted { .. }
+        )
+    })
+}
+
+fn declares_taint_reachability_or_source_independent(rule: &Rule) -> bool {
+    has_taint_predicate(rule)
+        || rule.category.as_deref() == Some("source-independent")
+        || (rule.match_spec.kind == MatchKind::Return
+            && rule
+                .description
+                .to_ascii_lowercase()
+                .contains("taint reachability"))
+}
+
+#[test]
+fn enabled_injection_data_sinks_declare_taint_or_source_independent_category() {
+    let dataflow_tags = BTreeSet::from([
+        "code-injection",
+        "command-injection",
+        "cql-injection",
+        "cypher-injection",
+        "graphql-injection",
+        "header-injection",
+        "jndi-injection",
+        "ldap-injection",
+        "lfi",
+        "log-injection",
+        "nosql-injection",
+        "open-redirect",
+        "path-traversal",
+        "prototype-pollution",
+        "queue-injection",
+        "smtp-injection",
+        "sql-injection",
+        "sqli",
+        "ssrf",
+        "ssti",
+        "xpath-injection",
+        "xss",
+        "xxe",
+    ]);
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let mut offenders = Vec::new();
+    for rule in pack.all_rules() {
+        if rule.kind != RuleKind::Sink || !rule.enabled {
+            continue;
+        }
+        let Some(tag) = rule.tag.as_deref() else {
+            continue;
+        };
+        if !dataflow_tags.contains(tag) {
+            continue;
+        }
+        if declares_taint_reachability_or_source_independent(rule) {
+            continue;
+        }
+        offenders.push(format!(
+            "{} ({}) tag={tag} kind={:?} must either declare arg/receiver taint, document taint reachability for return sinks, or be marked category: source-independent",
+            rule.id, rule.source_path, rule.match_spec.kind
+        ));
+    }
+    assert!(
+        offenders.is_empty(),
+        "enabled injection-like sink rules without semantic taint/source-independent classification:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn enabled_audited_sink_families_declare_taint_or_source_independent_category() {
+    let audited_tags = BTreeSet::from([
+        "access-control",
+        "auth-bypass",
+        "cookie-misconfig",
+        "cors",
+        "file-upload",
+        "insecure-deserialization",
+        "insecure-temp-file",
+        "jwt",
+        "race",
+        "redos",
+        "weak-auth",
+        "weak-crypto",
+        "weak-randomness",
+        "weak-tls",
+        "zip-slip",
+    ]);
+    let pack = load_rulepack(&rules_dir()).expect("rulepack loads");
+    let mut offenders = Vec::new();
+    for rule in pack.all_rules() {
+        if rule.kind != RuleKind::Sink || !rule.enabled {
+            continue;
+        }
+        let Some(tag) = rule.tag.as_deref() else {
+            continue;
+        };
+        if !audited_tags.contains(tag) {
+            continue;
+        }
+        if declares_taint_reachability_or_source_independent(rule) {
+            continue;
+        }
+        offenders.push(format!(
+            "{} ({}) tag={tag} kind={:?} must either declare arg/receiver taint, document taint reachability for return sinks, or be marked category: source-independent",
+            rule.id, rule.source_path, rule.match_spec.kind
+        ));
+    }
+    assert!(
+        offenders.is_empty(),
+        "enabled audited sink families without semantic taint/source-independent classification:\n{}",
+        offenders.join("\n")
     );
 }

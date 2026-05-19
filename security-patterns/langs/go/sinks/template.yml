@@ -13,20 +13,29 @@
     kind: call
     callee:
       regex: \.Parse$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "text/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
+      func example(tmpl *template.Template, target string) {
         tmpl.Parse(target)
       }
     expect_match_text:
     - tmpl.Parse
+  - name: literal template parse negative
+    code: |
+      import "text/template"
+      package main
+
+      func example(tmpl *template.Template) {
+        tmpl.Parse("Hello {{ .Name }}")
+      }
+    expect_no_match: true
   description: "text/template Template.Parse(tainted) — SSTI; template with .Funcs gives RCE. Merged collision aliases: go.template.raymond_parse."
   aliases:
   - go.template.raymond_parse
@@ -47,21 +56,33 @@
       attribute:
       - template
       - ParseFiles
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "text/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        template.ParseFiles("{{ user }}")
+      func example(path string) {
+        template.ParseFiles(path)
       }
+    expect_match_text: [template.ParseFiles]
+  - name: literal template parsefiles negative
+    code: |
+      import "text/template"
+      package main
+
+      func example() {
+        template.ParseFiles("views/index.tmpl")
+      }
+    expect_no_match: true
   description: "template.ParseFiles(tainted path) — loads attacker-picked template file; combines path-traversal + SSTI."
 - id: go.template.text_template_new_parse
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: go
   tag: ssti
   severity: high
@@ -87,7 +108,7 @@
         value := "value"
         template.New("{{ user }}")
       }
-  description: "text/template.New(tainted name) chained with .Parse(tainted) — tainted template source = SSTI."
+  description: "Disabled — text/template.New(name) alone does not parse attacker-controlled template source. Re-enable only with multi-call correlation that proves a later Parse/ParseFiles consumes tainted template content."
 - id: go.template.html_template_parsefiles
   enabled: true
   language: go
@@ -104,18 +125,28 @@
       attribute:
       - htmltemplate
       - ParseFiles
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "html/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        htmltemplate.ParseFiles("{{ user }}")
+      func example(path string) {
+        htmltemplate.ParseFiles(path)
       }
+    expect_match_text: [htmltemplate.ParseFiles]
+  - name: literal html template parsefiles negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        htmltemplate.ParseFiles("views/index.tmpl")
+      }
+    expect_no_match: true
   description: "html/template ParseFiles(tainted path) — tainted template source selection."
 - id: go.template.html_template_html
   enabled: false
@@ -169,18 +200,28 @@
       attribute:
       - template
       - URL
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "html/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        template.URL("{{ user }}")
+      func example(target string) {
+        template.URL(target)
       }
+    expect_match_text: [template.URL]
+  - name: literal template url negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        template.URL("/safe")
+      }
+    expect_no_match: true
   description: "html/template template.URL(tainted) — cast bypasses URL-context escaping; open-redirect / javascript: XSS."
 - id: go.template.pongo2_fromstring
   enabled: true
@@ -198,18 +239,28 @@
       attribute:
       - pongo2
       - FromString
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "github.com/flosch/pongo2"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        pongo2.FromString("{{ user }}")
+      func example(target string) {
+        pongo2.FromString(target)
       }
+    expect_match_text: [pongo2.FromString]
+  - name: literal pongo2 template negative
+    code: |
+      import "github.com/flosch/pongo2"
+      package main
+
+      func example() {
+        pongo2.FromString("Hello {{ user }}")
+      }
+    expect_no_match: true
   description: "pongo2.FromString(tainted) — Jinja-like SSTI; RCE via template sandbox escapes."
 - id: go.template.text_template_used_for_html
   enabled: false

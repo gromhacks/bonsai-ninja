@@ -1,9 +1,12 @@
 import 'dart:io';
+import 'package:sqflite/sqflite.dart';
+
+late Database authDb;
 
 int? verifyToken(String token) {
   var query = "SELECT user_id FROM tokens WHERE token = '$token'";
   // sink: SQL injection via string interpolation
-  print(query);
+  authDb.rawQuery(query);
   return 1;
 }
 

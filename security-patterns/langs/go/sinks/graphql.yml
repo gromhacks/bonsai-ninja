@@ -13,6 +13,9 @@
       attribute:
       - graphql
       - Do
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: graphql do
     code: |
@@ -23,11 +26,20 @@
       }
     expect_match_text:
     - graphql.Do
+  - name: graphql do literal request negative
+    code: |
+      import "github.com/graphql-go/graphql"
+      package main
+      func example(schema graphql.Schema) {
+        graphql.Do(nil)
+      }
+    expect_no_match: true
   description: "graphql.Do(params) — dynamic GraphQL query text or context reaches resolver execution."
 - id: go.graphql.playground_handler
   enabled: true
   language: go
   tag: graphql-injection
+  category: source-independent
   severity: medium
   packages:
   - github.com/99designs/gqlgen/graphql/playground

@@ -145,3 +145,34 @@ class C {
         "typed receiver should include its same-file base classes for rule matching, got {calls:?}"
     );
 }
+
+#[test]
+fn jdbc_platform_supertypes_are_exported_as_semantic_receiver_types() {
+    let db = db_with(
+        r#"
+class C {
+  void handle(java.sql.Connection connection, String sql) throws Exception {
+    java.sql.PreparedStatement statement = connection.prepareStatement(sql);
+    statement.execute();
+  }
+}
+"#,
+    );
+    let global = db.global_index();
+    let mut calls = Vec::new();
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if decl.name == "handle" {
+                collect_calls(&decl.flow_events, &mut calls);
+            }
+        }
+    }
+    assert!(
+        calls.iter().any(|(name, receiver_types)| {
+            name == "statement.execute"
+                && receiver_types.iter().any(|ty| ty == "PreparedStatement")
+                && receiver_types.iter().any(|ty| ty == "Statement")
+        }),
+        "JDBC receiver should carry declared type and semantic supertype, got {calls:?}"
+    );
+}

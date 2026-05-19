@@ -3,6 +3,7 @@
   enabled: true
   language: swift
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -18,6 +19,7 @@
   enabled: true
   language: swift
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -33,6 +35,7 @@
   enabled: true
   language: swift
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -48,6 +51,7 @@
   enabled: true
   language: swift
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -63,6 +67,7 @@
   enabled: true
   language: swift
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -78,6 +83,7 @@
   enabled: true
   language: swift
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -93,6 +99,7 @@
   enabled: true
   language: swift
   tag: weak-crypto
+  category: source-independent
   severity: medium
   cwe: [CWE-327]
   match:

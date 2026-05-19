@@ -1,6 +1,7 @@
+use rusqlite::Connection;
 use std::process::Command;
 
-pub fn verify_token(conn: &rusqlite::Connection, token: &str) -> Option<String> {
+pub fn verify_token(conn: &Connection, token: &str) -> Option<String> {
     let query = format!("SELECT user_id FROM tokens WHERE token = '{}'", token);
     let mut stmt = conn.prepare(&query).ok()?; // sink: SQL injection
     let user_id: String = stmt.query_row([], |row| row.get(0)).ok()?;

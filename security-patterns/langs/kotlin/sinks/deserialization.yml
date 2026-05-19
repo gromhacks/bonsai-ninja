@@ -57,6 +57,7 @@
   enabled: true
   language: kotlin
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   packages: ["com.fasterxml.jackson.core"]
   cwe: [CWE-502]
@@ -275,6 +276,7 @@
   enabled: true
   language: kotlin
   tag: insecure-deserialization
+  category: source-independent
   severity: high
   packages: ["com.fasterxml.jackson.core"]
   cwe: [CWE-502]
@@ -301,6 +303,7 @@
   enabled: true
   language: kotlin
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   packages: ["com.fasterxml.jackson.core"]
   cwe: [CWE-502]

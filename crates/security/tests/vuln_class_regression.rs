@@ -92,15 +92,27 @@ impl Outcome {
 }
 
 fn analyse(ws: &Workspace) -> Outcome {
-    let report = run_taint_analysis(
+    analyse_with_options(
         ws,
-        rulepack(),
         TaintAnalysisOptions {
             include_inferred_sources: true,
             ..TaintAnalysisOptions::default()
         },
     )
-    .expect("taint analysis");
+}
+
+fn analyse_pattern_only(ws: &Workspace) -> Outcome {
+    analyse_with_options(
+        ws,
+        TaintAnalysisOptions {
+            include_pattern_only: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+}
+
+fn analyse_with_options(ws: &Workspace, options: TaintAnalysisOptions) -> Outcome {
+    let report = run_taint_analysis(ws, rulepack(), options).expect("taint analysis");
     Outcome {
         findings: report
             .findings
@@ -504,17 +516,14 @@ def handler(user_input):
 
 #[test]
 fn weak_tls_python_create_unverified_context_reports() {
-    // The TLS rule has no `arg_tainted` constraint — the sink is a
-    // call shape — so the chain-aware pipeline still requires a
-    // tainted arg to surface a finding. Pass `protocol` through
-    // (matches the rule's match_example shape) so a real chain
-    // reaches the sink.
+    // Source-independent API misuse is pattern-only: it is enabled
+    // explicitly here so normal source-to-sink defaults stay quiet.
     let src = r#"
 import ssl
 def handler(protocol):
     return ssl._create_unverified_context(protocol)
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_reported(&outcome, "weak-tls", "weak-tls _create_unverified_context");
 }
 
@@ -525,7 +534,7 @@ import ssl
 def handler(protocol):
     return ssl.create_default_context(protocol)
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_absent(&outcome, "weak-tls", "weak-tls create_default_context");
 }
 
@@ -540,7 +549,7 @@ import hashlib
 def handler(payload):
     return hashlib.md5(payload).hexdigest()
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_reported(&outcome, "weak-crypto", "weak-crypto hashlib.md5");
 }
 
@@ -551,7 +560,7 @@ import hashlib
 def handler(payload):
     return hashlib.sha256(payload).hexdigest()
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_not_reported(&outcome, "weak-crypto", "weak-crypto hashlib.sha256");
 }
 
@@ -562,17 +571,14 @@ def handler(payload):
 
 #[test]
 fn weak_crypto_python_rsa_1024_reports() {
-    // Routes a tainted param into the call so the chain-aware
-    // pipeline surfaces the constraint-only finding. The
-    // `keyword_arg_equals` constraint on `key_size` does the
-    // discriminating; the tainted positional arg only satisfies
-    // the engine's "tainted-args-or-receiver" gate.
+    // The `keyword_arg_equals` constraint on `key_size` does the
+    // discriminating; no user-controlled source is required.
     let src = r#"
 from cryptography.hazmat.primitives.asymmetric import rsa
 def gen(exp):
     return rsa.generate_private_key(public_exponent=exp, key_size=1024)
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_reported(&outcome, "weak-crypto", "weak-crypto rsa key_size=1024");
 }
 
@@ -583,7 +589,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 def gen(exp):
     return rsa.generate_private_key(public_exponent=exp, key_size=2048)
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_absent(&outcome, "weak-crypto", "weak-crypto rsa key_size=2048");
 }
 
@@ -687,16 +693,14 @@ def handler(user_input):
 
 #[test]
 fn weak_random_python_random_random_reports() {
-    // `random.random` rule has no constraints. To surface through the
-    // chain-aware pipeline (which requires at least one tainted arg
-    // or receiver on the sink call) we pass `seed` into the call —
-    // mirroring the rule pack's own match_example shape.
+    // `random.random` is source-independent API misuse, so this uses
+    // the explicit pattern-only path rather than inferred taint.
     let src = r#"
 import random
 def issue_token(seed):
     return str(random.random(seed))
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_reported(&outcome, "weak-randomness", "weak-randomness random.random");
 }
 
@@ -707,7 +711,7 @@ import secrets
 def issue_token(size):
     return secrets.token_bytes(size)
 "#;
-    let outcome = analyse(&python_ws(src));
+    let outcome = analyse_pattern_only(&python_ws(src));
     assert_tag_absent(&outcome, "weak-randomness", "weak-randomness secrets.token_bytes");
 }
 

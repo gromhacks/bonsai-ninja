@@ -47,9 +47,19 @@
       attribute:
       - res
       - body
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "#include <crow.h> /* crow */\nvoid example() {\n  res.body = \"tainted\";\n}\n"
+  - name: literal crow body negative
+    code: |
+      #include <crow.h>
+      void example() {
+        res.body = "<p>safe</p>";
+      }
+    expect_no_match: true
   description: "crow res.body = tainted — reflected XSS if Content-Type is HTML."
 - id: cpp.xss.drogon_response_setbody
   enabled: true

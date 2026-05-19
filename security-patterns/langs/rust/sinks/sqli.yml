@@ -207,6 +207,37 @@
       }
     expect_no_match: true
   description: "rusqlite Connection::execute — prepared-statement API; flag when the SQL string itself is built from tainted input (params are safe). Typed-receiver sqli; `min_args: 1` rejects 0-arg decoys."
+- id: rust.sqli.rusqlite_prepare
+  enabled: true
+  language: rust
+  tag: sql-injection
+  severity: high
+  packages: [rusqlite]
+  cwe: [CWE-89]
+  match:
+    kind: call
+    callee:
+      regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.prepare$
+      base_name_in: [conn, con, db, database, connection]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted rusqlite prepare string
+    code: |
+      use rusqlite::Connection;
+      fn example(conn: &Connection, target: &str) {
+          conn.prepare(target);
+      }
+    expect_match_text: [conn.prepare]
+  - name: literal rusqlite prepare string negative
+    code: |
+      use rusqlite::Connection;
+      fn example(conn: &Connection) {
+          conn.prepare("select * from users where id = ?1");
+      }
+    expect_no_match: true
+  description: "rusqlite Connection::prepare with a tainted SQL string — placeholders protect values, but the SQL program itself must not be user-controlled."
 - id: rust.sqli.rusqlite_execute_batch
   enabled: true
   language: rust

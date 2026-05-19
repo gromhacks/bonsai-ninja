@@ -36,7 +36,8 @@
         }
       }
     expect_no_match: true
-  description: "jwt-circe decode — without signature verification, `decode` returns claims even if sig bad."
+  description: "jwt-circe decode — without signature verification, `decode` returns
+    claims even if sig bad."
 - id: scala.jwt.jwt_circe_decodejson
   enabled: true
   language: scala
@@ -73,7 +74,8 @@
         }
       }
     expect_no_match: true
-  description: "jwt-circe decodeJson — returns claims without enforcing signature verification when no key/algorithm supplied; forgeable tokens."
+  description: "jwt-circe decodeJson — returns claims without enforcing signature
+    verification when no key/algorithm supplied; forgeable tokens."
 - id: scala.jwt.jwt_decodejsonall
   enabled: true
   language: scala
@@ -149,9 +151,12 @@
         }
       }
     expect_no_match: true
-  description: "Nimbus SignedJWT.parse — parse-only; dangerous unless followed by verify()."
+  description: "Nimbus SignedJWT.parse — parse-only; dangerous unless followed by
+    verify()."
 - id: scala.jwt.jjwt_parser_build
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: scala
   tag: jwt
   severity: high
@@ -176,7 +181,9 @@
           Jwts.parser(input)
         }
       }
-  description: "jjwt Jwts.parser() — legacy builder that may skip signature check. Merged aliases: scala.jwt.alg_confusion_jjwt."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. jjwt Jwts.parser() — legacy builder
+    that may skip signature check. Merged aliases: scala.jwt.alg_confusion_jjwt."
   aliases:
   - scala.jwt.alg_confusion_jjwt
 - id: scala.jwt.auth0_decode

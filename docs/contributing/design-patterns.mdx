@@ -29,6 +29,13 @@ resolver filters by file. What it forbids: bare `find_by_name(name)` lookups
 above the resolver, ad-hoc matching languages, treating a function-name
 string match as a call.
 
+For global-namespace languages with translation-unit or shared package
+linkage, same-directory unqualified calls are semantic only when the
+`ResolveContext` includes the workspace file-path lookup. This lets C/C++
+helpers such as `storage.cpp -> executor.cpp` resolve without marking
+`execute(cmd)` as an inferred standalone entry point, while Python-style
+file modules still require imports or aliases.
+
 The receiver-callback shorthand is intentionally narrower than method
 calls. `cb.call(x)` / `cb.run(x)` only dispatches when `cb` resolves to a
 callable value. Constructed objects (`repo = Repository(x); repo.run()`) go
@@ -111,19 +118,31 @@ String interpolation taint comes from adapter-emitted expression operands,
 not engine text parsing. A template/f-string argument should carry the
 interpolated variable in `source_names`; literal text stays inert.
 
-## 4. Precision is a first-class fact
+## 4. Public analysis is semantic-only
 
-Every fact crossing a layer boundary carries a `Precision` from the lattice
-`Exact < Narrowed < OverApproximate < Unknown`.
+Every fact crossing an analysis boundary carries a `Precision` from the lattice
+`Exact < Narrowed < OverApproximate < Unknown`, but public analysis evidence is
+semantic-only:
 
-- Direct resolved edges → Exact.
-- Single resolution narrowed by aliases → Narrowed.
-- Multiple resolved candidates (virtual dispatch) → OverApproximate.
-- Unresolved or budget-truncated → Unknown.
-- `meet(a, b)` returns the worse; chain precision is the worst seen.
+- Direct structural facts and fully resolved edges → Exact.
+- Edges narrowed by aliases, receiver types, module paths, build targets, or
+  declared virtual dispatch semantics → Narrowed.
+- Multiple candidates are allowed only when the language facts explain that set
+  semantically, such as typed virtual dispatch over the known receiver family
+  or same-scope overloads. If declared argument/parameter types identify one
+  overload, dispatch must narrow to that candidate instead of flowing through
+  siblings.
+- Unresolved, dynamic, budget-truncated, or contextless matches are not evidence.
+  They must be omitted from semantic results and surfaced through explicit
+  incompleteness/debug metadata instead of being widened into findings.
+- `meet(a, b)` returns the worse semantic precision across a proven chain; if a
+  chain would require `OverApproximate` or `Unknown`, the public command must not
+  report it as a finding or flow.
 
-Findings render with a `precision` field in JSON / SARIF so consumers can
-distinguish proven evidence from over-approximation.
+Findings and flow exports render `precision` only for proven semantic evidence
+(`exact` / `narrowed`). Diagnostic broad classes may exist internally for cache
+round-trips or debugging, but they are not acceptable as user-facing analysis
+results.
 
 ## 5. Content-addressed caching
 
@@ -221,7 +240,9 @@ equivalent direct method call so the resolver narrows them like any other
 dispatch.
 
 Truly dynamic shapes (computed string arguments, runtime lookup tables)
-remain `OverApproximate` and the engine doesn't pretend otherwise.
+remain unresolved until an adapter or summary model can prove the target
+semantically. The engine must not fan those shapes out into workspace-wide
+candidate sets or report them as semantic findings.
 
 ## 12. Adapter responsibility versus engine responsibility
 
@@ -401,11 +422,9 @@ The justification typically takes one of three shapes:
   is `#[doc(hidden)]` and consumed by browse output / CLI
   trace-source resolution where cross-context candidate
   enumeration is acceptable.
-- **Dynamic-dispatch fallback** — `collect_virtual_dispatch_candidates`
-  in the taint engine when the receiver type is statically
-  unknown; the OverApproximate precision tag is attached at the
-  call site so consumers know the answer is wider than a single
-  receiver-narrowed result.
+- **Diagnostic-only compatibility paths** — legacy or debug-only code
+  may parse broad precision labels, but public analysis commands must
+  filter them out or report explicit incompleteness.
 
 A site that doesn't fit one of these shapes is almost certainly
 a bug — replace it with `resolve_callable_with_context`.

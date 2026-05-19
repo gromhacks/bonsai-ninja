@@ -4,6 +4,7 @@
 //! fields are rejected by the loader so rulepacks catch typos at load time
 //! instead of silently failing to match.
 
+use bonsai_lang_api::{DeclKind, Visibility};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 /// Which of the three rule families a rule belongs to. Derived from the
@@ -193,6 +194,12 @@ pub struct RuleTarget {
     /// Regex on the qualified callee / target name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regex: Option<String>,
+    /// Optional receiver/base identifier filter for receiver-agnostic
+    /// regexes. Example: `regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"`
+    /// plus `base_name_in: [conn, db]` matches `conn.execute(...)` and
+    /// `db.execute(...)` without hardcoding the receiver in the regex.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_name_in: Vec<String>,
     /// Match a parameter by an annotation/decorator name attached to it
     /// (Java `@RequestParam`, Python `@requires_admin`-style param
     /// decorators when the adapter surfaces them, C# `[FromBody]`).
@@ -218,6 +225,17 @@ pub struct RuleTarget {
     /// the enclosing decl's `name`. Case-sensitive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_method: Vec<String>,
+    /// Restrict a `kind: param` rule to declarations with one of the
+    /// adapter-emitted declaration kinds (`method`, `function`,
+    /// `constructor`, ...). This is adapter metadata, not a source-text
+    /// naming convention.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decl_kind_in: Vec<DeclKind>,
+    /// Restrict a `kind: param` rule to declarations with one of the
+    /// adapter-emitted visibilities (`public`, `private`, `crate`,
+    /// `module`, `protected`, `internal`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visibility_in: Vec<Visibility>,
 }
 
 impl RuleTarget {
@@ -229,8 +247,11 @@ impl RuleTarget {
             && self.attribute.is_none()
             && self.regex.is_none()
             && self.annotation.is_none()
+            && self.base_name_in.is_empty()
             && self.in_class.is_empty()
             && self.in_method.is_empty()
+            && self.decl_kind_in.is_empty()
+            && self.visibility_in.is_empty()
     }
 }
 
@@ -270,6 +291,21 @@ pub struct TaintSemantics {
     /// becomes tainted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_output_args: Vec<usize>,
+    /// Sanitizer/passthrough rules only: argument indices whose value
+    /// flows unchanged to the call result. This covers decode/unescape
+    /// APIs that preserve attacker control while changing representation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_result_passthrough_args: Vec<usize>,
+    /// Sanitizer/passthrough rules only: the method receiver flows
+    /// unchanged to the call result. This covers receiver transforms
+    /// such as `value.removingPercentEncoding`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub call_result_passthrough_receiver: bool,
+    /// Rulepack-declared transfer: tainted value arguments flow into
+    /// an output argument. This covers buffer-format/copy APIs without
+    /// baking API names into the engine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_arg_flows: Vec<OutputArgFlowSemantics>,
     /// Sink rules only: tainted arguments mutate the receiver's
     /// state. This covers APIs such as `Statement.addBatch(sql)` and
     /// `ProcessBuilder.command(cmd)`, where the dangerous operation
@@ -286,6 +322,16 @@ pub struct TaintSemantics {
 pub struct CleanOutputOverwriteSemantics {
     pub output_arg_index: usize,
     pub value_start_arg_index: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputArgFlowSemantics {
+    pub output_arg_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_start_arg_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_arg_indices: Vec<usize>,
 }
 
 /// One constraint — a v1 vocabulary of language-agnostic post-filters.

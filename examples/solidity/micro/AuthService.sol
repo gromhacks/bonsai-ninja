@@ -3,6 +3,7 @@ pragma solidity ^0.8.0;
 
 contract AuthService {
     address owner;
+    mapping(address => uint256) balances;
 
     constructor() {
         owner = msg.sender;
@@ -25,6 +26,7 @@ contract AuthService {
     function runAdminCommand(uint256 userId, bytes32 action) public returns (bool) {
         // sink: privileged action triggered by untrusted action parameter
         require(userId > 0, "bad user");
+        balances[msg.sender] = userId;
         emit Action(userId, action);
         return true;
     }

@@ -23,6 +23,45 @@
       )\n}\n}\n"
     expect_no_match: true
   description: JDBC Statement.executeQuery.
+- id: kotlin.sqli.local_statement_executequery
+  enabled: true
+  language: kotlin
+  tag: sql-injection
+  severity: critical
+  packages:
+  - java.sql
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.executeQuery$"
+      base_name_in: [stmt, statement]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: local JDBC Statement variable executeQuery
+    code: |
+      import java.sql.DriverManager
+      class App {
+        fun handle(input: String) {
+          val stmt = DriverManager.getConnection("jdbc:sqlite:test.db").createStatement()
+          stmt.executeQuery(input)
+        }
+      }
+    expect_match_text: [stmt.executeQuery]
+  - name: local JDBC Statement variable executeQuery literal negative
+    code: |
+      import java.sql.DriverManager
+      class App {
+        fun handle() {
+          val stmt = DriverManager.getConnection("jdbc:sqlite:test.db").createStatement()
+          stmt.executeQuery("SELECT 1")
+        }
+      }
+    expect_no_match: true
+  description: "Local JDBC Statement variable executeQuery(sql). Kotlin adapters do not always recover the Statement receiver type from createStatement(), so this rulepack-level fallback is constrained to conventional statement receiver names plus java.sql package evidence."
 - id: kotlin.sqli.statement_executeupdate
   enabled: true
   language: kotlin

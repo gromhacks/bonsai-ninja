@@ -160,31 +160,8 @@ pub(crate) mod out_count {
     }
 
     #[cfg(test)]
-    mod tests {
-        use super::visible_byte_len;
-
-        #[test]
-        fn strips_sgr_color() {
-            let s = "\x1b[38;2;96;156;156;1moutput\x1b[0m";
-            assert_eq!(visible_byte_len(s), "output".len());
-        }
-
-        #[test]
-        fn keeps_plain_ascii() {
-            assert_eq!(visible_byte_len("hello world\n"), "hello world\n".len());
-        }
-
-        #[test]
-        fn strips_osc_hyperlink() {
-            let s = "\x1b]8;;https://x\x1b\\label\x1b]8;;\x1b\\";
-            assert_eq!(visible_byte_len(s), "label".len());
-        }
-
-        #[test]
-        fn drops_carriage_return() {
-            assert_eq!(visible_byte_len("a\rb\n"), 3); // 'a' + 'b' + '\n'
-        }
-    }
+    #[path = "tests.rs"]
+    mod tests;
 }
 
 /// Like `println!` but bumps the global CLI output tally so the
@@ -299,6 +276,7 @@ fn main() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     // Intercept `--help` / `-h` before clap parses so we can render
@@ -351,7 +329,8 @@ fn main() -> Result<()> {
             workspace,
             watch,
             interval_ms,
-        } => cmd_index(&workspace, watch, interval_ms),
+            prewarm_dataflow,
+        } => cmd_index(&workspace, watch, interval_ms, prewarm_dataflow),
         Cmd::Trace {
             workspace,
             symbol,
@@ -852,11 +831,12 @@ fn main() -> Result<()> {
                      --in-fn / --kind), --flow <flow_id>, or --group <group_id>"
                 );
             }
-            // `--all` lifts every cap to usize::MAX. The chain enum's
-            // probe budget is `max_probes * 16`, so passing `usize::MAX`
-            // would overflow; clamp to MAX/16 to stay safe.
+            // `--all` lifts every cap. The chain enumerator uses
+            // saturating math internally, so `usize::MAX` is the
+            // explicit uncapped value here rather than a large finite
+            // stand-in.
             let (mf, mp, mh) = if all {
-                (usize::MAX, usize::MAX / 16, usize::MAX)
+                (usize::MAX, usize::MAX, usize::MAX)
             } else {
                 (max_flows, max_entry_probes, max_hits)
             };
@@ -888,8 +868,15 @@ fn main() -> Result<()> {
         Cmd::Export {
             workspace,
             full_propagations,
+            complete_chains,
+            all,
             format,
-        } => cmd_export(&workspace, full_propagations, format),
+        } => cmd_export(
+            &workspace,
+            full_propagations || all,
+            complete_chains || all,
+            format,
+        ),
         Cmd::Cache { action } => cmd_cache(action),
         Cmd::Security { workspace, action } => commands::security::cmd_security(&workspace, action),
         Cmd::Tree {

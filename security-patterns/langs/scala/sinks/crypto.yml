@@ -2,6 +2,7 @@
   enabled: true
   language: scala
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe:
   - CWE-327
@@ -33,6 +34,7 @@
   enabled: true
   language: scala
   tag: weak-crypto
+  category: source-independent
   severity: medium
   cwe:
   - CWE-327
@@ -67,6 +69,7 @@
   enabled: true
   language: scala
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe:
   - CWE-330
@@ -84,6 +87,7 @@
   enabled: true
   language: scala
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe:
   - CWE-330
@@ -101,6 +105,7 @@
   enabled: true
   language: scala
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe:
   - CWE-330
@@ -118,6 +123,7 @@
   enabled: true
   language: scala
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe:
   - CWE-330
@@ -141,6 +147,7 @@
   enabled: true
   language: scala
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe:
   - CWE-330
@@ -164,6 +171,7 @@
   enabled: true
   language: scala
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe:
   - CWE-330
@@ -187,6 +195,7 @@
   enabled: true
   language: scala
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe:
   - CWE-330

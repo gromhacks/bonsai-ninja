@@ -74,3 +74,78 @@ fn c_adapter_populates_qualified_name_and_visibility() {
         main_decl.visibility
     );
 }
+
+#[test]
+fn c_adapter_does_not_index_function_pointer_api_declarations_as_int() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_c::CAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("module_api.h"),
+        "REDISMODULE_API int (*RedisModule_GetApi)(const char *, void *) REDISMODULE_ATTR;\n\
+         REDISMODULE_API int (*RedisModule_CreateCommand)(void *ctx, const char *name) REDISMODULE_ATTR;\n\
+         static int real_function(int x) { return x; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+
+    assert!(
+        idx.defs.iter().all(|decl| decl.name != "int"),
+        "function-pointer API declarations must not become an `int` function: {:?}",
+        idx.defs.iter().map(|decl| &decl.name).collect::<Vec<_>>()
+    );
+    assert!(
+        idx.defs.iter().any(|decl| decl.name == "real_function"),
+        "real function definitions with compound bodies must still be indexed"
+    );
+}
+
+#[test]
+fn c_adapter_emits_function_pointer_callable_alias() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_c::CAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("callbacks.c"),
+        "void helper(char *p) { sink(p); }\nvoid entry(char *args) { void (*cb)(char*) = helper; cb(args); }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let entry = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "entry")
+        .expect("entry decl present");
+
+    assert!(
+        entry.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_name: Some(source),
+                source_call: None,
+                ..
+            } if target == "cb" && source == "helper"
+        )),
+        "function-pointer initializer must emit exact cb -> helper alias, got {:?}",
+        entry.flow_events
+    );
+}

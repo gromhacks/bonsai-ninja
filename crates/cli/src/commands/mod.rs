@@ -32,16 +32,16 @@ pub(crate) use bonsai_sdk::{
 };
 pub(crate) use browse::{
     apply_text_limit, cmd_args, cmd_calls, cmd_classes, cmd_comments, cmd_defs, cmd_imports, cmd_refs,
-    cmd_search, cmd_strings, cmd_vars, collect_callees, emit_json_paged_cached, page_info_to_json,
-    paging_from_cli, paging_from_cli_output, short_file, truncate,
+    cmd_search, cmd_strings, cmd_vars, emit_json_paged_cached, page_info_to_json,
+    paged_json_incomplete_reasons, paging_from_cli, paging_from_cli_output, short_file, truncate,
 };
 pub(crate) use cache::cmd_cache;
 pub(crate) use diagnostics::{cmd_diagnostics, cmd_dump_cfg, cmd_dump_hir, cmd_index};
 pub(crate) use dump::{cmd_dump_ast, cmd_dump_callgraph, cmd_dump_edges, cmd_dump_resolve, cmd_dump_taint};
 pub(crate) use export::cmd_export;
 pub(crate) use inspect::{
-    cmd_inspect, render_flow_block_with_heading, render_flow_with_filters, BodySet, InspectFilters,
-    InspectFlowRendered, InspectRenderOptions,
+    cmd_inspect, render_flow_block_with_heading, render_flow_with_cached_call_spans,
+    render_flow_with_filters, BodySet, InspectFilters, InspectFlowRendered, InspectRenderOptions,
 };
 pub(crate) use trace::{cmd_trace, nearest_names, not_found_with_suggestions};
 
@@ -77,12 +77,20 @@ pub(crate) fn resolve_symbol_arg(
 /// Callers always bind the guard to a name (even `_footer`) —
 /// dropping it immediately would print the footer BEFORE the
 /// command's actual output renders.
-pub(crate) fn open_project_full(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
-    open_project_with_options(root, bonsai_sdk::OpenOptions::default())
+pub(crate) fn open_project_dataflow_prewarm(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
+    let mut options = bonsai_sdk::OpenOptions::parse_only();
+    options.load_dataflow_sidecar = true;
+    options.prewarm_dataflow = true;
+    options.save_dataflow_sidecar = true;
+    open_project_with_options(root, options)
 }
 
 pub(crate) fn open_project_index_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
     open_project_with_options(root, bonsai_sdk::OpenOptions::query_only())
+}
+
+pub(crate) fn open_project_parse_only(root: &std::path::Path) -> Result<(Project, WorkspaceFooter)> {
+    open_project_with_options(root, bonsai_sdk::OpenOptions::parse_only())
 }
 
 pub(crate) fn open_project_index_only_with_rulepack(

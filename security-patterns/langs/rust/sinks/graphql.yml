@@ -39,6 +39,7 @@
     kind: call
     callee:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.execute$
+      base_name_in: [schema]
   constraints:
   - arg_tainted:
       index: 0

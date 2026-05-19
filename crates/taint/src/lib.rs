@@ -38,15 +38,18 @@ pub use assignment::{assign_chain_taints, target_is_tainted};
 pub use inter::{
     call_site_receives_taint, call_site_receives_taint_with_caches, function_summary, interprocedural_taint,
     interprocedural_taint_to_completion_with_caches, interprocedural_taint_with_caches,
-    resume_interprocedural_taint_with_caches, CallPropagation, CleanOutputOverwrite, FunctionSeed,
-    FunctionSummary, InterTaintCaches, InterTaintConfig, InterTaintContinuation, InterTaintResult,
-    InterTaintWorkItem, ReceiverStatePropagation, SourceOutputArgs, TaintedArg, TaintedArgAtCall,
-    TaintedCall, TaintedCallKind,
+    resume_interprocedural_taint_with_caches, CallPropagation, CallResultPassthrough, CleanOutputOverwrite,
+    FunctionSeed, FunctionSummary, InterTaintCaches, InterTaintConfig, InterTaintContinuation,
+    InterTaintResult, InterTaintWorkItem, OutputArgFlow, ReceiverStatePropagation, SourceOutputArgs,
+    TaintedArg, TaintedArgAtCall, TaintedCall, TaintedCallKind,
 };
 pub use intra::{intraprocedural_taint, IntraTaintResult, TaintConfig};
 pub use reachable::{
-    entry_taint_graph_from_idg, merge_into, name_reachable_through_chain_kinded,
-    name_reachable_through_file_kinded, name_reachable_through_func_kinded, taint_facts_and_graph_for_entry,
+    entry_taint_call_records_from_idg, entry_taint_call_records_from_idg_with_max_precision,
+    entry_taint_graph_from_idg, entry_taint_graph_from_idg_with_max_precision, merge_into,
+    name_reachable_through_chain_kinded, name_reachable_through_file_kinded,
+    name_reachable_through_func_kinded, source_seed_reaches_return_from_idg,
+    source_seed_reaches_return_from_idg_with_max_precision, taint_facts_and_graph_for_entry,
     taint_facts_and_graph_for_entry_with_caches, taint_facts_for_entry, EntryTaintGraph, FactKind,
     KindedTokens, TaintedCallEdge, TokenSet,
 };

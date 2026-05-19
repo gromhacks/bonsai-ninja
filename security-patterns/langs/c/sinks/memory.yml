@@ -18,7 +18,9 @@
         }
   description: "strcpy(dst, tainted_src) — copies until NUL with no length check; classic stack/heap buffer overflow."
 - id: c.memory.strncpy
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: c
   tag: memory-safety
   severity: medium
@@ -35,7 +37,7 @@
           char *fmt = arg;
           strncpy(arg);
         }
-  description: "strncpy — does NOT NUL-terminate; misuse common."
+  description: "Disabled — `strncpy` is only a finding when the analyzer can prove missing/manual-terminator misuse. A bare call rule over-reports common bounded-copy patterns that immediately NUL-terminate."
 - id: c.memory.strcat
   enabled: true
   language: c
@@ -56,7 +58,9 @@
         }
   description: "strcat(dst, tainted_src) — appends until NUL with no bound; overflows dst if remaining space < strlen(src)."
 - id: c.memory.strncat
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: c
   tag: memory-safety
   severity: medium
@@ -73,7 +77,7 @@
           char *fmt = arg;
           strncat(arg);
         }
-  description: "strncat — n is space remaining, common misuse."
+  description: "Disabled — `strncat` needs capacity/arithmetic context to distinguish misuse from bounded remaining-capacity patterns."
 - id: c.memory.gets
   enabled: true
   language: c

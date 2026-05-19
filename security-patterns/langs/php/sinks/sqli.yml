@@ -21,6 +21,38 @@
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  $mysqli->query(\"SELECT * FROM users WHERE id = 1\");\n}\n"
     expect_no_match: true
   description: mysqli::query — use prepared statements.
+- id: php.sqli.local_mysqli_query
+  enabled: true
+  language: php
+  tag: sql-injection
+  severity: critical
+  cwe:
+  - CWE-89
+  match:
+    kind: call
+    callee:
+      regex: '^\$?(conn|mysqli|db|database|link)->query$'
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: local mysqli connection query
+    code: |
+      <?php
+      function example($input) {
+        $conn = new mysqli("localhost", "root", "", "auth");
+        $conn->query($input);
+      }
+    expect_match_text: [$conn->query]
+  - name: local mysqli connection query literal negative
+    code: |
+      <?php
+      function example() {
+        $conn = new mysqli("localhost", "root", "", "auth");
+        $conn->query("SELECT 1");
+      }
+    expect_no_match: true
+  description: "Local mysqli-style connection query(sql). The receiver-name gate keeps this on common database handle variables while covering adapter-visible `$conn->query(...)` calls that are not typed as `mysqli::query`."
 - id: php.sqli.mysqli_real_query
   enabled: true
   language: php

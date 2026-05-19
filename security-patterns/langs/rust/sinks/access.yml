@@ -9,6 +9,9 @@
     kind: call
     callee:
       regex: "\\.get_object$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -20,6 +23,13 @@
           let query = "user";
           obj.get_object(target);
       }
+  - name: literal aws get object negative
+    code: |
+      use aws_sdk_s3;
+      fn example() {
+          obj.get_object("reports/fixed.csv");
+      }
+    expect_no_match: true
   description: "aws-sdk-s3 get_object — tainted bucket/key selector reads arbitrary object data."
 
   imports:
@@ -35,6 +45,9 @@
     kind: call
     callee:
       regex: "\\.put_object$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -46,6 +59,13 @@
           let query = "user";
           obj.put_object(target);
       }
+  - name: literal aws put object negative
+    code: |
+      use aws_sdk_s3;
+      fn example() {
+          obj.put_object("reports/fixed.csv");
+      }
+    expect_no_match: true
   description: "aws-sdk-s3 put_object — tainted bucket/key selector overwrites attacker-chosen object keys."
 
   imports:
@@ -61,6 +81,9 @@
     kind: call
     callee:
       regex: "\\.get_secret_value$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -72,6 +95,13 @@
           let query = "user";
           obj.get_secret_value(target);
       }
+  - name: literal aws get secret value negative
+    code: |
+      use aws_sdk_secretsmanager;
+      fn example() {
+          obj.get_secret_value("app/prod/db");
+      }
+    expect_no_match: true
   description: "aws-sdk-secretsmanager get_secret_value — tainted secret id reads arbitrary secret material."
 
   imports:
@@ -87,6 +117,9 @@
     kind: call
     callee:
       regex: "\\.access_secret_version$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -98,6 +131,13 @@
           let query = "user";
           obj.access_secret_version(target);
       }
+  - name: literal gcp access secret version negative
+    code: |
+      use google_cloud_secretmanager;
+      fn example() {
+          obj.access_secret_version("projects/app/secrets/db/versions/latest");
+      }
+    expect_no_match: true
   description: "Secret Manager access_secret_version — tainted resource name reads arbitrary secret versions."
   imports:
   - google_cloud_secretmanager

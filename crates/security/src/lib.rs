@@ -41,8 +41,9 @@ pub use analysis::{
     FindingWithChain, PackAuditCount, PackAuditFamilyCount, PackAuditLanguage, PackAuditReport,
     PackInventoryOptions, PackRuleRow, PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule,
     PackValidationIssue, PackValidationReport, SecurityInventoryOptions, SecurityMatchRow,
-    SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport, TaintAnalysisOptions,
-    TaintAnalysisReport, CANONICAL_SINK_FAMILIES, ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS, FAMILY_NOT_APPLICABLE,
+    SourceAnalysisCandidate, SourceAnalysisOptions, SourceAnalysisReport, SourceLineageLimits,
+    SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions, TaintAnalysisReport,
+    CANONICAL_SINK_FAMILIES, ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS, FAMILY_NOT_APPLICABLE,
 };
 pub use compile::{compile_rule_to_inspect_args, CompiledRule};
 pub use deps::{build_inventory, DependencyInventory, DependencyRow};

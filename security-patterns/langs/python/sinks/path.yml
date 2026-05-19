@@ -289,9 +289,14 @@
       attribute:
       - shutil
       - copy
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: path shutil copy
     code: "import shutil\ndef example(user_input):\n    return shutil.copy(user_input)\n"
+  - name: shutil copy literal negative
+    code: "import shutil\n\ndef example():\n    return shutil.copy('src.txt', 'dst.txt')\n"
+    expect_no_match: true
   description: shutil.copy target / source may include attacker-controlled paths.
 - id: python.path.shutil_copy2
   enabled: true
@@ -308,9 +313,14 @@
       attribute:
       - shutil
       - copy2
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: path shutil copy2
     code: "import shutil\ndef example(user_input):\n    return shutil.copy2(user_input)\n"
+  - name: shutil copy2 literal negative
+    code: "import shutil\n\ndef example():\n    return shutil.copy2('src.txt', 'dst.txt')\n"
+    expect_no_match: true
   description: "shutil.copy2 — same exposure as copy but also propagates metadata; tainted source / destination paths allow reading or overwriting arbitrary files."
 - id: python.path.shutil_copyfile
   enabled: true
@@ -327,9 +337,14 @@
       attribute:
       - shutil
       - copyfile
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: path shutil copyfile
     code: "import shutil\ndef example(user_input):\n    return shutil.copyfile(user_input)\n"
+  - name: shutil copyfile literal negative
+    code: "import shutil\n\ndef example():\n    return shutil.copyfile('src.txt', 'dst.txt')\n"
+    expect_no_match: true
   description: "shutil.copyfile — copies bytes between two file paths; tainted source or destination enables arbitrary-file read / write."
 - id: python.path.shutil_move
   enabled: true
@@ -346,9 +361,14 @@
       attribute:
       - shutil
       - move
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: path shutil move
     code: "import shutil\ndef example(user_input):\n    return shutil.move(user_input)\n"
+  - name: shutil move literal negative
+    code: "import shutil\n\ndef example():\n    return shutil.move('src.txt', 'dst.txt')\n"
+    expect_no_match: true
   description: "shutil.move — tainted source or destination can move files outside the intended directory or clobber arbitrary targets."
 - id: python.path.shutil_rmtree
   enabled: true
@@ -516,9 +536,14 @@
       attribute:
       - os
       - symlink
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: path os symlink
     code: "import os\ndef example(user_input):\n    return os.symlink(user_input)\n"
+  - name: os symlink literal negative
+    code: "import os\n\ndef example():\n    return os.symlink('src.txt', 'dst.txt')\n"
+    expect_no_match: true
   description: "os.symlink — tainted source or destination creates attacker-controlled symlinks, enabling symlink-race attacks against privileged readers."
 - id: python.path.os_link
   enabled: true
@@ -536,9 +561,14 @@
       attribute:
       - os
       - link
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: path os link
     code: "import os\ndef example(user_input):\n    return os.link(user_input)\n"
+  - name: os link literal negative
+    code: "import os\n\ndef example():\n    return os.link('src.txt', 'dst.txt')\n"
+    expect_no_match: true
   description: "os.link — hard links to tainted target; defeats per-path access checks by creating a second name for a sensitive file."
 - id: python.path.pathlib_write_text
   enabled: true
@@ -553,9 +583,15 @@
       attribute:
       - Path
       - write_text
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: path pathlib write text
     code: "def example(user_input):\n    return Path.write_text(user_input)\n"
+  - name: pathlib write text literal negative
+    code: "def example():\n    return Path.write_text('safe')\n"
+    expect_no_match: true
   description: "pathlib Path.write_text — tainted path writes attacker-controlled text to arbitrary files."
 - id: python.path.pathlib_write_bytes
   enabled: true
@@ -570,9 +606,15 @@
       attribute:
       - Path
       - write_bytes
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: path pathlib write bytes
     code: "def example(user_input):\n    return Path.write_bytes(user_input)\n"
+  - name: pathlib write bytes literal negative
+    code: "def example():\n    return Path.write_bytes(b'safe')\n"
+    expect_no_match: true
   description: "pathlib Path.write_bytes — tainted path writes attacker-controlled bytes to arbitrary files."
 - id: python.path.pathlib_unlink
   enabled: true
@@ -591,9 +633,15 @@
       attribute:
       - Path
       - unlink
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: path pathlib unlink
     code: "import pathlib\ndef example(user_input):\n    return Path.unlink(user_input)\n"
+  - name: pathlib unlink literal negative
+    code: "import pathlib\n\ndef example():\n    return Path.unlink('safe')\n"
+    expect_no_match: true
   description: "pathlib Path.unlink — tainted path deletes arbitrary files."
 - id: python.path.pathlib_rename
   enabled: true
@@ -612,9 +660,15 @@
       attribute:
       - Path
       - rename
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: path pathlib rename
     code: "import pathlib\ndef example(user_input):\n    return Path.rename(user_input)\n"
+  - name: pathlib rename literal negative
+    code: "import pathlib\n\ndef example():\n    return Path.rename('safe')\n"
+    expect_no_match: true
   description: "pathlib Path.rename — tainted source or destination can move files outside the intended directory."
 - id: python.path.tempfile_mkstemp_tainted
   enabled: false
@@ -638,6 +692,7 @@
   enabled: true
   language: python
   tag: insecure-temp-file
+  category: source-independent
   severity: medium
   packages:
   - tempfile

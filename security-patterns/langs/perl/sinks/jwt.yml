@@ -11,6 +11,9 @@
     kind: call
     callee:
       name: decode_jwt
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: perl.jwt.crypt_jwt_decode example
     code: |
@@ -19,7 +22,13 @@
         my ($input, $url, $id, $payload, $request) = @_;
         decode_jwt($input)
       }
-  description: "decode_jwt — Crypt::JWT / JSON::WebToken share this exported name. Without `accepted_alg => [...]` the library accepts alg=none and forged HS256-via-RS256-pubkey tokens."
+  - name: literal jwt negative
+    code: "use Crypt::JWT;\nsub example {\n  my ($input, $url, $id, $payload, $request)
+      = @_;\n  encode_jwt($input)\n}\n"
+    expect_no_match: true
+  description: "decode_jwt — Crypt::JWT / JSON::WebToken share this exported name.
+    Without `accepted_alg => [...]` the library accepts alg=none and forged HS256-via-RS256-pubkey
+    tokens."
 
 - id: perl.jwt.json_webtoken_decode
   enabled: false
@@ -34,7 +43,8 @@
     kind: call
     callee:
       name: decode_jwt
-  description: "Disabled — merged into perl.jwt.crypt_jwt_decode (same bare `decode_jwt` name)."
+  description: "Disabled — merged into perl.jwt.crypt_jwt_decode (same bare `decode_jwt`
+    name)."
 
 - id: perl.jwt.mojo_jwt_decode
   enabled: true
@@ -66,7 +76,8 @@
         decode("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzYWZlIn0.sig")
       }
     expect_no_match: true
-  description: "Mojo::JWT $jwt->decode — only safe if `algorithm`/`secret` are set before decode; missing verification = accept any signature."
+  description: "Mojo::JWT $jwt->decode — only safe if `algorithm`/`secret` are set
+    before decode; missing verification = accept any signature."
 
 - id: perl.jwt_jwt_decode_no_verify
   enabled: true
@@ -99,4 +110,5 @@
         decode_jwt_no_verify("eyJhbGciOiJub25lIn0.eyJzdWIiOiJzYWZlIn0.");
       }
     expect_no_match: true
-  description: "decode_jwt_no_verify-style helpers — parses attacker-controlled claims without validating signature / algorithm."
+  description: "decode_jwt_no_verify-style helpers — parses attacker-controlled claims
+    without validating signature / algorithm."

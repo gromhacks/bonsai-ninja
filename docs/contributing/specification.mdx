@@ -47,6 +47,11 @@ TraceResult {
 }
 ```
 
+`summary.analysis_complete` must be false for any budget truncation or
+semantic gap. Budget reasons live in `summary.truncation_reasons`;
+non-budget gaps such as unresolved call expansion live in
+`summary.analysis_incomplete_reasons`.
+
 `TraceStep` is `{ ordinal, kind, location, summary, value_id }` with
 `TraceStepKind` covering EnterFunction, EvalExpr, Assign, BranchSplit,
 Return, Throw, etc.
@@ -131,9 +136,10 @@ Every fact crossing a layer boundary carries a `Precision`:
 - `Unknown` — gave up.
 
 `meet(a, b)` returns the worse of the two. Chains take the worst seen.
-Consumers can render Exact / Narrowed evidence prominently and
-OverApproximate / Unknown evidence with a "may include spurious paths"
-caveat.
+Public review/security/debug commands render only Exact / Narrowed evidence.
+If a requested path would require OverApproximate / Unknown evidence, the
+command must omit the broad edge/path and mark the result incomplete with a
+reason instead of presenting spurious evidence as complete.
 
 ## 6. Determinism
 

@@ -9,6 +9,8 @@
     kind: call
     callee:
       regex: "\\.GetObject$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: generated direct match
     code: |
@@ -21,6 +23,14 @@
         value := "value"
         obj.GetObject(target)
       }
+  - name: literal s3 get object negative
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go/service/s3"
+      func example() {
+        obj.GetObject("reports/fixed.csv")
+      }
+    expect_no_match: true
   description: "S3 GetObject — tainted bucket/key selector reads arbitrary object data."
 
 - id: go.access.aws_s3_put_object
@@ -34,6 +44,8 @@
     kind: call
     callee:
       regex: "\\.PutObject$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: generated direct match
     code: |
@@ -46,6 +58,14 @@
         value := "value"
         obj.PutObject(target)
       }
+  - name: literal s3 put object negative
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go/service/s3"
+      func example() {
+        obj.PutObject("reports/fixed.csv")
+      }
+    expect_no_match: true
   description: "S3 PutObject — tainted bucket/key selector overwrites attacker-chosen object keys."
 
 - id: go.access.aws_secretsmanager_get_secret_value
@@ -59,6 +79,8 @@
     kind: call
     callee:
       regex: "\\.GetSecretValue$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: generated direct match
     code: |
@@ -71,6 +93,14 @@
         value := "value"
         obj.GetSecretValue(target)
       }
+  - name: literal secretsmanager get secret value negative
+    code: |
+      package main
+      import "github.com/aws/aws-sdk-go/service/secretsmanager"
+      func example() {
+        obj.GetSecretValue("app/prod/db")
+      }
+    expect_no_match: true
   description: "Secrets Manager GetSecretValue — tainted secret id reads arbitrary secret material."
 
 - id: go.access.azure_blob_download_buffer
@@ -84,6 +114,8 @@
     kind: call
     callee:
       regex: "\\.DownloadBuffer$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: generated direct match
     code: |
@@ -96,10 +128,20 @@
         value := "value"
         obj.DownloadBuffer(target)
       }
+  - name: literal azure blob download negative
+    code: |
+      package main
+      import "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+      func example() {
+        obj.DownloadBuffer("/var/app/export/report.csv")
+      }
+    expect_no_match: true
   description: "Azure blob DownloadBuffer — tainted blob selector reads arbitrary object data."
 
 - id: go.access.azure_blob_upload_buffer
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: access-control
   severity: high
@@ -121,10 +163,12 @@
         value := "value"
         obj.UploadBuffer(target)
       }
-  description: "Azure blob UploadBuffer — tainted blob selector writes attacker-chosen storage targets."
+  description: "Disabled — UploadBuffer uploads bytes to an already-selected blob client; the object/container selector lives on the receiver construction, not the data argument."
 
 - id: go.access.gcp_storage_new_reader
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: access-control
   severity: high
@@ -146,10 +190,12 @@
         value := "value"
         ObjectHandle.NewReader(target)
       }
-  description: "GCS ObjectHandle.NewReader — tainted bucket/object selector reads arbitrary objects."
+  description: "Disabled — ObjectHandle.NewReader(ctx) reads the receiver-selected object; the object selector is constructed earlier, not passed in this call."
 
 - id: go.access.gcp_storage_new_writer
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: go
   tag: access-control
   severity: high
@@ -171,7 +217,7 @@
         value := "value"
         ObjectHandle.NewWriter(target)
       }
-  description: "GCS ObjectHandle.NewWriter — tainted bucket/object selector writes attacker-chosen objects."
+  description: "Disabled — ObjectHandle.NewWriter(ctx) writes the receiver-selected object; the object selector is constructed earlier, not passed in this call."
 
 - id: go.access.gcp_secretmanager_access_secret_version
   enabled: true
@@ -184,6 +230,8 @@
     kind: call
     callee:
       regex: "\\.AccessSecretVersion$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: generated direct match
     code: |
@@ -196,4 +244,12 @@
         value := "value"
         obj.AccessSecretVersion(target)
       }
+  - name: literal gcp secret version negative
+    code: |
+      package main
+      import "cloud.google.com/go/secretmanager/apiv1"
+      func example() {
+        obj.AccessSecretVersion("projects/app/secrets/db/versions/latest")
+      }
+    expect_no_match: true
   description: "Secret Manager AccessSecretVersion — tainted resource name reads arbitrary secret versions."

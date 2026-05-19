@@ -29,9 +29,9 @@ constraint).
 | **P5 — Must-alias / points-to** | **Shipped (intra-procedural)** — `MustAlias` constraint resolves simple rename chains (`y = x`) within a decl. Compound RHS is not aliasing; cross-procedure aliasing is conservative. Foundation for P6. | n/a. | Available; opt-in. |
 | **P6 — Lifecycle state machine** | **Shipped** — flow-sensitive lattice consumes `FlowEvent::Lifecycle { name, transition }` events; `RequiresState` constraint queries the state at each call site. Canonical states: `freed`, `closed`, `unlocked`, `cancelled`, `moved`. | **All 21 langs** emit lifecycle events for their idiomatic free / close / unlock / cancel / move calls via `bonsai_lang_api::inject_lifecycle_events`. | Available; pack-side promotion of audit-pair rules in flight. |
 
-`MATCHER_POLICY_FINGERPRINT` currently `0x0015` — bumped each time the
-matcher's evaluation surface changes in a way that can affect cached
-findings.
+`MATCHER_POLICY_FINGERPRINT` in `bonsai_common::policy` is bumped each
+time matcher, resolver, IDG, or taint propagation semantics change in a
+way that can affect cached findings.
 
 ---
 
@@ -45,6 +45,12 @@ The taint engine already does the heavy lifting for injection analysis:
   arg-position attribution.
 - **Field-sensitive write/read precision** (`obj.value =` writes only
   `obj.value`, not bare `obj`), with carrier-arg propagation.
+- **Value-preserving call results** for string transforms, formatting,
+  joins, and Go `append`, without promoting structural metadata such as
+  `sizeof(buf)` into value flow.
+- **Semantic callable binding** for local aliases and single-lambda
+  closure factories, plus same-directory top-level resolution only for
+  languages with shared file namespaces.
 - **Path-sensitive branch merge** via per-arm cloning + union, plus
   pattern-arm disjointness for Scala / Swift / Rust match expressions.
 - **Typed catch-arm narrowing** for Java / Kotlin / C# — `IOException`
@@ -69,12 +75,13 @@ fully wired but pack-side promotion of the audit-pair rules to use
 
 ## Primitive 1 — Type-aware flow narrowing (extend existing typed-catch work) — **shipped (lexical), CFG-aware variant pending**
 
-**Why it matters for injection.** Today's engine over-approximates
-virtual dispatch: `Repository.find(tainted)` blooms to every implementor.
-A user's `class SqlRepo extends Repository` makes the `find` call
-`OverApproximate`. With type narrowing, `repo: SqlRepo = new SqlRepo();
-repo.find(input)` resolves to exactly `SqlRepo.find` — the SQLi rule
-either fires or doesn't, no spurious flows.
+**Why it matters for injection.** Without type evidence,
+`Repository.find(tainted)` cannot be treated as a complete semantic call to
+one implementor. Public output must mark that gap incomplete rather than
+blooming the call to every implementor. With type narrowing,
+`repo: SqlRepo = new SqlRepo(); repo.find(input)` resolves to exactly
+`SqlRepo.find` — the SQLi rule either fires or doesn't, with no spurious
+flows.
 
 Also: discriminated-union sinks (`if (msg.type === "shell") run(msg.cmd)`)
 and instanceof-narrowed sinks (`if (x instanceof File) read(x)`) only
@@ -328,7 +335,7 @@ template; the next sweep would cover:
 
 | Family | Languages | Effort |
 |---|---|---|
-| GraphQL injection sinks (resolver-context inputs → SQL/cmd/path) | py, js, ts, rb, java | 1d/lang |
+| Remaining GraphQL injection expansion beyond shipped resolver-argument coverage (operation names, framework-specific context aliases, less common ORMs) | rb, go, java, js, ts, py | 0.5d/lang |
 | OAuth / OIDC misconfig (open redirect, alg confusion, missing state) | py, js, ts, java, go | 1d/lang |
 | LLM prompt injection (LangChain / OpenAI SDK arg flows) | py, js, ts | 1d/lang |
 | ORM raw-string sinks (Sequelize raw, Diesel literal SQL, Mongoose `$where`) | js, ts, rust, py | 0.5d/lang |

@@ -1,4 +1,4 @@
-//! `.bonsai/callgraph.v1.bin` sidecar — persists the workspace's
+//! `.bonsai/callgraph.v10.bin` sidecar — persists the workspace's
 //! resolved call graph across CLI invocations. Earlier every
 //! `bonsai-ninja` command rebuilt it from scratch (sequential
 //! `for file in global.all_files()` loop in
@@ -13,6 +13,7 @@
 //! current file with the same hash. Any mismatch (file changed,
 //! file removed, file added) drops the sidecar.
 
+use crate::cache_fingerprint::dependency_metadata_fingerprint_for_sidecar;
 use ahash::AHashMap;
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::{workspace_bonsai_dir, MATCHER_POLICY_FINGERPRINT};
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const CALLGRAPH_CACHE_VERSION: u32 = 1;
+pub const CALLGRAPH_CACHE_VERSION: u32 = 10;
 static CALLGRAPH_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,6 +36,9 @@ pub(crate) struct CallgraphSnapshot {
     /// `(workspace-relative-path, content_hash)` pairs for every
     /// workspace file that contributed to the graph at save time.
     pub files: Vec<(String, u64)>,
+    /// Fingerprint of dependency manifests and lockfiles that may
+    /// influence import and call resolution.
+    pub dependency_metadata_fingerprint: u64,
     pub graph: ResolvedCallGraph,
 }
 
@@ -65,6 +69,7 @@ pub(crate) fn save_callgraph_sidecar(
         version: CALLGRAPH_CACHE_VERSION,
         matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
         files,
+        dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(path),
         graph: graph.clone(),
     };
     let bytes =
@@ -105,6 +110,9 @@ pub(crate) fn load_callgraph_sidecar(path: &Path, db: &AnalyzerDb) -> Option<Res
         return None;
     }
     if snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT {
+        return None;
+    }
+    if snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
         return None;
     }
     // Build the current `(path, hash)` set so we can match it

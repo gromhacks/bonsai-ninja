@@ -21,6 +21,7 @@
 
 use crate::edge::IdgEdge;
 use crate::node::NodeId;
+use bonsai_common::Precision;
 
 /// Compressed-sparse-row adjacency. Built from a list of edges; one
 /// CSR for forward (`from → targets`), one for backward (`to →
@@ -41,11 +42,35 @@ impl EdgeCsr {
         Self::build(n_nodes, edges, |e| (e.from.0, e.to.0))
     }
 
+    /// Build a forward CSR from compact `(from, to)` edge pairs.
+    #[must_use]
+    pub fn forward_pairs(n_nodes: usize, edges: &[(u32, u32)]) -> Self {
+        Self::build_pairs(n_nodes, edges, |(from, to)| (*from, *to))
+    }
+
+    /// Build a forward CSR from compact `(from, to, precision)` edge records.
+    #[must_use]
+    pub fn forward_precision(n_nodes: usize, edges: &[(u32, u32, Precision)]) -> Self {
+        Self::build_precision(n_nodes, edges, |(from, to, _)| (*from, *to))
+    }
+
     /// Build a backward CSR (transposed): each edge contributes one
     /// `to → from` entry.
     #[must_use]
     pub fn backward(n_nodes: usize, edges: &[IdgEdge]) -> Self {
         Self::build(n_nodes, edges, |e| (e.to.0, e.from.0))
+    }
+
+    /// Build a backward CSR from compact `(from, to)` edge pairs.
+    #[must_use]
+    pub fn backward_pairs(n_nodes: usize, edges: &[(u32, u32)]) -> Self {
+        Self::build_pairs(n_nodes, edges, |(from, to)| (*to, *from))
+    }
+
+    /// Build a backward CSR from compact `(from, to, precision)` edge records.
+    #[must_use]
+    pub fn backward_precision(n_nodes: usize, edges: &[(u32, u32, Precision)]) -> Self {
+        Self::build_precision(n_nodes, edges, |(from, to, _)| (*to, *from))
     }
 
     /// Build a CSR. `extract` returns `(src, dst)` from each edge —
@@ -72,6 +97,76 @@ impl EdgeCsr {
         let total = *offsets.last().unwrap_or(&0) as usize;
         let mut targets = vec![0u32; total];
         // Second pass: fill targets, advancing per-source cursor.
+        let mut cursor = offsets.clone();
+        for edge in valid_edges {
+            let (s, d) = extract(edge);
+            let pos = cursor[s as usize] as usize;
+            targets[pos] = d;
+            cursor[s as usize] += 1;
+        }
+        Self {
+            offsets,
+            targets,
+            n_nodes,
+        }
+    }
+
+    /// Build a CSR from compact `(from, to, precision)` records. The
+    /// precision is ignored here; callers keep it in a side adjacency
+    /// when precision-scoped traversal needs it.
+    fn build_precision<F>(n_nodes: usize, edges: &[(u32, u32, Precision)], extract: F) -> Self
+    where
+        F: Fn(&(u32, u32, Precision)) -> (u32, u32),
+    {
+        let mut offsets = vec![0u32; n_nodes + 1];
+        let valid_edges = edges.iter().filter(|edge| {
+            let (s, d) = extract(edge);
+            (s as usize) < n_nodes && (d as usize) < n_nodes
+        });
+        for edge in valid_edges.clone() {
+            let (s, _) = extract(edge);
+            offsets[s as usize + 1] += 1;
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let total = *offsets.last().unwrap_or(&0) as usize;
+        let mut targets = vec![0u32; total];
+        let mut cursor = offsets.clone();
+        for edge in valid_edges {
+            let (s, d) = extract(edge);
+            let pos = cursor[s as usize] as usize;
+            targets[pos] = d;
+            cursor[s as usize] += 1;
+        }
+        Self {
+            offsets,
+            targets,
+            n_nodes,
+        }
+    }
+
+    /// Build a CSR from compact `(from, to)` pairs. Used by query
+    /// materialisation when metadata has already been split into
+    /// side indexes and reachability only needs raw endpoints.
+    fn build_pairs<F>(n_nodes: usize, edges: &[(u32, u32)], extract: F) -> Self
+    where
+        F: Fn(&(u32, u32)) -> (u32, u32),
+    {
+        let mut offsets = vec![0u32; n_nodes + 1];
+        let valid_edges = edges.iter().filter(|edge| {
+            let (s, d) = extract(edge);
+            (s as usize) < n_nodes && (d as usize) < n_nodes
+        });
+        for edge in valid_edges.clone() {
+            let (s, _) = extract(edge);
+            offsets[s as usize + 1] += 1;
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let total = *offsets.last().unwrap_or(&0) as usize;
+        let mut targets = vec![0u32; total];
         let mut cursor = offsets.clone();
         for edge in valid_edges {
             let (s, d) = extract(edge);
@@ -122,108 +217,5 @@ impl EdgeCsr {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::edge::{EdgeMeta, IdgEdgeKind};
-    use bonsai_callgraph::EdgeKind as CallEdgeKind;
-    use bonsai_common::{FileId, Precision, Span};
-
-    fn span() -> Span {
-        Span::new(FileId::new(0), 0, 1)
-    }
-
-    fn meta() -> EdgeMeta {
-        EdgeMeta {
-            precision: Precision::Exact,
-            kind: IdgEdgeKind::IntraAssign,
-            call_kind: CallEdgeKind::Direct,
-            via_span: span(),
-        }
-    }
-
-    fn edge(from: u32, to: u32) -> IdgEdge {
-        IdgEdge {
-            from: NodeId(from),
-            to: NodeId(to),
-            meta: meta(),
-        }
-    }
-
-    #[test]
-    fn empty_csr_zero_edges() {
-        let csr = EdgeCsr::forward(0, &[]);
-        assert_eq!(csr.node_count(), 0);
-        assert_eq!(csr.edge_count(), 0);
-        assert_eq!(csr.degree(NodeId(0)), 0);
-    }
-
-    #[test]
-    fn forward_csr_neighbours_per_source() {
-        // 0 → 1, 0 → 2, 1 → 3
-        let edges = vec![edge(0, 1), edge(0, 2), edge(1, 3)];
-        let csr = EdgeCsr::forward(4, &edges);
-        let mut n0: Vec<u32> = csr.neighbours(NodeId(0)).to_vec();
-        n0.sort_unstable();
-        assert_eq!(n0, vec![1, 2]);
-        let n1: Vec<u32> = csr.neighbours(NodeId(1)).to_vec();
-        assert_eq!(n1, vec![3]);
-        assert_eq!(csr.neighbours(NodeId(3)), &[] as &[u32]);
-    }
-
-    #[test]
-    fn backward_csr_inverts_direction() {
-        // forward 0 → 1, 2 → 1 means backward 1 → {0, 2}
-        let edges = vec![edge(0, 1), edge(2, 1)];
-        let csr = EdgeCsr::backward(3, &edges);
-        let mut n1 = csr.neighbours(NodeId(1)).to_vec();
-        n1.sort_unstable();
-        assert_eq!(n1, vec![0, 2]);
-        assert_eq!(csr.neighbours(NodeId(0)), &[] as &[u32]);
-        assert_eq!(csr.neighbours(NodeId(2)), &[] as &[u32]);
-    }
-
-    #[test]
-    fn degree_matches_neighbours_length() {
-        let edges = vec![edge(0, 1), edge(0, 2), edge(0, 3), edge(1, 2)];
-        let csr = EdgeCsr::forward(4, &edges);
-        assert_eq!(csr.degree(NodeId(0)), 3);
-        assert_eq!(csr.degree(NodeId(1)), 1);
-        assert_eq!(csr.degree(NodeId(2)), 0);
-        assert_eq!(csr.degree(NodeId(3)), 0);
-    }
-
-    #[test]
-    fn out_of_range_source_returns_empty_slice() {
-        let csr = EdgeCsr::forward(2, &[edge(0, 1)]);
-        assert_eq!(csr.neighbours(NodeId(99)), &[] as &[u32]);
-        assert_eq!(csr.degree(NodeId(99)), 0);
-    }
-
-    #[test]
-    fn edges_referencing_out_of_range_nodes_dropped() {
-        let edges = vec![edge(0, 1), edge(0, 99), edge(99, 0)];
-        let csr = EdgeCsr::forward(2, &edges);
-        // Only edge 0 → 1 survives.
-        assert_eq!(csr.edge_count(), 1);
-        assert_eq!(csr.neighbours(NodeId(0)), &[1]);
-    }
-
-    #[test]
-    fn forward_and_backward_csrs_have_matching_total_edges() {
-        let edges = vec![edge(0, 1), edge(1, 2), edge(2, 3), edge(3, 0)];
-        let f = EdgeCsr::forward(4, &edges);
-        let b = EdgeCsr::backward(4, &edges);
-        assert_eq!(f.edge_count(), b.edge_count());
-    }
-
-    #[test]
-    fn duplicate_edges_appear_multiple_times_in_csr() {
-        // The CSR is faithful — duplicates are kept; consumers can
-        // dedupe at query time if needed.
-        let edges = vec![edge(0, 1), edge(0, 1), edge(0, 1)];
-        let csr = EdgeCsr::forward(2, &edges);
-        assert_eq!(csr.degree(NodeId(0)), 3);
-        let n: Vec<u32> = csr.neighbours(NodeId(0)).to_vec();
-        assert_eq!(n, vec![1, 1, 1]);
-    }
-}
+#[path = "csr_tests.rs"]
+mod tests;

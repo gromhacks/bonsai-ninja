@@ -26,6 +26,18 @@ pub fn to_text(trace: &TraceResult) -> String {
         trace.summary.explored_paths,
         trace.summary.truncated_paths,
     );
+    if !trace.summary.analysis_complete {
+        let mut reasons = trace.summary.truncation_reasons.clone();
+        reasons.extend(trace.summary.analysis_incomplete_reasons.iter().cloned());
+        reasons.sort();
+        reasons.dedup();
+        let reasons = if reasons.is_empty() {
+            "unknown".to_string()
+        } else {
+            reasons.join(", ")
+        };
+        let _ = writeln!(out, "Analysis incomplete: {reasons}\n");
+    }
     for path in &trace.paths {
         let _ = writeln!(out, "Path {}", path.path_id);
         for step in trace.steps.iter().filter(|s| s.path_id == path.path_id) {
@@ -39,12 +51,12 @@ pub fn to_text(trace: &TraceResult) -> String {
 
 fn write_step(out: &mut String, step: &TraceStep) {
     use std::fmt::Write as _;
-    let _ = writeln!(
-        out,
-        "  [{}] {}",
-        step.order,
-        human_label(step.kind, &step.message, &step.function),
-    );
+    let label = if step.precision.is_semantic() {
+        human_label(step.kind, &step.message, &step.function)
+    } else {
+        "Suppressed diagnostic-precision trace step".to_string()
+    };
+    let _ = writeln!(out, "  [{}] {}", step.order, label);
     let _ = writeln!(
         out,
         "      at {}:{}:{}-{}:{}",
@@ -98,3 +110,7 @@ pub fn to_dot(trace: &TraceResult) -> String {
 pub fn to_json(trace: &TraceResult) -> serde_json::Result<String> {
     serde_json::to_string_pretty(trace)
 }
+
+#[cfg(test)]
+#[path = "render_tests.rs"]
+mod tests;

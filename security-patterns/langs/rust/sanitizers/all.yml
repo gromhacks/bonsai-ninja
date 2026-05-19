@@ -572,6 +572,8 @@
     kind: call
     callee:
       attribute: [percent_encoding, percent_decode_str]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated direct match
     code: |
@@ -590,6 +592,8 @@
     kind: call
     callee:
       attribute: [urlencoding, decode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated direct match
     code: |

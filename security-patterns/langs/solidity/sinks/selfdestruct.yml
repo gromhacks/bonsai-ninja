@@ -2,6 +2,7 @@
   enabled: true
   language: solidity
   tag: access-control
+  category: source-independent
   severity: critical
   cwe: [CWE-284]
   match:
@@ -18,6 +19,7 @@
   enabled: true
   language: solidity
   tag: access-control
+  category: source-independent
   severity: critical
   cwe: [CWE-284]
   match:

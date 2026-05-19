@@ -15,6 +15,23 @@ cargo test --workspace
 
 Use `./target/release/bonsai-ninja` for CLI validation when the test or script expects the release binary.
 
+## Test Layout
+
+Keep production modules focused on production code. Unit-test bodies live in
+separate sibling files and are included with a small `#[cfg(test)]` module
+declaration:
+
+```rust
+#[cfg(test)]
+#[path = "value_flow_tests.rs"]
+mod tests;
+```
+
+For crate roots (`lib.rs`, `main.rs`, or `mod.rs`), `mod tests;` may point to
+the conventional sibling `tests.rs` file. For nested modules, use an explicit
+`#[path = "..._tests.rs"]` so Rust resolves the file next to the module source.
+Integration and matrix tests stay under each crate's `tests/` directory.
+
 ## Add A Rule
 
 1. Choose `sources`, `sinks`, or `sanitizers`.

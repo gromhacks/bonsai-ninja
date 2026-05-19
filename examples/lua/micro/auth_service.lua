@@ -1,9 +1,11 @@
 local M = {}
+local luasql = require("luasql.sqlite3")
+local db = luasql.sqlite3()
 
 function M.verifyToken(token)
     local query = "SELECT user_id FROM tokens WHERE token = '" .. token .. "'"
     -- sink: SQL injection via concatenation
-    print(query)
+    db:execute(query)
     return 1
 end
 

@@ -67,6 +67,10 @@ pub struct Rulepack {
     /// would silently overwrite, with the LAST inserted winning.
     /// `find_duplicate_ids_across_pack` locks this in at load time.
     by_id: std::sync::OnceLock<AHashMap<String, (String, RuleKindBucket, usize)>>,
+    /// Full enabled-rule content fingerprint used by taint graph cache
+    /// keys. Built lazily because broad conformance runs invoke taint
+    /// analysis many times against the same immutable pack.
+    pub(crate) taint_graph_rule_content_fingerprint: std::sync::OnceLock<u64>,
 }
 
 impl Default for Rulepack {
@@ -75,6 +79,7 @@ impl Default for Rulepack {
             packs: AHashMap::new(),
             root: PathBuf::new(),
             by_id: std::sync::OnceLock::new(),
+            taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
         }
     }
 }
@@ -97,6 +102,7 @@ impl Clone for Rulepack {
             packs: self.packs.clone(),
             root: self.root.clone(),
             by_id: std::sync::OnceLock::new(),
+            taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
         }
     }
 }
@@ -225,6 +231,7 @@ pub fn load_workspace_local_rules(workspace: &Path) -> Result<Option<Rulepack>, 
         packs: AHashMap::new(),
         root: local_root.clone(),
         by_id: std::sync::OnceLock::new(),
+        taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
     };
     let entries = read_dir(&local_root)?;
     for entry in entries {
@@ -359,6 +366,7 @@ pub fn load_rulepack(root: &Path) -> Result<Rulepack, LoadError> {
         packs: AHashMap::new(),
         root: root.to_path_buf(),
         by_id: std::sync::OnceLock::new(),
+        taint_graph_rule_content_fingerprint: std::sync::OnceLock::new(),
     };
     let langs_dir = root.join("langs");
     if langs_dir.exists() {

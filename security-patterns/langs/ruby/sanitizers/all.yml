@@ -815,6 +815,8 @@
     kind: call
     callee:
       attribute: [CGI, unescape]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: ruby.passthrough.cgi_unescape example
     code: |
@@ -831,6 +833,8 @@
     kind: call
     callee:
       attribute: [URI, decode_www_form_component]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: ruby.passthrough.uri_decode_www_form_component example
     code: |

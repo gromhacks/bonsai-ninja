@@ -6,6 +6,7 @@
   enabled: true
   language: cpp
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:
@@ -26,6 +27,7 @@
   enabled: true
   language: cpp
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:

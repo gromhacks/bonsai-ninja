@@ -971,7 +971,7 @@ fn export_deterministic_across_runs() {
 fn propagation_records_have_complete_shape() {
     let Some(_) = bin_path() else { return };
     let w = ws("python", "mega_flow");
-    let Some((out, _, _)) = run(&["export", &w]) else {
+    let Some((out, _, _)) = run(&["export", &w, "--full-propagations"]) else {
         return;
     };
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();

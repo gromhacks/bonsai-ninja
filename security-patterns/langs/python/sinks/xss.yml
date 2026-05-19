@@ -463,6 +463,9 @@
     kind: write
     target:
       regex: ^(resp|response)\.(text|body)$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: falcon response text html write
     code: |
@@ -471,4 +474,11 @@
           resp.text = "<p>" + user_input + "</p>"
     expect_match_text:
     - resp.text
+  - name: falcon response literal html write negative
+    code: |
+      import falcon
+      def on_get(req, resp):
+          text = "<p>safe</p>"
+          return text
+    expect_no_match: true
   description: Falcon response.text/body assignment with string-built HTML - tainted content is sent in the response body.

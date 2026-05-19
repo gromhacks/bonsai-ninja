@@ -73,6 +73,7 @@ pub(crate) fn cmd_defs(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
                     let headers =
                         with_flows_header(&["name", "kind", "location", "signature", "callees"], flows);
                     let mut t = u.table(&headers);
@@ -105,7 +106,8 @@ pub(crate) fn cmd_defs(
                             Cell::new(u.dim(&callees_cell)),
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            cells.push(flows_cell(u, &ann.labels_for(&d.file, d.line)));
+                            let labels = ann.labels_for(&d.file, d.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -117,6 +119,7 @@ pub(crate) fn cmd_defs(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} definitions)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja defs <workspace>");
                     Ok(())
@@ -356,8 +359,9 @@ pub(crate) fn build_flow_annotator<'a>(
 /// pulled in the same long flow list. Cap the displayed list at a
 /// fixed sample plus an "(+N more)" tail so the cell stays bounded
 /// while users still see enough flow ids to drill into via
-/// `inspect --flow F:<16-hex>`. JSON output is unaffected (the SDK
-/// `labels_for` keeps emitting the full set).
+/// `inspect --flow F:<16-hex>`. If the underlying label set itself
+/// was capped, the cell retains a trailing ellipsis and the renderer
+/// prints an incomplete-flow-column notice.
 pub(crate) fn flows_cell(u: &Ui, labels: &str) -> Cell {
     if labels.is_empty() {
         return Cell::new(u.dim("-"));
@@ -377,6 +381,39 @@ pub(crate) fn flows_cell(u: &Ui, labels: &str) -> Cell {
     } else {
         Cell::new(u.loc(labels))
     }
+}
+
+#[derive(Default)]
+struct FlowColumnStatus {
+    truncated_rows: usize,
+}
+
+fn flow_cell_with_status(u: &Ui, labels: &str, status: &mut FlowColumnStatus) -> Cell {
+    if flow_labels_truncated(labels) {
+        status.truncated_rows += 1;
+    }
+    flows_cell(u, labels)
+}
+
+fn flow_labels_truncated(labels: &str) -> bool {
+    labels.split_whitespace().any(|part| part.ends_with('…'))
+}
+
+fn render_flow_column_notice(u: &Ui, status: &FlowColumnStatus) {
+    if status.truncated_rows == 0 {
+        return;
+    }
+    cli_println!(
+        "{}",
+        u.warn(&format!(
+            "semantic-only flows column incomplete: {} rendered row(s) have capped flow-id labels",
+            status.truncated_rows
+        ))
+    );
+    cli_println!(
+        "{}",
+        u.dim("flow ids ending in … are prefixes, not complete label sets; use inspect --query ... --all for full evidence")
+    );
 }
 
 /// Conservative visible-byte estimate for one comfy-table cell.
@@ -427,9 +464,9 @@ fn flow_labels_estimated_cell_cost(flows: bool) -> u64 {
         // expensive to enumerate. Pricing every row exactly would
         // rebuild the label set for the whole result list before
         // rendering page 1. Use a wrap-aware allowance that matches
-        // the rendered cap (see `flow_labels_cell_cost`); the
-        // renderer still computes exact labels only for the rows it
-        // actually prints.
+        // the rendered cap (see `flow_labels_cell_cost`); rendering
+        // still resolves labels only for rows it actually prints and
+        // emits a notice if those labels are capped prefixes.
         wrapped_table_cell_cost(120)
     } else {
         0
@@ -558,7 +595,8 @@ pub(crate) fn cmd_calls(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let headers = with_flows_header(&["callee", "caller", "location", "code"], flows);
+                    let mut flow_status = FlowColumnStatus::default();
+                    let headers = with_flows_header(&["callee text", "caller", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     let mut last_code: Option<String> = None;
                     for c in &rows {
@@ -579,7 +617,8 @@ pub(crate) fn cmd_calls(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            cells.push(flows_cell(u, &ann.labels_for(&c.file, c.line)));
+                            let labels = ann.labels_for(&c.file, c.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -591,6 +630,7 @@ pub(crate) fn cmd_calls(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} call sites)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja calls <workspace>");
                     Ok(())
@@ -622,7 +662,10 @@ where
             filters_hash,
             row_cost_bytes,
             |slice, info, _cfg| {
+                let analysis_incomplete_reasons = paged_json_incomplete_reasons(command, info);
                 let wrapped = serde_json::json!({
+                    "analysis_complete": page_covers_entire_result(info),
+                    "analysis_incomplete_reasons": analysis_incomplete_reasons,
                     "rows": slice,
                     "page": page_info_to_json(info),
                 });
@@ -634,6 +677,26 @@ where
         cli_println!("{}", serde_json::to_string_pretty(&rows)?);
     }
     Ok(())
+}
+
+fn page_covers_entire_result(info: &paging::PageInfo) -> bool {
+    info.page_number == 1 && info.is_last
+}
+
+pub(crate) fn paged_json_incomplete_reasons(command: &str, info: &paging::PageInfo) -> Vec<String> {
+    if page_covers_entire_result(info) {
+        return Vec::new();
+    }
+    if let Some(next_cursor) = info.next_cursor.as_deref() {
+        return vec![format!(
+            "paged {command} result incomplete: page {} of {}; continue with --page {} or pass --all",
+            info.page_number, info.total_pages, next_cursor,
+        )];
+    }
+    vec![format!(
+        "paged {command} result incomplete: page {} of {}; this response contains only the requested page, pass --all for the full result set",
+        info.page_number, info.total_pages,
+    )]
 }
 
 /// Collapse the bare+sigil'd twin entries Perl's adapter emits for
@@ -783,6 +846,7 @@ pub(crate) fn cmd_imports(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
                     let headers =
                         with_flows_header(&["module", "symbol", "alias", "kind", "location", "code"], flows);
                     let mut t = u.table(&headers);
@@ -815,7 +879,7 @@ pub(crate) fn cmd_imports(
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
                             let labels = import_flow_labels(ann, import);
-                            cells.push(flows_cell(u, &labels));
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -827,6 +891,7 @@ pub(crate) fn cmd_imports(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} imports)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja imports <workspace>");
                     Ok(())
@@ -899,6 +964,7 @@ pub(crate) fn cmd_vars(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["var", "in", "source", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     let mut last_code: Option<String> = None;
@@ -921,7 +987,8 @@ pub(crate) fn cmd_vars(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            cells.push(flows_cell(u, &ann.labels_for(&v.file, v.line)));
+                            let labels = ann.labels_for(&v.file, v.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -933,6 +1000,7 @@ pub(crate) fn cmd_vars(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} writes)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja vars <workspace>");
                     Ok(())
@@ -1011,6 +1079,7 @@ pub(crate) fn cmd_strings(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["category", "text", "in", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     let mut last_code: Option<String> = None;
@@ -1035,7 +1104,8 @@ pub(crate) fn cmd_strings(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            cells.push(flows_cell(u, &ann.labels_for(&s.file, s.line)));
+                            let labels = ann.labels_for(&s.file, s.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1047,6 +1117,7 @@ pub(crate) fn cmd_strings(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} strings)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja strings <workspace>");
                     Ok(())
@@ -1203,8 +1274,11 @@ pub(crate) fn cmd_args(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
-                    let headers =
-                        with_flows_header(&["callee", "pos", "arg", "caller", "location", "code"], flows);
+                    let mut flow_status = FlowColumnStatus::default();
+                    let headers = with_flows_header(
+                        &["callee text", "pos", "arg", "caller", "location", "code"],
+                        flows,
+                    );
                     let mut t = u.table(&headers);
                     let mut last_code: Option<String> = None;
                     for a in &rows {
@@ -1234,7 +1308,8 @@ pub(crate) fn cmd_args(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            cells.push(flows_cell(u, &ann.labels_for(&a.file, a.line)));
+                            let labels = ann.labels_for(&a.file, a.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1246,6 +1321,7 @@ pub(crate) fn cmd_args(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} arguments)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja args <workspace>");
                     Ok(())
@@ -1306,6 +1382,7 @@ pub(crate) fn cmd_classes(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["name", "kind", "location", "#", "methods"], flows);
                     let mut t = u.table(&headers);
                     for c in &rows {
@@ -1353,7 +1430,7 @@ pub(crate) fn cmd_classes(
                                 }
                             }
                             let flows_text = union.into_iter().collect::<Vec<_>>().join(" ");
-                            cells.push(flows_cell(u, &flows_text));
+                            cells.push(flow_cell_with_status(u, &flows_text, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1365,6 +1442,7 @@ pub(crate) fn cmd_classes(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} types)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja classes <workspace>");
                     Ok(())
@@ -1418,6 +1496,7 @@ pub(crate) fn cmd_refs(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
                     let headers = with_flows_header(&["symbol", "kind", "in", "location", "code"], flows);
                     let mut t = u.table(&headers);
                     let mut last_code: Option<String> = None;
@@ -1441,7 +1520,8 @@ pub(crate) fn cmd_refs(
                             code_cell,
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            cells.push(flows_cell(u, &ann.labels_for(&r.file, r.line)));
+                            let labels = ann.labels_for(&r.file, r.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1453,6 +1533,7 @@ pub(crate) fn cmd_refs(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} references)", out.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja refs <workspace> <symbol>");
                     Ok(())
@@ -1511,6 +1592,7 @@ pub(crate) fn cmd_search(
                     let (rows, truncated) = apply_text_limit(paged, effective_limit(limit, cfg));
                     let u = ui();
                     let (flow_ann, flow_bar) = build_flow_annotator(ws, flows, rows.len() as u64);
+                    let mut flow_status = FlowColumnStatus::default();
                     // The "qualified" column is only meaningful for decl-kind
                     // hits; non-decl hits use the context column (signature /
                     // alias / "in <fn>") for the analogous info. The "code"
@@ -1542,7 +1624,8 @@ pub(crate) fn cmd_search(
                             Cell::new(u.path(&loc)),
                         ];
                         if let Some(ann) = flow_ann.as_ref() {
-                            cells.push(flows_cell(u, &ann.labels_for(&h.file, h.line)));
+                            let labels = ann.labels_for(&h.file, h.line);
+                            cells.push(flow_cell_with_status(u, &labels, &mut flow_status));
                             if let Some(b) = flow_bar.as_ref() {
                                 b.inc(1);
                             }
@@ -1554,6 +1637,7 @@ pub(crate) fn cmd_search(
                     }
                     cli_println!("{t}");
                     cli_println!("{}", u.dim(&format!("({} matches)", hits.len())));
+                    render_flow_column_notice(u, &flow_status);
                     render_truncation_notice(rows.len(), truncated);
                     render_paging_footer(info, "bonsai-ninja search <workspace> <query>");
                     Ok(())
@@ -1600,49 +1684,5 @@ pub(crate) fn collect_callees(events: &[FlowEvent], out: &mut Vec<String>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{collect_callees, truncate};
-    use bonsai_common::{FileId, Span};
-    use bonsai_lang_api::{CallKind, FlowEvent};
-
-    fn span() -> Span {
-        Span {
-            file: FileId(0),
-            start: 0,
-            end: 1,
-        }
-    }
-
-    #[test]
-    fn truncate_zero_chars_keeps_only_ellipsis() {
-        assert_eq!(truncate("abcdef", 0), "…");
-        assert_eq!(truncate("éclair", 0), "…");
-    }
-
-    #[test]
-    fn collect_callees_includes_assignment_source_calls() {
-        let events = vec![
-            FlowEvent::Assign {
-                target: "x".to_string(),
-                source_name: None,
-                source_names: Vec::new(),
-                source_call: Some("read_user".to_string()),
-                source_call_args: vec!["request".to_string()],
-                span: span(),
-                declares_new_binding: false,
-                value_kind: None,
-            },
-            FlowEvent::Call {
-                name: "sink".to_string(),
-                receiver: None,
-                args: Vec::new(),
-                receiver_types: Vec::new(),
-                call_kind: CallKind::Function,
-                span: span(),
-            },
-        ];
-        let mut out = Vec::new();
-        collect_callees(&events, &mut out);
-        assert_eq!(out, vec!["read_user", "sink"]);
-    }
-}
+#[path = "browse_tests.rs"]
+mod tests;

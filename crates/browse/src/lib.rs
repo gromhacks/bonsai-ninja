@@ -44,7 +44,10 @@ pub use classes::{classes, ClassOut, ClassesFilters};
 pub use comments::{comments, CommentOut, CommentsFilters};
 pub use common::{format_span, make_name_filter, Locator, NameFilter, Span};
 pub use defs::{defs, DefOut, DefsFilters};
-pub use dumps::{callgraph_summary, dump_callgraph, dump_cfg, dump_hir, CallgraphRow, HirDump};
+pub use dumps::{
+    callgraph_summary, dump_callgraph, dump_cfg, dump_hir, CallgraphRow, DumpCallableCandidate,
+    DumpLookupError, HirDump,
+};
 pub use edges::{compute_edge_id, dump_edges, EdgeRecord, EdgesFilters, PrecisionClass};
 pub use flows::FlowAnnotator;
 pub use graph_export::{
@@ -52,7 +55,10 @@ pub use graph_export::{
     GraphExportFormat, GraphNode, GraphProjection,
 };
 pub use imports::{imports, ImportOut, ImportsFilters};
-pub use native_export::{native_export_json, render_native_export_json};
+pub use native_export::{
+    native_export_json, native_export_json_with_config, render_native_export_json,
+    render_native_export_json_with_config, write_native_export_json_with_config, NativeExportConfig,
+};
 pub use refs::{refs, RefOut, RefsFilters};
 pub use resolve::{
     compute_candidate_id, dump_resolve, ResolveCandidate, ResolveFilters, ResolveOutcome, ResolveTrace,

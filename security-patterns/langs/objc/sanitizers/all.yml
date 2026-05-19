@@ -336,6 +336,8 @@
     kind: call
     callee:
       name: stringByRemovingPercentEncoding
+  taint_semantics:
+    call_result_passthrough_receiver: true
   match_examples:
   - name: declared shape
     code: |

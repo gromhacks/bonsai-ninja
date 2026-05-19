@@ -596,7 +596,10 @@
       name: zip_open
   description: "Disabled — informational marker for libzip archive open; the Zip Slip site is the use of zip_get_name() output (paired with file open / write below)."
 - id: cpp.path.libzip_zip_get_name
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: cpp.archive.libzip_zip_get_name
   language: cpp
   tag: zip-slip
   severity: high
@@ -611,9 +614,12 @@
   match_examples:
   - name: generated direct match
     code: "#include <libzip.h>\nvoid example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  zip_get_name(arg);\n}\n"
-  description: "libzip zip_get_name(za, idx, flags) — returns attacker-controlled archive entry name. Joining into a destination path and then opening for write is Zip Slip."
+  description: "Disabled sink duplicate — zip_get_name returns an attacker-controlled archive entry name and is modeled as source cpp.archive.libzip_zip_get_name; the actual Zip Slip sink is the later path open/write."
 - id: cpp.path.minizip_unzgetcurrentfileinfo
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: cpp.archive.minizip_unzgetcurrentfileinfo_filename
   language: cpp
   tag: zip-slip
   severity: high
@@ -626,4 +632,4 @@
   match_examples:
   - name: generated direct match
     code: "void example() {\n  const char *arg = \"tainted\";\n  const char *fmt = arg;\n  const char *query = arg;\n  unzGetCurrentFileInfo(arg);\n}\n"
-  description: "minizip unzGetCurrentFileInfo — fills filename buffer from archive entry; same Zip Slip exposure as libzip zip_get_name."
+  description: "Disabled sink duplicate — unzGetCurrentFileInfo writes an attacker-controlled archive filename into an output buffer and is modeled as source cpp.archive.minizip_unzgetcurrentfileinfo_filename; the actual Zip Slip sink is the later path open/write."

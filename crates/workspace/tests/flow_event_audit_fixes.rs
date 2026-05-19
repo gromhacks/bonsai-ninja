@@ -168,6 +168,37 @@ fn python_generator_expression_emits_loop_var_assign() {
 }
 
 #[test]
+fn python_match_dict_pattern_binds_exact_field() {
+    let src =
+        "def fn(payload):\n    match payload:\n        case {\"value\": v, **rest}:\n            return v\n";
+    let w = ws(python(), "a.py", src);
+    let d = decl(&w, "fn").expect("fn decl");
+    let assigns = assigns(&d.flow_events);
+
+    let has_exact_value = assigns.iter().any(|(target, source, names)| {
+        target == "v"
+            && (source.as_deref() == Some("payload.value")
+                || names.iter().any(|name| name == "payload.value"))
+    });
+    assert!(
+        has_exact_value,
+        "dict match binding must produce v ← payload.value; got {assigns:?}"
+    );
+    assert!(
+        !assigns
+            .iter()
+            .any(|(target, source, _)| target == "v" && source.as_deref() == Some("payload")),
+        "dict match binding must not leave coarse v ← payload fallback; got {assigns:?}"
+    );
+    assert!(
+        !assigns
+            .iter()
+            .any(|(target, source, _)| target == "rest" && source.as_deref() == Some("payload")),
+        "dict match rest binding must not over-approximate rest ← payload; got {assigns:?}"
+    );
+}
+
+#[test]
 fn js_jsx_attribute_emits_call_with_named_arg() {
     // `<Foo prop={tainted}/>` must be lowered to a Call(Foo, {prop:
     // tainted}) so prop-flow rules anchor on real call args.

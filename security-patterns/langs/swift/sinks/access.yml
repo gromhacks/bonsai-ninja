@@ -9,12 +9,20 @@
     kind: call
     callee:
       name: getObject
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
       func test() { let input = "x"; let amount = 1; getObject(input) }
+  - name: literal aws get object negative
+    code: |
+      import AWSCore // aws-sdk-swift
+      func test() { getObject("reports/fixed.csv") }
+    expect_no_match: true
   description: "AWS SDK for Swift getObject — tainted bucket/key selector reads arbitrary object data."
 
   imports:
@@ -30,12 +38,20 @@
     kind: call
     callee:
       name: putObject
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
       func test() { let input = "x"; let amount = 1; putObject(input) }
+  - name: literal aws put object negative
+    code: |
+      import AWSCore // aws-sdk-swift
+      func test() { putObject("reports/fixed.csv") }
+    expect_no_match: true
   description: "AWS SDK for Swift putObject — tainted bucket/key selector overwrites attacker-chosen object keys."
 
   imports:
@@ -51,12 +67,20 @@
     kind: call
     callee:
       name: getSecretValue
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
       func test() { let input = "x"; let amount = 1; getSecretValue(input) }
+  - name: literal aws get secret value negative
+    code: |
+      import AWSCore // aws-sdk-swift
+      func test() { getSecretValue("app/prod/db") }
+    expect_no_match: true
   description: "AWS SDK for Swift getSecretValue — tainted secret id reads arbitrary secret material."
   imports:
   - AWSCore

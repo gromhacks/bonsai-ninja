@@ -31,7 +31,7 @@ generate_table() {
     for ev in "${EVENTS[@]}"; do
         printf ' %-7s' "$ev"
     done
-    printf ' %-12s\n' "PseudoCall"
+    printf ' %s\n' "PseudoCall"
 
     for adapter in "$ROOT_DIR"/crates/lang_*; do
         name="$(basename "$adapter")"
@@ -48,7 +48,7 @@ generate_table() {
         done
         pseudo=$(grep -rcE "pseudo_call_event" "$adapter/src" 2>/dev/null \
             | awk -F: '{ s += $2 } END { print s+0 }')
-        printf ' %-12d\n' "$pseudo"
+        printf ' %d\n' "$pseudo"
     done
 }
 

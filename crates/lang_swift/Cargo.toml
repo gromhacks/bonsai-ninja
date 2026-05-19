@@ -17,5 +17,8 @@ workspace = true
 
 [dev-dependencies]
 bonsai_conformance = { workspace = true }
+bonsai_diagnostics = { workspace = true }
 bonsai_testkit = { workspace = true }
+bonsai_vfs = { workspace = true }
 bonsai_workspace = { workspace = true }
+parking_lot = { workspace = true }

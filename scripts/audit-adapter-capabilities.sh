@@ -31,7 +31,7 @@ esac
 # - super: super_dispatch handling
 
 generate_table() {
-    printf '%-20s %-3s %-7s %-5s %-3s %-5s %-7s\n' \
+    printf '%-20s %-3s %-7s %-5s %-3s %-5s %s\n' \
         "Adapter" "vis" "aliases" "bases" "rfw" "panns" "exports"
     for adapter in "$ROOT_DIR"/crates/lang_*; do
         name="$(basename "$adapter")"
@@ -65,7 +65,7 @@ generate_table() {
         # populates the field.
         visi=$(grep -cE 'visibility_by_span|Visibility::(Private|Public|Module|Crate|Protected|Internal)' "$src" 2>/dev/null)
         exports=$(grep -cE 'module_export_aliases' "$src" 2>/dev/null)
-        printf '%-20s %-3d %-7d %-5d %-3d %-5d %-7d\n' \
+        printf '%-20s %-3d %-7d %-5d %-3d %-5d %d\n' \
             "$name" "$visi" "$aliases" "$bases" "$rfw" "$panns" "$exports"
     done
 }

@@ -27,7 +27,7 @@ A sanitizer that is correct for one sink family may be wrong for another. For ex
 
 ## Taint
 
-Taint is tracked through assignments, arguments, returns, receiver methods, fields, containers, callbacks, and cross-file calls. The engine records which argument at a call site is tainted so the rendered flow explains why each hop is relevant.
+Taint is tracked through assignments, arguments, returns, receiver methods, fields, containers, positional tuple/list elements, callbacks, and cross-file calls, including import/export and package-internal handler-to-service hops. Source rules stay contextual: for example, GraphQL resolver arguments are modeled as `args.<field>` / `variables.<field>` receiver reads, not as every object property in a GraphQL file. The engine records which argument at a call site is tainted so the rendered flow explains why each hop is relevant.
 
 Receiver-method flow is semantic: adapters emit type aliases and parent
 links, the index path enriches receiver type facts, and resolver-backed
@@ -36,7 +36,16 @@ guessing.
 
 Return flow is semantic too: expression-bodied functions and true
 tail-expression languages expose implicit returns as adapter facts.
-Ordinary terminal statements are not guessed to be return values.
+Ordinary terminal statements are not guessed to be return values. Returned
+object fields and tuple/list positions remain separate, so a tainted
+second return element does not taint the first destructured binding.
+
+Call-result flow uses explicit models for value-preserving operations.
+String transforms, formatting helpers, joins, and Go `append` carry their
+real operands forward, while structural bookkeeping such as
+`sizeof(buf)` and buffer terminator writes is ignored as value-free
+metadata. Closure-factory calls are resolved only when the returned
+callable is unique.
 
 ```mermaid
 flowchart LR
@@ -59,7 +68,7 @@ flowchart LR
 | `TAINT FLOW` | `security taint-analysis` | A source-to-sink finding path where the security engine proved tainted data reaches the sink operand. Steps include tainted argument indexes or receiver evidence where available. |
 
 <Note>
-Navigation commands may use broad cached dataflow facts to stay fast and discoverable. Security finding flows use source-specific taint seeds so the rendered evidence follows the matched source value instead of every reachable local in the entry function.
+Navigation, review, export, and security commands render semantic evidence only. When a call, import, dynamic dispatch, or budgeted section cannot be resolved semantically, output is marked incomplete with explicit reasons instead of widening the flow.
 </Note>
 
 ## Lifecycle FSM

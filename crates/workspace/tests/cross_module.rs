@@ -69,16 +69,83 @@ fn assert_cross_file_trace(ws: &Workspace, entry: &str, callee: &str, expected_f
     );
 }
 
+fn assert_unresolved_call_marked_incomplete(ws: &Workspace, entry: &str, call_name: &str) {
+    let trace = ws
+        .trace_from(entry)
+        .unwrap_or_else(|e| panic!("trace_from({entry}) failed: {e:?}"));
+    let diagnostic_step = trace
+        .steps
+        .iter()
+        .find(|s| s.kind == TraceStepKind::Diagnostic && s.message.contains(call_name))
+        .unwrap_or_else(|| {
+            panic!(
+                "trace should render unresolved call {call_name} as diagnostic metadata; steps={:#?}",
+                trace.steps
+            )
+        });
+    assert_eq!(
+        diagnostic_step.precision,
+        bonsai_common::Precision::Exact,
+        "unresolved call diagnostics are exact metadata, not call-flow evidence; step={diagnostic_step:#?}"
+    );
+    assert!(
+        !trace
+            .steps
+            .iter()
+            .any(|s| s.kind == TraceStepKind::Call && s.message.contains(call_name)),
+        "unresolved calls must not be emitted as call evidence; steps={:#?}",
+        trace.steps
+    );
+    assert!(
+        !trace.steps.iter().any(|s| {
+            s.kind == TraceStepKind::EnterFunction
+                && s.message
+                    .contains(call_name.rsplit('.').next().unwrap_or(call_name))
+                && s.function != entry
+        }),
+        "unresolved call must not be expanded to a broad callee; steps={:#?}",
+        trace.steps
+    );
+    assert!(
+        !trace.summary.analysis_complete,
+        "unresolved call must mark trace incomplete; summary={:#?}",
+        trace.summary
+    );
+    let expected = format!("unresolved-call:{call_name}");
+    assert!(
+        trace
+            .summary
+            .analysis_incomplete_reasons
+            .iter()
+            .any(|reason| reason == &expected),
+        "trace should explain unresolved call {call_name}; summary={:#?}",
+        trace.summary
+    );
+    assert!(
+        trace.summary.truncation_reasons.is_empty(),
+        "unresolved calls are semantic incompleteness, not budget truncation; summary={:#?}",
+        trace.summary
+    );
+    assert!(
+        trace
+            .paths
+            .iter()
+            .all(|path| !matches!(path.terminated_by, bonsai_trace::PathTermination::DepthLimit)),
+        "unresolved calls must not masquerade as depth limits; paths={:#?}",
+        trace.paths
+    );
+}
+
 #[test]
 fn rust_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_rust::RustAdapter::new()),
         &[
-            ("/w/main.rs", "fn main() { helper(); }"),
-            ("/w/mod_helpers.rs", "pub fn helper() {}"),
+            ("/w/main.rs", "mod worker;\nfn main() { worker::helper(); }"),
+            ("/w/worker.rs", "pub fn helper() {}"),
         ],
     );
-    assert_cross_file_trace(&ws, "main", "helper", "mod_helpers.rs");
+    assert_cross_file_trace(&ws, "main", "helper", "worker.rs");
 }
 
 #[test]
@@ -86,7 +153,10 @@ fn python_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_python::PythonAdapter::new()),
         &[
-            ("/w/app.py", "def main():\n    worker()\n"),
+            (
+                "/w/app.py",
+                "from worker import worker\n\ndef main():\n    worker()\n",
+            ),
             ("/w/worker.py", "def worker():\n    pass\n"),
         ],
     );
@@ -98,8 +168,11 @@ fn javascript_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
         &[
-            ("/w/app.js", "function main() { worker(); }"),
-            ("/w/w.js", "function worker() {}"),
+            (
+                "/w/app.js",
+                "import { worker } from './w.js';\nfunction main() { worker(); }",
+            ),
+            ("/w/w.js", "export function worker() {}"),
         ],
     );
     assert_cross_file_trace(&ws, "main", "worker", "w.js");
@@ -218,8 +291,11 @@ fn typescript_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
         &[
-            ("/w/app.ts", "function main(): void { worker(); }"),
-            ("/w/w.ts", "function worker(): void {}"),
+            (
+                "/w/app.ts",
+                "import { worker } from './w';\nfunction main(): void { worker(); }",
+            ),
+            ("/w/w.ts", "export function worker(): void {}"),
         ],
     );
     assert_cross_file_trace(&ws, "main", "worker", "w.ts");
@@ -558,7 +634,7 @@ fn c_cross_file_trace() {
 }
 
 #[test]
-fn cpp_cross_file_trace() {
+fn cpp_extern_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_cpp::CppAdapter::new()),
         &[
@@ -586,15 +662,15 @@ fn kotlin_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
         &[
-            ("/w/Main.kt", "fun main() { worker() }"),
-            ("/w/W.kt", "fun worker() {}"),
+            ("/w/Main.kt", "package app\nfun main() { worker() }"),
+            ("/w/W.kt", "package app\nfun worker() {}"),
         ],
     );
     assert_cross_file_trace(&ws, "main", "worker", "W.kt");
 }
 
 #[test]
-fn scala_cross_file_trace() {
+fn scala_unresolved_cross_object_trace_is_marked_incomplete() {
     let ws = ws_with(
         Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
         &[
@@ -605,7 +681,7 @@ fn scala_cross_file_trace() {
             ("/w/W.scala", "object W { def worker(): Unit = () }"),
         ],
     );
-    assert_cross_file_trace(&ws, "main", "worker", "W.scala");
+    assert_unresolved_call_marked_incomplete(&ws, "main", "worker");
 }
 
 #[test]
@@ -621,23 +697,26 @@ fn swift_cross_file_trace() {
 }
 
 #[test]
-fn php_cross_file_trace() {
+fn php_unresolved_cross_file_trace_is_marked_incomplete() {
     let ws = ws_with(
         Arc::new(bonsai_lang_php::PhpAdapter::new()),
         &[
-            ("/w/main.php", "<?php function main() { worker(); }"),
+            (
+                "/w/main.php",
+                "<?php require \"w.php\"; function main() { worker(); }",
+            ),
             ("/w/w.php", "<?php function worker() {}"),
         ],
     );
-    assert_cross_file_trace(&ws, "main", "worker", "w.php");
+    assert_unresolved_call_marked_incomplete(&ws, "main", "worker");
 }
 
 #[test]
-fn ruby_cross_file_trace() {
+fn ruby_require_relative_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
         &[
-            ("/w/main.rb", "def main\n  worker()\nend\n"),
+            ("/w/main.rb", "require_relative 'w'\ndef main\n  worker()\nend\n"),
             ("/w/w.rb", "def worker\n  puts 1\nend\n"),
         ],
     );
@@ -645,11 +724,11 @@ fn ruby_cross_file_trace() {
 }
 
 #[test]
-fn perl_cross_file_trace() {
+fn perl_require_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_perl::PerlAdapter::new()),
         &[
-            ("/w/main.pl", "sub main { worker(); }"),
+            ("/w/main.pl", "require './w.pl';\nsub main { worker(); }"),
             ("/w/w.pl", "sub worker { }"),
         ],
     );
@@ -657,11 +736,11 @@ fn perl_cross_file_trace() {
 }
 
 #[test]
-fn dart_cross_file_trace() {
+fn dart_import_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_dart::DartAdapter::new()),
         &[
-            ("/w/main.dart", "void main() { worker(); }"),
+            ("/w/main.dart", "import 'w.dart';\nvoid main() { worker(); }"),
             ("/w/w.dart", "void worker() {}"),
         ],
     );
@@ -669,7 +748,7 @@ fn dart_cross_file_trace() {
 }
 
 #[test]
-fn objc_cross_file_trace() {
+fn objc_extern_cross_file_trace() {
     let ws = ws_with(
         Arc::new(bonsai_lang_objc::ObjCAdapter::new()),
         &[
@@ -684,15 +763,15 @@ fn objc_cross_file_trace() {
 }
 
 #[test]
-fn lua_cross_file_trace() {
+fn lua_unresolved_cross_file_trace_is_marked_incomplete() {
     let ws = ws_with(
         Arc::new(bonsai_lang_lua::LuaAdapter::new()),
         &[
-            ("/w/main.lua", "function main() worker() end"),
+            ("/w/main.lua", "dofile('w.lua')\nfunction main() worker() end"),
             ("/w/w.lua", "function worker() end"),
         ],
     );
-    assert_cross_file_trace(&ws, "main", "worker", "w.lua");
+    assert_unresolved_call_marked_incomplete(&ws, "main", "worker");
 }
 
 #[test]
@@ -729,7 +808,7 @@ fn erlang_cross_file_trace() {
 }
 
 #[test]
-fn solidity_cross_file_trace() {
+fn solidity_unresolved_contract_static_call_is_marked_incomplete() {
     let ws = ws_with(
         Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
         &[
@@ -743,5 +822,5 @@ fn solidity_cross_file_trace() {
             ),
         ],
     );
-    assert_cross_file_trace(&ws, "main", "worker", "w.sol");
+    assert_unresolved_call_marked_incomplete(&ws, "main", "W.worker");
 }

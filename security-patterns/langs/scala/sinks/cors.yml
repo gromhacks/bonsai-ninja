@@ -3,6 +3,7 @@
   enabled: true
   language: scala
   tag: cors
+  category: source-independent
   severity: medium
   packages: [ch.megard.akka.http.cors]
   cwe: [CWE-942]

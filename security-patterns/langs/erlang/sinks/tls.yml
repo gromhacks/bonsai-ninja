@@ -3,6 +3,7 @@
   enabled: true
   language: erlang
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:

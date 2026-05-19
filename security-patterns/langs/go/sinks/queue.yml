@@ -9,6 +9,9 @@
     kind: call
     callee:
       regex: "\\.SendMessage$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -21,6 +24,15 @@
         value := "value"
         obj.SendMessage(target)
       }
+  - name: literal send message negative
+    code: |
+      import "github.com/aws/aws-sdk-go/service/sqs"
+      package main
+
+      func example() {
+        obj.SendMessage("safe")
+      }
+    expect_no_match: true
   description: "Cloud queue SendMessage — tainted queue target/body injects arbitrary broker payloads."
 
 - id: go.queue.send_messages
@@ -34,6 +46,9 @@
     kind: call
     callee:
       regex: "\\.SendMessages$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -46,6 +61,15 @@
         value := "value"
         obj.SendMessages(target)
       }
+  - name: literal send messages negative
+    code: |
+      import "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
+      package main
+
+      func example() {
+        obj.SendMessages("safe")
+      }
+    expect_no_match: true
   description: "Service Bus SendMessages — tainted entity path/payload injects arbitrary broker payloads."
 
 - id: go.queue.publish

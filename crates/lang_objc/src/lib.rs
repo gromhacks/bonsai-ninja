@@ -131,6 +131,7 @@ impl LanguageAdapter for ObjCAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            bonsai_lang_api::kit::inject_c_family_function_pointer_aliases(&mut decl_index, &tree, src, file);
             let aliases_by_span = collect_objc_method_type_aliases(&tree, file, src);
             for decl in &mut decl_index.defs {
                 if let Some(aliases) = aliases_by_span
@@ -160,6 +161,29 @@ impl LanguageAdapter for ObjCAdapter {
                     .iter()
                     .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
                 {
+                    decl.bases = bases.clone();
+                }
+            }
+            let bases_by_name = decl_index
+                .defs
+                .iter()
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct
+                    ) && !decl.bases.is_empty()
+                })
+                .map(|decl| (decl.name.clone(), decl.bases.clone()))
+                .collect::<std::collections::HashMap<_, _>>();
+            for decl in &mut decl_index.defs {
+                if !matches!(
+                    decl.kind,
+                    DeclKind::Class | DeclKind::Interface | DeclKind::Trait | DeclKind::Struct
+                ) || !decl.bases.is_empty()
+                {
+                    continue;
+                }
+                if let Some(bases) = bases_by_name.get(&decl.name) {
                     decl.bases = bases.clone();
                 }
             }

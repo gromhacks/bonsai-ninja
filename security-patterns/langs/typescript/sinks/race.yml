@@ -6,6 +6,7 @@
   enabled: true
   language: typescript
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:

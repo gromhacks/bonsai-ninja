@@ -3,7 +3,7 @@
 //! Asserts that after a file edit, the IDG service is correctly
 //! invalidated and the next query reflects the new file content. The
 //! current implementation drops the IDG service slot wholesale on
-//! file edit and lazy-rebuilds on next access — this test pins that
+//! file edit and rebuilds on next access — this test pins that
 //! behaviour so any future incremental-rebuild optimisation
 //! (per-file segment replacement) preserves correctness.
 //!
@@ -14,7 +14,7 @@
 //! test. Here we cover the workspace-facing contract: the value-flow
 //! cache plus the IDG service stay coherent across a file refresh.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use bonsai_lang_api::LanguageRegistry;
@@ -26,7 +26,7 @@ fn registry() -> Arc<LanguageRegistry> {
     Arc::new(registry)
 }
 
-fn write_file(dir: &PathBuf, name: &str, content: &str) {
+fn write_file(dir: &Path, name: &str, content: &str) {
     std::fs::write(dir.join(name), content).expect("write fixture");
 }
 
@@ -48,8 +48,8 @@ fn idg_service_invalidated_then_rebuilt_after_file_edit() {
         "app.py",
         "def f(x):\n    helper(x)\n\ndef helper(p):\n    sink(p)\n",
     );
-    let ws =
-        Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default()).expect("open ws");
+    let ws = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
+        .expect("open ws");
 
     // First fetch: IDG is built and seeded by the open path.
     let svc1 = ws.db().idg_service().expect("idg seeded after open");
@@ -94,7 +94,7 @@ fn idg_service_invalidated_then_rebuilt_after_file_edit() {
 fn idg_sidecar_written_on_open_then_reloaded_on_reopen() {
     // The CodeQL-style index/query split relies on the IDG sidecar
     // surviving across process boundaries. Open twice: the first open
-    // builds and writes `.bonsai/idg.v1.factstore`; the second open
+    // builds and writes the versioned IDG sidecar; the second open
     // hits the load_from_disk fast path. Both must agree on segment
     // count + edge count.
     let tmp = std::env::temp_dir().join(format!(
@@ -113,13 +113,13 @@ fn idg_sidecar_written_on_open_then_reloaded_on_reopen() {
         "def f(x):\n    helper(x)\n\ndef helper(p):\n    sink(p)\n",
     );
 
-    let ws1 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default())
+    let ws1 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("first open");
     let svc1 = ws1.db().idg_service().expect("idg seeded after first open");
     let segments_1 = svc1.segment_count();
     let edges_1 = svc1.intra_edge_count();
 
-    let sidecar = tmp.join(".bonsai").join("idg.v1.factstore");
+    let sidecar = bonsai_workspace::idg_sidecar_path(&tmp);
     assert!(
         sidecar.exists(),
         "expected IDG sidecar at {} after open",
@@ -128,7 +128,7 @@ fn idg_sidecar_written_on_open_then_reloaded_on_reopen() {
 
     drop(ws1);
 
-    let ws2 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default())
+    let ws2 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("second open");
     let svc2 = ws2.db().idg_service().expect("idg seeded after reopen");
     assert_eq!(
@@ -166,7 +166,7 @@ fn idg_sidecar_invalidated_on_out_of_band_file_change() {
     std::fs::create_dir_all(&tmp).expect("create tmp dir");
     write_file(&tmp, "app.py", "def f(x):\n    return x\n");
 
-    let ws1 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default())
+    let ws1 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("first open");
     let svc1 = ws1.db().idg_service().expect("idg seeded after first open");
     let edges_1 = svc1.intra_edge_count();
@@ -181,7 +181,7 @@ fn idg_sidecar_invalidated_on_out_of_band_file_change() {
         "def f(x):\n    helper(x)\n\ndef helper(p):\n    sink(p)\n",
     );
 
-    let ws2 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default())
+    let ws2 = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("second open");
     let svc2 = ws2.db().idg_service().expect("idg seeded after reopen");
     assert!(
@@ -208,8 +208,8 @@ fn idg_service_drops_when_workspace_root_invalidated() {
     std::fs::create_dir_all(&tmp).expect("create tmp dir");
     write_file(&tmp, "a.py", "def g(x):\n    return x\n");
 
-    let ws =
-        Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::default()).expect("open ws");
+    let ws = Workspace::open_with_options(&tmp, registry(), WorkspaceOpenOptions::full_prewarm())
+        .expect("open ws");
     assert!(ws.db().idg_service().is_some());
     ws.db().invalidate_idg_service();
     assert!(ws.db().idg_service().is_none());

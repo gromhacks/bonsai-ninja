@@ -37,6 +37,18 @@ pub struct FunctionSummary {
     /// caller's LHS carry descendant taint (`lhs.*`) without making every
     /// ordinary `param0.field` read tainted.
     pub returns_container_taint_of: Vec<usize>,
+    /// Exact fields on a newly returned container whose value comes
+    /// from a parameter. `(0, "user", None)` means
+    /// `return {"user": param0}` taints `lhs.user`, not `lhs.*`;
+    /// `(0, "cmd", Some("value"))` means
+    /// `return {"cmd": param0.value}` taints `lhs.cmd` only when
+    /// the caller has proven `arg.value` tainted.
+    pub returns_field_taint_of: Vec<ReturnFieldTaint>,
+    /// Exact positional elements on a newly returned tuple/list whose
+    /// value comes from a parameter. `(0, 1)` means
+    /// `return (clean, param0)` taints only the second binding in
+    /// `(first, second) = callee(arg0)`.
+    pub returns_element_taint_of: Vec<ReturnElementTaint>,
     /// Exact parameter access paths returned by the function.
     /// `(0, "cmd")` means `return param0.cmd` or an alias of it.
     /// This lets callers propagate `arg.cmd` without promoting
@@ -54,6 +66,21 @@ pub struct FunctionSummary {
 pub struct ReturnAccessPath {
     pub param: usize,
     pub path: String,
+}
+
+/// One returned-container field whose value is parameter-tainted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReturnFieldTaint {
+    pub param: usize,
+    pub field: String,
+    pub source_path: Option<String>,
+}
+
+/// One returned tuple/list element whose value is parameter-tainted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReturnElementTaint {
+    pub param: usize,
+    pub index: usize,
 }
 
 /// One parameter-to-parameter side effect: tainting `source_param` on

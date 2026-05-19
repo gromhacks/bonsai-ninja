@@ -148,6 +148,7 @@ impl LanguageAdapter for SwiftAdapter {
                 if !aliases.is_empty() {
                     decl.type_aliases = aliases;
                 }
+                normalize_swift_parameter_names(decl);
             }
             // Per-class `bases`: `class Echo: WebSocketHandler, Mixin`
             // → ["WebSocketHandler", "Mixin"]. Swift exposes each
@@ -213,6 +214,28 @@ impl LanguageAdapter for SwiftAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn normalize_swift_parameter_names(decl: &mut bonsai_lang_api::Decl) {
+    if !matches!(
+        decl.kind,
+        DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+    ) || decl.type_aliases.is_empty()
+    {
+        return;
+    }
+    let type_names = decl
+        .type_aliases
+        .iter()
+        .map(|alias| alias.type_name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let alias_names = decl
+        .type_aliases
+        .iter()
+        .map(|alias| alias.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    decl.params
+        .retain(|param| !type_names.contains(param) || alias_names.contains(param));
 }
 
 /// Walk every Swift class-like declaration and pull `(name, type)`

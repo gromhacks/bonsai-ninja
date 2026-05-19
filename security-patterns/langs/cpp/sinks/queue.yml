@@ -9,6 +9,9 @@
     kind: call
     callee:
       regex: "^SQSClient::SendMessage$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -19,6 +22,13 @@
         const char *query = arg;
         SQSClient::SendMessage(arg);
       }
+  - name: literal sqs message negative
+    code: |
+      #include <aws-sdk-cpp-sqs.h>
+      void example() {
+        SQSClient::SendMessage("safe");
+      }
+    expect_no_match: true
   description: "AWS SDK C++ SQSClient::SendMessage — tainted queue target/body injects arbitrary SQS messages."
 
 - id: cpp.queue.aws_sns_publish
@@ -47,6 +57,9 @@
     kind: call
     callee:
       regex: "^ServiceBusSender::SendMessage$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -57,4 +70,11 @@
         const char *query = arg;
         ServiceBusSender::SendMessage(arg);
       }
+  - name: literal servicebus message negative
+    code: |
+      #include <azure-messaging-servicebus-cpp.h>
+      void example() {
+        ServiceBusSender::SendMessage("safe");
+      }
+    expect_no_match: true
   description: "Azure ServiceBusSender::SendMessage — tainted entity path/payload injects arbitrary Service Bus messages."

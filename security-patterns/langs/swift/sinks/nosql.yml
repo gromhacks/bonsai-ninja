@@ -75,11 +75,22 @@
   match:
     kind: write
     target:
-      name: predicate
+      regex: ^[^\.\s]+\.predicate$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: CoreData fetch request predicate member write
     code: |
-      func test() { let input = "x"; let amount = 1; predicate = input }
+      func test(input: NSPredicate) {
+        let request = NSFetchRequest<NSManagedObject>(entityName: "User")
+        request.predicate = input
+      }
+    expect_match_text: [request.predicate]
+  - name: local predicate variable negative
+    code: |
+      func test(input: NSPredicate) { let predicate = input }
+    expect_no_match: true
   description: "NSFetchRequest.predicate = tainted."
 
 - id: swift.nosql.mongodb_swift_find

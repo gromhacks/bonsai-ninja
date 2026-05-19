@@ -45,13 +45,14 @@
   enabled: true
   language: go
   tag: xxe
+  category: source-independent
   severity: medium
   packages: ["encoding/xml"]
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      name: CharsetReader
+      regex: ^[^\.\s]+\.CharsetReader$
   match_examples:
   - name: xml decoder charset reader assignment
     code: |
@@ -70,13 +71,14 @@
   enabled: true
   language: go
   tag: xxe
+  category: source-independent
   severity: medium
   packages: ["encoding/xml"]
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      name: Strict
+      regex: ^[^\.\s]+\.Strict$
   match_examples:
   - name: xml decoder strict disabled
     code: |
@@ -92,13 +94,14 @@
   enabled: true
   language: go
   tag: xxe
+  category: source-independent
   severity: medium
   packages: ["encoding/xml"]
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      name: Entity
+      regex: ^[^\.\s]+\.Entity$
   match_examples:
   - name: xml decoder entity assignment
     code: |

@@ -63,6 +63,7 @@
   enabled: true
   language: python
   tag: xxe
+  category: source-independent
   severity: high
   packages: [lxml]
   imports: [lxml, lxml.etree]
@@ -445,6 +446,7 @@
   enabled: true
   language: python
   tag: xxe
+  category: source-independent
   severity: high
   imports: [xml]
   cwe: [CWE-611]

@@ -12,16 +12,27 @@
     kind: call
     callee:
       attribute: [mergo, MapWithOverwrite]
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
+  - name: tainted merge source map
     code: |
-      import "github.com/imdario/mergo"
       package main
+      import "github.com/imdario/mergo"
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        mergo.MapWithOverwrite(target)
+      func merge(input map[string]any) {
+        target := map[string]any{}
+        mergo.MapWithOverwrite(&target, input)
       }
+  - name: literal merge source negative
+    code: |
+      package main
+      import "github.com/imdario/mergo"
+
+      func merge() {
+        target := map[string]any{}
+        mergo.MapWithOverwrite(&target, map[string]any{"role": "user"})
+      }
+    expect_no_match: true
   description: 'mergo.MapWithOverwrite(target, attacker_map) — recursive merge with overwrite semantics; cross-bound attacker keys leak into target struct.'

@@ -1,11 +1,10 @@
 //! Bonsai's workspace-wide Interprocedural Dataflow Graph.
 //!
 //! This crate is the canonical structural taint / dataflow graph.
-//! Consumers that need over-approximate reachability (value-flow,
-//! dump-taint, inspect, browse export) read the IDG directly. The
-//! security findings pipeline still drives the legacy
-//! [`bonsai_taint::inter`] engine for precision parity — see
-//! "Hybrid path" below.
+//! Public review, export, dump-taint, inspect, and security callers
+//! read it through precision-scoped queries and expose only
+//! semantic (`Exact` / `Narrowed`) reachability. Unscoped
+//! over-approximate reachability is diagnostic-only.
 //!
 //! ## Design
 //!
@@ -34,22 +33,20 @@
 //! kills earlier writers' bridges (the engine's classic
 //! clean-overwrite kill semantics, structurally encoded).
 //!
-//! Loops walk the body twice with `last_writer` accumulating
-//! across iterations — a fixpoint approximation that handles
-//! loop-carried accumulators and zero-iteration cases without
-//! converging deeper.
+//! Loops emit the body once for may-run flows, then revisit the body
+//! with body-end writers live so reads can bind to values from the
+//! previous iteration. Duplicate transfer edges are suppressed.
 //!
 //! ## Hybrid path
 //!
 //! The IDG forward-closure correctly models clean-overwrite kills
-//! and branch joins for most adapter shapes, but full security
-//! migration also needs adapter-uniform source-event anchoring
-//! (e.g., objc's side-effecting `fgets(buf, ...)`, solidity's
-//! `block.timestamp` field-read, perl's specific patterns) that's
-//! beyond the IDG's scope today. Until those land, the security
-//! findings pipeline keeps using the engine for precision-critical
-//! taint analysis. value-flow / dump-taint / inspect / browse
-//! consume the IDG directly — see [`IdgQueryService`].
+//! and branch joins for most adapter shapes, and public query
+//! defaults cap reachability at `Precision::Narrowed` so diagnostic
+//! edges do not become evidence. Full
+//! security migration also needs adapter-uniform source-event
+//! anchoring for side-effecting output arguments, blockchain
+//! environment reads, and framework-specific patterns; those source
+//! semantics are layered above the IDG.
 //!
 //! ## Why a single graph
 //!
@@ -92,7 +89,9 @@ pub use csr::EdgeCsr;
 pub use query::ReachabilityIndex;
 pub use service::{CrossCallEdge, IdgQueryService, PointKind, PointRef, WsNodeId};
 pub use transfer::{
-    transfer_for_many, transfer_function_for, CallSiteRef, NameInterner, ThrowSite, TransferOutput,
+    transfer_for_many, transfer_for_many_with_options, transfer_function_for,
+    transfer_function_for_with_options, CallSiteRef, CleanOutputOverwriteSpec, NameInterner,
+    SourceOutputArgSpec, ThrowSite, TransferOptions, TransferOutput,
 };
 pub use workspace::{CrossFileEdge, CrossFileEdges, FieldFlowLink, IdgWorkspace, SegmentId};
 

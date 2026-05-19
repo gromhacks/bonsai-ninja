@@ -59,6 +59,7 @@
   enabled: true
   language: kotlin
   tag: ssti
+  category: source-independent
   severity: critical
   packages:
   - org.thymeleaf
@@ -374,6 +375,7 @@
   enabled: true
   language: kotlin
   tag: ssti
+  category: source-independent
   severity: high
   packages:
   - freemarker

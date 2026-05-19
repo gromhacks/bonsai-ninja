@@ -212,7 +212,6 @@ fn collect_tu_private_function_names(
     ctx: &AdapterContext<'_>,
 ) -> std::collections::HashSet<String> {
     let mut private_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let _ = file;
     // Bail conservatively on any I/O / parser failure.
     let Ok(snapshot) = ctx.vfs.snapshot(file) else {
         return private_names;

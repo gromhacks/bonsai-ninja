@@ -7,6 +7,10 @@
 //! source-node selection before it runs exact source-seeded taint
 //! paths.
 
+use crate::cache_fingerprint::{
+    dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
+    workspace_content_fingerprint,
+};
 use crate::value_flow_disk::{
     decode as decode_value_flow_entry, encode as encode_value_flow_entry, ValueFlowEntry,
 };
@@ -29,7 +33,7 @@ use std::sync::Arc;
 /// sidecars (extension `.bin`) co-exist on disk but are ignored —
 /// they don't share `MAGIC` with the factstore reader so they fail
 /// the open check naturally.
-pub const VALUE_FLOW_CACHE_VERSION: u32 = 3;
+pub const VALUE_FLOW_CACHE_VERSION: u32 = 7;
 
 /// Caller-defined table id stamped into the factstore header. Lets
 /// the reader detect "this is the value-flow store" vs other
@@ -37,15 +41,18 @@ pub const VALUE_FLOW_CACHE_VERSION: u32 = 3;
 const VALUE_FLOW_TABLE_ID: u32 = 1;
 
 /// Pipeline-hash field in the factstore header. We fold the matcher
-/// policy fingerprint into 64 bits so a matcher policy change
-/// invalidates the cache (same semantic as the v2 sidecar's
-/// `matcher_policy_fingerprint` field).
-fn value_flow_pipeline_hash() -> u64 {
+/// policy fingerprint into 64 bits and mix in the current workspace
+/// content fingerprint so source changes cannot reuse stale FuncId-
+/// keyed graphs.
+fn value_flow_pipeline_hash(db: &AnalyzerDb, sidecar_path: &Path) -> u64 {
     let raw = MATCHER_POLICY_FINGERPRINT;
     // Fold the 128-bit fingerprint into 64 bits by xor of halves.
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
     lo ^ hi
+        ^ u64::from(VALUE_FLOW_CACHE_VERSION)
+        ^ workspace_content_fingerprint(db)
+        ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
 }
 
 /// Per-function content-address hash used for fine-grained
@@ -56,6 +63,8 @@ fn value_flow_pipeline_hash() -> u64 {
 /// can attach per-function content fingerprints without bumping the
 /// fact-store layout.
 const RESERVED_BODY_HASH: u64 = 0;
+
+type ValueFlowMemoryEntry = (FuncId, Arc<ValueFlowGraph>, Arc<AHashSet<String>>);
 
 /// Cache of `ValueFlowGraph` per entry function.
 ///
@@ -136,6 +145,40 @@ impl ValueFlowCache {
         let mut inner = self.inner.write();
         inner.graphs.insert(func, arc.clone());
         inner.returning_seeds.insert(func, returning);
+        arc
+    }
+
+    /// Get the value-flow graph for one immediate consumer without
+    /// retaining a freshly-computed graph in the workspace cache.
+    ///
+    /// This still reuses existing in-memory/disk entries and still
+    /// records the compact `returning_seeds` summary. The difference
+    /// is the cold-miss behavior: broad security scans may touch
+    /// thousands of source-bearing functions, and retaining every full
+    /// `ValueFlowGraph` in RAM defeats the disk-backed cache design.
+    /// Callers that need a durable in-process graph cache should use
+    /// [`Self::graph_for_with_caches`].
+    pub fn graph_for_transient_with_caches(
+        &self,
+        func: FuncId,
+        db: &AnalyzerDb,
+        caches: &InterTaintCaches,
+    ) -> Arc<ValueFlowGraph> {
+        let cached = self.inner.read().graphs.get(&func).cloned();
+        if let Some(hit) = cached {
+            return hit;
+        }
+        if let Some(arc) = self.try_hydrate_from_disk(func) {
+            return arc;
+        }
+        let graph = value_flow_for_function_with_caches(func, db, &InterTaintConfig::default(), caches);
+        let arc = Arc::new(graph);
+        let returning = Arc::new(compute_returning_seed_names(&arc, func));
+        self.inner
+            .write()
+            .returning_seeds
+            .entry(func)
+            .or_insert(returning);
         arc
     }
 
@@ -264,10 +307,28 @@ impl ValueFlowCache {
             // queries hit disk. Treat absent file as "nothing on
             // disk" rather than as an error.
             if path.exists() {
-                let _ = self.load_from_disk(path);
+                let _ = self.load_from_disk(path, db);
             }
             return Ok(0);
         }
+        let (memory_entries, disk_reader): (Vec<ValueFlowMemoryEntry>, Option<Arc<FactStoreReader>>) = {
+            let inner = self.inner.read();
+            (
+                inner
+                    .graphs
+                    .iter()
+                    .map(|(&func, graph)| {
+                        let returning = inner
+                            .returning_seeds
+                            .get(&func)
+                            .cloned()
+                            .unwrap_or_else(|| Arc::new(AHashSet::default()));
+                        (func, graph.clone(), returning)
+                    })
+                    .collect(),
+                inner.disk.clone(),
+            )
+        };
         // Carry the writer behind a Mutex: the rayon worker pool
         // races on `intern` and `add`, both of which mutate the
         // writer's interior buffers. Encoding the entry runs under
@@ -279,7 +340,7 @@ impl ValueFlowCache {
         let writer = FactStoreWriter::create_with_capacity(
             path,
             VALUE_FLOW_TABLE_ID,
-            value_flow_pipeline_hash(),
+            value_flow_pipeline_hash(db, path),
             todo.len(),
             // Rough heuristics for capacity hints: ~512 bytes of
             // interned bytes and ~64 unique strings per function.
@@ -288,6 +349,18 @@ impl ValueFlowCache {
             todo.len().saturating_mul(64),
         )
         .map_err(map_factstore_io)?;
+        let written_keys = std::sync::Mutex::new(AHashSet::<FuncId>::default());
+        for (func, graph, returning) in memory_entries {
+            let entry = ValueFlowEntry {
+                graph: (*graph).clone(),
+                returning_seeds: (*returning).clone(),
+            };
+            let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
+            writer
+                .add(u64::from(func.raw()), RESERVED_BODY_HASH, &payload)
+                .map_err(map_factstore_io)?;
+            written_keys.lock().expect("written keys lock").insert(func);
+        }
         todo.par_iter().for_each(|&f| {
             let graph = value_flow_for_function_with_caches(f, db, &InterTaintConfig::default(), caches);
             let returning = compute_returning_seed_names(&graph, f);
@@ -298,10 +371,34 @@ impl ValueFlowCache {
             let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
             if let Err(err) = writer.add(u64::from(f.raw()), RESERVED_BODY_HASH, &payload) {
                 tracing::warn!(error = %err, "value-flow factstore add failed");
+            } else {
+                written_keys.lock().expect("written keys lock").insert(f);
             }
         });
+        if let Some(reader) = disk_reader {
+            let pool = reader.string_pool().map_err(map_factstore_io)?;
+            for item in reader.iter() {
+                let (key, hit) = item.map_err(map_factstore_io)?;
+                let func = FuncId::new(u32::try_from(key).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "value-flow sidecar key out of FuncId u32 range",
+                    )
+                })?);
+                if written_keys.lock().expect("written keys lock").contains(&func) {
+                    continue;
+                }
+                let entry = decode_value_flow_entry(&hit.payload, &pool)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+                let payload = encode_value_flow_entry(&entry, &mut |s| writer.intern(s));
+                writer
+                    .add(u64::from(func.raw()), RESERVED_BODY_HASH, &payload)
+                    .map_err(map_factstore_io)?;
+                written_keys.lock().expect("written keys lock").insert(func);
+            }
+        }
         let written = writer.finish().map_err(map_factstore_io)?;
-        let reader = FactStoreReader::open(path, VALUE_FLOW_TABLE_ID, value_flow_pipeline_hash())
+        let reader = FactStoreReader::open(path, VALUE_FLOW_TABLE_ID, value_flow_pipeline_hash(db, path))
             .map_err(map_factstore_io)?;
         let mut inner = self.inner.write();
         // Drop any stale in-memory entries; the disk store is the
@@ -478,12 +575,12 @@ impl ValueFlowCache {
     /// file at `path`, atomic-rename style. The new file becomes the
     /// cache's disk store on success so subsequent queries page from
     /// disk instead of holding the just-written entries in memory.
-    pub fn save_to_disk(&self, path: &Path) -> std::io::Result<()> {
+    pub fn save_to_disk(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<()> {
         let inner = self.inner.read();
         let writer = FactStoreWriter::create_with_capacity(
             path,
             VALUE_FLOW_TABLE_ID,
-            value_flow_pipeline_hash(),
+            value_flow_pipeline_hash(db, path),
             inner.graphs.len(),
             inner.graphs.len().saturating_mul(512),
             inner.graphs.len().saturating_mul(64),
@@ -569,21 +666,23 @@ impl ValueFlowCache {
     /// error). Version / pipeline-hash mismatch and corrupt files
     /// return `Ok(0)` after a `tracing::warn!` — the next prewarm
     /// will overwrite the file.
-    pub fn load_from_disk(&self, path: &Path) -> std::io::Result<usize> {
+    pub fn load_from_disk(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<usize> {
         if !path.exists() {
             return Ok(0);
         }
-        let reader = match FactStoreReader::open(path, VALUE_FLOW_TABLE_ID, value_flow_pipeline_hash()) {
-            Ok(reader) => reader,
-            Err(err) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "ignoring stale or corrupt value-flow sidecar"
-                );
-                return Ok(0);
-            }
-        };
+        let reader =
+            match FactStoreReader::open(path, VALUE_FLOW_TABLE_ID, value_flow_pipeline_hash(db, path)) {
+                Ok(reader) => reader,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "ignoring stale or corrupt value-flow sidecar"
+                    );
+                    discard_stale_factstore_sidecar(path, &err);
+                    return Ok(0);
+                }
+            };
         let entries = reader.len();
         let mut inner = self.inner.write();
         inner.disk = Some(Arc::new(reader));
@@ -727,145 +826,5 @@ pub struct SerializableValueFlowEntry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai_lang_api::{AdapterArc, LanguageRegistry};
-    use bonsai_taint::ValueFlowNodeKind;
-    use bonsai_vfs::Vfs;
-    use std::sync::Arc;
-
-    fn build_db_with(files: &[(&str, &str)], adapter: AdapterArc) -> AnalyzerDb {
-        let vfs = Arc::new(Vfs::new());
-        for (path, source) in files {
-            vfs.write((*path).to_string(), Arc::<str>::from(*source));
-        }
-        let registry = Arc::new(LanguageRegistry::new());
-        registry.register(adapter);
-        let db = AnalyzerDb::new(vfs, registry);
-        for file in db.vfs().all_files() {
-            let _ = db.decl_index(file);
-        }
-        db
-    }
-
-    #[test]
-    fn cache_hits_share_arc() {
-        let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
-        let db = build_db_with(
-            &[(
-                "a.py",
-                "def entry(args):\n    helper(args)\n\ndef helper(p):\n    sink(p)\n",
-            )],
-            adapter,
-        );
-        let entry = bonsai_resolve::resolve_callable(&db.global_index(), "entry")
-            .into_iter()
-            .next()
-            .expect("entry resolves");
-        let cache = ValueFlowCache::new();
-        let g1 = cache.graph_for(entry, &db);
-        let g2 = cache.graph_for(entry, &db);
-        assert!(Arc::ptr_eq(&g1, &g2), "second hit must reuse Arc");
-    }
-
-    #[test]
-    fn nodes_matching_finds_param() {
-        let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
-        let db = build_db_with(
-            &[(
-                "a.py",
-                "def entry(args):\n    helper(args)\n\ndef helper(p):\n    sink(p)\n",
-            )],
-            adapter,
-        );
-        let entry = bonsai_resolve::resolve_callable(&db.global_index(), "entry")
-            .into_iter()
-            .next()
-            .expect("entry resolves");
-        let cache = ValueFlowCache::new();
-        let nodes = cache.nodes_matching(entry, &db, |n| {
-            n.kind == ValueFlowNodeKind::Param && n.value_text == "args"
-        });
-        assert_eq!(nodes.len(), 1, "should find exactly one args param");
-    }
-
-    #[test]
-    fn sidecar_roundtrip_preserves_graphs() {
-        let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
-        let db = build_db_with(
-            &[(
-                "a.py",
-                "def entry(args):\n    helper(args)\n\ndef helper(p):\n    sink(p)\n",
-            )],
-            adapter,
-        );
-        let entry = bonsai_resolve::resolve_callable(&db.global_index(), "entry")
-            .into_iter()
-            .next()
-            .expect("entry resolves");
-        let cache = ValueFlowCache::new();
-        let _ = cache.graph_for(entry, &db);
-        let initial_len = cache.len();
-        assert!(initial_len >= 1, "should have cached at least one graph");
-
-        let tmp = std::env::temp_dir().join(format!("value_flow_test_{}.bin", std::process::id()));
-        cache.save_to_disk(&tmp).expect("save to disk succeeds");
-
-        let restored = ValueFlowCache::new();
-        let loaded = restored.load_from_disk(&tmp).expect("load from disk succeeds");
-        assert_eq!(loaded, initial_len, "loaded count must match saved count");
-
-        let _ = std::fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn save_atomically_replaces_existing_sidecar() {
-        // The factstore writer's atomic-rename pattern is exercised
-        // by `bonsai_factstore::writer::tests::write_atomic_*`.
-        // Here we just verify the workspace-level save_to_disk uses
-        // it correctly: writing twice to the same path leaves a
-        // single, valid file.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("v.factstore");
-        let cache = ValueFlowCache::new();
-        cache.save_to_disk(&path).expect("first save");
-        assert!(path.exists());
-        cache.save_to_disk(&path).expect("second save replaces");
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn load_from_nonexistent_sidecar_returns_zero() {
-        let cache = ValueFlowCache::new();
-        let n = cache
-            .load_from_disk(Path::new("/tmp/value_flow_does_not_exist_xyz.bin"))
-            .expect("nonexistent path is not an error");
-        assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn forward_closure_via_cache_reaches_callee_param() {
-        let adapter: AdapterArc = Arc::new(bonsai_lang_python::PythonAdapter::new());
-        let db = build_db_with(
-            &[(
-                "a.py",
-                "def entry(args):\n    helper(args)\n\ndef helper(p):\n    sink(p)\n",
-            )],
-            adapter,
-        );
-        let entry = bonsai_resolve::resolve_callable(&db.global_index(), "entry")
-            .into_iter()
-            .next()
-            .expect("entry resolves");
-        let cache = ValueFlowCache::new();
-        let nodes = cache.nodes_matching(entry, &db, |n| {
-            n.kind == ValueFlowNodeKind::Param && n.value_text == "args"
-        });
-        let origin = nodes.into_iter().next().expect("origin exists");
-        let reach = cache.forward_closure(&origin, &db);
-        assert!(
-            reach.iter().any(|n| n.value_text == "p"),
-            "forward closure must reach `p`; got {reach:?}"
-        );
-    }
-}
+#[path = "value_flow_tests.rs"]
+mod tests;

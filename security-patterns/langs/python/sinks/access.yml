@@ -9,12 +9,21 @@
     kind: call
     callee:
       name: get_object
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: access boto3 get object
     code: |
       import boto3
       def example(user_input):
           return get_object(user_input)
+  - name: literal boto3 get object negative
+    code: |
+      import boto3
+      def example():
+          return get_object({"Bucket": "app", "Key": "reports/fixed.csv"})
+    expect_no_match: true
   description: "boto3 S3 get_object(bucket/key) — tainted selector can read arbitrary object data."
 
 - id: python.access.boto3_put_object
@@ -28,12 +37,21 @@
     kind: call
     callee:
       name: put_object
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: access boto3 put object
     code: |
       import boto3
       def example(user_input):
           return put_object(user_input)
+  - name: literal boto3 put object negative
+    code: |
+      import boto3
+      def example():
+          return put_object({"Bucket": "app", "Key": "reports/fixed.csv"})
+    expect_no_match: true
   description: "boto3 S3 put_object(bucket/key) — tainted selector can overwrite arbitrary object keys."
 
 - id: python.access.boto3_get_secret_value
@@ -47,16 +65,27 @@
     kind: call
     callee:
       name: get_secret_value
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: access boto3 get secret value
     code: |
       import boto3
       def example(user_input):
           return get_secret_value(user_input)
+  - name: literal boto3 get secret value negative
+    code: |
+      import boto3
+      def example():
+          return get_secret_value({"SecretId": "app/prod/db"})
+    expect_no_match: true
   description: "boto3 Secrets Manager get_secret_value — tainted secret id reads arbitrary secret material."
 
 - id: python.access.azure_blob_download_blob
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: access-control
   severity: high
@@ -72,12 +101,14 @@
       import azure.storage.blob
       def example(user_input):
           return download_blob(user_input)
-  description: "Azure BlobClient.download_blob — tainted container/blob selector reads arbitrary object data."
+  description: "Disabled — BlobClient.download_blob() reads the receiver-selected blob; selector taint belongs on BlobClient construction."
 
   imports:
   - azure.storage.blob
 - id: python.access.azure_blob_upload_blob
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: access-control
   severity: high
@@ -93,12 +124,14 @@
       import azure.storage.blob
       def example(user_input):
           return upload_blob(user_input)
-  description: "Azure BlobClient.upload_blob — tainted blob name or container target overwrites attacker-chosen storage."
+  description: "Disabled — BlobClient.upload_blob(data) uploads bytes to the receiver-selected blob; the container/blob selector is not this data argument."
 
   imports:
   - azure.storage.blob
 - id: python.access.gcs_download_as_bytes
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: access-control
   severity: high
@@ -114,12 +147,14 @@
       import google.cloud.storage
       def example(user_input):
           return download_as_bytes(user_input)
-  description: "google-cloud-storage Blob.download_as_bytes — tainted bucket/blob selector reads arbitrary object data."
+  description: "Disabled — Blob.download_as_bytes() reads the receiver-selected object; object selector taint belongs on Blob construction."
 
   imports:
   - google.cloud.storage
 - id: python.access.gcs_upload_from_file
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: python
   tag: access-control
   severity: high
@@ -135,7 +170,7 @@
       import google.cloud.storage
       def example(user_input):
           return upload_from_file(user_input)
-  description: "google-cloud-storage Blob.upload_from_file — tainted object key writes to attacker-chosen storage location."
+  description: "Disabled — Blob.upload_from_file(file_obj) writes to the receiver-selected object; the object key is not represented by this data/file argument."
 
   imports:
   - google.cloud.storage
@@ -150,12 +185,21 @@
     kind: call
     callee:
       name: access_secret_version
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: access gcp secretmanager access secret version
     code: |
       import google.cloud.secretmanager
       def example(user_input):
           return access_secret_version(user_input)
+  - name: literal gcp secretmanager access secret version negative
+    code: |
+      import google.cloud.secretmanager
+      def example():
+          return access_secret_version({"name": "projects/app/secrets/db/versions/latest"})
+    expect_no_match: true
   description: "SecretManagerServiceClient.access_secret_version — tainted resource name reads arbitrary secret versions."
   imports:
   - google.cloud.secretmanager

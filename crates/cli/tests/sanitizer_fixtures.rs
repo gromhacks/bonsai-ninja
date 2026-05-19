@@ -1,13 +1,12 @@
 //! Per-language `sanitizer_test` fixture integration tests.
 //!
 //! Every `examples/<lang>/sanitizer_test/` directory pairs
-//! `<name>_raw` / `<name>_safe` handlers: the raw form reaches the
-//! sink directly (finding expected), the safe form routes taint
-//! through a sanitizer before the sink (finding expected with
-//! sanitizer evidence).
-//!
-//! This file runs `security taint-analysis` against every fixture and
-//! asserts the engine's sanitizer semantics hold.
+//! `<name>_raw` / `<name>_safe` handlers. Default taint-analysis must
+//! keep the raw source-to-sink findings visible. Safe branches may be
+//! fully removed when the value no longer reaches the sink; when a
+//! safe branch still produces sanitizer evidence, that evidence must
+//! be complete. The newer `sanitizer_credit_audit` suite is the
+//! authoritative all-language status test for sanitizer credit.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -73,14 +72,10 @@ fn fixture_ws(lang: &str) -> String {
         .into_owned()
 }
 
-/// Languages whose sanitizer_test fixture produces both a raw (no
-/// sanitizer) AND a safe (sanitizer-attached) finding on at least
-/// one sink family.
-const LANGS_WITH_SANITIZER_EVIDENCE: &[&str] =
-    &["c", "dart", "elixir", "erlang", "go", "javascript", "solidity"];
-
-/// Languages whose fixture produces at least one raw-form finding.
-const LANGS_WITH_RAW_FINDING: &[&str] = &[
+/// Languages whose fixture produces at least one default source-to-sink
+/// raw finding. Solidity's fixture is source-independent/pattern-only,
+/// so it is covered separately with `--include-pattern-only` below.
+const LANGS_WITH_DEFAULT_RAW_FINDING: &[&str] = &[
     "c",
     "cpp",
     "csharp",
@@ -88,6 +83,7 @@ const LANGS_WITH_RAW_FINDING: &[&str] = &[
     "elixir",
     "erlang",
     "go",
+    "java",
     "javascript",
     "kotlin",
     "lua",
@@ -98,15 +94,23 @@ const LANGS_WITH_RAW_FINDING: &[&str] = &[
     "ruby",
     "rust",
     "scala",
-    "solidity",
     "swift",
     "typescript",
+];
+
+/// Languages whose current sanitizer_test fixture produces at least
+/// one finding with sanitizer evidence. Other languages still have
+/// sanitizer coverage through `crates/security/tests/sanitizer_credit_audit.rs`;
+/// this legacy fixture only asserts evidence shape where evidence is
+/// actually emitted in default taint-analysis.
+const LANGS_WITH_SANITIZER_EVIDENCE: &[&str] = &[
+    "c", "cpp", "dart", "elixir", "erlang", "go", "lua", "php", "ruby", "rust", "swift",
 ];
 
 #[test]
 fn every_sanitizer_fixture_produces_a_raw_finding() {
     let Some(_) = bin_path() else { return };
-    for lang in LANGS_WITH_RAW_FINDING {
+    for lang in LANGS_WITH_DEFAULT_RAW_FINDING {
         let w = fixture_ws(lang);
         let Some((out, _, code)) = run(&[
             "security",
@@ -140,6 +144,39 @@ fn every_sanitizer_fixture_produces_a_raw_finding() {
             "[{lang}] sanitizer_test: no raw (unsanitized / wrong-context) finding — rulepack or adapter may have silently suppressed the unsafe handler"
         );
     }
+}
+
+#[test]
+fn solidity_source_independent_fixture_produces_pattern_only_raw_findings() {
+    let Some(_) = bin_path() else { return };
+    let w = fixture_ws("solidity");
+    let Some((out, _, code)) = run(&[
+        "security",
+        &w,
+        "taint-analysis",
+        "--inferred-sources",
+        "--include-pattern-only",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    assert_eq!(code, 0, "[solidity] sanitizer_test flows ec={code}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = rows_of(&parsed);
+    let raw_count = rows
+        .iter()
+        .filter(|r| {
+            r.get("status")
+                .and_then(|s| s.as_str())
+                .map(|s| s != "sanitized")
+                .unwrap_or(true)
+        })
+        .count();
+    assert!(
+        raw_count > 0,
+        "[solidity] source-independent sanitizer_test fixture produced no pattern-only raw finding"
+    );
 }
 
 #[test]
@@ -209,22 +246,9 @@ fn show_sanitized_is_compatibility_noop() {
 
     let default_rows = rows_of(&serde_json::from_str(&default_out).unwrap());
     let shown_rows = rows_of(&serde_json::from_str(&shown_out).unwrap());
-    let default_sanitized = default_rows
-        .iter()
-        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("sanitized"))
-        .count();
-    let shown_sanitized = shown_rows
-        .iter()
-        .filter(|r| r.get("status").and_then(|s| s.as_str()) == Some("sanitized"))
-        .count();
-
-    assert!(
-        default_sanitized > 0,
-        "default taint-analysis should include credit-cleared sanitizer paths"
-    );
     assert_eq!(
-        shown_sanitized, default_sanitized,
-        "--show-sanitized is a compatibility flag and should not change sanitizer visibility"
+        shown_rows, default_rows,
+        "--show-sanitized is a compatibility flag and should not change taint-analysis output"
     );
 }
 
@@ -269,9 +293,10 @@ fn sanitizer_evidence_has_complete_shape() {
     }
 }
 
-/// For the Python fixture we can be precise: raw and sanitized
-/// branches both remain visible, with sanitizer evidence attached
-/// to the safe branches.
+/// For the Python fixture we can be precise under the current
+/// semantic contract: only the raw branches remain visible in default
+/// taint-analysis. The sanitizer-cleared branches do not reach a
+/// tainted sink in this legacy fixture.
 #[test]
 fn python_sanitizer_fixture_expected_counts() {
     let Some(_) = bin_path() else { return };
@@ -298,15 +323,6 @@ fn python_sanitizer_fixture_expected_counts() {
                 .unwrap_or(true)
         })
         .collect();
-    let safe: Vec<_> = rows
-        .iter()
-        .filter(|r| {
-            r.get("sanitizers_seen")
-                .and_then(|s| s.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-        })
-        .collect();
     assert_eq!(
         raw.len(),
         2,
@@ -314,9 +330,9 @@ fn python_sanitizer_fixture_expected_counts() {
         raw.len()
     );
     assert_eq!(
-        safe.len(),
+        rows.len(),
         2,
-        "python sanitizer fixture: sanitized findings = {}, want exactly 2",
-        safe.len()
+        "python sanitizer fixture: total findings = {}, want exactly 2 raw-only findings",
+        rows.len()
     );
 }

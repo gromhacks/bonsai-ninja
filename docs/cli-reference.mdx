@@ -79,6 +79,9 @@ bonsai-ninja security ./src taint-analysis --format sarif --all > findings.sarif
 Text output is labelled `TAINT FLOW`. Each step is derived from the
 finding's source-specific taint path and annotates the source, tainted
 argument propagation, receiver evidence where relevant, and sink operand.
+JSON and SARIF findings include `analysis_complete` and
+`analysis_incomplete_reasons`; emitted findings are complete semantic
+evidence, so complete findings carry an empty reason list.
 
 | Flag | Default | Description |
 |---|---:|---|
@@ -97,8 +100,9 @@ argument propagation, receiver evidence where relevant, and sink operand.
 | `--show-sanitized` | Compatibility | Sanitized reachable paths are already included with sanitizer evidence. |
 | `--taint-budget <N>` | 512 | Interprocedural function/seed chunk size; analysis resumes chunks to completion. |
 | `--intra-worklist-cap <N>` | CFG-derived | Intraprocedural worklist cap per function. |
-| `--precision <LEVEL>` | None | Keep only `exact`, `narrowed`, `over-approximate`, or `unknown` precision. |
+| `--precision <LEVEL>` | None | Keep only semantic precision: `exact` or `narrowed`. Broad diagnostic classes are rejected by analysis commands. |
 | `--strict-flow` | false | Equivalent to keeping exact and narrowed paths. |
+| `--include-pattern-only` | false | Include exact source-independent local findings in text/JSON. SARIF enables these automatically. |
 | `--context <BUDGET>` | 32k text | Token budget. |
 | `--page <PAGE>` | 1 | Page number, cursor, or `next`. |
 | `--all` | false | Emit every finding. |
@@ -164,6 +168,13 @@ bonsai-ninja trace ./src --from handle_request --to os.system --format dot > flo
 | `--max-loop-iters <N>` | 1 | Loop iterations represented in metadata. |
 | `--format <FORMAT>` | text | `text`, `json`, or `dot`. |
 
+JSON `summary.analysis_complete` is false when a trace hits a budget or
+cannot resolve a call it would need to expand. Budget failures are listed
+in `summary.truncation_reasons`; semantic gaps such as unresolved calls
+are listed in `summary.analysis_incomplete_reasons`. Text renderers keep
+unresolved syntactic call breadcrumbs visible, but mark those steps inline
+as `non-semantic`; they are not reviewed flow evidence.
+
 ## export
 
 `export` writes the analyzed workspace graph to stdout.
@@ -177,6 +188,8 @@ bonsai-ninja export ./src --format graphml > graph.graphml
 |---|---:|---|
 | `<WORKSPACE>` | Required | Workspace root. |
 | `--full-propagations` | false | Force exhaustive interprocedural propagation records. |
+| `--complete-chains` | false | Request expanded semantic enumeration for chain and flow-id-label evidence; guarded rows remain semantic and are marked incomplete instead of reported complete. |
+| `--all` | false | Request every expensive export evidence section, equivalent to `--full-propagations --complete-chains` for native JSON. |
 | `--format <FORMAT>` | json | `json`, `networkx`, `graphml`, or `cypher`. |
 
 ## source-analysis
@@ -191,6 +204,10 @@ bonsai-ninja security ./src source-analysis --format json --all
 Text output is labelled `SOURCE FLOW`. The command runs taint forward
 from each matched source seed, so it maps where that source value travels
 without requiring a sink rule.
+
+JSON rows include `analysis_complete`, `analysis_incomplete_reasons`, and
+`lineage` so capped representative lineage is machine-readable even when
+`--all` emits the backward-compatible bare array shape.
 
 | Flag | Default | Description |
 |---|---:|---|
@@ -265,6 +282,12 @@ Common browse output flags:
 | `--no-flows` | false | Hide flow-id columns on commands that include them. |
 | `--format <FORMAT>` | text | `text` or `json`. |
 
+Flow columns are semantic-only navigation labels: exact/narrowed facts only,
+never unresolved fan-out. If a rendered flow cell
+ends in `…`, the command also prints `semantic-only flows column incomplete`;
+those IDs are a bounded prefix, not the complete label set for that row.
+Use `inspect --query ... --all` for full flow evidence.
+
 ## Navigation
 
 `tree` and `read-file` combine structural facts with finding and flow marks.
@@ -279,6 +302,15 @@ bonsai-ninja read-file ./src auth/verify_token.py --lines 1:80 --from request.ar
 |---|---|---|
 | `tree` | Workspace tree with file-level flow, edge, finding, and security annotations. | `--max-depth`, `--file`, `--severity`, `--tag`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--rules-dir` |
 | `read-file` | Source view for one file with inline marks and cross-file caller/callee bodies. | `--lines`, `--from`, `--to`, `--max-inlined-bodies`, `--compact`, `--context`, `--page`, `--all`, `--format`, `--rules-dir` |
+
+`tree` and `read-file` are semantic-only for flow-bearing context. JSON
+includes top-level `analysis_complete` and
+`analysis_incomplete_reasons`. `tree` marks depth, limit, id-list, and
+cross-file-edge caps incomplete; use `--all` and avoid restrictive
+`--max-depth` when you need every node and evidence id. `read-file`
+finding digests repeat their own completion fields. If caller/callee bodies
+are omitted by the default inline-body cap, the view is marked incomplete;
+use `--all` or `--max-inlined-bodies 0` when you need every cross-file body.
 
 ## Debug Dumps
 
@@ -301,3 +333,7 @@ bonsai-ninja dump-taint ./src --source handle_request --seed cmd
 | `dump-resolve` | Resolver stages and candidates for a name. | positional name, `--name`, `--in-file`, `--compact`, `--candidate`, `--format` |
 | `dump-taint` | Taint propagation records from one source function with stable `T:` ids. | `--source`, `--seed`, `--sanitizer`, `--sink`, `--budget`, `--intra-worklist-cap`, `--compact`, `--taint`, `--format` |
 | `diagnostics` | Adapter diagnostic pass over the workspace. | `<WORKSPACE>` |
+
+`dump-taint --format json` includes top-level `analysis_complete` and
+`analysis_incomplete_reasons`. The IDG-backed path computes the requested
+semantic closure exactly; compatibility budget flags do not cap evidence.

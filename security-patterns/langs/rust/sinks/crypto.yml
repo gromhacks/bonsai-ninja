@@ -2,6 +2,7 @@
   enabled: true
   language: rust
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [md5]
   cwe: [CWE-327]
@@ -27,6 +28,7 @@
   enabled: true
   language: rust
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [sha1]
   cwe: [CWE-327]
@@ -52,6 +54,7 @@
   enabled: true
   language: rust
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [md2]
   cwe: [CWE-327, CWE-328]
@@ -74,6 +77,7 @@
   enabled: true
   language: rust
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [md4]
   cwe: [CWE-327, CWE-328]
@@ -96,6 +100,7 @@
   enabled: true
   language: rust
   tag: weak-randomness
+  category: source-independent
   severity: medium
   packages: [rand]
   cwe: [CWE-330]
@@ -117,6 +122,7 @@
   enabled: true
   language: rust
   tag: weak-randomness
+  category: source-independent
   severity: medium
   packages: [rand]
   cwe: [CWE-330]
@@ -138,6 +144,7 @@
   enabled: true
   language: rust
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: [openssl]
   cwe: [CWE-327]
@@ -159,6 +166,7 @@
   enabled: true
   language: rust
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: [openssl]
   cwe: [CWE-327]
@@ -180,6 +188,7 @@
   enabled: true
   language: rust
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: [openssl]
   cwe: [CWE-327]

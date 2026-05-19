@@ -3,6 +3,7 @@
   enabled: true
   language: scala
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [sttp]
   cwe: [CWE-295]
@@ -25,6 +26,7 @@
   enabled: true
   language: scala
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [akka.http.scaladsl]
   cwe: [CWE-295]
@@ -50,6 +52,7 @@
   enabled: true
   language: scala
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [play.api.libs.ws]
   cwe: [CWE-295]
@@ -74,6 +77,7 @@
   enabled: true
   language: scala
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [okhttp]
   cwe: [CWE-295]
@@ -96,6 +100,7 @@
   enabled: true
   language: scala
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -117,6 +122,7 @@
   enabled: true
   language: scala
   tag: weak-tls
+  category: source-independent
   severity: medium
   cwe: [CWE-295]
   match:

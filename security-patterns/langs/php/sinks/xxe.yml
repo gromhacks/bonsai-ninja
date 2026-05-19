@@ -191,6 +191,7 @@
   enabled: true
   language: php
   tag: xxe
+  category: source-independent
   severity: medium
   cwe: [CWE-611]
   match:

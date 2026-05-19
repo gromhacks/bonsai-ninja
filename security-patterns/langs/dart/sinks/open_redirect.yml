@@ -104,11 +104,18 @@
   match:
     kind: write
     target:
-      name: href
+      regex: ^(?:window\.location|location)\.href$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: window location href member write
     code: |
       void test() { var input = "x"; var amount = 1; location.href = input; }
+  - name: local href variable negative
+    code: |
+      void test(input) { var href = input; }
+    expect_no_match: true
   description: "window.location.href = tainted."
 
 - id: dart.open_redirect.launchurl

@@ -18,6 +18,7 @@ bonsai_index.workspace = true
 bonsai_lang_api.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
+regex.workspace = true
 serde.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true

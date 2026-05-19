@@ -488,18 +488,27 @@
     kind: call
     callee:
       attribute: [http, FileServer]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: generated direct match
+  - name: tainted fileserver root
     code: |
-      import "net/http"
       package main
+      import "net/http"
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
-        http.FileServer(target)
+      func serve(root string) {
+        http.FileServer(http.Dir(root))
       }
+  - name: literal fileserver root negative
+    code: |
+      package main
+      import "net/http"
+
+      func serve() {
+        http.FileServer(http.Dir("/srv/public"))
+      }
+    expect_no_match: true
   description: "http.FileServer(http.Dir(tainted)) — serves everything under a directory; attacker-chosen root = full traversal of that subtree."
 - id: go.path.filepath_walk
   enabled: true
@@ -545,6 +554,8 @@
     kind: call
     callee:
       attribute: [filepath, Join]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: join base with request path segment
     code: |
@@ -553,7 +564,7 @@
         "net/http"
         "path/filepath"
       )
-      func file(r *http.Request) string {
+      func file(r *http.Request, input string) string {
         name := input
         return filepath.Join("/srv/files", name)
       }
@@ -591,6 +602,15 @@
         return filepath.Join(root, f.Name)
       }
     expect_match_text: [filepath.Join]
+  - name: literal filepath join negative
+    code: |
+      package main
+      import "path/filepath"
+
+      func dst() string {
+        return filepath.Join("/srv/files", "readme.txt")
+      }
+    expect_no_match: true
   description: "filepath.Join(base, tainted...) — Join does NOT prevent traversal; an attacker segment containing '..' escapes `base`. Tainted segments here are a real path-traversal sink unless followed by a containment check (e.g. strings.HasPrefix on the cleaned result against a fixed root)."
 - id: go.path.path_join
   enabled: true
@@ -603,18 +623,27 @@
     kind: call
     callee:
       attribute: [path, Join]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: generated direct match
     code: |
       import "path"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
+      func example(target string) {
         path.Join(target)
       }
+    expect_match_text: [path.Join]
+  - name: literal path join negative
+    code: |
+      import "path"
+      package main
+
+      func example() {
+        path.Join("/safe", "asset.png")
+      }
+    expect_no_match: true
   description: "path.Join(base, tainted...) — same traversal exposure as filepath.Join; '..' segments are not stripped by Join alone."
 
 # Archive extraction (Zip Slip class). The destination path is built
@@ -624,7 +653,10 @@
 # with filepath.Join(dest, header.Name) where header.Name was
 # attacker-controlled.
 - id: go.path.tar_reader_next
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: go.archive.tar_reader_next_header
   language: go
   tag: zip-slip
   severity: critical
@@ -643,9 +675,11 @@
         _, _ = tr.Next()
       }
     expect_match_text: [tr.Next]
-  description: "tar.Reader.Next() — returns header whose Name field is attacker-controlled inside the archive. Joining header.Name into a destination path without containment check is Zip Slip (CVE-2022-1928 shape)."
+  description: "Disabled sink duplicate — tar.Reader.Next() returns an attacker-controlled header and is modeled as source go.archive.tar_reader_next_header; the actual Zip Slip sink is the later path open/write using header.Name."
 - id: go.path.zip_reader_open
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: go
   tag: zip-slip
   severity: high
@@ -667,4 +701,4 @@
         value := "value"
         zip.OpenReader(target)
       }
-  description: "zip.OpenReader returns *Reader whose File entries carry attacker-controlled Name fields. The Zip Slip vector is using entry.Name as a path component without containment check."
+  description: "Disabled — zip.OpenReader returns an archive reader, not a vulnerable path operation. Re-enable as a source model when adapter facts can taint per-entry File.Name values precisely; the Zip Slip sink is the later path open/write."

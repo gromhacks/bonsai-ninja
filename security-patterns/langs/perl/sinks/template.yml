@@ -164,6 +164,7 @@
   enabled: true
   language: perl
   tag: xss
+  category: source-independent
   severity: high
   packages: [Template]
   cwe: [CWE-79]

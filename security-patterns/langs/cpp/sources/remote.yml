@@ -39,6 +39,94 @@
         recvfrom(0, buf, sizeof(buf), 0, 0, 0);
       }
   description: "BSD socket recvfrom(fd, buf, len, flags, ...) — remote datagram bytes taint the caller buffer."
+- id: cpp.archive.libzip_zip_get_name
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: archive-input
+  payload_types: [path]
+  packages: [libzip]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: zip_get_name
+  match_examples:
+  - name: libzip archive entry name
+    code: |
+      #include <libzip.h>
+      void example(zip_t *archive) {
+        const char *name = zip_get_name(archive, 0, 0);
+      }
+    expect_match_text: [zip_get_name]
+  description: "libzip zip_get_name(za, idx, flags) — archive-controlled entry name. Taint the returned name; Zip Slip is reported only when that value reaches a path open/write sink."
+- id: cpp.archive.minizip_unzgetcurrentfileinfo_filename
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: archive-input
+  payload_types: [path]
+  packages: [minizip]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      name: unzGetCurrentFileInfo
+  taint_semantics:
+    source_output_args: [2]
+  match_examples:
+  - name: minizip archive filename output
+    code: |
+      #include <minizip/unzip.h>
+      void example(unzFile archive) {
+        char filename[256];
+        unzGetCurrentFileInfo(archive, 0, filename, sizeof(filename), 0, 0, 0, 0);
+      }
+    expect_match_text: [unzGetCurrentFileInfo]
+  description: "minizip unzGetCurrentFileInfo(..., filename, filename_size, ...) — archive-controlled entry name is written to the filename output buffer. Zip Slip is reported only when that buffer reaches a path open/write sink."
+- id: cpp.source.cpphttplib_file_value
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [file, multipart, path]
+  packages: [cpp-httplib]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [Request, get_file_value]
+  match_examples:
+  - name: cpp-httplib multipart file value
+    code: |
+      #include <httplib.h>
+      #include <cpp-httplib/httplib.h>
+      void example(httplib::Request req) {
+        auto file = req.get_file_value("upload");
+      }
+    expect_match_text: [req.get_file_value]
+  description: "cpp-httplib Request::get_file_value(name) — returned MultipartFormData contains client-controlled upload metadata, including filename."
+- id: cpp.source.drogon_uploaded_filename
+  enabled: true
+  language: cpp
+  trust: remote
+  tag: http-input
+  payload_types: [file, multipart, path]
+  packages: [drogon]
+  cwe: [CWE-434]
+  match:
+    kind: call
+    callee:
+      attribute: [HttpFile, getFileName]
+  match_examples:
+  - name: drogon uploaded filename
+    code: |
+      #include <drogon/drogon.h>
+      void example(drogon::HttpFile file) {
+        auto name = file.getFileName();
+      }
+    expect_match_text: [file.getFileName]
+  description: "Drogon HttpFile::getFileName() — client-controlled multipart filename; report when it reaches a path/file-write sink."
 - id: cpp.input.read_socket
   enabled: false
   disabled_reason:
@@ -77,7 +165,9 @@
       name: params
   description: "Disabled — unscoped `params` parameter name matches every function with a param named `params` (render loops, math helpers, anything). The per-framework crow / drogon / pistache / cpphttplib rules below capture the real HTTP-handler shape with proper package scoping."
 - id: cpp.input.crow_request_param
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: cpp
   trust: remote
   tag: http-input
@@ -95,7 +185,7 @@
       void example(const char *req) {
         (void)req;
       }
-  description: "HTTP handler `req` parameter — covers Crow, Drogon, cpp-httplib (same param shape)."
+  description: "Disabled — a bare `req` parameter name is not a security boundary without type/enclosing-handler evidence. Use precise request accessor rules such as multipart/file/query helpers until the C++ adapter can scope param rules to framework handler signatures."
 - id: cpp.input.drogon_request_param
   enabled: false
   disabled_reason:

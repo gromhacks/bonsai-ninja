@@ -232,6 +232,7 @@
   enabled: true
   language: python
   tag: xss
+  category: source-independent
   severity: high
   packages:
   - mako
@@ -488,6 +489,7 @@
   enabled: true
   language: python
   tag: ssti
+  category: source-independent
   severity: high
   packages:
   - jinja2
@@ -572,6 +574,7 @@
   enabled: true
   language: python
   tag: ssti
+  category: source-independent
   severity: high
   packages:
   - jinja2

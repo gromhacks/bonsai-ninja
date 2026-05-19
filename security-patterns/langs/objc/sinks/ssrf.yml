@@ -127,10 +127,17 @@
     kind: write
     target:
       regex: "^(?:.*\\.)?(URL|HTTPBody|HTTPBodyStream)$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; NSMutableURLRequest.URL = input; }
+  - name: literal request url negative
+    code: |
+      void test(void) { NSMutableURLRequest.URL = @"https://safe.example"; }
+    expect_no_match: true
   description: "NSMutableURLRequest .URL / .HTTPBody / .HTTPBodyStream assignment with tainted value — controls outbound request target/body. Constrained to URL-request receivers."
 
 - id: objc.ssrf.webview_load_request

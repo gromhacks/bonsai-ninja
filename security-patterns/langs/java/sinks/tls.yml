@@ -2,6 +2,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -19,6 +20,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -36,6 +38,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -53,6 +56,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -70,6 +74,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: critical
   packages:
   - okhttp
@@ -95,6 +100,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: critical
   packages:
   - okhttp
@@ -120,6 +126,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: critical
   packages:
   - org.apache.http
@@ -143,6 +150,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - org.apache.http
@@ -182,6 +190,7 @@
   enabled: true
   language: java
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-327

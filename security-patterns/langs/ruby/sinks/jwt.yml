@@ -14,6 +14,9 @@
       attribute:
       - JWT
       - decode
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: ruby.jwt.decode_no_verify example
     code: |
@@ -21,7 +24,13 @@
       def example(input, url, id, payload, request, params)
         JWT.decode(input, input, false)
       end
-  description: "JWT.decode(token, key, false) — signature verification disabled. Merged aliases: ruby.jwt.decode_alg_none, ruby.jwt.decode_no_keyword_verify, ruby.jwt.decode_algorithms_none_array, ruby.jwt.alg_confusion."
+  - name: literal jwt negative
+    code: "require \"jwt\"\ndef example(\"safe\", url, id, payload, request, params)\n\
+      \  JWT.decode(\"safe\", \"safe\", false)\nend\n"
+    expect_no_match: true
+  description: "JWT.decode(token, key, false) — signature verification disabled. Merged
+    aliases: ruby.jwt.decode_alg_none, ruby.jwt.decode_no_keyword_verify, ruby.jwt.decode_algorithms_none_array,
+    ruby.jwt.alg_confusion."
   aliases:
   - ruby.jwt.decode_alg_none
   - ruby.jwt.decode_no_keyword_verify
@@ -31,6 +40,7 @@
   enabled: true
   language: ruby
   tag: jwt
+  category: source-independent
   severity: critical
   packages:
   - jwt
@@ -42,6 +52,10 @@
       attribute:
       - JWT
       - encode
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: (?i)[\"\']none[\"\']
   match_examples:
   - name: ruby.jwt.encode_alg_none example
     code: |
@@ -49,6 +63,10 @@
       def example(input, url, id, payload, request, params)
         JWT.encode(input, input, "none")
       end
+  - name: literal jwt negative
+    code: "require \"jwt\"\ndef example(input, url, id, payload, request, params)\n\
+      \  JWT.encode(input, input, \"HS256\")\nend\n"
+    expect_no_match: true
   description: JWT.encode(payload, nil, 'none').
 - id: ruby.jwt.json_jwt_decode
   enabled: true
@@ -65,6 +83,9 @@
       attribute:
       - JSON::JWT
       - decode
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: ruby.jwt.json_jwt_decode example
     code: |
@@ -72,6 +93,10 @@
       def example(input, url, id, payload, request, params)
         JSON::JWT.decode(input)
       end
+  - name: literal jwt negative
+    code: "require \"json-jwt\"\ndef example(\"safe\", url, id, payload, request,
+      params)\n  JSON::JWT.decode(\"safe\")\nend\n"
+    expect_no_match: true
   description: "json-jwt JSON::JWT.decode — flag if no subsequent .verify!."
 - id: ruby.jwt.devise_jwt_decode
   enabled: false

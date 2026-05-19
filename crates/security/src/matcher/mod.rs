@@ -97,6 +97,12 @@ pub struct InterTaintView<'a> {
     verdict_cache: parking_lot::Mutex<AHashMap<(String, FileId, u64, u64), bool>>,
 }
 
+type CalleeCallsView<'a> = (
+    std::borrow::Cow<'a, [CallFact]>,
+    Option<std::collections::HashMap<String, AliasTarget>>,
+    Option<&'a std::collections::HashMap<String, AliasTarget>>,
+);
+
 impl<'a> InterTaintView<'a> {
     /// Build a view over the engine's tainted-call records. Pre-bins
     /// calls by span so the hot lookup path in `arg_is_tainted` is
@@ -140,7 +146,13 @@ impl<'a> InterTaintView<'a> {
     /// source's graph. Falls back to overlapping-span scan when no
     /// exact span match exists.
     #[must_use]
-    pub fn arg_is_tainted(&self, span: Span, args: &[CallArg], spec: &ArgTaintedSpec) -> bool {
+    pub fn arg_is_tainted(
+        &self,
+        span: Span,
+        args: &[CallArg],
+        spec: &ArgTaintedSpec,
+        allow_synthetic_write: bool,
+    ) -> bool {
         let Some(index) = resolve_arg_tainted_index(args, spec) else {
             return false;
         };
@@ -149,14 +161,15 @@ impl<'a> InterTaintView<'a> {
         if self.calls_by_span.get(&span).is_some_and(|calls| {
             calls
                 .iter()
-                .any(|call| tainted_call_has_arg(call, index, arg_value, true))
+                .any(|call| tainted_call_has_arg(call, index, arg_value, true, allow_synthetic_write))
         }) {
             return true;
         }
         // Fallback: overlap-only check for cross-line / multi-call
         // expressions where the matcher and engine spans diverge.
         self.calls.iter().any(|call| {
-            spans_overlap(span, call.call_span) && tainted_call_has_arg(call, index, arg_value, false)
+            spans_overlap(span, call.call_span)
+                && tainted_call_has_arg(call, index, arg_value, false, allow_synthetic_write)
         })
     }
 
@@ -166,13 +179,13 @@ impl<'a> InterTaintView<'a> {
     /// APIs with a specific dangerous operand should use
     /// `arg_tainted` instead.
     #[must_use]
-    pub fn any_arg_is_tainted(&self, span: Span, args: &[CallArg]) -> bool {
+    pub fn any_arg_is_tainted(&self, span: Span, args: &[CallArg], allow_synthetic_write: bool) -> bool {
         (0..args.len()).any(|index| {
             let spec = ArgTaintedSpec {
                 index: Some(index as u32),
                 kw: None,
             };
-            self.arg_is_tainted(span, args, &spec)
+            self.arg_is_tainted(span, args, &spec, allow_synthetic_write)
         })
     }
 
@@ -206,8 +219,9 @@ fn tainted_call_has_arg(
     index: usize,
     arg_value: Option<&str>,
     allow_index_match: bool,
+    allow_synthetic_write: bool,
 ) -> bool {
-    if call.kind != TaintedCallKind::Call {
+    if call.kind != TaintedCallKind::Call && !(allow_synthetic_write && call.kind == TaintedCallKind::Write) {
         return false;
     }
     call.tainted_args.iter().any(|tainted| {
@@ -337,9 +351,234 @@ pub(crate) fn rule_match_passes_constraints_with_taint_view(
     expected: &RuleMatch,
     taint_view: &InterTaintView<'_>,
 ) -> bool {
+    let Some(prepared) = PreparedRule::new(rule) else {
+        return false;
+    };
+    if let Some(verdict) =
+        exact_rule_match_passes_constraints_at_expected_hit(ws, &prepared, expected, taint_view)
+    {
+        return verdict;
+    }
     match_rule_against_facts_with_taint_view(ws, rule, taint_view)
         .into_iter()
         .any(|hit| hit.rule_id == expected.rule_id && hit.span == expected.span)
+}
+
+fn exact_rule_match_passes_constraints_at_expected_hit(
+    ws: &Workspace,
+    prepared: &PreparedRule<'_>,
+    expected: &RuleMatch,
+    taint_view: &InterTaintView<'_>,
+) -> Option<bool> {
+    // Taint-analysis already has the exact endpoint span from the
+    // constraint-agnostic sink scan. Rebuild the same per-fact
+    // constraint context for supported endpoint kinds instead of
+    // scanning the whole workspace for one `(rule, span)` verdict.
+    if prepared.rule.language != expected.language || prepared.rule.id != expected.rule_id {
+        return Some(false);
+    }
+    match prepared.rule.match_spec.kind {
+        MatchKind::Call | MatchKind::New => Some(call_rule_match_passes_constraints_at_expected_hit(
+            ws, prepared, expected, taint_view,
+        )),
+        MatchKind::Write => Some(write_rule_match_passes_constraints_at_expected_hit(
+            ws, prepared, expected, taint_view,
+        )),
+        MatchKind::Read | MatchKind::Return | MatchKind::Param | MatchKind::Missing => None,
+    }
+}
+
+fn call_rule_match_passes_constraints_at_expected_hit(
+    ws: &Workspace,
+    prepared: &PreparedRule<'_>,
+    expected: &RuleMatch,
+    taint_view: &InterTaintView<'_>,
+) -> bool {
+    let file = expected.span.file;
+    let global = ws.db().global_index();
+    let file_packages = file_package_set(ws, file);
+    let bundle = decl_match_facts_for(ws, file);
+    let constructor_names = if prepared.rule.match_spec.kind == MatchKind::New {
+        collect_constructor_names(global.as_ref())
+    } else {
+        AHashSet::new()
+    };
+
+    for decl in global.decls_in(file) {
+        if expected
+            .enclosing_fn
+            .as_ref()
+            .is_some_and(|name| name != &decl.name)
+        {
+            continue;
+        }
+        let Some(facts) = bundle.by_decl_span.get(&decl.span) else {
+            continue;
+        };
+        for call in facts.calls.iter().filter(|call| call.span == expected.span) {
+            let Some(matched_callee) = callee_or_alias_matches(
+                &call.callee,
+                &call.receiver_types,
+                prepared.name,
+                prepared.attribute,
+                prepared.regex.as_ref(),
+                &facts.alias_map,
+            ) else {
+                continue;
+            };
+            if !prepared.call_context_allows(
+                &call.callee,
+                &call.receiver_types,
+                &facts.alias_map,
+                file_packages.as_ref(),
+            ) {
+                continue;
+            }
+            if prepared.rule.match_spec.kind == MatchKind::New
+                && call.call_kind != CallKind::Constructor
+                && !constructor_name_matches(&call.callee, &constructor_names)
+            {
+                continue;
+            }
+            let receiver_call_count =
+                receiver_method_key(&call.callee).and_then(|key| facts.receiver_counts.get(&key).copied());
+            if constraints_pass(ConstraintEval {
+                rule_id: &prepared.rule.id,
+                callee: &matched_callee,
+                args: &call.args,
+                receiver_types: &call.receiver_types,
+                span: call.span,
+                call_origin: Some(call.origin),
+                constraints: &prepared.rule.constraints.0,
+                constraint_regexes: &prepared.constraint_regexes,
+                receiver_call_count,
+                assignment_texts: Some(&facts.assignment_map),
+                mode: ConstraintMode::Strict,
+                taint_view: Some(taint_view),
+                enclosing_decorators: Some(facts.decl_decorators.as_slice()),
+                alias_chains: Some(&facts.alias_chains),
+                runtime_types: Some(&facts.runtime_types),
+                lifecycle_transitions: Some(&facts.lifecycle_transitions),
+            }) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn write_rule_match_passes_constraints_at_expected_hit(
+    ws: &Workspace,
+    prepared: &PreparedRule<'_>,
+    expected: &RuleMatch,
+    taint_view: &InterTaintView<'_>,
+) -> bool {
+    let file = expected.span.file;
+    let global = ws.db().global_index();
+    let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let file_packages = file_package_set(ws, file);
+    let alias_map = file_alias_map(ws, file);
+
+    for decl in global.decls_in(file) {
+        if expected
+            .enclosing_fn
+            .as_ref()
+            .is_some_and(|name| name != &decl.name)
+        {
+            continue;
+        }
+        for (target, span) in collect_writes(&decl.flow_events) {
+            if span != expected.span {
+                continue;
+            }
+            if !callee_matches(
+                &target,
+                prepared.name,
+                prepared.attribute,
+                prepared.regex.as_ref(),
+            ) {
+                continue;
+            }
+            if !prepared.call_context_allows(&target, &[], &alias_map, file_packages.as_ref()) {
+                continue;
+            }
+            let args = write_args_from_source_text(source_text.as_deref(), span);
+            if constraints_pass(ConstraintEval {
+                rule_id: &prepared.rule.id,
+                callee: &target,
+                args: &args,
+                receiver_types: &[],
+                span,
+                call_origin: Some(CallFactOrigin::SyntheticWrite),
+                constraints: &prepared.rule.constraints.0,
+                constraint_regexes: &prepared.constraint_regexes,
+                receiver_call_count: None,
+                assignment_texts: None,
+                mode: ConstraintMode::Strict,
+                taint_view: Some(taint_view),
+                enclosing_decorators: None,
+                alias_chains: None,
+                runtime_types: None,
+                lifecycle_transitions: None,
+            }) {
+                return true;
+            }
+        }
+    }
+
+    let Some(idx) = ws.db().decl_index(file) else {
+        return false;
+    };
+    for r in &idx.refs {
+        if r.kind != RefKind::Write || r.span != expected.span {
+            continue;
+        }
+        if !callee_matches(
+            &r.name,
+            prepared.name,
+            prepared.attribute,
+            prepared.regex.as_ref(),
+        ) {
+            continue;
+        }
+        let args = write_args_from_source_text(source_text.as_deref(), r.span);
+        if constraints_pass(ConstraintEval {
+            rule_id: &prepared.rule.id,
+            callee: &r.name,
+            args: &args,
+            receiver_types: &[],
+            span: r.span,
+            call_origin: Some(CallFactOrigin::SyntheticWrite),
+            constraints: &prepared.rule.constraints.0,
+            constraint_regexes: &prepared.constraint_regexes,
+            receiver_call_count: None,
+            assignment_texts: None,
+            mode: ConstraintMode::Strict,
+            taint_view: Some(taint_view),
+            enclosing_decorators: None,
+            alias_chains: None,
+            runtime_types: None,
+            lifecycle_transitions: None,
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn write_args_from_source_text(source_text: Option<&str>, span: Span) -> Vec<CallArg> {
+    source_text
+        .and_then(|text| text.get(span.start as usize..span.end as usize))
+        .map(|value_text| {
+            vec![CallArg {
+                span,
+                name: None,
+                place: None,
+                source_names: Vec::new(),
+                value_text: value_text.to_string(),
+            }]
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn rule_example_has_arg_index(ws: &Workspace, rule: &Rule, wanted_index: u32) -> bool {
@@ -500,6 +739,7 @@ enum CallFactOrigin {
     RealCall,
     NestedReceiverCall,
     AssignmentSourceCall,
+    SyntheticWrite,
 }
 
 #[derive(Clone, Debug)]
@@ -513,16 +753,12 @@ struct CallFact {
 }
 
 impl ConstraintMode {
-    /// True when ALL constraints should be skipped — used by
-    /// taint-endpoint matching where the engine's reachability
-    /// proof is the source of truth.
-    fn ignore_constraints(self) -> bool {
-        self == Self::TaintEndpoint
-    }
-
     /// True when only `arg_tainted` constraints should be skipped.
-    /// Sink-inventory mode preserves structural constraints (arg
-    /// counts, namespace, etc.) but can't consult a taint view.
+    /// Sink-inventory and initial taint-endpoint matching preserve
+    /// structural constraints (arg counts, namespace, regexes, etc.)
+    /// but cannot consult the per-source taint view yet. The
+    /// source-specific taint pass rechecks arg-taint constraints
+    /// before emitting a finding.
     fn ignore_arg_tainted(self) -> bool {
         matches!(self, Self::SinkInventory | Self::TaintEndpoint)
     }
@@ -533,6 +769,7 @@ struct PreparedRule<'a> {
     name: Option<&'a str>,
     attribute: Option<&'a Vec<String>>,
     regex: Option<Regex>,
+    base_name_in: &'a [String],
     requires_call_package_signal: bool,
     constraint_regexes: Vec<Option<Regex>>,
     /// The rule's `packages` ∪ `imports` ∪ `modules`, in the
@@ -589,10 +826,21 @@ impl<'a> PreparedRule<'a> {
             name: target.name.as_deref(),
             attribute: target.attribute.as_ref(),
             regex,
+            base_name_in: target.base_name_in.as_slice(),
             requires_call_package_signal,
             constraint_regexes,
             package_signals,
         })
+    }
+
+    fn base_name_allows(&self, text: &str) -> bool {
+        if self.base_name_in.is_empty() {
+            return true;
+        }
+        let Some(base) = match_base_name(text) else {
+            return false;
+        };
+        self.base_name_in.iter().any(|want| want == base)
     }
 
     fn call_context_allows(
@@ -663,13 +911,21 @@ impl<'a> PreparedRule<'a> {
                 push_target(&mut candidates, target);
             }
         }
+        let constrained_receiver_name_sink = self.rule.kind == crate::rule::RuleKind::Sink
+            && !self.base_name_in.is_empty()
+            && self
+                .rule
+                .tag
+                .as_deref()
+                .is_some_and(|tag| matches!(tag, "sql-injection" | "graphql-injection"));
         let file_level_package_evidence_allowed = self.rule.kind == crate::rule::RuleKind::Source
             || (self.rule.kind == crate::rule::RuleKind::Sink
                 && self
                     .rule
                     .tag
                     .as_deref()
-                    .is_some_and(|tag| matches!(tag, "memory-safety" | "race")));
+                    .is_some_and(|tag| matches!(tag, "memory-safety" | "race")))
+            || constrained_receiver_name_sink;
         self.package_signals.iter().any(|signal| {
             (file_level_package_evidence_allowed && file_packages.contains(*signal))
                 || candidates
@@ -704,6 +960,18 @@ fn push_unique_package_candidate(out: &mut Vec<String>, value: &str) {
     if !value.is_empty() && !out.iter().any(|existing| existing == value) {
         out.push(value.to_string());
     }
+}
+
+fn match_base_name(text: &str) -> Option<&str> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let end = text
+        .find(|ch: char| ch == '.' || ch == '[' || ch == '-' || ch == ':' || ch == '(')
+        .unwrap_or(text.len());
+    let base = text[..end].trim();
+    (!base.is_empty()).then_some(base)
 }
 
 fn scan_file_rules(
@@ -864,6 +1132,14 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                 // require an exact match.
                 let target = prepared.rule.match_spec.target.as_ref();
                 if let Some(t) = target {
+                    if !t.decl_kind_in.is_empty() && !t.decl_kind_in.iter().any(|want| want == &decl.kind) {
+                        continue;
+                    }
+                    if !t.visibility_in.is_empty()
+                        && !t.visibility_in.iter().any(|want| want == &decl.visibility)
+                    {
+                        continue;
+                    }
                     if !t.in_class.is_empty() {
                         let direct_match = enclosing_class_name
                             .as_deref()
@@ -1003,6 +1279,9 @@ fn scan_calls_batch(
                 ) else {
                     continue;
                 };
+                if !prepared.base_name_allows(&matched_callee) {
+                    continue;
+                }
                 if !prepared.call_context_allows(
                     &call.callee,
                     &call.receiver_types,
@@ -1109,6 +1388,9 @@ fn scan_calls_batch(
             ) else {
                 continue;
             };
+            if !prepared.base_name_allows(&matched_callee) {
+                continue;
+            }
             if !prepared.call_context_allows(&r.name, &[], &import_aliases, file_packages.as_ref()) {
                 continue;
             }
@@ -1289,6 +1571,7 @@ fn missing_target_in_reachable_callees(
         .map(|adapter| adapter.capabilities().module_export_aliases)
         .unwrap_or(&[]);
     collect_callee_symbols(
+        ws,
         &entry.flow_events,
         &global,
         entry,
@@ -1328,27 +1611,24 @@ fn missing_target_in_reachable_callees(
             // a decl with no flow_events skip it), fall through
             // to the prior inline shape.
             let callee_facts = callee_bundle.by_decl_span.get(&callee_decl.span).cloned();
-            let (calls_view, callee_alias_owned, callee_alias_borrow): (
-                std::borrow::Cow<'_, [CallFact]>,
-                Option<std::collections::HashMap<String, AliasTarget>>,
-                Option<&std::collections::HashMap<String, AliasTarget>>,
-            ) = if let Some(facts) = &callee_facts {
-                (
-                    std::borrow::Cow::Borrowed(facts.calls.as_slice()),
-                    None,
-                    Some(&facts.alias_map),
-                )
-            } else {
-                let mut callee_alias = file_alias_map(ws, callee_file);
-                extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
-                bonsai_lang_api::extend_alias_map_with_flow_events(
-                    &mut callee_alias,
-                    &callee_decl.flow_events,
-                );
-                let mut calls = collect_calls(&callee_decl.flow_events);
-                enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
-                (std::borrow::Cow::Owned(calls), Some(callee_alias), None)
-            };
+            let (calls_view, callee_alias_owned, callee_alias_borrow): CalleeCallsView<'_> =
+                if let Some(facts) = &callee_facts {
+                    (
+                        std::borrow::Cow::Borrowed(facts.calls.as_slice()),
+                        None,
+                        Some(&facts.alias_map),
+                    )
+                } else {
+                    let mut callee_alias = file_alias_map(ws, callee_file);
+                    extend_alias_map_with_declared_types(&mut callee_alias, &callee_decl.type_aliases);
+                    bonsai_lang_api::extend_alias_map_with_flow_events(
+                        &mut callee_alias,
+                        &callee_decl.flow_events,
+                    );
+                    let mut calls = collect_calls(&callee_decl.flow_events);
+                    enrich_call_fact_receiver_types(&mut calls, &callee_decl.type_aliases);
+                    (std::borrow::Cow::Owned(calls), Some(callee_alias), None)
+                };
             let callee_alias_ref = callee_alias_borrow
                 .unwrap_or_else(|| callee_alias_owned.as_ref().expect("alias map populated"));
             for call in calls_view.iter() {
@@ -1377,6 +1657,7 @@ fn missing_target_in_reachable_callees(
                 .map(|adapter| adapter.capabilities().module_export_aliases)
                 .unwrap_or(&[]);
             collect_callee_symbols(
+                ws,
                 &callee_decl.flow_events,
                 &global,
                 callee_decl,
@@ -1798,6 +2079,9 @@ fn scan_refs_batch(
             ) {
                 continue;
             }
+            if !prepared.base_name_allows(&r.name) {
+                continue;
+            }
             // Receiver-agnostic read regexes (`^[A-Za-z_]\w*\.body$`)
             // would otherwise fire on any `<ident>.body` shape across
             // every workspace file — koa's request_body matching
@@ -1877,22 +2161,31 @@ fn scan_flow_reads_batch(
 
 fn flow_read_rule_match(prepared: &PreparedRule<'_>, tokens: &[String]) -> Option<String> {
     if let Some(name) = prepared.name {
-        if tokens.iter().any(|token| token == name) {
+        if tokens
+            .iter()
+            .any(|token| token == name && prepared.base_name_allows(token))
+        {
             return Some(name.to_string());
         }
     }
     if let Some(attr) = prepared.attribute {
-        if attr.iter().all(|part| tokens.iter().any(|token| token == part)) {
-            return Some(attr.join("."));
+        let joined = attr.join(".");
+        if prepared.base_name_allows(&joined)
+            && attr.iter().all(|part| tokens.iter().any(|token| token == part))
+        {
+            return Some(joined);
         }
     }
     if let Some(regex) = prepared.regex.as_ref() {
-        if let Some(token) = tokens.iter().find(|token| regex.is_match(token)) {
+        if let Some(token) = tokens
+            .iter()
+            .find(|token| regex.is_match(token) && prepared.base_name_allows(token))
+        {
             return Some(token.clone());
         }
         if let Some(attr) = prepared.attribute {
             let joined = attr.join(".");
-            if regex.is_match(&joined) {
+            if regex.is_match(&joined) && prepared.base_name_allows(&joined) {
                 return Some(joined);
             }
         }
@@ -2297,6 +2590,9 @@ fn scan_writes_batch(
                 ) {
                     continue;
                 }
+                if !prepared.base_name_allows(&target) {
+                    continue;
+                }
                 // Same package-signal gate the call/read scanners use —
                 // a receiver-agnostic write target like
                 // `^[A-Za-z_$]\w*\.headers$` would otherwise fire on
@@ -2310,7 +2606,7 @@ fn scan_writes_batch(
                     args: &args,
                     receiver_types: &[],
                     span,
-                    call_origin: None,
+                    call_origin: Some(CallFactOrigin::SyntheticWrite),
                     constraints: &prepared.rule.constraints.0,
                     constraint_regexes: &prepared.constraint_regexes,
                     receiver_call_count: None,
@@ -2380,13 +2676,16 @@ fn scan_ref_writes_batch(
             ) {
                 continue;
             }
+            if !prepared.base_name_allows(&r.name) {
+                continue;
+            }
             if !constraints_pass(ConstraintEval {
                 rule_id: &prepared.rule.id,
                 callee: &r.name,
                 args: &args,
                 receiver_types: &[],
                 span: r.span,
-                call_origin: None,
+                call_origin: Some(CallFactOrigin::SyntheticWrite),
                 constraints: &prepared.rule.constraints.0,
                 constraint_regexes: &prepared.constraint_regexes,
                 receiver_call_count: None,
@@ -3584,9 +3883,6 @@ struct ConstraintEval<'a, 't> {
 }
 
 fn constraints_pass(ctx: ConstraintEval<'_, '_>) -> bool {
-    if ctx.mode.ignore_constraints() {
-        return true;
-    }
     let can_cache_taint_verdict = ctx.call_origin == Some(CallFactOrigin::RealCall);
     if let Some(view) = ctx.taint_view.filter(|_| can_cache_taint_verdict) {
         if let Some(verdict) = view.cached_verdict(ctx.rule_id, ctx.span) {
@@ -3697,16 +3993,21 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 if ctx.mode.ignore_arg_tainted() {
                     continue;
                 }
+                let allow_synthetic_write = ctx.call_origin == Some(CallFactOrigin::SyntheticWrite);
                 if !matches!(
                     ctx.call_origin,
-                    Some(CallFactOrigin::RealCall | CallFactOrigin::NestedReceiverCall)
+                    Some(
+                        CallFactOrigin::RealCall
+                            | CallFactOrigin::NestedReceiverCall
+                            | CallFactOrigin::SyntheticWrite
+                    )
                 ) {
                     return false;
                 }
                 let Some(view) = ctx.taint_view else {
                     return false;
                 };
-                if !view.arg_is_tainted(ctx.span, ctx.args, arg_tainted) {
+                if !view.arg_is_tainted(ctx.span, ctx.args, arg_tainted, allow_synthetic_write) {
                     return false;
                 }
             }
@@ -3737,16 +4038,21 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 if !*any_arg_tainted {
                     return false;
                 }
+                let allow_synthetic_write = ctx.call_origin == Some(CallFactOrigin::SyntheticWrite);
                 if !matches!(
                     ctx.call_origin,
-                    Some(CallFactOrigin::RealCall | CallFactOrigin::NestedReceiverCall)
+                    Some(
+                        CallFactOrigin::RealCall
+                            | CallFactOrigin::NestedReceiverCall
+                            | CallFactOrigin::SyntheticWrite
+                    )
                 ) {
                     return false;
                 }
                 let Some(view) = ctx.taint_view else {
                     return false;
                 };
-                if !view.any_arg_is_tainted(ctx.span, ctx.args) {
+                if !view.any_arg_is_tainted(ctx.span, ctx.args, allow_synthetic_write) {
                     return false;
                 }
             }
@@ -4184,6 +4490,7 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
             .unwrap_or(&[]);
         for decl in global.decls_in(file) {
             collect_callee_symbols(
+                ws,
                 &decl.flow_events,
                 &global,
                 decl,
@@ -4572,6 +4879,7 @@ fn decorator_is_attached_to_decl(
 /// narrow candidates per
 /// `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
 fn collect_callee_symbols(
+    ws: &Workspace,
     events: &[FlowEvent],
     global: &bonsai_index::GlobalIndex,
     caller: &bonsai_lang_api::Decl,
@@ -4579,37 +4887,65 @@ fn collect_callee_symbols(
     export_aliases: &[&'static str],
     out: &mut ahash::AHashSet<bonsai_common::SymbolId>,
 ) {
-    let resolve = |name: &str, out: &mut ahash::AHashSet<bonsai_common::SymbolId>| {
-        if name.trim().is_empty() {
-            return;
-        }
-        // Build a resolve context for this caller. Pass alias_map
-        // through so the resolver can rewrite imported aliases
-        // (`require("child_process") as cp; cp.exec(...)`) before
-        // candidate lookup.
-        let ahash_alias: ahash::AHashMap<String, AliasTarget> =
-            alias_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
-            .with_alias_map(&ahash_alias);
-        for func in bonsai_resolve::resolve_callable_with_context(global, name, &ctx) {
-            out.insert(bonsai_common::SymbolId::new(func.raw()));
-        }
-        // Tail-name fallback for chains like `obj.method` where the
-        // resolver couldn't infer the receiver type. The same
-        // visibility/module narrowing applies because the caller
-        // context is unchanged.
-        if let Some(tail) = name.rsplit(&['.', ':'][..]).next() {
-            if !tail.is_empty() && tail != name {
-                for func in bonsai_resolve::resolve_callable_with_context(global, tail, &ctx) {
-                    out.insert(bonsai_common::SymbolId::new(func.raw()));
+    let resolve =
+        |name: &str, receiver_types: &[String], out: &mut ahash::AHashSet<bonsai_common::SymbolId>| {
+            if name.trim().is_empty() {
+                return;
+            }
+            // Build a resolve context for this caller. Pass alias_map
+            // through so the resolver can rewrite imported aliases
+            // (`require("child_process") as cp; cp.exec(...)`) before
+            // candidate lookup.
+            let ahash_alias: ahash::AHashMap<String, AliasTarget> =
+                alias_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let path_lookup = |file| {
+                ws.vfs()
+                    .path(file)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+            };
+            let ctx = bonsai_resolve::ResolveContext::new(caller.span.file, &caller.module_path)
+                .with_alias_map(&ahash_alias)
+                .with_file_path_lookup(&path_lookup);
+            for func in bonsai_resolve::resolve_callable_with_context(global, name, &ctx) {
+                out.insert(bonsai_common::SymbolId::new(func.raw()));
+            }
+            let tail = name.rsplit(&['.', ':', '\\'][..]).next().unwrap_or(name);
+            for receiver_type in receiver_types {
+                for receiver_class in bonsai_resolve::resolve_class(global, receiver_type, &ctx) {
+                    let mut seen = ahash::AHashSet::default();
+                    let mut candidates = Vec::new();
+                    bonsai_resolve::collect_method_candidates_for_class(
+                        global,
+                        receiver_class,
+                        tail,
+                        &ctx,
+                        &mut seen,
+                        &mut candidates,
+                    );
+                    for func in candidates {
+                        out.insert(bonsai_common::SymbolId::new(func.raw()));
+                    }
                 }
             }
-        }
-    };
+            // Tail-name fallback for chains like `obj.method` where the
+            // resolver couldn't infer the receiver type. The same
+            // visibility/module narrowing applies because the caller
+            // context is unchanged.
+            if let Some(tail) = name.rsplit(&['.', ':'][..]).next() {
+                if !tail.is_empty() && tail != name {
+                    for func in bonsai_resolve::resolve_callable_with_context(global, tail, &ctx) {
+                        out.insert(bonsai_common::SymbolId::new(func.raw()));
+                    }
+                }
+            }
+        };
     for event in events {
         match event {
-            FlowEvent::Call { name, .. } => {
-                resolve(name.as_str(), out);
+            FlowEvent::Call {
+                name, receiver_types, ..
+            } => {
+                resolve(name.as_str(), receiver_types, out);
             }
             FlowEvent::Assign {
                 target,
@@ -4633,14 +4969,14 @@ fn collect_callee_symbols(
                 // suppresses the inferred entry-point source that the
                 // security wrapper needs.
                 if let Some(name) = source_name.as_deref() {
-                    resolve(name, out);
+                    resolve(name, &[], out);
                 }
                 if let Some(name) = source_call.as_deref() {
-                    resolve(name, out);
+                    resolve(name, &[], out);
                 }
                 if assignment_exports_callable_names(target, export_aliases) {
                     for name in source_names {
-                        resolve(name, out);
+                        resolve(name, &[], out);
                     }
                 }
             }
@@ -4649,11 +4985,11 @@ fn collect_callee_symbols(
                 else_events,
                 ..
             } => {
-                collect_callee_symbols(then_events, global, caller, alias_map, export_aliases, out);
-                collect_callee_symbols(else_events, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(ws, then_events, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(ws, else_events, global, caller, alias_map, export_aliases, out);
             }
             FlowEvent::Loop { body, .. } => {
-                collect_callee_symbols(body, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(ws, body, global, caller, alias_map, export_aliases, out);
             }
             FlowEvent::Try {
                 body,
@@ -4661,12 +4997,12 @@ fn collect_callee_symbols(
                 finally_events,
                 ..
             } => {
-                collect_callee_symbols(body, global, caller, alias_map, export_aliases, out);
-                collect_callee_symbols(catch_events, global, caller, alias_map, export_aliases, out);
-                collect_callee_symbols(finally_events, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(ws, body, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(ws, catch_events, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(ws, finally_events, global, caller, alias_map, export_aliases, out);
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                collect_callee_symbols(body, global, caller, alias_map, export_aliases, out);
+                collect_callee_symbols(ws, body, global, caller, alias_map, export_aliases, out);
             }
             _ => {}
         }

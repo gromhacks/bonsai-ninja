@@ -851,6 +851,31 @@
     expect_match_text: [window.location.href]
   description: window.location.href / location.href — full URL, attacker-controlled via navigation.
 
+- id: javascript.source.document_url
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: browser-input
+  payload_types: [url]
+  match:
+    kind: read
+    target:
+      attribute: [document, URL]
+  match_examples:
+  - name: document url
+    code: |
+      function demo() {
+        return document.URL;
+      }
+    expect_match_text: [document.URL]
+  - name: unrelated document property negative
+    code: |
+      function demo() {
+        return document.title;
+      }
+    expect_no_match: true
+  description: "document.URL — browser URL-derived field used as a DOM-XSS source."
+
 - id: javascript.source.document_referrer
   enabled: true
   language: javascript
@@ -1084,11 +1109,12 @@
   trust: remote
   tag: graphql-input
   payload_types: [graphql]
-  packages: [graphql, apollo-server, "@apollo/server", type-graphql, nexus]
+  packages: [graphql, apollo-server, "@apollo/server", type-graphql, nexus, graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: read
     target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(input|data|where|filter|id|variables|query|search|email|username|password)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.[A-Za-z_$][A-Za-z0-9_$]*$"
+      base_name_in: [args, variables]
   match_examples:
   - name: graphql args input
     code: |
@@ -1111,7 +1137,21 @@
         return args.email;
       }
     expect_match_text: [args.email]
-  description: "GraphQL resolver args.<field> — attacker-controlled resolver arguments, narrowed to common payload fields instead of bare `args`."
+  - name: graphql args arbitrary field
+    code: |
+      const _u = require("graphql-yoga");
+      function resolver(parent, args) {
+        return args.q;
+      }
+    expect_match_text: [args.q]
+  - name: graphql non args field negative
+    code: |
+      const _u = require("graphql");
+      function resolver(parent, args, user) {
+        return user.id;
+      }
+    expect_no_match: true
+  description: "GraphQL resolver args.<field> / variables.<field> — attacker-controlled resolver arguments. Receiver names are exact to avoid tainting unrelated objects such as user.id."
 
 - id: javascript.source.graphql_info_context_args
   enabled: true
@@ -1119,11 +1159,11 @@
   trust: remote
   tag: graphql-input
   payload_types: [graphql]
-  packages: [graphql, apollo-server, "@apollo/server", type-graphql, nexus]
+  packages: [graphql, apollo-server, "@apollo/server", type-graphql, nexus, graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: read
     target:
-      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.args(\\.(input|data|where|filter|id|variables))?$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.args(\\.[A-Za-z_$][A-Za-z0-9_$]*)?$"
   match_examples:
   - name: graphql info context args
     code: |
@@ -1139,6 +1179,13 @@
         return info.context.args.where;
       }
     expect_match_text: [info.context.args.where]
+  - name: graphql info context args arbitrary field
+    code: |
+      const _u = require("graphql-yoga");
+      function resolver(parent, args, context, info) {
+        return info.context.args.q;
+      }
+    expect_match_text: [info.context.args.q]
   description: "GraphQL info.context.args — framework-propagated resolver args exposed through GraphQL context."
 
 - id: javascript.source.http_incoming_message

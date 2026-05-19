@@ -4,11 +4,12 @@
 //! `InspectReport`.
 
 use anyhow::{Context, Result};
-use bonsai_lang_api::{AliasTarget, DeclKind, FlowEvent, RefKind};
+use bonsai_lang_api::{DeclKind, FlowEvent, RefKind};
 use bonsai_sdk::Workspace;
 use bonsai_sdk::{
     chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id,
-    find_call_span_to_func_uncached, func_display_name, CallEdgeResolver, ChainCache, ResolvedChain,
+    find_call_span_to_func_uncached, func_display_name, CallEdgeResolver, CallPathTruncation, ChainCache,
+    ResolvedChain,
 };
 use comfy_table::Cell;
 use serde::Serialize;
@@ -26,8 +27,8 @@ use bonsai_sdk::refs::read_snippet;
 use bonsai_sdk::RefOut;
 
 use super::{
-    collect_callees, format_span, nearest_names, open_project_index_only as open_project, page_info_to_json,
-    short_file, truncate,
+    format_span, nearest_names, open_project_index_only as open_project, page_info_to_json,
+    paged_json_incomplete_reasons, short_file, truncate,
 };
 
 #[derive(Serialize, Clone)]
@@ -84,12 +85,9 @@ pub(crate) struct InspectFlowRendered {
     pub(crate) flow_id: String,
     pub(crate) chain: Vec<String>,
     pub(crate) chain_display: String,
-    /// Worst-case precision of any edge along the chain. `Exact` means
-    /// the renderer never weakened it; `OverApproximate` means at least
-    /// one edge resolved to multiple candidates (e.g. PHP's
-    /// `parent::__construct`). Spec §5 — chains through Unknown /
-    /// Virtual edges are weaker evidence than chains through Direct
-    /// edges. JSON serialised in snake_case so dashboards can filter.
+    /// Worst-case precision of any semantic edge along the chain.
+    /// Public inspect output is filtered to `Exact` / `Narrowed`
+    /// chains before rendering.
     pub(crate) precision: bonsai_common::Precision,
     pub(crate) functions: Vec<InspectFunctionRendered>,
 }
@@ -131,6 +129,12 @@ struct InspectReport {
     query: String,
     regex: bool,
     kind_filter: Vec<String>,
+    /// Top-level completion verdict for the inspect result set. False
+    /// means at least one requested occurrence or flow evidence set is
+    /// a capped prefix and downstream tooling must not treat the JSON
+    /// as complete.
+    analysis_complete: bool,
+    analysis_incomplete_reasons: Vec<String>,
     /// Per-decl flow rendering: each matching decl gets its own
     /// `InspectOut` with chain-enumerated flows.
     decl_hits: Vec<InspectOut>,
@@ -145,11 +149,35 @@ struct InspectReportSummary {
     total_decl_hits: usize,
     total_hits: usize,
     hit_counts_by_kind: serde_json::Value,
+    /// Number of non-decl hits whose flow evidence is known to be a
+    /// capped prefix rather than a complete chain/path set.
+    #[serde(skip_serializing_if = "is_zero_usize", default)]
+    flow_truncated_hits: usize,
+    /// Stable, human-readable set of truncation reasons observed
+    /// across occurrence-hit flow evidence.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    flow_truncation_reasons: Vec<String>,
     /// `true` when the non-decl-hit pass hit `--max-hits` and dropped
     /// at least one occurrence. Surfaced in the text output so users
     /// know to re-run with `--all` (or a higher `--max-hits`).
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     hits_truncated: bool,
+    /// Exact bounded-mode reason(s) for `hits_truncated`. The normal
+    /// result cap and the filtered-candidate attempt cap are separate
+    /// so machine consumers can distinguish "shown hit list is full"
+    /// from "the query rejected too many candidates before reaching
+    /// the shown-hit cap".
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    hit_truncation_reasons: Vec<String>,
+    /// Number of non-decl candidates that reached the flow/filter
+    /// phase. Present only when truncation happened so capped runs are
+    /// auditable without noisy default metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hit_candidates_attempted: Option<usize>,
+    /// The candidate-attempt cap in effect for this run. Present only
+    /// when truncation happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hit_attempt_cap: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -168,6 +196,10 @@ struct HitOut {
     /// Suffix-clustered view of `flows`. Populated alongside `flows`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     groups: Vec<InspectFlowGroup>,
+    /// Present when this hit's flow list is known to be incomplete
+    /// because chain or downstream path enumeration hit a cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flow_truncated_by: Option<String>,
     /// When `--from` is set, the first reachable name that matched the
     /// `--from` needle on this hit's chain plus its source location
     /// (`name (file:line:col)`). Lets users see not just which
@@ -336,6 +368,11 @@ pub(crate) fn cmd_inspect(
     // `--no-cache` / `BONSAI_NO_CACHE` swaps this for a pass-through
     // variant that always takes the cold path.
     let chain_cache = build_chain_cache(ws);
+    let (downstream_max_extra, downstream_max_paths) = if paging_cfg.all {
+        (usize::MAX, usize::MAX)
+    } else {
+        (6, 12)
+    };
     // Edge resolvability is queried heavily when `inspect` extends raw
     // upstream chains into concrete downstream call paths. Cache the
     // per-file alias maps and per-edge span lookups for this invocation;
@@ -453,7 +490,8 @@ pub(crate) fn cmd_inspect(
             // Precompute the downstream user-fn closure of the decl once.
             // Each chain is extended with this so the filter match space
             // equals what the renderer will inline.
-            let _decl_downstream_r = chain_cache.downstream_resolved(target_func, 6, 12);
+            let _decl_downstream_r =
+                chain_cache.downstream_resolved(target_func, downstream_max_extra, downstream_max_paths);
             // For decl hits the "hit text" is the decl name itself; pass
             // it so `--to <decl>` still matches even when the chain has
             // just one element (the decl is a root).
@@ -463,14 +501,10 @@ pub(crate) fn cmd_inspect(
             // extend + reachable-names compute in that case. This is
             // loss-free: the filter result is guaranteed to be `true`,
             // so we'd have kept every chain anyway.
-            // Accurate-taint default: drop chains whose worst-case
-            // precision is `OverApproximate` or `Unknown`, AND drop
-            // chains with any unresolvable edge (caller body doesn't
-            // syntactically contain a call to the next hop — the
-            // former render-time `(over-approx)` marker). These are
-            // chains stitched together via polymorphic / multi-target
-            // call edges where the resolver couldn't pin a single
-            // callee — they're guesses, not real data flows.
+            // Semantic-only default: drop chains whose worst-case
+            // precision is outside `Exact` / `Narrowed`, and drop
+            // chains with any unresolvable edge. Those shapes are not
+            // semantic evidence for inspect flows.
             let chains_r: Vec<ResolvedChain> = chains_r
                 .into_iter()
                 .filter(|c| {
@@ -488,15 +522,20 @@ pub(crate) fn cmd_inspect(
             // Only paths with actual syntactic edges survive; no
             // reachability-bag `(over-approx)` annotations make it
             // into render.
-            let mut extended_chains_r: Vec<(Vec<bonsai_common::FuncId>, bonsai_common::Precision)> = chains_r
-                .iter()
-                .flat_map(|chain| {
-                    edge_resolver
-                        .enumerate_call_paths_from(&chain_cache, &chain.funcs, 6, 12)
-                        .into_iter()
-                        .map(move |path| (path, chain.precision))
-                })
-                .collect();
+            let mut decl_truncation_labels = Vec::new();
+            push_chain_truncation(&mut decl_truncation_labels, decl_truncation);
+            let mut extended_chains_r: Vec<(Vec<bonsai_common::FuncId>, bonsai_common::Precision)> =
+                Vec::new();
+            for chain in &chains_r {
+                let (paths, path_truncation) = edge_resolver.enumerate_call_paths_from_with_truncation(
+                    &chain_cache,
+                    &chain.funcs,
+                    downstream_max_extra,
+                    downstream_max_paths,
+                );
+                push_call_path_truncation(&mut decl_truncation_labels, path_truncation);
+                extended_chains_r.extend(paths.into_iter().map(|path| (path, chain.precision)));
+            }
             if filters.from.is_some() || filters.to.is_some() {
                 chain_cache
                     .prewarm_taint_facts(extended_chains_r.iter().filter_map(|(c, _)| c.first().copied()));
@@ -591,40 +630,20 @@ pub(crate) fn cmd_inspect(
                         *prec,
                         match_at,
                         filters,
+                        true,
                         full_source_for_large_bodies,
                     )
                 })
                 .collect();
-            let mut direct_callers: Vec<RefOut> = Vec::new();
-            for file in global.all_files() {
-                let Some(idx) = global.file_index(file) else {
-                    continue;
-                };
-                for r in &idx.refs {
-                    if r.name == decl.name || r.name.ends_with(&format!(".{}", decl.name)) {
-                        let (p, l, c) = format_span(&r.span, ws);
-                        direct_callers.push(RefOut {
-                            symbol: r.name.clone(),
-                            file: p,
-                            line: l,
-                            column: c,
-                            kind: format!("{:?}", r.kind).to_lowercase(),
-                            snippet: read_snippet(ws, &r.span),
-                        });
-                    }
-                }
-            }
-            let mut callees_out: Vec<String> = Vec::new();
-            collect_callees(&decl.flow_events, &mut callees_out);
-            callees_out.sort();
-            callees_out.dedup();
+            let direct_callers = semantic_direct_callers(ws, chain_cache.resolved_graph(), target_func);
+            let callees_out = semantic_callees(ws, chain_cache.resolved_graph(), target_func);
             let unique_entries: ahash::AHashSet<&String> =
                 flows.iter().filter_map(|f| f.chain.first()).collect();
             let summary = InspectSummary {
                 total_flows: flows.len() as u32,
                 max_chain_depth: flows.iter().map(|f| f.chain.len() as u32).max().unwrap_or(0),
                 unique_entry_points: unique_entries.len() as u32,
-                truncated_by: decl_truncation.label().map(str::to_string),
+                truncated_by: truncation_summary(&decl_truncation_labels),
             };
             let groups = group_flows_by_suffix(&flows);
             decl_hits.push(InspectOut {
@@ -654,7 +673,8 @@ pub(crate) fn cmd_inspect(
     // have been filtered out by `--from`/`--to`/etc.) but the right
     // semantics for the truncation flag: "at least one candidate was
     // not given a chance to land in the output."
-    let hits_truncated = std::cell::Cell::new(false);
+    let hits_truncated_by_output_cap = std::cell::Cell::new(false);
+    let hits_truncated_by_attempt_cap = std::cell::Cell::new(false);
     // Independent attempt counter: every call that passed the
     // pre-filter checks (file / in-fn) bumps it, regardless of
     // whether the chain filter later accepts or rejects the hit.
@@ -671,9 +691,14 @@ pub(crate) fn cmd_inspect(
                         text: String,
                         span: bonsai_common::Span,
                         containing: Option<(bonsai_common::FuncId, String)>,
+                        assignment_source_call: bool,
                         out: &mut Vec<HitOut>| {
-        if out.len() >= max_hits || hits_attempted.get() >= attempt_cap {
-            hits_truncated.set(true);
+        if out.len() >= max_hits {
+            hits_truncated_by_output_cap.set(true);
+            return;
+        }
+        if hits_attempted.get() >= attempt_cap {
+            hits_truncated_by_attempt_cap.set(true);
             return;
         }
         let (path, line, col) = format_span(&span, ws);
@@ -699,7 +724,7 @@ pub(crate) fn cmd_inspect(
         // space so name collisions across classes / modules can't
         // stitch unrelated decls into the same chain.
         let containing_downstream_r: Vec<bonsai_common::FuncId> = containing_id
-            .map(|f| chain_cache.downstream_resolved(f, 6, 12))
+            .map(|f| chain_cache.downstream_resolved(f, downstream_max_extra, downstream_max_paths))
             .unwrap_or_default();
         // Populated by the filter pass below when `--from` / `--to`
         // is set — the specific reachable name (or hit text) that
@@ -710,12 +735,16 @@ pub(crate) fn cmd_inspect(
         // (AuthService.swift:23:24)` on line 23:24".
         let mut hit_from_match: Option<FilterMatch> = None;
         let mut hit_to_match: Option<FilterMatch> = None;
+        let mut flow_truncation_labels: Vec<&'static str> = Vec::new();
+        let mut call_hit_targets: Vec<(bonsai_common::FuncId, bonsai_common::Precision)> = Vec::new();
         let chains_r: Vec<ResolvedChain> = if let Some(c_id) = containing_id {
             let mut seed = Vec::new();
             let mut seed_from_call_target = false;
             if kind == "call" {
-                for target in resolve_call_hit_targets(ws, &chain_cache, c_id, &text) {
-                    let (raw, _) = chain_cache.chains_resolved(target, max_flows, max_entry_probes);
+                call_hit_targets = resolve_call_hit_targets(&chain_cache, c_id, span);
+                for (target, direct_precision) in call_hit_targets.iter().copied() {
+                    let (raw, truncation) = chain_cache.chains_resolved(target, max_flows, max_entry_probes);
+                    push_chain_truncation(&mut flow_truncation_labels, truncation);
                     let target_seed = if raw.is_empty() {
                         vec![ResolvedChain {
                             funcs: vec![target],
@@ -724,17 +753,24 @@ pub(crate) fn cmd_inspect(
                     } else {
                         raw
                     };
-                    seed.extend(
-                        target_seed
-                            .into_iter()
-                            .filter(|chain| chain.funcs.contains(&c_id)),
-                    );
+                    let mut target_seed: Vec<ResolvedChain> = target_seed
+                        .into_iter()
+                        .filter(|chain| chain.funcs.contains(&c_id))
+                        .collect();
+                    if target_seed.is_empty() && target != c_id {
+                        target_seed.push(ResolvedChain {
+                            funcs: vec![c_id, target],
+                            precision: direct_precision,
+                        });
+                    }
+                    seed.extend(target_seed);
                 }
                 seed = dedupe_chains_keep_best_precision(seed);
                 seed_from_call_target = !seed.is_empty();
             }
             if seed.is_empty() {
-                let (raw, _) = chain_cache.chains_resolved(c_id, max_flows, max_entry_probes);
+                let (raw, truncation) = chain_cache.chains_resolved(c_id, max_flows, max_entry_probes);
+                push_chain_truncation(&mut flow_truncation_labels, truncation);
                 // Ensure the containing function itself is a candidate
                 // chain even when it's an entry point (no upstream
                 // callers). Without this synthetic chain, a sink that
@@ -751,11 +787,10 @@ pub(crate) fn cmd_inspect(
                     raw
                 };
             }
-            // Accurate-taint default: drop chains whose worst-case
-            // precision is `OverApproximate` or `Unknown`, AND drop
-            // chains with any unresolvable edge (caller body doesn't
-            // syntactically contain a call to the next hop). See the
-            // decl-hit branch above for the rationale.
+            // Semantic-only default: drop chains whose worst-case
+            // precision is outside `Exact` / `Narrowed`, and drop
+            // chains with any unresolvable edge. See the decl-hit
+            // branch above for the rationale.
             let seed: Vec<ResolvedChain> = seed
                 .into_iter()
                 .filter(|c| {
@@ -777,7 +812,7 @@ pub(crate) fn cmd_inspect(
             // no-op. Skip the extend + reachable compute entirely: the
             // output is identical, we just save per-hit cost on the
             // cold path where the user didn't ask for filtering.
-            if filters.from.is_some() || filters.to.is_some() {
+            if (filters.from.is_some() || filters.to.is_some()) && kind != "call" {
                 // Track the first reachable FuncId per chain whose
                 // display name satisfies `--from` / `--to`, then
                 // resolve back to a location so the hits table can
@@ -944,17 +979,30 @@ pub(crate) fn cmd_inspect(
         // tail — same contract as the decl-hit branch. Unresolvable
         // downstream hops terminate the extension rather than getting
         // appended as bogus `(over-approx)` edges.
-        let mut extended_chains_r: Vec<(Vec<bonsai_common::FuncId>, bonsai_common::Precision)> =
-            working_chains_r
-                .iter()
-                .take(max_flows)
-                .flat_map(|chain| {
-                    edge_resolver
-                        .enumerate_call_paths_from(&chain_cache, &chain.funcs, 6, 12)
-                        .into_iter()
-                        .map(move |path| (path, chain.precision))
-                })
-                .collect();
+        if working_chains_r.len() > max_flows {
+            push_truncation_label(&mut flow_truncation_labels, "max-flows cap");
+        }
+        let mut extended_chains_r: Vec<(Vec<bonsai_common::FuncId>, bonsai_common::Precision)> = Vec::new();
+        let extend_downstream = kind != "call" || !call_hit_targets.is_empty() || assignment_source_call;
+        if extend_downstream {
+            for chain in working_chains_r.iter().take(max_flows) {
+                let (paths, path_truncation) = edge_resolver.enumerate_call_paths_from_with_truncation(
+                    &chain_cache,
+                    &chain.funcs,
+                    downstream_max_extra,
+                    downstream_max_paths,
+                );
+                push_call_path_truncation(&mut flow_truncation_labels, path_truncation);
+                extended_chains_r.extend(paths.into_iter().map(|path| (path, chain.precision)));
+            }
+        } else {
+            extended_chains_r.extend(
+                working_chains_r
+                    .iter()
+                    .take(max_flows)
+                    .map(|chain| (chain.funcs.clone(), chain.precision)),
+            );
+        }
         if filters.from.is_some() || filters.to.is_some() {
             // Filter enumerated paths, not the raw upstream chains:
             // only paths that reach the `--to` sink (or contain the
@@ -964,11 +1012,13 @@ pub(crate) fn cmd_inspect(
             // care about.
             extended_chains_r.retain(|(path, _)| {
                 let mut chain_names: Vec<String> = path.iter().map(|&f| func_display_name(ws, f)).collect();
-                if let Some(&tail) = path.last() {
-                    for c in chain_cache.callees_of_resolved(tail) {
-                        let name = func_display_name(ws, c);
-                        if !name.is_empty() && !chain_names.contains(&name) {
-                            chain_names.push(name);
+                if extend_downstream {
+                    if let Some(&tail) = path.last() {
+                        for c in chain_cache.callees_of_resolved(tail) {
+                            let name = func_display_name(ws, c);
+                            if !name.is_empty() && !chain_names.contains(&name) {
+                                chain_names.push(name);
+                            }
                         }
                     }
                 }
@@ -1017,6 +1067,7 @@ pub(crate) fn cmd_inspect(
                     *prec,
                     Some((match_idx, match_override.clone())),
                     filters,
+                    true,
                     full_source_for_large_bodies,
                 )
             })
@@ -1035,6 +1086,7 @@ pub(crate) fn cmd_inspect(
             chains_preview,
             flows,
             groups,
+            flow_truncated_by: truncation_summary(&flow_truncation_labels),
             from_match: hit_from_match,
             to_match: hit_to_match,
         });
@@ -1073,7 +1125,7 @@ pub(crate) fn cmd_inspect(
             for s in &idx.strings {
                 if matcher.is_match(&s.text) {
                     let enclosing = chain_cache.enclosing_func(file, &decls_in_file, s.span);
-                    push_hit("string", s.text.clone(), s.span, enclosing, &mut hits);
+                    push_hit("string", s.text.clone(), s.span, enclosing, false, &mut hits);
                 }
             }
         }
@@ -1103,7 +1155,7 @@ pub(crate) fn cmd_inspect(
             }
             if matcher.is_match(&r.name) {
                 let enclosing = chain_cache.enclosing_func(file, &decls_in_file, r.span);
-                push_hit(kind_tag, r.name.clone(), r.span, enclosing, &mut hits);
+                push_hit(kind_tag, r.name.clone(), r.span, enclosing, false, &mut hits);
             }
         }
 
@@ -1131,7 +1183,7 @@ pub(crate) fn cmd_inspect(
                 });
             for imp in &imports_vec {
                 if matcher.is_match(&imp.module) {
-                    push_hit("import", imp.module.clone(), imp.span, None, &mut hits);
+                    push_hit("import", imp.module.clone(), imp.span, None, false, &mut hits);
                 }
             }
         }
@@ -1159,35 +1211,34 @@ pub(crate) fn cmd_inspect(
     });
 
     // ----- 3. Summary.
-    let mut by_kind: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
-    for h in &hits {
-        *by_kind.entry(h.kind.clone()).or_insert(0) += 1;
-    }
-    // Per docs/contributing/design-patterns.mdx::Stable IDs From Content / Lossless
-    // Caches: machine-readable JSON output must be byte-identical
-    // across runs and cache modes. AHashMap iteration is randomized,
-    // so we sort the kind keys before serialising into the report.
-    let mut by_kind_sorted: Vec<(String, usize)> = by_kind.into_iter().collect();
-    by_kind_sorted.sort_by(|a, b| a.0.cmp(&b.0));
-    let by_kind_obj: serde_json::Map<String, serde_json::Value> = by_kind_sorted
-        .into_iter()
-        .map(|(k, v)| (k, serde_json::Value::from(v)))
-        .collect();
+    let (flow_truncated_hits, flow_truncation_reasons) = occurrence_flow_truncation_summary(&hits);
+    let hits_truncated = hits_truncated_by_output_cap.get() || hits_truncated_by_attempt_cap.get();
     let summary = InspectReportSummary {
         total_decl_hits: decl_hits.len(),
         total_hits: hits.len(),
-        hit_counts_by_kind: serde_json::Value::Object(by_kind_obj),
-        hits_truncated: hits_truncated.get(),
+        hit_counts_by_kind: sorted_hit_counts_json(&hits),
+        flow_truncated_hits,
+        flow_truncation_reasons,
+        hits_truncated,
+        hit_truncation_reasons: inspect_hit_truncation_reasons(
+            hits_truncated_by_output_cap.get(),
+            hits_truncated_by_attempt_cap.get(),
+        ),
+        hit_candidates_attempted: hits_truncated.then_some(hits_attempted.get()),
+        hit_attempt_cap: hits_truncated.then_some(attempt_cap),
     };
 
     let mut report = InspectReport {
         query: pattern.unwrap_or("").to_string(),
         regex: is_regex,
         kind_filter: kind_filter.iter().map(String::from).collect(),
+        analysis_complete: false,
+        analysis_incomplete_reasons: Vec::new(),
         decl_hits,
         hits,
         summary,
     };
+    refresh_inspect_completeness(&mut report);
 
     // `--flow <id>`: keep only flows whose stable id matches, then
     // drop hit / decl records that no longer have any flows. Runs
@@ -1223,12 +1274,7 @@ pub(crate) fn cmd_inspect(
 
     if filters.from.is_some() && filters.to.is_some() {
         report.hits.retain(|hit| !hit.flows.is_empty());
-        let mut by_kind: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
-        for hit in &report.hits {
-            *by_kind.entry(hit.kind.clone()).or_insert(0) += 1;
-        }
-        report.summary.total_hits = report.hits.len();
-        report.summary.hit_counts_by_kind = serde_json::to_value(&by_kind)?;
+        rebuild_report_summary(&mut report);
     }
 
     // No matches? Print a friendly zero-hits line with close-name
@@ -1311,7 +1357,13 @@ pub(crate) fn cmd_inspect(
                     filters_hash,
                     inspect_decl_cost,
                     |slice, info, _cfg| {
+                        let mut analysis_incomplete_reasons = report.analysis_incomplete_reasons.clone();
+                        analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("inspect", info));
+                        analysis_incomplete_reasons.sort();
+                        analysis_incomplete_reasons.dedup();
                         let wrapped = serde_json::json!({
+                            "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                            "analysis_incomplete_reasons": analysis_incomplete_reasons,
                             "query": &report.query,
                             "regex": report.regex,
                             "kind_filter": &report.kind_filter,
@@ -1388,6 +1440,168 @@ fn build_chain_cache(ws: &Workspace) -> ChainCache<'_> {
     } else {
         ChainCache::new(ws)
     }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // Serde skip_serializing_if requires `fn(&T) -> bool`.
+fn is_zero_usize(n: &usize) -> bool {
+    usize::eq(n, &0)
+}
+
+fn inspect_hit_truncation_reasons(output_cap: bool, attempt_cap: bool) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if output_cap {
+        reasons.push("max-hits output cap".to_string());
+    }
+    if attempt_cap {
+        reasons.push("candidate-attempt cap derived from max-hits".to_string());
+    }
+    reasons
+}
+
+fn push_truncation_label(labels: &mut Vec<&'static str>, label: &'static str) {
+    if !labels.contains(&label) {
+        labels.push(label);
+    }
+}
+
+fn push_chain_truncation(labels: &mut Vec<&'static str>, truncation: bonsai_callgraph::ChainTruncation) {
+    if let Some(label) = truncation.label() {
+        push_truncation_label(labels, label);
+    }
+}
+
+fn push_call_path_truncation(labels: &mut Vec<&'static str>, truncation: CallPathTruncation) {
+    if let Some(label) = truncation.label() {
+        push_truncation_label(labels, label);
+    }
+}
+
+fn truncation_summary(labels: &[&'static str]) -> Option<String> {
+    if labels.is_empty() {
+        return None;
+    }
+    let mut ordered = Vec::new();
+    for known in [
+        "max-flows cap",
+        "entry-probe budget",
+        "downstream-depth cap",
+        "downstream-path cap",
+    ] {
+        if labels.contains(&known) {
+            ordered.push(known);
+        }
+    }
+    for label in labels {
+        if !ordered.contains(label) {
+            ordered.push(label);
+        }
+    }
+    Some(ordered.join(", "))
+}
+
+fn semantic_direct_callers(
+    ws: &Workspace,
+    graph: &bonsai_callgraph::ResolvedCallGraph,
+    target: bonsai_common::FuncId,
+) -> Vec<RefOut> {
+    let global = ws.db().global_index();
+    let target_name = global
+        .decl_of(bonsai_common::SymbolId::new(target.raw()))
+        .map(|decl| decl.name.clone())
+        .unwrap_or_default();
+    let mut callers: Vec<RefOut> = graph
+        .callers_of(target)
+        .filter(|edge| edge.precision.is_semantic())
+        .filter_map(|edge| {
+            let caller_decl = global.decl_of(bonsai_common::SymbolId::new(edge.from.raw()))?;
+            let span =
+                find_call_span_to_func_uncached(ws, caller_decl, target, &target_name).unwrap_or(edge.span);
+            let (file, line, column) = format_span(&span, ws);
+            Some(RefOut {
+                symbol: func_display_name(ws, edge.from),
+                file,
+                line,
+                column,
+                kind: edge_kind_label(edge.kind).to_string(),
+                snippet: read_snippet(ws, &span),
+            })
+        })
+        .collect();
+    callers.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
+            .then_with(|| a.symbol.cmp(&b.symbol))
+    });
+    callers.dedup_by(|a, b| {
+        a.symbol == b.symbol && a.file == b.file && a.line == b.line && a.column == b.column
+    });
+    callers
+}
+
+fn semantic_callees(
+    ws: &Workspace,
+    graph: &bonsai_callgraph::ResolvedCallGraph,
+    source: bonsai_common::FuncId,
+) -> Vec<String> {
+    let mut callees: Vec<String> = graph
+        .callees_of(source)
+        .filter(|edge| edge.precision.is_semantic())
+        .map(|edge| func_display_name(ws, edge.to))
+        .filter(|name| !name.is_empty())
+        .collect();
+    callees.sort();
+    callees.dedup();
+    callees
+}
+
+fn edge_kind_label(kind: bonsai_callgraph::EdgeKind) -> &'static str {
+    match kind {
+        bonsai_callgraph::EdgeKind::Direct => "call",
+        bonsai_callgraph::EdgeKind::Virtual => "virtual-call",
+        bonsai_callgraph::EdgeKind::Indirect => "indirect-call",
+        bonsai_callgraph::EdgeKind::Unknown => "unknown-call",
+    }
+}
+
+fn sorted_hit_counts_json(hits: &[HitOut]) -> serde_json::Value {
+    let mut by_kind: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
+    for h in hits {
+        *by_kind.entry(h.kind.clone()).or_insert(0) += 1;
+    }
+    let mut by_kind_sorted: Vec<(String, usize)> = by_kind.into_iter().collect();
+    by_kind_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    serde_json::Value::Object(
+        by_kind_sorted
+            .into_iter()
+            .map(|(k, v)| (k, serde_json::Value::from(v)))
+            .collect(),
+    )
+}
+
+fn occurrence_flow_truncation_summary(hits: &[HitOut]) -> (usize, Vec<String>) {
+    let mut reasons: Vec<&'static str> = Vec::new();
+    let mut truncated_hits = 0usize;
+    for hit in hits {
+        let Some(reason) = hit.flow_truncated_by.as_deref() else {
+            continue;
+        };
+        truncated_hits += 1;
+        for part in reason.split(", ") {
+            match part {
+                "max-flows cap" => push_truncation_label(&mut reasons, "max-flows cap"),
+                "entry-probe budget" => push_truncation_label(&mut reasons, "entry-probe budget"),
+                "downstream-depth cap" => push_truncation_label(&mut reasons, "downstream-depth cap"),
+                "downstream-path cap" => push_truncation_label(&mut reasons, "downstream-path cap"),
+                _ => {}
+            }
+        }
+    }
+    let reason_vec = truncation_summary(&reasons)
+        .map(|s| s.split(", ").map(str::to_string).collect())
+        .unwrap_or_default();
+    (truncated_hits, reason_vec)
 }
 
 /// Byte-cost heuristic for one rendered `InspectFlowRendered`,
@@ -1508,12 +1722,32 @@ fn apply_group_id_filter(report: &mut InspectReport, target_group_id: &str) {
 fn rebuild_report_summary(report: &mut InspectReport) {
     report.summary.total_decl_hits = report.decl_hits.len();
     report.summary.total_hits = report.hits.len();
-    let mut hit_count_by_kind: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
-    for occurrence_hit in &report.hits {
-        *hit_count_by_kind.entry(occurrence_hit.kind.clone()).or_insert(0) += 1;
+    report.summary.hit_counts_by_kind = sorted_hit_counts_json(&report.hits);
+    let (flow_truncated_hits, flow_truncation_reasons) = occurrence_flow_truncation_summary(&report.hits);
+    report.summary.flow_truncated_hits = flow_truncated_hits;
+    report.summary.flow_truncation_reasons = flow_truncation_reasons;
+    refresh_inspect_completeness(report);
+}
+
+fn refresh_inspect_completeness(report: &mut InspectReport) {
+    let mut reasons = Vec::new();
+    for reason in &report.summary.hit_truncation_reasons {
+        reasons.push(format!("inspect hit list capped by {reason}"));
     }
-    report.summary.hit_counts_by_kind =
-        serde_json::to_value(&hit_count_by_kind).unwrap_or(serde_json::Value::Null);
+    for reason in &report.summary.flow_truncation_reasons {
+        reasons.push(format!("inspect occurrence flow evidence capped by {reason}"));
+    }
+    for reason in report
+        .decl_hits
+        .iter()
+        .filter_map(|decl| decl.summary.truncated_by.as_deref())
+    {
+        reasons.push(format!("inspect decl flow evidence capped by {reason}"));
+    }
+    reasons.sort();
+    reasons.dedup();
+    report.analysis_complete = reasons.is_empty();
+    report.analysis_incomplete_reasons = reasons;
 }
 
 /// Concrete view mode after [`InspectView::Auto`] has been resolved
@@ -1600,15 +1834,52 @@ fn render_inspect_report_text(
             cli_println!("  {} {}", u.dim("by kind:"), kind_count_parts.join(", "));
         }
     }
+    if !report.analysis_complete {
+        let reasons = if report.analysis_incomplete_reasons.is_empty() {
+            "unknown reason".to_string()
+        } else {
+            report.analysis_incomplete_reasons.join("; ")
+        };
+        cli_println!("  {} {}", u.warn("analysis incomplete:"), u.dim(&reasons));
+    }
     if report.summary.hits_truncated {
-        // Loud warning: at least one occurrence was dropped because we
-        // hit `--max-hits`. Tell the user how to see them all so this
-        // is never a silent miss.
+        // Loud warning: at least one occurrence was dropped. Include
+        // the exact bounded-mode reason so this is never a silent or
+        // misleading miss.
+        let reasons = if report.summary.hit_truncation_reasons.is_empty() {
+            "unknown cap".to_string()
+        } else {
+            report.summary.hit_truncation_reasons.join(", ")
+        };
+        let attempted = report
+            .summary
+            .hit_candidates_attempted
+            .map(|n| format!("; {n} candidate(s) attempted"))
+            .unwrap_or_default();
+        let attempt_cap = report
+            .summary
+            .hit_attempt_cap
+            .map(|n| format!("; candidate-attempt cap {n}"))
+            .unwrap_or_default();
         cli_println!(
             "  {}",
             u.warn(&format!(
-                "[truncated] hit list capped at --max-hits ({}); re-run with --all or a larger --max-hits to see every occurrence",
-                report.hits.len()
+                "[truncated] hit list capped by {reasons} ({} shown{attempted}{attempt_cap}); re-run with --all or larger inspect caps to see every occurrence",
+                report.hits.len(),
+            ))
+        );
+    }
+    if report.summary.flow_truncated_hits > 0 {
+        let reasons = if report.summary.flow_truncation_reasons.is_empty() {
+            "unknown cap".to_string()
+        } else {
+            report.summary.flow_truncation_reasons.join(", ")
+        };
+        cli_println!(
+            "  {}",
+            u.warn(&format!(
+                "[truncated] flow evidence capped for {} occurrence hit(s) by {}; re-run with --all or larger inspect caps to enumerate every chain/path",
+                report.summary.flow_truncated_hits, reasons
             ))
         );
     }
@@ -1709,14 +1980,14 @@ fn render_inspect_report_text(
         };
         scale(raw)
     };
-    // Budget after an 8 % chrome reserve. Covers the closing
+    // Budget after a 12 % chrome reserve. Covers the closing
     // truncation hint + paging footer bytes that count toward
     // `out_count::bytes()` but aren't part of the per-unit
     // budget check, plus width-dependent table wrapping at common
     // terminal sizes.
     let budget_bytes = paging_cfg.effective_budget().map(|tokens| {
         let raw = tokens.saturating_mul(paging::BYTES_PER_TOKEN);
-        raw.saturating_sub(raw * 8 / 100)
+        raw.saturating_sub(raw * 12 / 100)
     });
     // Reserve a modest 12 % of budget for the OCCURRENCE HITS
     // table on each page. That's enough for ~25 rows at the
@@ -2703,7 +2974,14 @@ fn walk_flow_hits<F>(
     out: &mut Vec<HitOut>,
     push_hit: &mut F,
 ) where
-    F: FnMut(&str, String, bonsai_common::Span, Option<(bonsai_common::FuncId, String)>, &mut Vec<HitOut>),
+    F: FnMut(
+        &str,
+        String,
+        bonsai_common::Span,
+        Option<(bonsai_common::FuncId, String)>,
+        bool,
+        &mut Vec<HitOut>,
+    ),
 {
     let want = |k: &str| kinds.is_empty() || kinds.contains(k);
     let containing = |id: bonsai_common::FuncId, name: &str| Some((id, name.to_string()));
@@ -2711,7 +2989,14 @@ fn walk_flow_hits<F>(
         match e {
             FlowEvent::Call { span, name, args, .. } => {
                 if want("call") && matcher.is_match(name) {
-                    push_hit("call", name.clone(), *span, containing(in_fn_id, in_fn), out);
+                    push_hit(
+                        "call",
+                        name.clone(),
+                        *span,
+                        containing(in_fn_id, in_fn),
+                        false,
+                        out,
+                    );
                 }
                 if want("arg") {
                     for a in args {
@@ -2729,7 +3014,7 @@ fn walk_flow_hits<F>(
                             } else {
                                 a.value_text.clone()
                             };
-                            push_hit("arg", text, a.span, containing(in_fn_id, in_fn), out);
+                            push_hit("arg", text, a.span, containing(in_fn_id, in_fn), false, out);
                         }
                     }
                 }
@@ -2745,12 +3030,19 @@ fn walk_flow_hits<F>(
             } => {
                 if let Some(call) = source_call {
                     if want("call") && matcher.is_match(call) {
-                        push_hit("call", call.clone(), *span, containing(in_fn_id, in_fn), out);
+                        push_hit(
+                            "call",
+                            call.clone(),
+                            *span,
+                            containing(in_fn_id, in_fn),
+                            true,
+                            out,
+                        );
                     }
                     if want("arg") {
                         for arg in source_call_args {
                             if matcher.is_match(arg) {
-                                push_hit("arg", arg.clone(), *span, containing(in_fn_id, in_fn), out);
+                                push_hit("arg", arg.clone(), *span, containing(in_fn_id, in_fn), false, out);
                             }
                         }
                     }
@@ -2773,6 +3065,7 @@ fn walk_flow_hits<F>(
                         ),
                         *span,
                         containing(in_fn_id, in_fn),
+                        false,
                         out,
                     );
                 }
@@ -2913,51 +3206,30 @@ fn render_inspect_text(out: &InspectOut, render: &InspectRenderOptions, view: Re
     }
 }
 
-/// Resolve a call occurrence to the workspace callee(s) it invokes in
-/// the enclosing function's import/module context.
+/// Resolve a call occurrence to the workspace callee(s) it invokes.
+///
+/// Occurrence hits must use the already-built semantic graph, keyed by
+/// the exact call-site span. Re-resolving by name here can bind a hit
+/// like `external.helper()` to an unrelated sibling call `helper()` in
+/// the same function.
 fn resolve_call_hit_targets(
-    ws: &Workspace,
     chain_cache: &ChainCache<'_>,
     caller_func: bonsai_common::FuncId,
-    call_name: &str,
-) -> Vec<bonsai_common::FuncId> {
-    let global = ws.db().global_index();
-    let Some(caller_decl) = global.decl_of(bonsai_common::SymbolId::new(caller_func.raw())) else {
-        return Vec::new();
-    };
-    let alias_targets: ahash::AHashMap<String, AliasTarget> =
-        bonsai_lang_api::alias_map_from_import_specs(&ws.db().imports_for(caller_decl.span.file))
-            .into_iter()
-            .collect();
-    let mut targets = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
-        &global,
-        call_name,
-        caller_decl,
-        &alias_targets,
-    );
-    let short = bonsai_callgraph::short_callee(call_name);
-    if targets.is_empty() && short != call_name {
-        targets = bonsai_callgraph::collect_callable_targets_with_context_and_aliases(
-            &global,
-            short,
-            caller_decl,
-            &alias_targets,
-        );
-    }
-    if targets.is_empty() {
-        targets = chain_cache
-            .callees_of_resolved(caller_func)
-            .into_iter()
-            .filter(|callee| {
-                global
-                    .decl_of(bonsai_common::SymbolId::new(callee.raw()))
-                    .is_some_and(|decl| decl.name == call_name || decl.name == short)
-            })
-            .collect();
-    }
-    targets.sort_by_key(|func| func.raw());
-    targets.dedup();
+    call_span: bonsai_common::Span,
+) -> Vec<(bonsai_common::FuncId, bonsai_common::Precision)> {
+    let mut targets: Vec<(bonsai_common::FuncId, bonsai_common::Precision)> = chain_cache
+        .resolved_graph()
+        .callees_of(caller_func)
+        .filter(|edge| edge.precision.is_semantic() && spans_overlap(edge.span, call_span))
+        .map(|edge| (edge.to, edge.precision))
+        .collect();
+    targets.sort_by(|a, b| a.0.raw().cmp(&b.0.raw()).then_with(|| a.1.cmp(&b.1)));
+    targets.dedup_by_key(|target| target.0);
     targets
+}
+
+fn spans_overlap(left: bonsai_common::Span, right: bonsai_common::Span) -> bool {
+    left.file == right.file && left.start < right.end && right.start < left.end
 }
 
 fn dedupe_chains_keep_best_precision(mut chains: Vec<ResolvedChain>) -> Vec<ResolvedChain> {
@@ -2993,20 +3265,17 @@ fn format_filter_match_cell(ui: &Ui, matched: Option<&FilterMatch>) -> String {
 }
 
 /// Render a chain's precision as a short, colorized suffix for the
-/// `FLOW N` header. Returns the empty string when precision is
-/// `Exact` or `Narrowed` (the "rock-solid" cases where surfacing
-/// would just be visual noise) and a yellow/red tag for
-/// `OverApproximate` / `Unknown` so users can tell at a glance which
-/// flows are weak evidence.
-fn precision_header_suffix(ui: &Ui, precision: bonsai_common::Precision) -> String {
+/// `FLOW N` header. Public inspect flows are semantic-only, so exact
+/// and narrowed chains need no suffix. Non-semantic chains are dropped
+/// before rendering.
+fn precision_header_suffix(_ui: &Ui, precision: bonsai_common::Precision) -> String {
+    debug_assert!(
+        precision.is_semantic(),
+        "inspect render received diagnostic-precision flow evidence: {precision:?}"
+    );
     match precision {
         bonsai_common::Precision::Exact | bonsai_common::Precision::Narrowed => String::new(),
-        bonsai_common::Precision::OverApproximate => {
-            format!(" {}", ui.warn("[precision: over-approximate]"))
-        }
-        bonsai_common::Precision::Unknown => {
-            format!(" {}", ui.warn("[precision: unknown]"))
-        }
+        bonsai_common::Precision::OverApproximate | bonsai_common::Precision::Unknown => String::new(),
     }
 }
 
@@ -3083,12 +3352,13 @@ pub(crate) fn render_flow_with_filters(
         precision,
         match_at,
         filters,
+        true,
         false,
     )
 }
 
 #[allow(clippy::too_many_arguments)] // stable parameter list — see calling site for shape
-fn render_flow_with_cached_call_spans(
+pub(crate) fn render_flow_with_cached_call_spans(
     ws: &Workspace,
     chain: &[bonsai_common::FuncId],
     call_spans: &[Option<bonsai_common::Span>],
@@ -3097,8 +3367,12 @@ fn render_flow_with_cached_call_spans(
     precision: bonsai_common::Precision,
     match_at: Option<(usize, MatchOverride)>,
     filters: InspectFilters<'_>,
+    resolve_missing_call_spans: bool,
     full_source_for_large_bodies: bool,
 ) -> Option<InspectFlowRendered> {
+    if !precision.is_semantic() {
+        return None;
+    }
     let global = ws.db().global_index();
     // Chains now carry FuncIds all the way from enumeration, so each
     // hop resolves to exactly one decl — no name collision, no fallback
@@ -3129,13 +3403,20 @@ fn render_flow_with_cached_call_spans(
         let is_match_fn = function_index == match_idx;
 
         // Find the specific call-site span for the chain-advancing call.
-        let call_span = call_spans.get(function_index).copied().flatten().or_else(|| {
-            chain
-                .get(function_index + 1)
-                .copied()
-                .zip(next_name.as_deref())
-                .and_then(|(next_func, n)| find_call_span_to_func_uncached(ws, decl, next_func, n))
-        });
+        let call_span = {
+            let cached = call_spans.get(function_index).copied().flatten();
+            if resolve_missing_call_spans {
+                cached.or_else(|| {
+                    chain
+                        .get(function_index + 1)
+                        .copied()
+                        .zip(next_name.as_deref())
+                        .and_then(|(next_func, n)| find_call_span_to_func_uncached(ws, decl, next_func, n))
+                })
+            } else {
+                cached
+            }
+        };
 
         let match_here = if is_match_fn { match_label.clone() } else { None };
         let rendered = render_function_source(
@@ -3447,20 +3728,8 @@ fn render_function_source(
                 subjects.push(next);
             }
         } else if advance_line.is_none() && !is_root && !is_target && ln == def_line {
-            // Fallback annotation for chain links whose call site
-            // couldn't be resolved to a specific line — happens on
-            // over-approximate polymorphic dispatches where the
-            // analyzer tracked `foo.execute → bar.execute` by name
-            // but the enclosing function's body doesn't literally
-            // call the next symbol. Without this branch, the step
-            // counter silently stalls mid-chain and the user sees
-            // un-numbered function bodies with no indication of
-            // why step numbers skipped.
-            if let Some(next) = next_name.as_deref() {
-                *step_counter += 1;
-                step = Some(*step_counter);
-                annotation = Some(format!("[FLOW {flow_label} -> {next} (over-approx)]"));
-                subjects.push(next);
+            if next_name.is_some() {
+                return None;
             } else {
                 // Chain TAIL that isn't the match target (happens
                 // when the match point is an upstream function and
@@ -3631,126 +3900,5 @@ fn compress_context(lines: &[InspectLine]) -> Vec<InspectLine> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{walk_flow_hits, HitOut, InspectFilters, Matcher};
-    use crate::args::FactKindFilter;
-    use bonsai_common::{FileId, FuncId, Span};
-    use bonsai_lang_api::FlowEvent;
-    use bonsai_sdk::find_call_span_by_name;
-
-    fn span(start: u32) -> Span {
-        Span {
-            file: FileId(0),
-            start: u64::from(start),
-            end: u64::from(start + 1),
-        }
-    }
-
-    fn assign_event() -> FlowEvent {
-        FlowEvent::Assign {
-            target: "user".to_string(),
-            source_name: None,
-            source_names: vec!["request".to_string()],
-            source_call: Some("read_user".to_string()),
-            source_call_args: vec!["request".to_string()],
-            span: span(10),
-            declares_new_binding: false,
-            value_kind: None,
-        }
-    }
-
-    #[test]
-    fn walk_flow_hits_surfaces_assignment_source_calls() {
-        let matcher = Matcher::build(Some("read_user"), false).expect("matcher");
-        let kinds = ahash::AHashSet::from_iter(["call".to_string()]);
-        let mut seen: Vec<(String, String)> = Vec::new();
-        let mut out: Vec<HitOut> = Vec::new();
-        let mut push = |kind: &str,
-                        text: String,
-                        _span: Span,
-                        _containing: Option<(FuncId, String)>,
-                        _out: &mut Vec<HitOut>| {
-            seen.push((kind.to_string(), text));
-        };
-
-        walk_flow_hits(
-            &[assign_event()],
-            FuncId::new(1),
-            "handler",
-            &matcher,
-            &kinds,
-            &mut out,
-            &mut push,
-        );
-
-        assert_eq!(seen, vec![("call".to_string(), "read_user".to_string())]);
-    }
-
-    #[test]
-    fn walk_flow_hits_surfaces_assignment_source_call_args() {
-        let matcher = Matcher::build(Some("request"), false).expect("matcher");
-        let kinds = ahash::AHashSet::from_iter(["arg".to_string()]);
-        let mut seen: Vec<(String, String)> = Vec::new();
-        let mut out: Vec<HitOut> = Vec::new();
-        let mut push = |kind: &str,
-                        text: String,
-                        _span: Span,
-                        _containing: Option<(FuncId, String)>,
-                        _out: &mut Vec<HitOut>| {
-            seen.push((kind.to_string(), text));
-        };
-
-        walk_flow_hits(
-            &[assign_event()],
-            FuncId::new(1),
-            "handler",
-            &matcher,
-            &kinds,
-            &mut out,
-            &mut push,
-        );
-
-        assert_eq!(seen, vec![("arg".to_string(), "request".to_string())]);
-    }
-
-    #[test]
-    fn find_call_span_matches_assignment_source_call() {
-        assert_eq!(
-            find_call_span_by_name(&[assign_event()], "read_user"),
-            Some(span(10))
-        );
-    }
-
-    #[test]
-    fn inspect_cli_filters_map_one_to_one_to_sdk_filters() {
-        let cli = InspectFilters {
-            from: Some("request"),
-            from_kind: Some(FactKindFilter::Read),
-            to: Some("os.system"),
-            to_kind: Some(FactKindFilter::Call),
-            file: Some("gateway.py"),
-            in_fn: Some("handle_request"),
-        };
-        let sdk = cli.to_sdk();
-        assert_eq!(sdk.from, Some("request"));
-        assert_eq!(sdk.from_kind, Some(bonsai_sdk::FactKindFilter::Read));
-        assert_eq!(sdk.to, Some("os.system"));
-        assert_eq!(sdk.to_kind, Some(bonsai_sdk::FactKindFilter::Call));
-        assert_eq!(sdk.file, Some("gateway.py"));
-        assert_eq!(sdk.in_fn, Some("handle_request"));
-
-        let all_kinds = [
-            (FactKindFilter::Decl, bonsai_sdk::FactKindFilter::Decl),
-            (FactKindFilter::Call, bonsai_sdk::FactKindFilter::Call),
-            (FactKindFilter::Read, bonsai_sdk::FactKindFilter::Read),
-            (FactKindFilter::Write, bonsai_sdk::FactKindFilter::Write),
-            (FactKindFilter::Arg, bonsai_sdk::FactKindFilter::Arg),
-            (FactKindFilter::StringLit, bonsai_sdk::FactKindFilter::StringLit),
-            (FactKindFilter::Import, bonsai_sdk::FactKindFilter::Import),
-            (FactKindFilter::Class, bonsai_sdk::FactKindFilter::Class),
-        ];
-        for (cli_kind, sdk_kind) in all_kinds {
-            assert_eq!(cli_kind.to_sdk(), sdk_kind);
-        }
-    }
-}
+#[path = "inspect_tests.rs"]
+mod tests;

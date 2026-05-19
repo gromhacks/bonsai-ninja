@@ -2,6 +2,7 @@
   enabled: true
   language: java
   tag: cookie-misconfig
+  category: source-independent
   severity: medium
   packages:
   - javax.servlet

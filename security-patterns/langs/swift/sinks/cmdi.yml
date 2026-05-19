@@ -140,11 +140,25 @@
   match:
     kind: write
     target:
-      name: launchPath
+      regex: ^(?:process|task|proc|p)\.launchPath$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: process launch path member write
     code: |
-      func test() { let input = "x"; let amount = 1; launchPath = input }
+      import Foundation
+      func test(input: String) {
+        let process = Process()
+        process.launchPath = input
+      }
+  - name: local launchpath variable negative
+    code: |
+      import Foundation
+      func test(input: String) {
+        let launchPath = input
+      }
+    expect_no_match: true
   description: "Process.launchPath = tainted — path to executable."
 - id: swift.cmdi.executableurl_write
   enabled: true
@@ -155,11 +169,25 @@
   match:
     kind: write
     target:
-      name: executableURL
+      regex: ^(?:process|task|proc|p)\.executableURL$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: process executable url member write
     code: |
-      func test() { let input = "x"; let amount = 1; executableURL = input }
+      import Foundation
+      func test(input: URL) {
+        let process = Process()
+        process.executableURL = input
+      }
+  - name: local executableurl variable negative
+    code: |
+      import Foundation
+      func test(input: URL) {
+        let executableURL = input
+      }
+    expect_no_match: true
   description: "Process.executableURL = tainted — Swift-preferred variant."
 - id: swift.cmdi.arguments_write
   enabled: true
@@ -170,9 +198,23 @@
   match:
     kind: write
     target:
-      name: arguments
+      regex: ^(?:process|task|proc|p)\.arguments$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: process arguments member write
     code: |
-      func test() { let input = "x"; let amount = 1; arguments = input }
+      import Foundation
+      func test(input: String) {
+        let process = Process()
+        process.arguments = [input]
+      }
+  - name: local arguments variable negative
+    code: |
+      import Foundation
+      func test(input: String) {
+        let arguments = [input]
+      }
+    expect_no_match: true
   description: "Process.arguments = [tainted] — argv injection."

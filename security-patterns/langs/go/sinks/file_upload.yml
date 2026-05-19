@@ -38,8 +38,11 @@
     kind: call
     callee:
       regex: "\\.SaveUploadedFile$"
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
+  - name: tainted gin upload destination
     code: |
       import "github.com/gin-gonic/gin"
       package main
@@ -48,12 +51,22 @@
         target := "tainted"
         name := "user"
         value := "value"
-        obj.SaveUploadedFile(target)
+        obj.SaveUploadedFile(value, target)
       }
+  - name: literal gin upload destination negative
+    code: |
+      package main
+      func example(file any) {
+        obj.SaveUploadedFile(file, "/srv/uploads/avatar.png")
+      }
+    expect_no_match: true
   description: "gin Context.SaveUploadedFile(file, dst) — if dst is built from header.Filename, path-traversal + unrestricted upload."
 
 - id: go.upload.echo_formfile
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: go.gin_echo.context_formfile
   language: go
   tag: file-upload
   severity: medium
@@ -75,7 +88,7 @@
         value := "value"
         obj.FormFile(target)
       }
-  description: "echo Context.FormFile — returns *multipart.FileHeader whose .Filename is client-controlled; sink when later written with tainted name."
+  description: "Disabled — echo Context.FormFile returns client-controlled multipart metadata and is modeled as go.gin_echo.context_formfile. The sink is the later write using FileHeader.Filename."
 
 - id: go.upload.fiber_savefile
   enabled: true
@@ -88,8 +101,11 @@
     kind: call
     callee:
       regex: "\\.SaveFile$"
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
-  - name: generated direct match
+  - name: tainted fiber upload destination
     code: |
       import "github.com/gofiber/fiber"
       package main
@@ -98,6 +114,13 @@
         target := "tainted"
         name := "user"
         value := "value"
-        obj.SaveFile(target)
+        obj.SaveFile(value, target)
       }
+  - name: literal fiber upload destination negative
+    code: |
+      package main
+      func example(file any) {
+        obj.SaveFile(file, "/srv/uploads/avatar.png")
+      }
+    expect_no_match: true
   description: "fiber Ctx.SaveFile(fileheader, path) — tainted path + client filename = traversal / unrestricted upload."

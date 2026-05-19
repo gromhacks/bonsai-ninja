@@ -16,15 +16,16 @@ use crate::matcher::{
     match_rules_against_facts_for_taint_with_progress, match_rules_against_facts_with_progress,
     rule_match_passes_constraints_with_taint_view, InterTaintView, RuleMatch,
 };
-use crate::rule::{ConstraintKind, MatchKind, Rule, RuleKind, Severity};
+use crate::rule::{ConstraintKind, MatchKind, Rule, RuleKind, RuleTarget, Severity};
 use crate::sanitizer_credit::{sanitizer_credits_sink_tag, sanitizer_tag_is_recognized_non_crediting};
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use bonsai_common::{FuncId, Precision, Span, SymbolId};
 use bonsai_lang_api::LanguageRegistry;
 use bonsai_taint::{
-    CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig, ReceiverStatePropagation,
-    SourceOutputArgs, TaintedCall, TaintedCallEdge, TaintedCallKind, TokenSet, ValueFlowGraph,
+    CallResultPassthrough, CleanOutputOverwrite, EntryTaintGraph, InterTaintCaches, InterTaintConfig,
+    OutputArgFlow, ReceiverStatePropagation, SourceOutputArgs, TaintedCall, TaintedCallEdge, TokenSet,
+    ValueFlowGraph,
 };
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -32,6 +33,10 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
+
+type RankedCallPath = std::cmp::Reverse<(i64, u32, u32, Vec<FuncId>)>;
+type InventoryMatchIdentity = (String, String, u32, u32, String, String, Option<String>);
 
 /// Phase-aware progress event emitted by `run_taint_analysis_with_phase_progress`
 /// and `run_source_analysis_with_phase_progress`. Long-running phases
@@ -56,7 +61,7 @@ pub enum AnalysisProgress {
     PhaseFinished,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TaintAnalysisOptions {
     pub source: Option<String>,
     pub trust: Option<String>,
@@ -73,6 +78,12 @@ pub struct TaintAnalysisOptions {
     /// source). Disabled by default — produces O(functions) noisy
     /// inferred-trust findings that drown out real source-rule matches.
     pub include_inferred_sources: bool,
+    /// Opt-in: include exact local pattern findings in taint-analysis
+    /// output. Disabled by default because pattern-only rows do not
+    /// prove source-to-sink reachability and should not appear in a
+    /// source-to-sink taint report unless a caller explicitly requests
+    /// mixed local-pattern inventory.
+    pub include_pattern_only: bool,
     /// Deprecated compatibility switch. Sanitizer rules are now evidence
     /// attached to propagated paths, not propagation blockers, so sanitized
     /// paths are always present when source-to-sink reachability exists.
@@ -85,14 +96,53 @@ pub struct TaintAnalysisOptions {
     /// Optional per-function intraprocedural CFG worklist cap.
     /// Defaults to the CFG-size-derived cap when unset.
     pub intra_worklist_cap: Option<u32>,
-    /// Optional maximum tolerated flow precision. Lower enum values are
-    /// more precise, so `Some(Precision::Narrowed)` keeps exact and
-    /// narrowed findings while dropping over-approximate/unknown ones.
+    /// Optional maximum tolerated flow precision. Public security
+    /// analysis is semantic-only: `Some(Precision::Narrowed)` keeps
+    /// exact and narrowed findings and rejects broad diagnostic
+    /// classes.
     pub max_precision: Option<Precision>,
     /// When true, drop findings whose source OR sink lives in a
     /// conventional test path (`test/`, `tests/`, `*_test.go`, etc.).
     /// See `crate::finding::path_is_test_file` for the exact rule.
     pub exclude_tests: bool,
+}
+
+impl Default for TaintAnalysisOptions {
+    fn default() -> Self {
+        Self {
+            source: None,
+            trust: None,
+            category: None,
+            sink: None,
+            severity: None,
+            tag: None,
+            files: Vec::new(),
+            exclude_files: Vec::new(),
+            include_inferred_sources: false,
+            include_pattern_only: false,
+            show_sanitized: false,
+            interprocedural_budget: None,
+            intra_worklist_cap: None,
+            max_precision: Some(Precision::Narrowed),
+            exclude_tests: false,
+        }
+    }
+}
+
+impl TaintAnalysisOptions {
+    /// Enforce the production semantic-only precision contract.
+    ///
+    /// `Exact` remains exact. Every other request is capped at
+    /// `Narrowed`, so broad diagnostic classes cannot leak into
+    /// user-facing taint results through SDK defaults or custom callers.
+    #[must_use]
+    pub fn semantic_precision_only(mut self) -> Self {
+        self.max_precision = Some(match self.max_precision {
+            Some(Precision::Exact) => Precision::Exact,
+            _ => Precision::Narrowed,
+        });
+        self
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -105,6 +155,41 @@ pub struct SourceAnalysisOptions {
     pub exclude_files: Vec<String>,
     /// See `TaintAnalysisOptions::include_inferred_sources`.
     pub include_inferred_sources: bool,
+    /// Lineage evidence bounds for rendered source-flow paths. Default
+    /// command output keeps this representative and explicitly marks
+    /// omissions; callers that request an uncapped audit scope should
+    /// pass [`SourceLineageLimits::unbounded`].
+    pub lineage_limits: SourceLineageLimits,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceLineageLimits {
+    pub max_hops: usize,
+    pub max_paths: usize,
+}
+
+impl SourceLineageLimits {
+    #[must_use]
+    pub const fn bounded_default() -> Self {
+        Self {
+            max_hops: SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS,
+            max_paths: SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS,
+        }
+    }
+
+    #[must_use]
+    pub const fn unbounded() -> Self {
+        Self {
+            max_hops: usize::MAX,
+            max_paths: usize::MAX,
+        }
+    }
+}
+
+impl Default for SourceLineageLimits {
+    fn default() -> Self {
+        Self::bounded_default()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -352,6 +437,8 @@ pub struct SourceAnalysisCandidate {
     pub flow_id: String,
     pub chain_names: Vec<String>,
     pub taint_path: Vec<TaintPropagationStep>,
+    pub precision: Precision,
+    pub lineage: SourceLineageStatus,
 }
 
 #[derive(Clone, Debug)]
@@ -361,14 +448,136 @@ pub struct CombinedSourceAnalysisCandidate {
     pub path: Vec<FuncId>,
     pub flow_id: String,
     pub taint_path: Vec<TaintPropagationStep>,
+    pub precision: Precision,
+    pub lineage: SourceLineageStatus,
     pub additional_sources: Vec<FindingMatch>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct SourceLineageStatus {
+    pub complete: bool,
+    pub truncated_hops: bool,
+    pub omitted_paths: usize,
+    pub emitted_paths: usize,
+    pub max_hops: usize,
+    pub max_paths: usize,
+}
+
+impl SourceLineageStatus {
+    fn complete() -> Self {
+        Self {
+            complete: true,
+            truncated_hops: false,
+            omitted_paths: 0,
+            emitted_paths: 0,
+            max_hops: SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS,
+            max_paths: SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS,
+        }
+    }
+
+    fn from_lineage(
+        emission: &SourceLineageEmission<'_>,
+        stats: SourceLineageEnumeration,
+        emitted_index: usize,
+    ) -> Self {
+        // Omitted paths are enumeration-level evidence, not a property
+        // of every emitted representative path. Attach them once so
+        // top-level summaries report the real omission count instead
+        // of multiplying it by the number of rows.
+        let omitted_paths = if emitted_index == 0 {
+            stats.omitted_paths
+        } else {
+            0
+        };
+        let incomplete = emission.truncated_hops || omitted_paths > 0;
+        Self {
+            complete: !incomplete,
+            truncated_hops: emission.truncated_hops,
+            omitted_paths,
+            emitted_paths: 1,
+            max_hops: stats.max_hops,
+            max_paths: stats.max_paths,
+        }
+    }
+
+    pub fn is_complete_default(&self) -> bool {
+        self.complete && !self.truncated_hops && self.omitted_paths == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct SourceLineageSummary {
+    pub complete: bool,
+    pub incomplete_flows: usize,
+    pub truncated_hop_flows: usize,
+    pub omitted_paths: usize,
+    pub emitted_paths: usize,
+    pub max_hops: usize,
+    pub max_paths: usize,
+}
+
+impl Default for SourceLineageSummary {
+    fn default() -> Self {
+        Self {
+            complete: true,
+            incomplete_flows: 0,
+            truncated_hop_flows: 0,
+            omitted_paths: 0,
+            emitted_paths: 0,
+            max_hops: SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS,
+            max_paths: SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS,
+        }
+    }
+}
+
+impl SourceLineageSummary {
+    pub fn from_candidates(candidates: &[CombinedSourceAnalysisCandidate]) -> Self {
+        Self::from_statuses(candidates.iter().map(|candidate| candidate.lineage))
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+            && self.incomplete_flows == 0
+            && self.truncated_hop_flows == 0
+            && self.omitted_paths == 0
+    }
+
+    fn from_statuses<I>(statuses: I) -> Self
+    where
+        I: IntoIterator<Item = SourceLineageStatus>,
+    {
+        let mut summary = Self::default();
+        for status in statuses {
+            if !status.is_complete_default() {
+                summary.incomplete_flows = summary.incomplete_flows.saturating_add(1);
+            }
+            if status.truncated_hops {
+                summary.truncated_hop_flows = summary.truncated_hop_flows.saturating_add(1);
+            }
+            summary.omitted_paths = summary.omitted_paths.saturating_add(status.omitted_paths);
+            summary.emitted_paths = summary.emitted_paths.saturating_add(status.emitted_paths);
+            summary.max_hops = summary.max_hops.max(status.max_hops);
+            summary.max_paths = summary.max_paths.max(status.max_paths);
+        }
+        summary.complete = summary.incomplete_flows == 0;
+        summary
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SourceAnalysisReport {
     pub candidates: Vec<CombinedSourceAnalysisCandidate>,
     pub source_rule_count: usize,
+    pub lineage_summary: SourceLineageSummary,
 }
+
+// Rendering guard for the current source-flow report shape. Naively
+// enumerating every raw trace path can explode even in `examples/`;
+// the production-grade exactness follow-up is to report canonical
+// reachability summaries or stream an explicit incomplete marker,
+// not to silently materialize an unbounded path product in memory.
+const SOURCE_ANALYSIS_LINEAGE_RENDER_HOPS: usize = 6;
+const SOURCE_ANALYSIS_LINEAGE_RENDER_PATHS: usize = 24;
 
 /// Top-level taint analysis entry point. Combines source / sink /
 /// sanitizer matching with interprocedural taint propagation and
@@ -424,6 +633,7 @@ pub fn run_taint_analysis_with_phase_progress<F>(
 where
     F: FnMut(AnalysisProgress),
 {
+    let options = options.semantic_precision_only();
     let mut sources = select_rules(pack, RuleKind::Source, None, options.source.as_deref(), |r| {
         source_rule_matches_filters(r, options.trust.as_deref(), options.category.as_deref(), None)
     })?;
@@ -465,13 +675,29 @@ where
     );
     filter_by_path(&mut source_hits, &options.files, &options.exclude_files);
 
-    let pattern_sinks: Vec<&Rule> = sinks
+    let include_pattern_only = options.include_pattern_only
+        && options.source.is_none()
+        && options.trust.is_none()
+        && options.category.is_none();
+    let pattern_only_sink_ids: AHashSet<String> = sinks
         .iter()
         .copied()
         .filter(|rule| rule_is_pattern_only_finding(rule))
+        .map(|rule| rule.id.clone())
         .collect();
+    let pattern_sinks: Vec<&Rule> = if include_pattern_only {
+        sinks
+            .iter()
+            .copied()
+            .filter(|rule| pattern_only_sink_ids.contains(&rule.id))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let source_languages: AHashSet<&str> = source_hits.iter().map(|hit| hit.language.as_str()).collect();
-    sinks.retain(|rule| source_languages.contains(rule.language.as_str()));
+    sinks.retain(|rule| {
+        !pattern_only_sink_ids.contains(&rule.id) && source_languages.contains(rule.language.as_str())
+    });
     sanitizers.retain(|rule| source_languages.contains(rule.language.as_str()));
 
     on_progress(AnalysisProgress::PhaseStarted {
@@ -529,6 +755,16 @@ where
     sort_matches(&mut sanitizer_hits);
     sort_matches(&mut pattern_sink_hits);
 
+    // Exact security analysis relies on value-flow to choose source
+    // seeds before it builds source-seeded taint graphs. Query-only
+    // workspace opens do not eager-build the IDG, so force it here
+    // once for the requested analysis scope; otherwise value-flow
+    // falls back to the legacy per-source interprocedural engine and
+    // broad scans recompute the same workspace facts hundreds of times.
+    if !source_hits.is_empty() && !sink_hits.is_empty() {
+        seed_idg_service_for_rulepack(ws, pack);
+    }
+
     let mut findings_raw = build_findings_chain_aware(
         ws,
         &source_hits,
@@ -537,6 +773,7 @@ where
         pack,
         options.interprocedural_budget,
         options.intra_worklist_cap,
+        options.max_precision,
         &mut on_progress,
     );
     let taint_sink_sites: AHashSet<(String, String, u32, u32)> = findings_raw
@@ -694,6 +931,15 @@ where
     filter_by_path(&mut source_hits, &options.files, &options.exclude_files);
     sort_matches(&mut source_hits);
 
+    // Source-analysis is exact and source-seeded, but its source
+    // selection pass asks value-flow for per-function seed shape.
+    // Seed/load the IDG once before that fan-out so value-flow uses
+    // the workspace graph instead of repeatedly invoking the legacy
+    // interprocedural engine for every source match.
+    if !source_hits.is_empty() {
+        seed_idg_service_for_rulepack(ws, pack);
+    }
+
     let global = ws.db().global_index();
     let func_ids = function_ids_by_lang_file_name(ws);
     let source_graph_config = InterTaintConfig {
@@ -703,7 +949,10 @@ where
         source_bearing_functions: AHashSet::default(),
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
         source_output_args: source_output_args_from_rulepack(pack),
+        call_result_passthroughs: call_result_passthroughs_from_rulepack(pack),
+        output_arg_flows: output_arg_flows_from_rulepack(pack),
         receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
+        max_edge_precision: Some(Precision::Narrowed),
         ..Default::default()
     };
     let source_graph_caches = ws.inter_taint_caches();
@@ -711,104 +960,219 @@ where
         label: "enumerating source paths",
         total: source_hits.len() as u64,
     });
-    // Stream-only scan: each `(source, seed_shape)` graph is built,
-    // drained into one or more `SourceAnalysisCandidate`s, and then
-    // dropped on the next loop iteration. The `TaintGraphIndex` is
-    // probed first so any graph already computed earlier in the same
-    // run is reused without recomputing — but graphs computed by this
-    // path are not written back, because the workspace index is not
-    // persisted to disk and unbounded in-memory accumulation OOM'd
-    // multi-thousand-source scans (e.g. Redis `src/`).
+    // Exact source-seeded graphs are cached through the workspace
+    // `TaintGraphIndex`, which is bounded in memory and keyed by a
+    // rule/config fingerprint. Disk persistence is opt-in because
+    // broad exact scans can produce multi-GB graph payloads; cache
+    // eviction only drops a performance artifact, never an analysis
+    // result.
     let workspace_taint_index = ws.taint_index();
-    use rayon::prelude::*;
-    // Per-thread `seen` Vecs merged at the end so the parallel
-    // collect doesn't serialise on a global set lock; the second
-    // `seen` pass below is a single-threaded canonicalisation.
-    let parallel_candidates: Vec<SourceAnalysisCandidate> = source_hits
-        .par_iter()
-        .flat_map_iter(|hit| {
-            let mut local: Vec<SourceAnalysisCandidate> = Vec::new();
-            let Some(source_match) = source_finding_match(hit, pack) else {
-                return local.into_iter();
+    let source_graph_fingerprint =
+        taint_graph_config_fingerprint(pack, "source-analysis", source_graph_config.max_edge_precision);
+    prepare_workspace_taint_graph_cache(ws, source_graph_fingerprint);
+    struct SourceGraphJob {
+        source_match: FindingMatch,
+        start: FuncId,
+        seeds: TokenSet,
+        anchor: Option<Span>,
+        output_arg_names: Vec<String>,
+        graph_key: Vec<String>,
+    }
+    struct SourceGraphGroup {
+        first_index: usize,
+        start: FuncId,
+        graph_key: Vec<String>,
+        jobs: Vec<SourceGraphJob>,
+    }
+    struct SourceHitForFunction<'a> {
+        index: usize,
+        hit: &'a RuleMatch,
+        source_match: FindingMatch,
+    }
+    let mut hits_by_func: AHashMap<FuncId, Vec<SourceHitForFunction<'_>>> = AHashMap::new();
+    for (idx, hit) in source_hits.iter().enumerate() {
+        let Some(source_match) = source_finding_match(hit, pack) else {
+            continue;
+        };
+        let Some(start) = func_id_for_match(hit, &func_ids) else {
+            continue;
+        };
+        hits_by_func.entry(start).or_default().push(SourceHitForFunction {
+            index: idx,
+            hit,
+            source_match,
+        });
+    }
+    let mut hits_by_func_sorted: Vec<(FuncId, Vec<SourceHitForFunction<'_>>)> =
+        hits_by_func.into_iter().collect();
+    hits_by_func_sorted.sort_by_key(|(_, hits)| hits.first().map(|hit| hit.index).unwrap_or(usize::MAX));
+
+    let mut source_jobs: Vec<(usize, SourceGraphJob)> = Vec::new();
+    for (start, hits) in hits_by_func_sorted {
+        let Some(decl) = global.decl_of(SymbolId::new(start.raw())) else {
+            continue;
+        };
+        // The transient value-flow graph is only needed to derive
+        // source seed shape. Build it once per source-bearing
+        // function, derive every matching source seed in that
+        // function, then drop the graph before moving on. This keeps
+        // broad source-analysis scans exact without recomputing the
+        // same function-local value-flow graph for every source hit.
+        let value_flow = ws
+            .value_flow()
+            .graph_for_transient_with_caches(start, ws.db(), source_graph_caches);
+        for hit in hits {
+            let seeds = source_seed_set(pack, hit.hit, decl, Some(value_flow.as_ref()));
+            let output_arg_names = output_arg_names_for_match(pack, hit.hit, decl);
+            let anchor = if rule_match_kind_is_param(pack, &hit.hit.rule_id) {
+                None
+            } else {
+                Some(hit.hit.span)
             };
-            let Some(start) = func_id_for_match(hit, &func_ids) else {
-                return local.into_iter();
-            };
-            let graph = global
-                .decl_of(SymbolId::new(start.raw()))
-                .map(|decl| {
-                    let value_flow =
-                        ws.value_flow()
-                            .graph_for_with_caches(start, ws.db(), source_graph_caches);
-                    let seeds = source_seed_set(pack, hit, decl, Some(value_flow.as_ref()));
-                    let output_arg_names = output_arg_names_for_match(pack, hit, decl);
-                    let anchor = if rule_match_kind_is_param(pack, &hit.rule_id) {
-                        None
-                    } else {
-                        Some(hit.span)
-                    };
-                    let graph_key = (
-                        start,
-                        sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names),
-                    );
-                    // Probe the workspace index for a graph computed
-                    // earlier in this run. On miss, compute fresh and
-                    // drop the `Arc` at end-of-iteration without
-                    // writing back — see the stream-only rationale on
-                    // the `workspace_taint_index` binding above.
-                    if let Some(arc) = workspace_taint_index.get(start, &graph_key.1) {
-                        return (*arc).clone();
-                    }
-                    let computed = exact_source_seed_graph(
-                        start,
-                        &seeds,
-                        &source_graph_config,
-                        ws.db(),
-                        source_graph_caches,
-                        ws,
-                        anchor,
-                        &output_arg_names,
-                    );
-                    computed
-                })
-                .unwrap_or_else(|| ws.dataflow().graph_for(start, ws.db()).as_ref().clone());
-            let lineages = enumerate_tainted_source_lineages(&graph.call_records, start, 6, 24);
-            if lineages.is_empty() {
-                let path = vec![start];
+            let graph_key = sorted_seed_key_with_anchor(&seeds, anchor, &output_arg_names);
+            source_jobs.push((
+                hit.index,
+                SourceGraphJob {
+                    source_match: hit.source_match,
+                    start,
+                    seeds,
+                    anchor,
+                    output_arg_names,
+                    graph_key,
+                },
+            ));
+        }
+    }
+    source_jobs.sort_by_key(|(idx, _)| *idx);
+    let mut source_groups: Vec<SourceGraphGroup> = Vec::new();
+    let mut group_by_key: AHashMap<(FuncId, Vec<String>), usize> = AHashMap::new();
+    for (idx, job) in source_jobs {
+        let group_key = (job.start, job.graph_key.clone());
+        if let Some(&group_idx) = group_by_key.get(&group_key) {
+            source_groups[group_idx].jobs.push(job);
+        } else {
+            let group_idx = source_groups.len();
+            group_by_key.insert(group_key, group_idx);
+            source_groups.push(SourceGraphGroup {
+                first_index: idx,
+                start: job.start,
+                graph_key: job.graph_key.clone(),
+                jobs: vec![job],
+            });
+        }
+    }
+    source_groups.sort_by_key(|group| group.first_index);
+    let build_group_candidates = |group: &SourceGraphGroup| -> Vec<SourceAnalysisCandidate> {
+        let graph = workspace_taint_index
+            .get(group.start, &group.graph_key)
+            .unwrap_or_else(|| {
+                let first = &group.jobs[0];
+                let graph = Arc::new(exact_source_path_graph(
+                    group.start,
+                    &first.seeds,
+                    &source_graph_config,
+                    ws.db(),
+                    source_graph_caches,
+                    ws,
+                    first.anchor,
+                    &first.output_arg_names,
+                ));
+                workspace_taint_index.insert_if_absent(group.start, group.graph_key.clone(), graph)
+            });
+        let mut local: Vec<SourceAnalysisCandidate> = Vec::new();
+        for job in &group.jobs {
+            let mut seen_chains: AHashSet<Vec<String>> = AHashSet::new();
+            let (lineages, lineage_stats) = collect_tainted_source_lineages(
+                &graph.call_records,
+                job.start,
+                options.lineage_limits.max_hops,
+                options.lineage_limits.max_paths,
+            );
+            let mut emitted_lineage_rows = 0usize;
+            for emission in &lineages {
+                let terminal = emission
+                    .records
+                    .last()
+                    .map(|record| record.callee)
+                    .unwrap_or(job.start);
+                let Some(path) = chain_funcs_for_lineage(&emission.records, job.start, terminal) else {
+                    continue;
+                };
                 let Some(chain_names) = chain_names_for_path(ws, &path) else {
-                    return local.into_iter();
+                    continue;
+                };
+                if !seen_chains.insert(chain_names.clone()) {
+                    continue;
+                }
+                let taint_path = taint_path_for_lineage(ws, &emission.records, None);
+                let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+                let precision = chain_precision_for_records(&emission.records);
+                if !precision.is_semantic() {
+                    continue;
+                }
+                local.push(SourceAnalysisCandidate {
+                    source: job.source_match.clone(),
+                    path,
+                    flow_id,
+                    chain_names,
+                    taint_path,
+                    precision,
+                    lineage: SourceLineageStatus::from_lineage(emission, lineage_stats, emitted_lineage_rows),
+                });
+                emitted_lineage_rows = emitted_lineage_rows.saturating_add(1);
+            }
+            if lineages.is_empty() {
+                let path = vec![job.start];
+                let Some(chain_names) = chain_names_for_path(ws, &path) else {
+                    continue;
                 };
                 let taint_path = Vec::new();
                 let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
                 local.push(SourceAnalysisCandidate {
-                    source: source_match.clone(),
+                    source: job.source_match.clone(),
                     path,
                     flow_id,
                     chain_names,
                     taint_path,
+                    precision: Precision::Exact,
+                    lineage: SourceLineageStatus::complete(),
                 });
-                return local.into_iter();
+                continue;
             }
-            for lineage in lineages {
-                let terminal = lineage.last().map(|record| record.callee).unwrap_or(start);
-                let Some(path) = chain_funcs_for_lineage(&lineage, start, terminal) else {
-                    continue;
-                };
-                let Some(chain_names) = chain_names_for_path(ws, &path) else {
-                    continue;
-                };
-                let taint_path = taint_path_for_lineage(ws, &lineage, None);
-                let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
-                local.push(SourceAnalysisCandidate {
-                    source: source_match.clone(),
-                    path,
-                    flow_id,
-                    chain_names,
-                    taint_path,
-                });
+        }
+        local
+    };
+    use rayon::prelude::*;
+    let worker_count = source_analysis_worker_count();
+    let mut grouped_candidates: Vec<(usize, Vec<SourceAnalysisCandidate>)> =
+        if worker_count > 1 && source_groups.len() > 1 {
+            match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
+                Ok(pool) => pool.install(|| {
+                    source_groups
+                        .par_iter()
+                        .enumerate()
+                        .map(|(idx, group)| (idx, build_group_candidates(group)))
+                        .collect()
+                }),
+                Err(_) => source_groups
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, group)| (idx, build_group_candidates(group)))
+                    .collect(),
             }
-            local.into_iter()
-        })
+        } else {
+            source_groups
+                .iter()
+                .enumerate()
+                .map(|(idx, group)| (idx, build_group_candidates(group)))
+                .collect()
+        };
+    grouped_candidates.sort_by_key(|(idx, _)| *idx);
+    // Per-group output Vecs are merged at the end; the second
+    // `seen` pass below is a canonicalisation step.
+    let parallel_candidates: Vec<SourceAnalysisCandidate> = grouped_candidates
+        .into_iter()
+        .flat_map(|(_, candidates)| candidates)
         .collect();
 
     // Single-threaded dedupe pass — preserves the first-occurrence
@@ -821,7 +1185,7 @@ where
     // detail that doesn't always survive into the rendered output —
     // two lineages that collapse to the same chain produce identical
     // panels and must not be reported twice.
-    let mut seen: AHashSet<(String, String, u32, u32, String)> = AHashSet::new();
+    let mut seen: AHashMap<(String, String, u32, u32, String), usize> = AHashMap::new();
     let mut candidates: Vec<SourceAnalysisCandidate> = Vec::with_capacity(parallel_candidates.len());
     for candidate in parallel_candidates {
         let dedupe_key = (
@@ -831,7 +1195,12 @@ where
             candidate.source.column,
             candidate.chain_names.join("\0"),
         );
-        if seen.insert(dedupe_key) {
+        if let Some(&idx) = seen.get(&dedupe_key) {
+            merge_source_lineage_status(&mut candidates[idx].lineage, candidate.lineage);
+            candidates[idx].precision = candidates[idx].precision.meet(candidate.precision);
+        } else {
+            let idx = candidates.len();
+            seen.insert(dedupe_key, idx);
             candidates.push(candidate);
         }
     }
@@ -840,9 +1209,13 @@ where
     }
     on_progress(AnalysisProgress::PhaseFinished);
 
+    let candidates = combine_source_analysis_candidates(candidates);
+    let lineage_summary = SourceLineageSummary::from_candidates(&candidates);
+    finish_workspace_taint_graph_cache(ws);
     Ok(SourceAnalysisReport {
-        candidates: combine_source_analysis_candidates(candidates),
+        candidates,
         source_rule_count: sources.len(),
+        lineage_summary,
     })
 }
 
@@ -1924,6 +2297,44 @@ fn validate_taint_semantics(rule: &Rule, issues: &mut Vec<PackValidationIssue>) 
             "taint_semantics.source_output_args is only valid on source rules",
         );
     }
+    if !semantics.call_result_passthrough_args.is_empty() && rule.kind != RuleKind::Sanitizer {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.call_result_passthrough_args is only valid on sanitizer/passthrough rules",
+        );
+    }
+    if semantics.call_result_passthrough_receiver && rule.kind != RuleKind::Sanitizer {
+        push_validation_issue(
+            issues,
+            "error",
+            "invalid-taint-semantics",
+            Some(rule),
+            "taint_semantics.call_result_passthrough_receiver is only valid on sanitizer/passthrough rules",
+        );
+    }
+    for flow in &semantics.output_arg_flows {
+        if flow.value_start_arg_index.is_none() && flow.value_arg_indices.is_empty() {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.output_arg_flows entries require value_start_arg_index or value_arg_indices",
+            );
+        }
+        if flow.value_arg_indices.contains(&flow.output_arg_index) {
+            push_validation_issue(
+                issues,
+                "error",
+                "invalid-taint-semantics",
+                Some(rule),
+                "taint_semantics.output_arg_flows value_arg_indices must not include output_arg_index",
+            );
+        }
+    }
     if semantics.clean_output_overwrite.is_some() && rule.kind != RuleKind::Sanitizer {
         push_validation_issue(
             issues,
@@ -2558,19 +2969,44 @@ fn func_id_for_match(
         .copied()
 }
 
-fn enumerate_tainted_source_lineages(
-    records: &[TaintedCallEdge],
+struct SourceLineageEmission<'a> {
+    records: Vec<&'a TaintedCallEdge>,
+    truncated_hops: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SourceLineageEnumeration {
+    emitted_paths: usize,
+    omitted_paths: usize,
+    truncated_paths: usize,
+    max_hops: usize,
+    max_paths: usize,
+}
+
+fn collect_tainted_source_lineages<'a>(
+    records: &'a [TaintedCallEdge],
     source: FuncId,
     max_extra: usize,
     max_paths: usize,
-) -> Vec<Vec<&TaintedCallEdge>> {
+) -> (Vec<SourceLineageEmission<'a>>, SourceLineageEnumeration) {
+    let mut stats = SourceLineageEnumeration {
+        max_hops: max_extra,
+        max_paths,
+        ..Default::default()
+    };
     if max_extra == 0 || max_paths == 0 || !records.iter().any(|record| record.trace_id != 0) {
-        return Vec::new();
+        return (Vec::new(), stats);
     }
     let child_trace_ids: AHashSet<u64> = records
         .iter()
         .filter_map(|record| record.parent_trace_id)
         .collect();
+    let mut by_id: AHashMap<u64, &TaintedCallEdge> = AHashMap::new();
+    for record in records {
+        if record.trace_id != 0 {
+            by_id.entry(record.trace_id).or_insert(record);
+        }
+    }
     let mut endpoints: Vec<&TaintedCallEdge> = records
         .iter()
         .filter(|record| record.trace_id != 0)
@@ -2588,24 +3024,33 @@ fn enumerate_tainted_source_lineages(
     let mut out = Vec::new();
     let mut seen: AHashSet<Vec<u64>> = AHashSet::new();
     for endpoint in endpoints {
-        let Some(mut lineage) = lineage_records_for_trace_id(records, endpoint.trace_id) else {
+        let Some(mut lineage) = lineage_records_for_trace_id_indexed(&by_id, endpoint.trace_id) else {
             continue;
         };
         if lineage.first().is_none_or(|record| record.caller != source) {
             continue;
         }
+        let truncated_hops = lineage.len() > max_extra;
         if lineage.len() > max_extra {
             lineage.truncate(max_extra);
         }
         let key: Vec<u64> = lineage.iter().map(|record| record.trace_id).collect();
         if !key.is_empty() && seen.insert(key) {
-            out.push(lineage);
-            if out.len() >= max_paths {
-                break;
+            if out.len() < max_paths {
+                if truncated_hops {
+                    stats.truncated_paths += 1;
+                }
+                out.push(SourceLineageEmission {
+                    records: lineage,
+                    truncated_hops,
+                });
+                stats.emitted_paths += 1;
+            } else {
+                stats.omitted_paths += 1;
             }
         }
     }
-    out
+    (out, stats)
 }
 
 fn chain_precision_for_records(records: &[&TaintedCallEdge]) -> Precision {
@@ -2614,26 +3059,196 @@ fn chain_precision_for_records(records: &[&TaintedCallEdge]) -> Precision {
     })
 }
 
+#[derive(Clone, Debug)]
+struct UnresolvedWorkspaceCallSite {
+    span: Span,
+    name: String,
+}
+
+struct GraphUnresolvedCallIndex {
+    by_caller: AHashMap<FuncId, Vec<UnresolvedWorkspaceCallSite>>,
+}
+
+impl GraphUnresolvedCallIndex {
+    fn new(global: &bonsai_index::GlobalIndex, graph: &EntryTaintGraph) -> Self {
+        let resolved_sites: AHashSet<(FuncId, Span)> = graph
+            .call_records
+            .iter()
+            .map(|record| (record.caller, record.call_span))
+            .collect();
+        let mut seen_sites: AHashSet<(FuncId, Span)> = AHashSet::new();
+        let mut by_caller: AHashMap<FuncId, Vec<UnresolvedWorkspaceCallSite>> = AHashMap::new();
+        for call in &graph.tainted_calls {
+            if !matches!(call.kind, bonsai_taint::TaintedCallKind::Call)
+                || resolved_sites.contains(&(call.caller, call.call_span))
+                || !seen_sites.insert((call.caller, call.call_span))
+            {
+                continue;
+            }
+            if workspace_has_callable_named_in_context(global, call.caller, &call.name) {
+                by_caller
+                    .entry(call.caller)
+                    .or_default()
+                    .push(UnresolvedWorkspaceCallSite {
+                        span: call.call_span,
+                        name: call.name.clone(),
+                    });
+            }
+        }
+        for sites in by_caller.values_mut() {
+            sites.sort_by(|a, b| {
+                (a.span.start, a.span.end, a.name.as_str()).cmp(&(b.span.start, b.span.end, b.name.as_str()))
+            });
+            sites.dedup_by(|a, b| a.span == b.span && a.name == b.name);
+        }
+        Self { by_caller }
+    }
+
+    fn reasons_for_terminal_call(&self, terminal_call: &TaintedCall) -> Vec<String> {
+        let Some(sites) = self.by_caller.get(&terminal_call.caller) else {
+            return Vec::new();
+        };
+        let mut reasons = Vec::new();
+        for site in sites {
+            if unresolved_call_site_is_in_terminal_expression(terminal_call.call_span, site.span) {
+                reasons.push(format!("unresolved-call:{}", site.name));
+            }
+        }
+        reasons.sort();
+        reasons.dedup();
+        reasons
+    }
+}
+
+fn unresolved_call_site_is_in_terminal_expression(terminal_span: Span, unresolved_span: Span) -> bool {
+    span_contains(terminal_span, unresolved_span)
+}
+
+fn workspace_has_callable_named_in_context(
+    global: &bonsai_index::GlobalIndex,
+    caller: FuncId,
+    name: &str,
+) -> bool {
+    let Some(caller_decl) = global.decl_of(SymbolId::new(caller.raw())) else {
+        return false;
+    };
+    let caller_file = global
+        .declaring_file(caller_decl.symbol)
+        .unwrap_or(caller_decl.span.file);
+    let ctx = bonsai_resolve::ResolveContext::new(caller_file, &caller_decl.module_path);
+    let short = bonsai_lang_api::kit::short_name_of(name);
+    [name, short].into_iter().any(|candidate| {
+        !candidate.is_empty()
+            && !bonsai_resolve::resolve_callable_with_context(global, candidate, &ctx).is_empty()
+    })
+}
+
+struct CallEvidence {
+    chain_funcs: Vec<FuncId>,
+    chain_names: Vec<String>,
+    chain_precision: Precision,
+    taint_path: Vec<TaintPropagationStep>,
+    group_id: String,
+    flow_id: String,
+    sink_tainted_args: Vec<TaintedArgInfo>,
+}
+
+fn build_call_evidence(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    trace_index: &AHashMap<u64, &TaintedCallEdge>,
+    canonical_chain_index: &CanonicalChainIndex,
+    source_func: FuncId,
+    call: &TaintedCall,
+    graph_saturated: bool,
+) -> Option<CallEvidence> {
+    // Public findings are semantic-only. A saturated graph means the
+    // requested source scope did not produce complete evidence, so do
+    // not downgrade it to a broad precision class and report it as a
+    // finding. Current IDG-backed graphs are built to completion and
+    // set `saturated = false`; this guard protects compatibility
+    // callers that still hand in an older graph shape.
+    if graph_saturated {
+        return None;
+    }
+    let records = lineage_records_for_call_indexed(trace_index, call)?;
+    let primary = chain_funcs_for_lineage(&records, source_func, call.caller)?;
+    // Chain-quality upgrade: when the lineage walk anchored on
+    // `parent_trace_id` goes through synthetic edges (Phase 3c field-flow
+    // stitches, Phase 3d receiver-method propagation, or Return back-edges),
+    // prefer an equivalent canonical call sequence with fewer synthetic hops.
+    let chain_funcs =
+        rewrite_chain_with_canonical_path(primary, canonical_chain_index, source_func, call.caller);
+    let chain_precision = chain_precision_for_records(&records);
+    if !chain_precision.is_semantic() {
+        return None;
+    }
+    let taint_path = taint_path_for_lineage(ws, &records, Some(call));
+    let chain_names: Vec<String> = chain_funcs
+        .iter()
+        .filter_map(|&func| {
+            global
+                .decl_of(SymbolId::new(func.raw()))
+                .map(|decl| decl.name.clone())
+        })
+        .collect();
+    let group_id = group_id_for_taint_path(&chain_names, &taint_path);
+    let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
+    let sink_tainted_args: Vec<TaintedArgInfo> = call
+        .tainted_args
+        .iter()
+        .map(|arg| TaintedArgInfo {
+            index: arg.index,
+            value_text: arg.value_text.clone(),
+        })
+        .collect();
+    Some(CallEvidence {
+        chain_funcs,
+        chain_names,
+        chain_precision,
+        taint_path,
+        group_id,
+        flow_id,
+        sink_tainted_args,
+    })
+}
+
+#[cfg(test)]
 fn lineage_records_for_call<'a>(
     records: &'a [TaintedCallEdge],
     terminal_call: &TaintedCall,
 ) -> Option<Vec<&'a TaintedCallEdge>> {
-    match terminal_call.parent_trace_id {
-        Some(trace_id) => lineage_records_for_trace_id(records, trace_id),
-        None => Some(Vec::new()),
-    }
+    let by_id = trace_record_index(records);
+    lineage_records_for_call_indexed(&by_id, terminal_call)
 }
 
-fn lineage_records_for_trace_id(records: &[TaintedCallEdge], trace_id: u64) -> Option<Vec<&TaintedCallEdge>> {
-    let mut current = Some(trace_id);
-    let mut lineage = Vec::new();
-    let mut seen = AHashSet::new();
+fn trace_record_index(records: &[TaintedCallEdge]) -> AHashMap<u64, &TaintedCallEdge> {
     let mut by_id: AHashMap<u64, &TaintedCallEdge> = AHashMap::new();
     for record in records {
         if record.trace_id != 0 {
             by_id.entry(record.trace_id).or_insert(record);
         }
     }
+    by_id
+}
+
+fn lineage_records_for_call_indexed<'a>(
+    by_id: &AHashMap<u64, &'a TaintedCallEdge>,
+    terminal_call: &TaintedCall,
+) -> Option<Vec<&'a TaintedCallEdge>> {
+    match terminal_call.parent_trace_id {
+        Some(trace_id) => lineage_records_for_trace_id_indexed(by_id, trace_id),
+        None => Some(Vec::new()),
+    }
+}
+
+fn lineage_records_for_trace_id_indexed<'a>(
+    by_id: &AHashMap<u64, &'a TaintedCallEdge>,
+    trace_id: u64,
+) -> Option<Vec<&'a TaintedCallEdge>> {
+    let mut current = Some(trace_id);
+    let mut lineage = Vec::new();
+    let mut seen = AHashSet::new();
     while let Some(trace_id) = current {
         if !seen.insert(trace_id) {
             return None;
@@ -2652,24 +3267,62 @@ fn lineage_records_for_trace_id(records: &[TaintedCallEdge], trace_id: u64) -> O
 /// sentinel `arg_idx == usize::MAX`). Only fires when the alternative
 /// strictly reduces synthetic-edge count AND covers at least as many
 /// distinct functions. Otherwise the original chain is returned.
+struct CanonicalChainIndex {
+    adjacency: AHashMap<FuncId, Vec<(FuncId, bool)>>,
+    edge_has_any: AHashSet<(FuncId, FuncId)>,
+    edge_has_real: AHashSet<(FuncId, FuncId)>,
+}
+
+impl CanonicalChainIndex {
+    fn new(records: &[TaintedCallEdge]) -> Self {
+        let mut edge_synthetic: AHashMap<(FuncId, FuncId), bool> = AHashMap::default();
+        let mut edge_has_any = AHashSet::default();
+        let mut edge_has_real = AHashSet::default();
+        for record in records {
+            let is_synthetic = edge_is_synthetic(record);
+            let edge = (record.caller, record.callee);
+            edge_has_any.insert(edge);
+            if !is_synthetic {
+                edge_has_real.insert(edge);
+            }
+            edge_synthetic
+                .entry(edge)
+                .and_modify(|existing| *existing &= is_synthetic)
+                .or_insert(is_synthetic);
+        }
+        let mut adjacency: AHashMap<FuncId, Vec<(FuncId, bool)>> = AHashMap::default();
+        for ((caller, callee), is_synthetic) in edge_synthetic {
+            adjacency.entry(caller).or_default().push((callee, is_synthetic));
+        }
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort_by_key(|(callee, is_synthetic)| (callee.raw(), *is_synthetic));
+        }
+        Self {
+            adjacency,
+            edge_has_any,
+            edge_has_real,
+        }
+    }
+}
+
 fn rewrite_chain_with_canonical_path(
     primary: Vec<FuncId>,
-    all_records: &[TaintedCallEdge],
+    index: &CanonicalChainIndex,
     source_func: FuncId,
     terminal_func: FuncId,
 ) -> Vec<FuncId> {
-    let primary_synth = chain_synth_count(&primary, all_records);
+    let primary_synth = chain_synth_count(&primary, index);
     if primary_synth == 0 {
         return primary;
     }
-    let Some(alt) = best_chain_through_real_edges(all_records, source_func, terminal_func) else {
+    let Some(alt) = best_chain_through_real_edges(index, source_func, terminal_func) else {
         return primary;
     };
     // Reject degenerate alternatives (shorter than primary).
     if alt.len() < primary.len() {
         return primary;
     }
-    let alt_synth = chain_synth_count(&alt, all_records);
+    let alt_synth = chain_synth_count(&alt, index);
     let primary_real = primary.len().saturating_sub(1).saturating_sub(primary_synth);
     let alt_real = alt.len().saturating_sub(1).saturating_sub(alt_synth);
     // Prefer chain with more real hops (more informative call
@@ -2683,27 +3336,20 @@ fn rewrite_chain_with_canonical_path(
     }
 }
 
-fn chain_synth_count(chain: &[FuncId], all_records: &[TaintedCallEdge]) -> usize {
-    fn is_synthetic(rec: &TaintedCallEdge) -> bool {
-        rec.tainted_args
-            .first()
-            .map(|a| a.index == usize::MAX || a.index == 255)
-            .unwrap_or(false)
-    }
+fn edge_is_synthetic(record: &TaintedCallEdge) -> bool {
+    record
+        .tainted_args
+        .first()
+        .map(|arg| arg.index == usize::MAX || arg.index == 255)
+        .unwrap_or(false)
+}
+
+fn chain_synth_count(chain: &[FuncId], index: &CanonicalChainIndex) -> usize {
     let mut count = 0;
     for window in chain.windows(2) {
         let (a, b) = (window[0], window[1]);
-        let mut found_any = false;
-        let mut found_real = false;
-        for r in all_records {
-            if r.caller == a && r.callee == b {
-                found_any = true;
-                if !is_synthetic(r) {
-                    found_real = true;
-                    break;
-                }
-            }
-        }
+        let found_any = index.edge_has_any.contains(&(a, b));
+        let found_real = index.edge_has_real.contains(&(a, b));
         if found_any && !found_real {
             count += 1;
         }
@@ -2719,32 +3365,21 @@ fn chain_synth_count(chain: &[FuncId], all_records: &[TaintedCallEdge]) -> usize
 /// search at `MAX_HOPS` per path so degenerate fanouts don't
 /// blow up the heap.
 fn best_chain_through_real_edges(
-    all_records: &[TaintedCallEdge],
+    index: &CanonicalChainIndex,
     source_func: FuncId,
     terminal_func: FuncId,
 ) -> Option<Vec<FuncId>> {
     const MAX_HOPS: usize = 16;
-    fn is_synthetic(rec: &TaintedCallEdge) -> bool {
-        rec.tainted_args
-            .first()
-            .map(|a| a.index == usize::MAX || a.index == 255)
-            .unwrap_or(false)
-    }
     fn score(synth: u32, real: u32) -> i64 {
         100i64 * (synth as i64) - (real as i64)
     }
-    let mut adj: AHashMap<FuncId, Vec<(FuncId, bool)>> = AHashMap::default();
-    for r in all_records {
-        adj.entry(r.caller).or_default().push((r.callee, is_synthetic(r)));
-    }
-    use std::cmp::Reverse;
     use std::collections::BinaryHeap;
     // State: (score, synth, real, path). Pop lowest score first.
-    let mut heap: BinaryHeap<Reverse<(i64, u32, u32, Vec<FuncId>)>> = BinaryHeap::new();
-    heap.push(Reverse((score(0, 0), 0, 0, vec![source_func])));
+    let mut heap: BinaryHeap<RankedCallPath> = BinaryHeap::new();
+    heap.push(std::cmp::Reverse((score(0, 0), 0, 0, vec![source_func])));
     let mut best_score: AHashMap<FuncId, i64> = AHashMap::default();
     best_score.insert(source_func, score(0, 0));
-    while let Some(Reverse((s, synth, real, path))) = heap.pop() {
+    while let Some(std::cmp::Reverse((s, synth, real, path))) = heap.pop() {
         let cur = *path.last().unwrap();
         if cur == terminal_func && path.len() > 1 {
             return Some(path);
@@ -2755,7 +3390,9 @@ fn best_chain_through_real_edges(
         if best_score.get(&cur).copied().unwrap_or(i64::MAX) < s {
             continue;
         }
-        let Some(neighbors) = adj.get(&cur) else { continue };
+        let Some(neighbors) = index.adjacency.get(&cur) else {
+            continue;
+        };
         for &(next_f, is_synth) in neighbors {
             if path.contains(&next_f) {
                 continue;
@@ -2769,7 +3406,7 @@ fn best_chain_through_real_edges(
             best_score.insert(next_f, next_score);
             let mut next_path = path.clone();
             next_path.push(next_f);
-            heap.push(Reverse((next_score, next_synth, next_real, next_path)));
+            heap.push(std::cmp::Reverse((next_score, next_synth, next_real, next_path)));
         }
     }
     None
@@ -3009,8 +3646,7 @@ fn sort_matches(matches: &mut [RuleMatch]) {
 /// pipeline consumes the broader match stream where multiple
 /// entries per call site carry distinct downstream context.
 fn dedup_inventory_matches(matches: &mut Vec<RuleMatch>) {
-    let mut seen: AHashSet<(String, String, u32, u32, String, String, Option<String>)> =
-        AHashSet::new();
+    let mut seen: AHashSet<InventoryMatchIdentity> = AHashSet::new();
     matches.retain(|m| {
         seen.insert((
             m.language.clone(),
@@ -3032,6 +3668,8 @@ fn combine_source_analysis_candidates(
     for item in flows {
         let key = item.flow_id.clone();
         if let Some(&idx) = index.get(&key) {
+            merge_source_lineage_status(&mut groups[idx].lineage, item.lineage);
+            groups[idx].precision = groups[idx].precision.meet(item.precision);
             if !same_source_site(&groups[idx].source, &item.source)
                 && !groups[idx]
                     .additional_sources
@@ -3050,10 +3688,21 @@ fn combine_source_analysis_candidates(
             path: item.path,
             flow_id: item.flow_id,
             taint_path: item.taint_path,
+            precision: item.precision,
+            lineage: item.lineage,
             additional_sources: Vec::new(),
         });
     }
     groups
+}
+
+fn merge_source_lineage_status(current: &mut SourceLineageStatus, incoming: SourceLineageStatus) {
+    current.complete = current.complete && incoming.complete;
+    current.truncated_hops = current.truncated_hops || incoming.truncated_hops;
+    current.omitted_paths = current.omitted_paths.saturating_add(incoming.omitted_paths);
+    current.emitted_paths = current.emitted_paths.saturating_add(incoming.emitted_paths);
+    current.max_hops = current.max_hops.max(incoming.max_hops);
+    current.max_paths = current.max_paths.max(incoming.max_paths);
 }
 
 fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> {
@@ -3072,6 +3721,12 @@ fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> 
 /// to avoid pushing duplicate sources onto a group.
 fn same_source_site(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.rule_id == b.rule_id && a.file == b.file && a.line == b.line && a.column == b.column
+}
+
+/// True when two source matches point at the same concrete source
+/// location, regardless of which alias rule matched it.
+fn same_source_location(a: &FindingMatch, b: &FindingMatch) -> bool {
+    a.file == b.file && a.line == b.line && a.column == b.column
 }
 
 /// True when two sink-side `FindingMatch`es refer to the exact same
@@ -3167,10 +3822,33 @@ fn merge_finding_into_group(group: &mut CombinedFindingWithChain, incoming: Find
     merge_unique(&mut group.finding.cwe, incoming.cwe);
     merge_unique(&mut group.finding.owasp, incoming.owasp);
     merge_finding_matches(&mut group.finding.sanitizers_seen, incoming.sanitizers_seen);
+    merge_analysis_completeness(
+        &mut group.finding.analysis_complete,
+        &mut group.finding.analysis_incomplete_reasons,
+        incoming.analysis_complete,
+        incoming.analysis_incomplete_reasons,
+    );
     // Status merge: the LEAST-mitigated chain wins. If any chain in
     // this group is unsanitized, the group is unsanitized — finding a
     // sanitizer on one path doesn't make the others safe.
     group.finding.status = group.finding.status.merge(incoming.status);
+}
+
+fn merge_analysis_completeness(
+    current_complete: &mut bool,
+    current_reasons: &mut Vec<String>,
+    incoming_complete: bool,
+    incoming_reasons: Vec<String>,
+) {
+    if !incoming_complete {
+        *current_complete = false;
+    }
+    merge_unique(current_reasons, incoming_reasons);
+    current_reasons.sort();
+    current_reasons.dedup();
+    if !current_reasons.is_empty() {
+        *current_complete = false;
+    }
 }
 
 fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
@@ -3195,12 +3873,19 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
     sources.push(group.finding.source.clone());
     sources.extend(group.additional_sources.iter().cloned());
     sources.sort_by(|a, b| {
-        a.rule_id
-            .cmp(&b.rule_id)
-            .then_with(|| (a.file.as_str(), a.line, a.column).cmp(&(b.file.as_str(), b.line, b.column)))
+        (a.file.as_str(), a.line, a.column)
+            .cmp(&(b.file.as_str(), b.line, b.column))
+            .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
     group.finding.source = sources[0].clone();
-    group.additional_sources = sources.into_iter().skip(1).collect();
+    // Distinct source sites can collapse onto the same conservative
+    // field/container lineage. Do not surface them as additional proven
+    // sources unless they are aliases for the same exact call site.
+    group.additional_sources = sources
+        .into_iter()
+        .skip(1)
+        .filter(|source| same_source_location(&group.finding.source, source))
+        .collect();
 
     let group_id = group
         .finding
@@ -3342,6 +4027,7 @@ fn build_findings_chain_aware<F>(
     pack: &Rulepack,
     interprocedural_budget: Option<u32>,
     intra_worklist_cap: Option<u32>,
+    max_precision: Option<Precision>,
     on_progress: &mut F,
 ) -> Vec<FindingWithChain>
 where
@@ -3401,33 +4087,54 @@ where
         return Vec::new();
     }
     let mut out = Vec::new();
-    // Materialise per-source value-flow seeds in parallel. On
-    // OWASP this loop runs 2,740 times sequentially without rayon
-    // because each `graph_for_with_caches` faults a per-function
-    // value-flow graph under a single RwLock. The cache is
-    // RwLock-backed and order-independent (cache-fill races on the
-    // same key produce identical values — see `InterTaintCaches`
-    // doc), so the fan-out is a pure scheduling change. Input
-    // ordering is preserved: `source_hits` is sorted upstream
-    // (`sort_matches`) and `par_iter().filter_map().collect()` is
-    // order-preserving, so downstream `idx`-keyed dedup
-    // (`emitted_for_source_sink_flow`) sees identical idx values.
-    use rayon::prelude::*;
-    let source_entries: Vec<(&RuleMatch, FuncId, TokenSet)> = source_hits
-        .par_iter()
-        .filter_map(|src| {
-            let src_key = match_func_key(src)?;
-            let &src_func_id = funcs_by_key.get(&src_key)?;
-            let src_decl = global.decl_of(SymbolId::new(src_func_id.raw()))?;
-            let value_flow =
-                ws.value_flow()
-                    .graph_for_with_caches(src_func_id, ws.db(), ws.inter_taint_caches());
-            let seeds = source_seed_set(pack, src, src_decl, Some(value_flow.as_ref()));
+    // Materialise per-source value-flow seeds in source order, using
+    // transient value-flow graphs on cold misses. Broad scans can
+    // touch thousands of source-bearing functions; keeping every full
+    // `ValueFlowGraph` resident caused multi-GB RSS before the exact
+    // source-seeded graph phase even started. Compute each transient
+    // graph once per source-bearing function, derive all seeds in
+    // that function, then drop it.
+    struct SourceForFunction<'a> {
+        index: usize,
+        src: &'a RuleMatch,
+    }
+    let mut sources_by_func: AHashMap<FuncId, Vec<SourceForFunction<'_>>> = AHashMap::new();
+    for (idx, src) in source_hits.iter().enumerate() {
+        let Some(src_key) = match_func_key(src) else {
+            continue;
+        };
+        let Some(&src_func_id) = funcs_by_key.get(&src_key) else {
+            continue;
+        };
+        sources_by_func
+            .entry(src_func_id)
+            .or_default()
+            .push(SourceForFunction { index: idx, src });
+    }
+    let mut sources_by_func_sorted: Vec<(FuncId, Vec<SourceForFunction<'_>>)> =
+        sources_by_func.into_iter().collect();
+    sources_by_func_sorted
+        .sort_by_key(|(_, sources)| sources.first().map(|source| source.index).unwrap_or(usize::MAX));
+    let mut indexed_source_entries: Vec<(usize, (&RuleMatch, FuncId, TokenSet))> = Vec::new();
+    for (src_func_id, sources) in sources_by_func_sorted {
+        let Some(src_decl) = global.decl_of(SymbolId::new(src_func_id.raw())) else {
+            continue;
+        };
+        let value_flow =
+            ws.value_flow()
+                .graph_for_transient_with_caches(src_func_id, ws.db(), ws.inter_taint_caches());
+        for source in sources {
+            let seeds = source_seed_set(pack, source.src, src_decl, Some(value_flow.as_ref()));
             if seeds.is_empty() {
-                return None;
+                continue;
             }
-            Some((src, src_func_id, seeds))
-        })
+            indexed_source_entries.push((source.index, (source.src, src_func_id, seeds)));
+        }
+    }
+    indexed_source_entries.sort_by_key(|(idx, _)| *idx);
+    let source_entries: Vec<(&RuleMatch, FuncId, TokenSet)> = indexed_source_entries
+        .into_iter()
+        .map(|(_, entry)| entry)
         .collect();
     let mut source_work: Vec<(&RuleMatch, FuncId, TokenSet)> = Vec::with_capacity(source_entries.len());
     let mut source_groups: AHashMap<FuncId, Vec<usize>> = AHashMap::new();
@@ -3436,149 +4143,49 @@ where
         source_work.push((src, src_func_id, seeds));
         source_groups.entry(src_func_id).or_default().push(idx);
     }
-
+    let receiver_state_propagations = receiver_state_propagations_from_rulepack(pack);
+    let idg = ws
+        .db()
+        .idg_service()
+        .unwrap_or_else(|| ws.build_and_seed_idg_service());
+    // IDG closures already follow `callee.Return -> caller.CallRet`
+    // edges and then continue through caller-side flow. The legacy
+    // engine needed a separate "source reaches return" prepass to
+    // schedule callers with synthetic empty seeds; doing that in the
+    // IDG path is both redundant and imprecise because empty seeds
+    // fall back to all caller params. Keep the phase boundary for
+    // progress/API stability, but make it a no-op.
     on_progress(AnalysisProgress::PhaseStarted {
         label: "checking source returns",
-        total: source_work.len() as u64,
+        total: 0,
     });
-    // Parallel "does this seed reach a Return?" pass. Dedup keys
-    // first so each unique `(src_func_id, sorted_seed_key)` runs
-    // only once, mirroring the previous sequential cache. Then
-    // fan out across rayon — `source_seed_reaches_return` consults
-    // the workspace value-flow cache (RwLock-backed, thread-safe)
-    // and falls back to the engine via the workspace InterTaintCaches
-    // singleton, also thread-safe. `on_progress` isn't `Sync`, so
-    // ticks are replayed sequentially after the parallel collect.
-    let mut unique_keys: Vec<(FuncId, Vec<String>)> = Vec::new();
-    {
-        let mut seen: AHashSet<(FuncId, Vec<String>)> = AHashSet::new();
-        for (_, src_func_id, seeds) in source_work.iter() {
-            let key = (*src_func_id, sorted_seed_key(seeds));
-            if seen.insert(key.clone()) {
-                unique_keys.push(key);
-            }
-        }
-    }
-    let returning_pairs: Vec<((FuncId, Vec<String>), bool)> = unique_keys
-        .par_iter()
-        .map(|key| {
-            let seeds: TokenSet = key.1.iter().cloned().collect();
-            let returns = source_seed_reaches_return(key.0, &seeds, ws, intra_worklist_cap);
-            (key.clone(), returns)
-        })
-        .collect();
-    let returning_map: AHashMap<(FuncId, Vec<String>), bool> = returning_pairs.into_iter().collect();
-    let mut source_returning_indices: AHashSet<usize> = AHashSet::new();
-    for (idx, (_, src_func_id, seeds)) in source_work.iter().enumerate() {
-        let key = (*src_func_id, sorted_seed_key(seeds));
-        if *returning_map.get(&key).unwrap_or(&false) {
-            source_returning_indices.insert(idx);
-        }
-    }
-    for _ in 0..source_work.len() {
-        on_progress(AnalysisProgress::PhaseTicked);
-    }
+    use rayon::prelude::*;
     on_progress(AnalysisProgress::PhaseFinished);
 
-    // Schedule each transitive caller of every source-returning
-    // function as an additional entry so the inter pass processes
-    // them too. The engine walks DOWNWARD through callees starting
-    // from the source-bearing function; without scheduling the
-    // callers, helper functions like `def get_user_input(): return
-    // os.getenv(...)` never propagate their tainted return into
-    // the variable that captured the call result. Bounded depth so
-    // deep call chains don't explode the per-entry pair count.
-    //
-    // Crucially, source-bearing is not enough. A helper that reads a
-    // file or request but returns only a status must not taint every
-    // caller branch that happens to be reachable from the same
-    // function. Only helpers where the matched source reaches a
-    // Return event are eligible for caller scheduling.
-    const TRANSITIVE_CALLER_DEPTH: u32 = 4;
-    // The transitive caller closure is rulepack-independent — it's
-    // a pure function of the resolved call graph — so we let the
-    // workspace cache it once and consult it here. Per-source-
-    // returning func, look up the cached closure, then attribute
-    // each transitive caller back to the source's `orig_idx` so
-    // lineage stays correct (without the orig_idx tracking, the
-    // old fallback could attach an unrelated source rule's lineage
-    // to a chain — the canonical bug was a Redis report titled
-    // "source in ACLLoadFromFile" but rendered as starting at
-    // `aclCommand`).
-    let cg = ws.cached_resolved_call_graph();
-    let transitive_callers = ws.transitive_callers();
-    let mut visited: AHashSet<(FuncId, usize)> = source_work
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| source_returning_indices.contains(idx))
-        .map(|(idx, (_, func, _))| (*func, idx))
-        .collect();
-    // Iterate `(func, orig_idx)` pairs in deterministic order so the
-    // resulting `source_work` extension order is stable across runs.
-    let mut seed_pairs: Vec<(FuncId, usize)> = source_work
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| source_returning_indices.contains(idx))
-        .map(|(idx, (_, func, _))| (*func, idx))
-        .collect();
-    seed_pairs.sort_by_key(|(func, idx)| (func.raw(), *idx));
-    for &(seed_func, orig_idx) in &seed_pairs {
-        let callers = transitive_callers.callers_of(&cg, seed_func, TRANSITIVE_CALLER_DEPTH);
-        for caller_func in callers.iter().copied() {
-            if !visited.insert((caller_func, orig_idx)) {
-                continue;
-            }
-            let (orig_src, _, _) = &source_work[orig_idx];
-            // Empty seed — the inter pass's `apply_return_taint`
-            // consults the callee's `returns_external` and taints
-            // the assignment LHS when it sees
-            // `var = source_helper()`. A non-empty seed risks
-            // pre-tainting unrelated identifiers in the caller.
-            let new_idx = source_work.len();
-            source_work.push((*orig_src, caller_func, TokenSet::default()));
-            source_groups.entry(caller_func).or_default().push(new_idx);
-        }
-    }
-
-    // Functions the security layer has proven source-returning.
-    // The taint engine consults this set to decide whether
-    // `var = helper()` should auto-taint `var` (cross-file recall
-    // for source-returning helpers, task #95). The engine never
-    // populates this on its own — empty set ⇒ engine produces zero
-    // propagation records on empty seeds (engine invariant).
-    let source_bearing_functions: AHashSet<FuncId> = source_returning_indices
-        .iter()
-        .filter_map(|idx| source_work.get(*idx).map(|(_, func, _)| *func))
-        .collect();
     let config = InterTaintConfig {
         sanitizers: TokenSet::default(),
         budget: interprocedural_budget.unwrap_or_else(|| InterTaintConfig::default().budget),
         intra_worklist_cap,
-        source_bearing_functions,
+        source_bearing_functions: AHashSet::default(),
         clean_output_overwrites: clean_output_overwrites_from_rulepack(pack),
         source_output_args: source_output_args_from_rulepack(pack),
-        receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
+        call_result_passthroughs: call_result_passthroughs_from_rulepack(pack),
+        output_arg_flows: output_arg_flows_from_rulepack(pack),
+        receiver_state_propagations,
+        max_edge_precision: max_precision,
         ..Default::default()
     };
     let taint_caches = ws.inter_taint_caches();
-    // Workspace-wide source-seeded graph index (Stage 6). Lifted out
-    // of the per-invocation map so a second `taint-analysis` /
-    // `source-analysis` against the same `(workspace, rulepack)`
-    // becomes a lookup. Within ONE invocation the inner per-thread
-    // `parking_lot::RwLock` still owns the dedup so rayon workers
-    // probe locally before falling back to the workspace index.
+    // Workspace-wide source-seeded graph index. The resident cache is
+    // bounded and guarded by a rule/config fingerprint, so reuse
+    // cannot keep stale graphs alive across rulepack or precision
+    // changes and cannot grow without limit on large scans. Disk
+    // persistence is opt-in for the same reason as source-analysis:
+    // exact graphs are correct but can be very large.
     let workspace_taint_index = ws.taint_index();
-    // Stream-only scan: per-`(source_func, seed_shape)` graphs are
-    // computed, drained into `FindingWithChain`s, and dropped before
-    // the next source is processed. Previously this layer accumulated
-    // every graph in both an L1 `exact_graphs` and the workspace-wide
-    // `TaintGraphIndex` so a future run could reuse them, but neither
-    // is persisted to disk so the only effect was unbounded peak RAM
-    // — a 100K-LOC C codebase (Redis) accumulated 3 GB+ in this map
-    // before OOMing. Recomputing per run is a non-issue when the rest
-    // of the pipeline (`DataFlowCache`, `ValueFlowCache`) already
-    // memoises the heavy lifting and the matcher work below is bounded
-    // by the source-match cardinality.
+    let taint_graph_fingerprint =
+        taint_graph_config_fingerprint(pack, "taint-analysis", config.max_edge_precision);
+    prepare_workspace_taint_graph_cache(ws, taint_graph_fingerprint);
     // AHashMap iteration order is hash-randomized per process. Sort
     // by FuncId.raw() so the per-source-group analysis order and
     // resulting finding fingerprints are stable across runs.
@@ -3590,207 +4197,246 @@ where
         label: "building taint chains",
         total: total_groups as u64,
     });
-    // `rayon::prelude::*` is already in scope from the
-    // earlier `source_entries` parallel pass.
-    let parallel_out: Vec<FindingWithChain> = source_groups_sorted
-        .par_iter()
-        .flat_map_iter(|&(src_func_id, indices)| {
-            let mut group_out: Vec<FindingWithChain> = Vec::new();
-            let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
-                AHashSet::new();
-            for &idx in indices {
-                let (src, _, seeds) = &source_work[idx];
-                let output_arg_names = global
-                    .decl_of(SymbolId::new(src_func_id.raw()))
-                    .map(|d| output_arg_names_for_match(pack, src, d))
-                    .unwrap_or_default();
-                let anchor = if rule_match_kind_is_param(pack, &src.rule_id) {
+    let debug_taint_phase = bonsai_diagnostics::debug::is_enabled("security-taint");
+    let build_source_group = |&(src_func_id, indices): &(FuncId, &Vec<usize>)| {
+        let group_started = debug_taint_phase.then(Instant::now);
+        let mut graph_nanos = 0u128;
+        let mut attribution_nanos = 0u128;
+        let mut graph_builds = 0usize;
+        let mut group_graph_hits = 0usize;
+        let mut workspace_graph_hits = 0usize;
+        let mut empty_graphs = 0usize;
+        let mut tainted_calls_seen = 0usize;
+        let mut sink_candidate_checks = 0usize;
+        let mut sink_matches = 0usize;
+        let mut lineage_misses = 0usize;
+        let mut group_out: Vec<FindingWithChain> = Vec::new();
+        let mut emitted_for_source_sink_flow: AHashSet<(usize, String, u32, u64, u64, Option<u64>)> =
+            AHashSet::new();
+        // Bounded L1 for this one source function. Several
+        // source-rule matches in the same function can collapse
+        // to the same exact seed shape; computing that graph
+        // once per group avoids duplicated exact work without
+        // retaining every source graph for the whole workspace.
+        let mut group_graphs: AHashMap<Vec<String>, Arc<EntryTaintGraph>> = AHashMap::new();
+        for &idx in indices {
+            let (src, _, seeds) = &source_work[idx];
+            let output_arg_names = global
+                .decl_of(SymbolId::new(src_func_id.raw()))
+                .map(|d| output_arg_names_for_match(pack, src, d))
+                .unwrap_or_default();
+            let anchor =
+                if rule_match_kind_is_param(pack, &src.rule_id) || src.rule_id.starts_with("entry-point.") {
                     None
                 } else {
                     Some(src.span)
                 };
-                let graph_key = (
+            let graph_key = (
+                src_func_id,
+                effective_source_seed_key(src_func_id, seeds, anchor, &output_arg_names, idg.as_ref()),
+            );
+            // Compute the per-`(source_func, seed_shape)` graph
+            // exactly. The per-group cache removes duplicate work
+            // inside this source function; the workspace cache gives
+            // repeat SDK calls bounded reuse across invocations.
+            let graph_started = debug_taint_phase.then(Instant::now);
+            let graph = if let Some(hit) = group_graphs.get(&graph_key.1) {
+                group_graph_hits = group_graph_hits.saturating_add(1);
+                hit.clone()
+            } else if let Some(hit) = workspace_taint_index.get(src_func_id, &graph_key.1) {
+                workspace_graph_hits = workspace_graph_hits.saturating_add(1);
+                group_graphs.insert(graph_key.1.clone(), hit.clone());
+                hit
+            } else {
+                graph_builds = graph_builds.saturating_add(1);
+                let graph = Arc::new(exact_source_seed_graph(
                     src_func_id,
-                    sorted_seed_key_with_anchor(seeds, anchor, &output_arg_names),
-                );
-                // Stream-only: compute the per-`(source_func, seed_shape)`
-                // graph, use it to enumerate findings, then drop the
-                // `Arc` at the end of this iteration. Workspace-wide
-                // `TaintGraphIndex` isn't persisted, and the L1 fallback
-                // map was unbounded growth on large codebases. Within
-                // one source group several matches may share the same
-                // `graph_key`; the workspace cache (which still
-                // contains entries from earlier in this same run) is
-                // probed first so we don't redo the work, but we do
-                // not write back to it from this stream-only path.
-                let _ = &graph_key; // borrow keeps `seeds`/`anchor` ownership clear
-                let graph: std::sync::Arc<EntryTaintGraph> =
-                    if let Some(hit) = workspace_taint_index.get(src_func_id, &graph_key.1) {
-                        hit
-                    } else {
-                        std::sync::Arc::new(exact_source_seed_graph(
-                            src_func_id,
-                            seeds,
-                            &config,
-                            ws.db(),
-                            taint_caches,
-                            ws,
-                            anchor,
-                            &output_arg_names,
-                        ))
-                    };
-                if graph.tainted_calls.is_empty() {
+                    seeds,
+                    &config,
+                    ws.db(),
+                    taint_caches,
+                    ws,
+                    anchor,
+                    &output_arg_names,
+                ));
+                let graph = workspace_taint_index.insert_if_absent(src_func_id, graph_key.1.clone(), graph);
+                group_graphs.insert(graph_key.1.clone(), graph.clone());
+                graph
+            };
+            if let Some(started) = graph_started {
+                graph_nanos = graph_nanos.saturating_add(started.elapsed().as_nanos());
+            }
+            if graph.tainted_calls.is_empty() {
+                empty_graphs = empty_graphs.saturating_add(1);
+                continue;
+            }
+            tainted_calls_seen = tainted_calls_seen.saturating_add(graph.tainted_calls.len());
+            let unresolved_call_index = GraphUnresolvedCallIndex::new(global.as_ref(), graph.as_ref());
+            let attribution_started = debug_taint_phase.then(Instant::now);
+            // Span set of every recorded tainted call on this
+            // source graph — sanitizer credit pass uses it to
+            // require data-flow connectivity rather than mere
+            // chain co-occurrence.
+            let tainted_call_spans: AHashSet<Span> =
+                graph.tainted_calls.iter().map(|c| c.call_span).collect();
+            let trace_index = trace_record_index(&graph.call_records);
+            let canonical_chain_index = CanonicalChainIndex::new(&graph.call_records);
+            for call in &graph.tainted_calls {
+                let Some(candidate_sinks) = sink_by_func.get(&call.caller) else {
                     continue;
-                }
-                // Span set of every recorded tainted call on this
-                // source graph — sanitizer credit pass uses it to
-                // require data-flow connectivity rather than mere
-                // chain co-occurrence.
-                let tainted_call_spans: AHashSet<Span> =
-                    graph.tainted_calls.iter().map(|c| c.call_span).collect();
-                for call in &graph.tainted_calls {
-                    let Some(candidate_sinks) = sink_by_func.get(&call.caller) else {
+                };
+                let mut cached_evidence: Option<Option<CallEvidence>> = None;
+                sink_candidate_checks = sink_candidate_checks.saturating_add(candidate_sinks.len());
+                // Multi-sink attribution: when several sinks live in
+                // the same function, prefer span-equality over text
+                // overlap. If ANY candidate sink shares a span with
+                // this call, attribute to span-matches only — text
+                // match is a fallback used when no sink overlaps the
+                // call's span (e.g. cross-file references). The
+                // Strapi `_.template(layout)` / `fs.readFileSync(path)`
+                // case is the canonical motivator: previously the same
+                // source attached to BOTH because text-matching is
+                // loose enough to bridge unrelated calls.
+                let any_span_match = candidate_sinks
+                    .iter()
+                    .any(|snk| snk.language == src.language && spans_overlap(call.call_span, snk.span));
+                for snk in candidate_sinks {
+                    if snk.language != src.language {
+                        continue;
+                    }
+                    if !source_can_precede_sink(pack, src, snk) {
+                        continue;
+                    }
+                    if any_span_match {
+                        if !spans_overlap(call.call_span, snk.span) {
+                            continue;
+                        }
+                    } else if !tainted_call_matches_sink(call, snk) {
+                        continue;
+                    }
+                    sink_matches = sink_matches.saturating_add(1);
+                    // Return / Write tainted-call rows are emitted
+                    // as evidence that *the function's return slot
+                    // / write target* received tainted data — they
+                    // don't carry tainted_args because there is no
+                    // "argument" to flag, the dataflow happened on
+                    // the return expression itself. Skip the
+                    // empty-args/receiver guard for those kinds so
+                    // a `MatchKind::Return` sink rule (or
+                    // `MatchKind::Write`) can still fire on the
+                    // span the IDG closure proved tainted.
+                    let kind_emits_synthetic_evidence = matches!(
+                        call.kind,
+                        bonsai_taint::TaintedCallKind::Return | bonsai_taint::TaintedCallKind::Write
+                    );
+                    if !kind_emits_synthetic_evidence
+                        && call.tainted_args.is_empty()
+                        && call.tainted_receiver.is_none()
+                    {
+                        continue;
+                    }
+                    let Some(sink_rule) = pack.find_rule_by_id(&snk.rule_id) else {
                         continue;
                     };
-                    // Multi-sink attribution: when several sinks live in
-                    // the same function, prefer span-equality over text
-                    // overlap. If ANY candidate sink shares a span with
-                    // this call, attribute to span-matches only — text
-                    // match is a fallback used when no sink overlaps the
-                    // call's span (e.g. cross-file references). The
-                    // Strapi `_.template(layout)` / `fs.readFileSync(path)`
-                    // case is the canonical motivator: previously the same
-                    // source attached to BOTH because text-matching is
-                    // loose enough to bridge unrelated calls.
-                    let any_span_match = candidate_sinks
-                        .iter()
-                        .any(|snk| snk.language == src.language && spans_overlap(call.call_span, snk.span));
-                    for snk in candidate_sinks {
-                        if snk.language != src.language {
-                            continue;
-                        }
-                        if !source_can_precede_sink(src, snk) {
-                            continue;
-                        }
-                        if any_span_match {
-                            if !spans_overlap(call.call_span, snk.span) {
-                                continue;
-                            }
-                        } else if !tainted_call_matches_sink(call, snk) {
-                            continue;
-                        }
-                        // Return / Write tainted-call rows are emitted
-                        // as evidence that *the function's return slot
-                        // / write target* received tainted data — they
-                        // don't carry tainted_args because there is no
-                        // "argument" to flag, the dataflow happened on
-                        // the return expression itself. Skip the
-                        // empty-args/receiver guard for those kinds so
-                        // a `MatchKind::Return` sink rule (or
-                        // `MatchKind::Write`) can still fire on the
-                        // span the IDG closure proved tainted.
-                        let kind_emits_synthetic_evidence = matches!(
-                            call.kind,
-                            bonsai_taint::TaintedCallKind::Return | bonsai_taint::TaintedCallKind::Write
-                        );
-                        if !kind_emits_synthetic_evidence
-                            && call.tainted_args.is_empty()
-                            && call.tainted_receiver.is_none()
-                        {
-                            continue;
-                        }
-                        let Some(sink_rule) = pack.find_rule_by_id(&snk.rule_id) else {
-                            continue;
-                        };
-                        if !sink_rule.constraints.is_empty() {
-                            let current_call_view = std::slice::from_ref(call);
-                            let current_call_taint_view = InterTaintView::new(current_call_view);
-                            if !rule_match_passes_constraints_with_taint_view(
-                                ws,
-                                sink_rule,
-                                snk,
-                                &current_call_taint_view,
-                            ) {
-                                continue;
-                            }
-                        }
-                        let lineage_records = lineage_records_for_call(&graph.call_records, call);
-                        let lineage_chain = lineage_records.as_ref().and_then(|records| {
-                            let primary = chain_funcs_for_lineage(records, src_func_id, call.caller)?;
-                            // Chain-quality upgrade: when the lineage walk
-                            // anchored on `parent_trace_id` goes through
-                            // synthetic edges (Phase 3c field-flow stitches,
-                            // Phase 3d receiver-method propagation, or
-                            // Return back-edges — all sentinel
-                            // `arg_idx == usize::MAX`), search the full
-                            // record set for an alternative path that has
-                            // fewer synthetic hops while covering at least
-                            // as many distinct functions. Picks the
-                            // canonical call sequence over data-flow
-                            // detours (e.g. Java
-                            // `handle → orchestrate → persist → run` over
-                            // `handle → orchestrate → cmd → run`).
-                            Some(rewrite_chain_with_canonical_path(
-                                primary,
-                                &graph.call_records,
-                                src_func_id,
-                                call.caller,
-                            ))
-                        });
-                        let (Some(records), Some(chain_funcs)) = (lineage_records.as_ref(), lineage_chain)
-                        else {
-                            continue;
-                        };
-                        let mut chain_precision = chain_precision_for_records(records);
-                        let taint_path = taint_path_for_lineage(ws, records, Some(call));
-                        if graph.saturated {
-                            chain_precision = chain_precision.meet(Precision::OverApproximate);
-                        }
-                        let chain_names: Vec<String> = chain_funcs
-                            .iter()
-                            .filter_map(|&f| global.decl_of(SymbolId::new(f.raw())).map(|d| d.name.clone()))
-                            .collect();
-                        let group_id = group_id_for_taint_path(&chain_names, &taint_path);
-                        let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
-                        if !emitted_for_source_sink_flow.insert(source_sink_flow_emission_key(idx, snk, call))
-                        {
-                            continue;
-                        }
-                        let sink_tainted_args: Vec<TaintedArgInfo> = call
-                            .tainted_args
-                            .iter()
-                            .map(|a| TaintedArgInfo {
-                                index: a.index,
-                                value_text: a.value_text.clone(),
-                            })
-                            .collect();
-                        if let Some(f) = make_finding(
-                            src,
+                    if !sink_rule.constraints.is_empty() {
+                        let current_call_view = std::slice::from_ref(call);
+                        let current_call_taint_view = InterTaintView::new(current_call_view);
+                        if !rule_match_passes_constraints_with_taint_view(
+                            ws,
+                            sink_rule,
                             snk,
-                            pack,
-                            FindingBuildContext {
-                                group_id: Some(group_id),
-                                flow_id: Some(flow_id),
-                                chain_funcs: &chain_funcs,
-                                chain_names: chain_names.clone(),
-                                san_by_func: &san_by_func,
-                                tainted_call_spans: &tainted_call_spans,
-                                sink_tainted_args,
-                                taint_path,
-                                precision: chain_precision,
-                            },
+                            &current_call_taint_view,
                         ) {
-                            group_out.push(FindingWithChain {
-                                finding: f,
-                                chain_funcs,
-                            });
+                            continue;
                         }
+                    }
+                    if !emitted_for_source_sink_flow.insert(source_sink_flow_emission_key(idx, snk, call)) {
+                        continue;
+                    }
+                    let evidence = cached_evidence.get_or_insert_with(|| {
+                        build_call_evidence(
+                            ws,
+                            global.as_ref(),
+                            &trace_index,
+                            &canonical_chain_index,
+                            src_func_id,
+                            call,
+                            graph.saturated,
+                        )
+                    });
+                    let Some(evidence) = evidence.as_ref() else {
+                        lineage_misses = lineage_misses.saturating_add(1);
+                        continue;
+                    };
+                    if let Some(f) = make_finding(
+                        src,
+                        snk,
+                        pack,
+                        FindingBuildContext {
+                            group_id: Some(evidence.group_id.clone()),
+                            flow_id: Some(evidence.flow_id.clone()),
+                            chain_funcs: &evidence.chain_funcs,
+                            chain_names: evidence.chain_names.clone(),
+                            san_by_func: &san_by_func,
+                            tainted_call_spans: &tainted_call_spans,
+                            sink_tainted_args: evidence.sink_tainted_args.clone(),
+                            taint_path: evidence.taint_path.clone(),
+                            precision: evidence.chain_precision,
+                            analysis_incomplete_reasons: unresolved_call_index
+                                .reasons_for_terminal_call(call),
+                        },
+                    ) {
+                        group_out.push(FindingWithChain {
+                            finding: f,
+                            chain_funcs: evidence.chain_funcs.clone(),
+                        });
                     }
                 }
             }
-            group_out
-        })
-        .collect();
+            if let Some(started) = attribution_started {
+                attribution_nanos = attribution_nanos.saturating_add(started.elapsed().as_nanos());
+            }
+        }
+        if debug_taint_phase {
+            let name = global
+                .decl_of(SymbolId::new(src_func_id.raw()))
+                .map(|decl| decl.name.clone())
+                .unwrap_or_default();
+            let total_secs = group_started
+                .map(|started| started.elapsed().as_secs_f64())
+                .unwrap_or_default();
+            bonsai_diagnostics::debug_log!(
+                    "security-taint",
+                    "group func={}({}) sources={} graphs_built={} group_hits={} workspace_hits={} empty_graphs={} tainted_calls={} sink_candidates={} sink_matches={} lineage_misses={} findings={} graph={:.3}s attribution={:.3}s total={:.3}s",
+                    name,
+                    src_func_id.raw(),
+                    indices.len(),
+                    graph_builds,
+                    group_graph_hits,
+                    workspace_graph_hits,
+                    empty_graphs,
+                    tainted_calls_seen,
+                    sink_candidate_checks,
+                    sink_matches,
+                    lineage_misses,
+                    group_out.len(),
+                    graph_nanos as f64 / 1_000_000_000.0,
+                    attribution_nanos as f64 / 1_000_000_000.0,
+                    total_secs
+                );
+        }
+        group_out
+    };
+    let worker_count = security_taint_worker_count();
+    let parallel_groups: Vec<Vec<FindingWithChain>> = if worker_count > 1 && source_groups_sorted.len() > 1 {
+        match rayon::ThreadPoolBuilder::new().num_threads(worker_count).build() {
+            Ok(pool) => pool.install(|| source_groups_sorted.par_iter().map(build_source_group).collect()),
+            Err(_) => source_groups_sorted.iter().map(build_source_group).collect(),
+        }
+    } else {
+        source_groups_sorted.iter().map(build_source_group).collect()
+    };
+    let parallel_out: Vec<FindingWithChain> = parallel_groups.into_iter().flatten().collect();
     out.extend(parallel_out);
     // Progress callback isn't `Send`, so the parallel pass can't tick
     // mid-flight. Replay one tick per group now so consumers see the
@@ -3799,6 +4445,7 @@ where
         on_progress(AnalysisProgress::PhaseTicked);
     }
     on_progress(AnalysisProgress::PhaseFinished);
+    finish_workspace_taint_graph_cache(ws);
     out
 }
 
@@ -3806,26 +4453,175 @@ where
 /// hash to the same `exact_graphs` cache slot regardless of insertion
 /// order. AHashSet iteration is randomised per process, which would
 /// otherwise miss obvious cache hits.
+fn taint_graph_config_fingerprint(
+    pack: &Rulepack,
+    mode: &'static str,
+    max_precision: Option<Precision>,
+) -> u64 {
+    let rule_content_fingerprint = *pack.taint_graph_rule_content_fingerprint.get_or_init(|| {
+        let mut rule_tokens = Vec::new();
+        let mut rules = pack.all_rules();
+        rules.sort_by(|a, b| {
+            a.language
+                .cmp(&b.language)
+                .then_with(|| a.kind.cmp(&b.kind))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        for rule in rules.into_iter().filter(|rule| rule.enabled) {
+            rule_tokens.push(format!(
+                "rule:{}:{}:{}",
+                rule.language,
+                rule_kind_token(rule.kind),
+                rule.id
+            ));
+            rule_tokens
+                .push(serde_json::to_string(rule).unwrap_or_else(|_| format!("rule-json-error:{}", rule.id)));
+        }
+        bonsai_hash::fnv1a_names64(&rule_tokens)
+    });
+    let tokens = vec![
+        "taint-graph-config-v2".to_string(),
+        format!("mode={mode}"),
+        format!(
+            "max_precision={}",
+            max_precision.map(precision_label).unwrap_or("all")
+        ),
+        format!("rule_content={rule_content_fingerprint}"),
+    ];
+    bonsai_hash::fnv1a_names64(&tokens)
+}
+
+fn prepare_workspace_taint_graph_cache(ws: &Workspace, config_fingerprint: u64) {
+    let index = ws.taint_index();
+    index.clear_for_config(config_fingerprint);
+    let Some(root) = ws.db().workspace_root() else {
+        return;
+    };
+    let sidecar = bonsai_workspace::taint_index::TaintGraphIndex::sidecar_path(&root);
+    if let Err(err) = bonsai_workspace::taint_index::cleanup_sidecar_temp_files(&sidecar) {
+        tracing::warn!(
+            path = %sidecar.display(),
+            error = %err,
+            "taint graph factstore temp cleanup failed"
+        );
+    }
+    if let Err(err) = index.load_from_disk_for_config(&sidecar, ws.db(), config_fingerprint) {
+        tracing::warn!(
+            path = %sidecar.display(),
+            error = %err,
+            "taint graph factstore load failed"
+        );
+    }
+    if !taint_graph_persistence_enabled() {
+        return;
+    }
+    if let Err(err) = index.begin_persist_to_disk(&sidecar, ws.db(), config_fingerprint) {
+        tracing::warn!(
+            path = %sidecar.display(),
+            error = %err,
+            "taint graph factstore write-through setup failed"
+        );
+    }
+}
+
+fn taint_graph_persistence_enabled() -> bool {
+    std::env::var("BONSAI_TAINT_GRAPH_PERSIST")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn finish_workspace_taint_graph_cache(ws: &Workspace) {
+    if let Err(err) = ws.taint_index().finish_persist_to_disk(ws.db()) {
+        tracing::warn!(error = %err, "taint graph factstore finish failed");
+    }
+}
+
+fn rule_kind_token(kind: RuleKind) -> &'static str {
+    match kind {
+        RuleKind::Source => "source",
+        RuleKind::Sink => "sink",
+        RuleKind::Sanitizer => "sanitizer",
+    }
+}
+
 fn sorted_seed_key(seeds: &TokenSet) -> Vec<String> {
     let mut sorted: Vec<String> = seeds.iter().cloned().collect();
     sorted.sort();
     sorted
 }
 
-/// Variant of [`sorted_seed_key`] that additionally encodes the
-/// anchor span and the configured output-arg name list into the
-/// cache key. The taint-graph cache is keyed on `(FuncId, Vec<String>)`,
-/// and the IDG-driven seed builder threads `anchor`/`output_arg_names`
-/// into the per-source graph computation — but the resulting graph
-/// can differ between two source matches on the same function with
-/// the same name seeds but different anchor spans (e.g. two
-/// `req.getParameter("…")` calls on adjacent lines produce different
-/// IDG seed-node sets, hence different forward closures). Without
-/// the anchor in the key, the first insert wins and the second
-/// match wedges into the wrong cached graph — that's the divergence
-/// behind the CLI/SDK parity gap on Java micro. Prefixing the key
-/// with `__anchor@file:start..end` is a no-op when anchor is `None`
-/// (kind: param sources fall through to name-based seeding).
+fn source_analysis_worker_count() -> usize {
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .max(1);
+    let default = available.clamp(1, 4);
+    std::env::var("BONSAI_SOURCE_ANALYSIS_JOBS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|requested| requested.clamp(1, available))
+        .unwrap_or(default)
+}
+
+fn security_taint_worker_count() -> usize {
+    let available = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .max(1);
+    let default = std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|requested| requested.clamp(1, available))
+        .unwrap_or_else(|| available.clamp(1, 2));
+    std::env::var("BONSAI_TAINT_ANALYSIS_JOBS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|requested| requested.clamp(1, available))
+        .unwrap_or(default)
+}
+
+/// Build the cache key for an exact source-seeded graph. When an
+/// anchored source match resolves to concrete IDG seed nodes, those
+/// nodes are the semantic input to the closure; using them directly
+/// deduplicates overlapping rule matches at the same call site
+/// without merging distinct anchors that resolve to different nodes.
+/// If the anchor cannot be resolved, fall back to the historical
+/// name/anchor/output-arg key because the IDG seed builder will do
+/// the same fallback internally.
+fn effective_source_seed_key(
+    source_func: FuncId,
+    seeds: &TokenSet,
+    anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+    idg: &bonsai_idg::IdgQueryService,
+) -> Vec<String> {
+    if let Some(span) = anchor {
+        let mut seed_nodes = Vec::new();
+        if !output_arg_names.is_empty() {
+            for arg_name in output_arg_names {
+                if arg_name.is_empty() {
+                    continue;
+                }
+                seed_nodes.extend(idg.nodes_for_name_after_span(source_func, arg_name, span));
+            }
+        }
+        if seed_nodes.is_empty() {
+            seed_nodes = idg.source_seed_nodes_at_span(source_func, span);
+        }
+        if !seed_nodes.is_empty() {
+            seed_nodes.sort();
+            seed_nodes.dedup();
+            let node_ids = seed_nodes
+                .iter()
+                .map(|node| node.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            return vec![format!("__idg_seed_nodes@{node_ids}")];
+        }
+    }
+    sorted_seed_key_with_anchor(seeds, anchor, output_arg_names)
+}
+
 fn sorted_seed_key_with_anchor(
     seeds: &TokenSet,
     anchor: Option<bonsai_common::Span>,
@@ -3848,6 +4644,7 @@ fn sorted_seed_key_with_anchor(
     sorted
 }
 
+#[allow(clippy::too_many_arguments)] // IDG source graph construction needs explicit source/sink/cache context.
 fn exact_source_seed_graph(
     source_func: FuncId,
     seeds: &TokenSet,
@@ -3873,65 +4670,55 @@ fn exact_source_seed_graph(
     let idg = db
         .idg_service()
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
-    bonsai_taint::entry_taint_graph_from_idg(
+    bonsai_taint::entry_taint_graph_from_idg_with_max_precision(
         source_func,
         seeds,
         source_anchor,
         output_arg_names,
         &config.receiver_state_propagations,
+        &config.call_result_passthroughs,
+        &config.output_arg_flows,
+        config.max_edge_precision,
         db,
         idg.as_ref(),
     )
 }
 
-fn source_seed_reaches_return(
+#[allow(clippy::too_many_arguments)] // IDG path graph construction needs explicit source/sink/cache context.
+fn exact_source_path_graph(
     source_func: FuncId,
     seeds: &TokenSet,
+    config: &InterTaintConfig,
+    db: &bonsai_db::AnalyzerDb,
+    _caches: &InterTaintCaches,
     ws: &Workspace,
-    intra_worklist_cap: Option<u32>,
-) -> bool {
-    if seeds.is_empty() {
-        return false;
-    }
-    // Fast path: a hash-set lookup against the precomputed
-    // `returning_seed_names` set built when the value-flow graph
-    // for `source_func` was constructed. This collapses the
-    // per-seed forward-closure walk into a single intersection.
-    let returning_names = ws
-        .value_flow()
-        .returning_seed_names(source_func, ws.db(), ws.inter_taint_caches());
-    if !returning_names.is_empty() && seeds.iter().any(|s| returning_names.contains(s)) {
-        return true;
-    }
-    // Engine fallback path. The engine's seed-by-name semantics
-    // matches the source_seed_set output exactly; switching this
-    // to IDG would require span-based seeding (Phase 8 follow-on).
-    let config = InterTaintConfig {
-        sanitizers: TokenSet::default(),
-        budget: 64,
-        intra_worklist_cap,
-        source_bearing_functions: AHashSet::default(),
-        ..Default::default()
-    };
-    let result = bonsai_taint::interprocedural_taint_to_completion_with_caches(
+    source_anchor: Option<bonsai_common::Span>,
+    output_arg_names: &[String],
+) -> EntryTaintGraph {
+    let idg = db
+        .idg_service()
+        .unwrap_or_else(|| ws.build_and_seed_idg_service());
+    bonsai_taint::entry_taint_call_records_from_idg_with_max_precision(
         source_func,
         seeds,
-        &config,
-        ws.db(),
-        ws.inter_taint_caches(),
-    );
-    result
-        .tainted_calls
-        .iter()
-        .any(|call| call.caller == source_func && call.kind == TaintedCallKind::Return)
+        source_anchor,
+        output_arg_names,
+        &config.receiver_state_propagations,
+        config.max_edge_precision,
+        db,
+        idg.as_ref(),
+    )
 }
 
 /// True when the source could syntactically reach the sink — same-fn
 /// flows must have the source statement BEFORE the sink, otherwise
 /// the supposed flow runs backwards in time. Cross-fn cases always
 /// pass since the call graph models the temporal order separately.
-fn source_can_precede_sink(src: &RuleMatch, snk: &RuleMatch) -> bool {
+fn source_can_precede_sink(pack: &Rulepack, src: &RuleMatch, snk: &RuleMatch) -> bool {
     if src.file != snk.file || src.enclosing_fn != snk.enclosing_fn {
+        return true;
+    }
+    if src.rule_id.starts_with("entry-point.") || rule_match_kind_is_param(pack, &src.rule_id) {
         return true;
     }
     src.line < snk.line || (src.line == snk.line && src.column <= snk.column)
@@ -3942,8 +4729,8 @@ fn source_can_precede_sink(src: &RuleMatch, snk: &RuleMatch) -> bool {
 /// any rule whose call site happens to live on the source-to-sink
 /// chain would be credited even when its arguments have nothing to
 /// do with the tainted value — see WC#4 in the Redis evaluation
-/// where a `pthread_mutex_lock` (lock-acquire tag) was being
-/// flagged as a wrong-context sanitizer for a `memcpy` sink.
+/// where a lock-acquire call was being flagged as a wrong-context
+/// sanitizer for an unrelated memory sink.
 fn sanitizer_call_overlaps_tainted_call(san: &RuleMatch, tainted_call_spans: &AHashSet<Span>) -> bool {
     tainted_call_spans
         .iter()
@@ -4020,10 +4807,9 @@ fn rule_match_kind_is_param(pack: &Rulepack, rule_id: &str) -> bool {
 }
 
 /// Resolve the source rule's `source_output_args` indices to the
-/// concrete carrier names at the source's call site. For
-/// `fgets(buf, sz, stdin)` with `output_args=[0]`, returns
-/// `["buf"]` — the IDG seeder then includes post-call reads/writes
-/// of `buf` so the side-effect taint flows into downstream consumers.
+/// concrete carrier names at the source's call site. The IDG seeder
+/// then includes post-call reads/writes of those carriers so the
+/// side-effect taint flows into downstream consumers.
 fn output_arg_names_for_match(pack: &Rulepack, src: &RuleMatch, decl: &bonsai_lang_api::Decl) -> Vec<String> {
     use bonsai_lang_api::FlowEvent;
     let Some(rule) = pack.find_rule_by_id(&src.rule_id) else {
@@ -4178,23 +4964,7 @@ fn collect_source_seed_targets(
                     if !target.is_empty() {
                         insert_taint_aliases(out, target);
                     }
-                    if let Some(callee) = source_call.as_deref() {
-                        // Only seed the unqualified TAIL of the source
-                        // call, not the full qualified form. Adding
-                        // `os.getenv` as a seed token taints the bare
-                        // base `os` via
-                        // `state_qualified_token_matches_text`, which
-                        // then conflates every other `os.<x>` call in
-                        // the same function (Task #279). The tail
-                        // (`getenv`) carries the same matching
-                        // ergonomics for downstream sink-name rules
-                        // without polluting the receiver namespace.
-                        if let Some(tail) = callee.rsplit(&['.', ':'][..]).next() {
-                            if !tail.is_empty() {
-                                out.insert(tail.to_string());
-                            }
-                        }
-                    }
+                    let _ = source_call;
                     if let Some(source_name) = source_name.as_deref() {
                         if security_text_matches_source_strict(source_name, &src.match_text) {
                             insert_taint_aliases(out, source_name);
@@ -4391,11 +5161,6 @@ fn insert_taint_aliases(out: &mut TokenSet, text: &str) {
     if normalised != trimmed {
         out.insert(normalised);
     }
-    if let Some(tail) = trimmed.rsplit(&['.', ':'][..]).next() {
-        if tail != trimmed && !tail.is_empty() {
-            out.insert(tail.to_string());
-        }
-    }
 }
 
 fn insert_descendant_taint_aliases(out: &mut TokenSet, text: &str) {
@@ -4532,6 +5297,8 @@ fn make_pattern_finding(snk: &RuleMatch, pack: &Rulepack, _chain_funcs: &[FuncId
         .as_ref()
         .map(|name| vec![name.clone()])
         .unwrap_or_default();
+    // Pattern-only findings are exact local rule matches, not taint/source
+    // reachability claims. They carry no propagation path to complete.
     Some(Finding {
         finding_id,
         language: snk.language.clone(),
@@ -4540,6 +5307,8 @@ fn make_pattern_finding(snk: &RuleMatch, pack: &Rulepack, _chain_funcs: &[FuncId
         sanitizers_seen: Vec::new(),
         group_id: Some(group_id.clone()),
         representative_flow_id: Some(flow_id),
+        analysis_complete: true,
+        analysis_incomplete_reasons: Vec::new(),
         chain_display,
         taint_path: Vec::new(),
         tag: sink_rule.tag.clone(),
@@ -4553,31 +5322,11 @@ fn make_pattern_finding(snk: &RuleMatch, pack: &Rulepack, _chain_funcs: &[FuncId
 }
 
 fn rule_is_pattern_only_finding(rule: &Rule) -> bool {
-    if rule.kind != RuleKind::Sink || !rule.enabled || rule_has_taint_predicate(rule) {
-        return false;
-    }
-    if rule.match_spec.kind == MatchKind::Missing {
-        return true;
-    }
-    let tag = rule.tag.as_deref().unwrap_or_default();
-    matches!(
-        tag,
-        "weak-crypto"
-            | "weak-randomness"
-            | "weak-tls"
-            | "cors"
-            | "csrf"
-            | "auth-bypass"
-            | "insecure-temp-file"
-            | "memory-safety"
-            | "race"
-            | "secure-cookie"
-    ) || rule.cwe.iter().any(|cwe| {
-        matches!(
-            cwe.as_str(),
-            "CWE-327" | "CWE-328" | "CWE-330" | "CWE-338" | "CWE-614"
-        )
-    })
+    rule.kind == RuleKind::Sink
+        && rule.enabled
+        && !rule_has_taint_predicate(rule)
+        && (rule.category.as_deref() == Some("source-independent")
+            || rule.match_spec.kind == MatchKind::Missing)
 }
 
 fn rule_has_taint_predicate(rule: &Rule) -> bool {
@@ -4610,6 +5359,7 @@ struct FindingBuildContext<'a> {
     sink_tainted_args: Vec<TaintedArgInfo>,
     taint_path: Vec<TaintPropagationStep>,
     precision: Precision,
+    analysis_incomplete_reasons: Vec<String>,
 }
 
 fn make_finding(
@@ -4707,6 +5457,8 @@ fn make_finding(
         sanitizers_seen,
         group_id: Some(group),
         representative_flow_id: context.flow_id,
+        analysis_complete: context.analysis_incomplete_reasons.is_empty(),
+        analysis_incomplete_reasons: context.analysis_incomplete_reasons,
         chain_display: context.chain_names,
         taint_path: context.taint_path,
         tag: skr.tag.clone(),
@@ -4937,12 +5689,11 @@ fn clean_output_overwrites_from_rulepack(pack: &Rulepack) -> Vec<CleanOutputOver
         .filter(|rule| rule.enabled && rule.kind == RuleKind::Sanitizer)
         .filter_map(|rule| {
             let semantics = rule.taint_semantics.as_ref()?.clean_output_overwrite.as_ref()?;
-            let callee = rule.match_spec.callee.as_ref().and_then(|target| {
-                target
-                    .name
-                    .clone()
-                    .or_else(|| target.attribute.as_ref().map(|parts| parts.join(".")))
-            })?;
+            let callee = rule
+                .match_spec
+                .callee
+                .as_ref()
+                .and_then(semantic_transfer_callee)?;
             Some(CleanOutputOverwrite {
                 callee,
                 output_arg_index: semantics.output_arg_index,
@@ -4950,6 +5701,62 @@ fn clean_output_overwrites_from_rulepack(pack: &Rulepack) -> Vec<CleanOutputOver
             })
         })
         .collect()
+}
+
+fn clean_output_overwrites_from_rulepack_for_languages(
+    pack: &Rulepack,
+    languages: &AHashSet<String>,
+) -> Vec<CleanOutputOverwrite> {
+    pack.all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled && rule.kind == RuleKind::Sanitizer && languages.contains(rule.language.as_str())
+        })
+        .filter_map(|rule| {
+            let semantics = rule.taint_semantics.as_ref()?.clean_output_overwrite.as_ref()?;
+            let callee = rule
+                .match_spec
+                .callee
+                .as_ref()
+                .and_then(semantic_transfer_callee)?;
+            Some(CleanOutputOverwrite {
+                callee,
+                output_arg_index: semantics.output_arg_index,
+                value_start_arg_index: semantics.value_start_arg_index,
+            })
+        })
+        .collect()
+}
+
+fn idg_transfer_options_from_rulepack_shapes(
+    overwrites: &[CleanOutputOverwrite],
+    source_outputs: &[SourceOutputArgs],
+) -> bonsai_idg::TransferOptions {
+    bonsai_idg::TransferOptions {
+        clean_output_overwrites: overwrites
+            .iter()
+            .map(|shape| bonsai_idg::CleanOutputOverwriteSpec {
+                callee: shape.callee.clone(),
+                output_arg_index: shape.output_arg_index,
+                value_start_arg_index: shape.value_start_arg_index,
+            })
+            .collect(),
+        source_output_args: source_outputs
+            .iter()
+            .map(|shape| bonsai_idg::SourceOutputArgSpec {
+                callee: shape.callee.clone(),
+                output_arg_indices: shape.output_arg_indices.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) {
+    let languages = workspace_languages(ws);
+    let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, &languages);
+    let source_outputs = source_output_args_from_rulepack_for_languages(pack, &languages);
+    let options = idg_transfer_options_from_rulepack_shapes(&overwrites, &source_outputs);
+    let _ = ws.build_and_seed_idg_service_with_transfer_options(&options);
 }
 
 fn source_output_args_from_rulepack(pack: &Rulepack) -> Vec<SourceOutputArgs> {
@@ -4961,18 +5768,105 @@ fn source_output_args_from_rulepack(pack: &Rulepack) -> Vec<SourceOutputArgs> {
             if semantics.source_output_args.is_empty() {
                 return None;
             }
-            let callee = rule.match_spec.callee.as_ref().and_then(|target| {
-                target
-                    .name
-                    .clone()
-                    .or_else(|| target.attribute.as_ref().map(|parts| parts.join(".")))
-            })?;
+            let callee = rule
+                .match_spec
+                .callee
+                .as_ref()
+                .and_then(semantic_transfer_callee)?;
             Some(SourceOutputArgs {
                 callee,
                 output_arg_indices: semantics.source_output_args.clone(),
             })
         })
         .collect()
+}
+
+fn source_output_args_from_rulepack_for_languages(
+    pack: &Rulepack,
+    languages: &AHashSet<String>,
+) -> Vec<SourceOutputArgs> {
+    pack.all_rules()
+        .into_iter()
+        .filter(|rule| {
+            rule.enabled && rule.kind == RuleKind::Source && languages.contains(rule.language.as_str())
+        })
+        .filter_map(|rule| {
+            let semantics = rule.taint_semantics.as_ref()?;
+            if semantics.source_output_args.is_empty() {
+                return None;
+            }
+            let callee = rule
+                .match_spec
+                .callee
+                .as_ref()
+                .and_then(semantic_transfer_callee)?;
+            Some(SourceOutputArgs {
+                callee,
+                output_arg_indices: semantics.source_output_args.clone(),
+            })
+        })
+        .collect()
+}
+
+fn call_result_passthroughs_from_rulepack(pack: &Rulepack) -> Vec<CallResultPassthrough> {
+    pack.all_rules()
+        .into_iter()
+        .filter(|rule| rule.enabled && rule.kind == RuleKind::Sanitizer)
+        .filter_map(|rule| {
+            let semantics = rule.taint_semantics.as_ref()?;
+            if semantics.call_result_passthrough_args.is_empty()
+                && !semantics.call_result_passthrough_receiver
+            {
+                return None;
+            }
+            let callee = rule
+                .match_spec
+                .callee
+                .as_ref()
+                .and_then(semantic_transfer_callee)?;
+            Some(CallResultPassthrough {
+                callee,
+                input_arg_indices: semantics.call_result_passthrough_args.clone(),
+                input_receiver: semantics.call_result_passthrough_receiver,
+            })
+        })
+        .collect()
+}
+
+fn output_arg_flows_from_rulepack(pack: &Rulepack) -> Vec<OutputArgFlow> {
+    pack.all_rules()
+        .into_iter()
+        .filter(|rule| rule.enabled)
+        .flat_map(|rule| {
+            let callee = rule.match_spec.callee.as_ref().and_then(semantic_transfer_callee);
+            let Some(callee) = callee else {
+                return Vec::new();
+            };
+            rule.taint_semantics
+                .as_ref()
+                .map(|semantics| {
+                    semantics
+                        .output_arg_flows
+                        .iter()
+                        .map(|flow| OutputArgFlow {
+                            callee: callee.clone(),
+                            output_arg_index: flow.output_arg_index,
+                            value_start_arg_index: flow.value_start_arg_index,
+                            value_arg_indices: flow.value_arg_indices.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn semantic_transfer_callee(target: &RuleTarget) -> Option<String> {
+    target
+        .name
+        .clone()
+        .or_else(|| target.attribute.as_ref().map(|parts| parts.join(".")))
+        .or_else(|| target.regex.as_ref().map(|regex| format!("regex:{regex}")))
 }
 
 fn receiver_state_propagations_from_rulepack(pack: &Rulepack) -> Vec<ReceiverStatePropagation> {
@@ -5060,6 +5954,18 @@ pub fn select_pack_rules<'a>(pack: &'a Rulepack, options: &PackInventoryOptions)
 pub fn canonical_sink_audit_applies(lang: &str) -> bool {
     !ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS.contains(&lang)
 }
+
+#[cfg(test)]
+#[path = "semantic_options_tests.rs"]
+mod semantic_options_tests;
+
+#[cfg(test)]
+#[path = "source_lineage_tests.rs"]
+mod source_lineage_tests;
+
+#[cfg(test)]
+#[path = "finding_completeness_tests.rs"]
+mod finding_completeness_tests;
 
 /// Path of `rule`'s source file relative to its
 /// `langs/<lang>/<kind>s/` bucket — `crypto.yml`, `subdir/foo.yml`,

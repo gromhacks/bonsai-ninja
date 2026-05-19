@@ -10,6 +10,7 @@
 //! Nothing in this crate depends on Tree-sitter or any language adapter; it is
 //! safe to depend on from every other crate.
 
+pub mod dependency_metadata;
 pub mod ids;
 pub mod names;
 pub mod policy;

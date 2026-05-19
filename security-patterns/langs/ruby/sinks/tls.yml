@@ -7,6 +7,7 @@
   enabled: true
   language: ruby
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -25,6 +26,7 @@
   enabled: true
   language: ruby
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [httparty, rest-client]
   cwe: [CWE-295]
@@ -78,6 +80,7 @@
   enabled: true
   language: ruby
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [typhoeus]
   cwe: [CWE-295]

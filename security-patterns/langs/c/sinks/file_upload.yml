@@ -1,6 +1,8 @@
 # C file-upload sinks (libmicrohttpd / civetweb / mongoose POST handlers).
 - id: c.upload.mhd_postprocessor
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: c
   tag: file-upload
   severity: medium
@@ -19,10 +21,12 @@
         char *fmt = arg;
         MHD_create_post_processor(arg);
       }
-  description: "MHD POST processor — filename from multipart is client-controlled."
+  description: "Disabled — MHD_create_post_processor installs multipart parsing callbacks; it is not itself a file-write sink. Model callback filename arguments as remote sources when callback adapter facts are available."
 
 - id: c.upload.civetweb_form_data_handler
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: c
   tag: file-upload
   severity: medium
@@ -41,7 +45,7 @@
         char *fmt = arg;
         mg_handle_form_request(arg);
       }
-  description: "civetweb mg_handle_form_request."
+  description: "Disabled — mg_handle_form_request dispatches multipart/form callbacks; it is not itself a write sink. Flag downstream writes using callback-provided filenames instead."
 
 - id: c.upload.mongoose_mg_http_upload
   enabled: true

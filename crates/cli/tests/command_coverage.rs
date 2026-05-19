@@ -62,6 +62,28 @@ fn run(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+fn run_fail(args: &[&str]) -> Option<(String, String)> {
+    let bin = bin_path()?;
+    let mut full: Vec<&str> = args.to_vec();
+    full.push("--no-color");
+    let out = Command::new(&bin)
+        .args(&full)
+        .env("COLUMNS", "200")
+        .env_remove("BONSAI_CONTEXT")
+        .output()
+        .expect("failed to run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "bonsai-ninja {:?} unexpectedly succeeded: stdout={}",
+        args,
+        String::from_utf8_lossy(&out.stdout)
+    );
+    Some((
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    ))
+}
+
 fn assert_contains(out: &str, needle: &str, cmd: &str) {
     assert!(
         out.contains(needle),
@@ -392,6 +414,19 @@ fn dump_edges_renders_edge_ids_and_precision() {
             pair.1
         );
     }
+}
+
+#[test]
+fn dump_edges_rejects_broad_precision() {
+    let Some((_stdout, stderr)) = run_fail(&[
+        "dump-edges",
+        ws().to_str().unwrap(),
+        "--precision",
+        "over-approximate",
+    ]) else {
+        return;
+    };
+    assert_contains(&stderr, "semantic-only", "dump-edges");
 }
 
 // -------- dump-resolve --------

@@ -73,15 +73,18 @@ let result = interprocedural_taint(entry, &seed, &config, &db);
 The engine reports unresolved external calls in
 `InterTaintResult.tainted_calls`. The security layer decides what's
 actually a sink — the engine never filters by name. `TaintedCall.kind`
-identifies the record shape. Only `kind: Call` carries syntactic
-call-argument indices; `Write` and `Return` use diagnostic operand order.
+identifies the record shape. `kind: Call` carries syntactic call-argument
+indices. `kind: Write` carries a synthetic operand for the assignment RHS
+so the security matcher can enforce `arg_tainted: { index: 0 }` on write
+rules. `kind: Return` is return-expression evidence and has no call
+argument slots.
 
 ### 3. Sanitizer model
 
 `InterTaintConfig.sanitizers: TokenSet` is accepted but doesn't change
 propagation semantics. Sanitizer attribution is a security-layer concern;
-the engine over-approximates conservatively (false positives over false
-negatives).
+the engine preserves the semantic taint path and leaves sanitizer status to
+the security layer.
 
 ### 4. Call graph
 
@@ -130,11 +133,27 @@ qualified RHS reads (`obj.field`, `obj['field']`, `obj->field`) as
 value-bearing operands, including grammars that split selectors into
 multiple nodes.
 
+Value-preserving call results are explicit rulepack models, not text
+fallbacks or engine API tables. When a sanitizer/passthrough rule declares
+`taint_semantics.call_result_passthrough_args` or
+`call_result_passthrough_receiver`, string/list transforms such as
+`upper`, `toUpperCase`, `strings.ToUpper`, `TrimSpace`, and
+formatting/join helpers bridge their configured input operands to the
+assignment result. Go `append` bridges each appended operand to the
+returned slice while the container-mutator rule below separately models
+receiver descendant state.
+
 Constructor / object-initializer assignments with named fields are
 field-sensitive. `env = Envelope({cmd: raw, kind: K})` seeds `env.cmd` from
 `raw` without tainting bare `env` or `env.kind`. Positional constructors
 fall back to descendant-container taint only when a type-like call
 actually receives tainted data.
+
+Indexed buffer bookkeeping does not overwrite the whole container. Adapter
+shapes like `buf[sizeof(buf) - 1] = '\0'` may emit both precise indexed
+writes and structural base tokens; the IDG drops the `sizeof` metadata and
+same-span base self-write so the terminator assignment cannot erase the
+tainted buffer value.
 
 ### 6. Module resolver
 
@@ -202,6 +221,13 @@ post-spawn continuation.
 - `returns_container_taint_of`: indices whose direct value gets embedded
   into a returned container, so the caller's assignment target carries
   descendant taint.
+- `returns_field_taint_of`: exact returned-container fields whose values
+  come from a parameter. `return {"user": user}` taints `result.user`,
+  not `result.*`.
+- `returns_element_taint_of`: exact returned tuple/list positions whose
+  values come from a parameter. `return {"ok", p}` / `return (clean, p)`
+  taints only the second destructured binding in `{a, b} = helper(p)` or
+  `(a, b) = helper(p)`.
 - `taints_params_from`: parameter-to-parameter side effects (e.g.
   `join(dst, ..., src)` writes `src` into `dst`).
 
@@ -217,6 +243,12 @@ also emits the sibling `FlowEvent::Call`, the inter walker borrows the
 call's arg list. That's semantic correlation between two adapter facts,
 not a text fallback — return-summary checks still use positional
 arguments.
+
+Container summaries are intentionally split. Whole-container taint is a
+fallback for dynamic aggregate returns. Named-field returns and positional
+tuple/list returns are applied only when the caller assignment exposes the
+matching field or destructuring index; they must not scalar-taint sibling
+fields or sibling bindings.
 
 ## Workspace-level result caches
 
@@ -271,21 +303,41 @@ is the single semantic entry point. It applies, in order:
 3. Receiver-type narrowing when `ctx.receiver_type` is `Some` —
    `Decl.parent` must be the receiver type or in its base chain.
 
+Unqualified same-directory top-level fallbacks are enabled only for
+languages whose adapters model files as a shared package/module namespace
+or translation unit link surface (`.c`, `.h`, `.cc`, `.cpp`, `.cxx`,
+`.hpp`, `.hh`, `.hxx`, `.kt`, `.kts`, `.swift`, `.pl`, `.pm`). The caller
+must provide the workspace file-path lookup in `ResolveContext`; otherwise
+the fallback is unavailable. File-scoped module languages such as Python
+must import or alias the symbol, so the resolver fails closed instead of
+fabricating a cross-file edge.
+
 The engine's `resolve_call_candidates_with_caller_at` builds the
 `ResolveContext` from each call site's `(caller_func, call_span)`,
 threads it into the resolver, and memoises the answer in
 `InterTaintCaches::resolved_calls_by_site`. When the answer is a
 single candidate, the edge is `EdgeKind::Direct` /
-`Precision::Narrowed`. When it's multiple, the edge is
-`EdgeKind::Virtual` / `Precision::OverApproximate`. There is no
+`Precision::Narrowed`. Multiple candidates are emitted only when adapter
+facts semantically explain the set, such as typed virtual dispatch over a
+known receiver family or a same-scope overload family. Overload families are
+then narrowed by declared argument/parameter type facts when available, so a
+known `String` actual does not propagate into an `Int` overload. The remaining
+multi-candidate edges are `EdgeKind::Virtual` /
+`Precision::Narrowed`. Contextless or unexplained multi-candidate sets are
+not public evidence and must be surfaced as incompleteness/debug metadata,
+not widened into `Precision::OverApproximate` findings. There is no
 "used-tail-fallback widens single candidates to OverApproximate"
 exception — `ResolveContext` filtering already narrowed the result.
 
-Dynamic-dispatch fallback for receiver-type-unknown calls runs
-through `collect_virtual_dispatch_candidates`, which is marked
-with a `CONTEXTLESS_LOOKUP_JUSTIFICATION:` comment and immediately
-narrows by class-shape + visibility before any candidate leaves
-the function.
+Receiver-type-unknown calls produce no semantic call target. Debug-only
+helpers may explain why a name looked dynamic, but public review/security
+flows must wait for receiver-type, alias, module, or model facts before
+emitting an edge.
+
+Closure-factory calls are resolved only when the factory's body returns a
+single lambda/function literal in the same file. The callgraph binds the
+assignment target to that returned callable; ambiguous or multi-return
+factories stay unresolved rather than tainting every later indirect call.
 
 ## Engine layers
 
@@ -313,10 +365,19 @@ The taint crate is layered:
 - `source_bearing_functions: AHashSet<FuncId>` — security-layer source
   helpers.
 - `clean_output_overwrites: Vec<CleanOutputOverwrite>` — declarative
-  overwrite shapes from adapters/rules.
+  overwrite shapes derived from rulepack `taint_semantics`.
 - `source_output_args: Vec<SourceOutputArgs>` — source calls whose
-  listed output arguments receive taint, such as C/C++ `recv` and
-  `SSL_read` buffers.
+  listed output arguments receive taint, such as `recv`, `SSL_read`,
+  and `fgets` buffers. These are derived from source rules, not from a
+  built-in API list.
+- `call_result_passthroughs: Vec<CallResultPassthrough>` — rulepack
+  declarations that selected call arguments or the method receiver flow
+  to the call result, such as URL decode/unescape helpers. The engine
+  owns the transfer primitive, not a hardcoded API list.
+- `output_arg_flows: Vec<OutputArgFlow>` — rulepack declarations that
+  selected value arguments flow into an output argument. This covers
+  formatter/copy-style APIs without putting library names or argument
+  orders in the engine.
 - `callback_invocation_methods: AHashSet<String>` — method tails that
   invoke callable receivers.
 - `receiver_state_propagations: Vec<ReceiverStatePropagation>` —
@@ -375,6 +436,12 @@ recognises a small set of language-neutral patterns (literal booleans,
 `flag`, `!flag`, `flag == 0`) so guarded code doesn't generate spurious
 flows. The list grows conservatively — a constant fact must be
 language-neutral and trivially safe to reason about.
+
+Tainted conditions are not dataflow. A tainted branch guard may choose
+which clean/dynamic container is returned, but it does not make every
+field in that returned container tainted. Returned containers are tainted
+only by explicit data movement into the returned value or one of its
+tracked fields or positional elements.
 
 ## Append-style mutators and lifecycle calls
 

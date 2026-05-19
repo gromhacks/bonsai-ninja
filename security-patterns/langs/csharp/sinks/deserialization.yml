@@ -27,6 +27,7 @@
   enabled: true
   language: csharp
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   cwe: [CWE-502]
   match:
@@ -90,6 +91,7 @@
   enabled: true
   language: csharp
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   cwe: [CWE-502]
   match:
@@ -130,6 +132,7 @@
   enabled: true
   language: csharp
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   cwe: [CWE-502]
   match:
@@ -170,6 +173,7 @@
   enabled: true
   language: csharp
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   cwe: [CWE-502]
   match:
@@ -233,6 +237,7 @@
   enabled: true
   language: csharp
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   packages: [Newtonsoft.Json]
   cwe: [CWE-502]
@@ -366,6 +371,7 @@
   enabled: true
   language: csharp
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   packages: [MessagePack]
   cwe: [CWE-502]

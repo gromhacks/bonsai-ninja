@@ -65,19 +65,27 @@ fn facade_indexes_and_exposes_workspace_basics() {
     assert!(project.diagnostics().is_empty());
     assert!(project.rulepack().is_some());
     assert!(project.rulepack_root().is_some());
-    project.save_dataflow_sidecar().expect("save sidecar");
+    let stats = project.cache().stats().expect("cache stats after index");
+    assert!(
+        !stats.dataflow_sidecar_exists && !stats.dataflow_factstore_sidecar_exists,
+        "SDK index should stay structural unless full prewarm/cache rebuild is requested"
+    );
+    project.cache().rebuild_dataflow().expect("rebuild dataflow");
     assert!(project.load_dataflow_sidecar().expect("load sidecar") > 0);
     let stats = project.cache().stats().expect("cache stats");
     assert!(stats.bonsai_dir_exists);
-    assert!(stats.dataflow_sidecar_exists);
-    project.cache().clear_dataflow_only().expect("clear dataflow");
     assert!(
-        !project
-            .cache()
-            .stats()
-            .expect("cache stats after clear")
-            .dataflow_sidecar_exists
+        stats.dataflow_sidecar_exists,
+        "explicit cache rebuild should write the legacy SDK dataflow sidecar"
     );
+    assert!(
+        !stats.dataflow_factstore_sidecar_exists,
+        "cache rebuild should not imply the streaming full-prewarm factstore path"
+    );
+    project.cache().clear_dataflow_only().expect("clear dataflow");
+    let stats = project.cache().stats().expect("cache stats after clear");
+    assert!(!stats.dataflow_sidecar_exists);
+    assert!(!stats.dataflow_factstore_sidecar_exists);
     project.cache().rebuild_dataflow().expect("rebuild dataflow");
     assert!(
         project
@@ -90,12 +98,16 @@ fn facade_indexes_and_exposes_workspace_basics() {
         .export()
         .warm_default_json_cache()
         .expect("warm default export cache");
+    let stats = project.cache().stats().expect("cache stats after export warm");
     assert!(
-        project
-            .cache()
-            .stats()
-            .expect("cache stats after export warm")
-            .export_sidecar_exists
+        stats.export_sidecar_exists,
+        "warming the default export cache must write the sidecar"
+    );
+    let export_json = std::fs::read_to_string(&stats.export_sidecar).expect("read export sidecar");
+    let parsed: serde_json::Value = serde_json::from_str(&export_json).expect("export sidecar JSON parses");
+    assert!(
+        parsed.get("taint_graph").is_some(),
+        "export sidecar should contain native export JSON"
     );
     let root_cache = sdk().cache(&root);
     assert!(root_cache.stats().expect("root cache stats").bonsai_dir_exists);
@@ -137,11 +149,40 @@ fn facade_index_with_progress_reports_workspace_lifecycle() {
             .count(),
         parsed_files
     );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmStarted { .. }
+                | bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmFinished
+                | bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmStarted
+                | bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmFinished
+                | bonsai_sdk::WorkspaceOpenEvent::FlowIdsPrewarmStarted
+                | bonsai_sdk::WorkspaceOpenEvent::FlowIdsPrewarmFinished
+        )),
+        "index_with_progress should report structural indexing only by default"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn facade_full_prewarm_with_progress_reports_analysis_prewarm() {
+    let root = temp_python_micro("progress-full-prewarm");
+    let events = Mutex::new(Vec::new());
+    let project = sdk()
+        .open_with_options_and_progress(&root, bonsai_sdk::OpenOptions::full_prewarm(), |event| {
+            events.lock().expect("events lock").push(event);
+        })
+        .expect("full prewarm with progress");
+
+    assert!(project.stats().files > 0);
+    let events = events.into_inner().expect("events lock");
     assert!(events.iter().any(|event| matches!(
         event,
         bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmStarted { .. }
     )));
     assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::DataflowPrewarmFinished));
+    assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmStarted));
+    assert!(events.contains(&bonsai_sdk::WorkspaceOpenEvent::ValueFlowPrewarmFinished));
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -230,8 +271,8 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
         .expect("search")
         .is_empty());
 
-    assert!(project.dump().hir("handle_request").is_some());
-    assert!(project.dump().cfg("handle_request").is_some());
+    assert!(project.dump().hir("handle_request").expect("dump-hir").is_some());
+    assert!(project.dump().cfg("handle_request").expect("dump-cfg").is_some());
     assert!(!project.dump().callgraph().is_empty());
     assert!(!project.dump().edges(Default::default()).is_empty());
     assert!(matches!(
@@ -254,6 +295,7 @@ fn facade_browse_dump_export_security_trace_and_inspect_work() {
         .export()
         .native_json(bonsai_sdk::NativeExportOptions {
             full_propagations: true,
+            complete_chains: false,
         })
         .expect("native export");
     assert!(native["taint_graph"]["functions"]

@@ -14,6 +14,9 @@
       attribute:
       - JWT
       - decode
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: php.jwt.firebase_decode example
     code: |
@@ -24,7 +27,13 @@
       function example($input, $url, $id, $payload, $request) {
         JWT::decode($input);
       }
-  description: 'Firebase JWT::decode — flag missing/none alg whitelist. Merged aliases: php.jwt.alg_confusion.'
+  - name: literal jwt negative
+    code: "<?php\nuse firebase\\phpjwt;\nuse firebase\\phpjwt;\nuse firebase\\php-jwt;\n\
+      function example($input, $url, $id, $payload, $request) {\n  JWT::encode($input, $input, \"HS256\");\n\
+      }\n"
+    expect_no_match: true
+  description: 'Firebase JWT::decode — flag missing/none alg whitelist. Merged aliases:
+    php.jwt.alg_confusion.'
   aliases:
   - php.jwt.alg_confusion
   imports:
@@ -35,6 +44,7 @@
   enabled: true
   language: php
   tag: jwt
+  category: source-independent
   severity: critical
   packages:
   - firebase/php-jwt
@@ -46,6 +56,10 @@
       attribute:
       - JWT
       - encode
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: (?i)[\"\']none[\"\']
   match_examples:
   - name: php.jwt.firebase_encode_none example
     code: |
@@ -56,6 +70,11 @@
       function example($input, $url, $id, $payload, $request) {
         JWT::encode($input, $input, "none");
       }
+  - name: literal jwt negative
+    code: "<?php\nuse firebase\\phpjwt;\nuse firebase\\phpjwt;\nuse firebase\\php-jwt;\n\
+      function example($input, $url, $id, $payload, $request) {\n  JWT::encode($input,
+      $input, \"HS256\");\n}\n"
+    expect_no_match: true
   description: JWT::encode with alg='none'.
   imports:
   - firebase/phpjwt
@@ -76,6 +95,9 @@
       attribute:
       - Parser
       - parse
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: php.jwt.lcobucci_parser_parse example
     code: |
@@ -85,7 +107,12 @@
       function example($input, $url, $id, $payload, $request) {
         Parser::parse($input);
       }
-  description: lcobucci/jwt Parser::parse — flag if no subsequent validate/verify.
+  - name: literal jwt negative
+    code: "<?php\nuse lcobucci\\jwt;\nuse lcobucci\\jwt;\nfunction example($input,
+      $url, $id, $payload, $request) {\n  Parser::validate($input);\n}\n"
+    expect_no_match: true
+  description: lcobucci/jwt Parser::parse — flag if no subsequent
+    validate/verify.
   imports:
   - lcobucci\jwt
   - lcobucci
@@ -106,9 +133,12 @@
       attribute:
       - Validator
       - validate
-  description: Disabled — Validator is the check; flag missing SignedWith constraint.
+  description: Disabled — Validator is the check; flag missing SignedWith
+    constraint.
 - id: php.jwt.web_token_jws_loader
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: php
   tag: jwt
   severity: high
@@ -132,7 +162,9 @@
       function example($input, $url, $id, $payload, $request) {
         JWSLoader::loadAndVerifyWithKey($input);
       }
-  description: web-token JWSLoader — flag if no alg whitelist.
+  description: Disabled — requires a rulepack constraint that proves the unsafe
+    JWT configuration, not just the broad API shape. web-token JWSLoader — flag
+    if no alg whitelist.
   imports:
   - webtoken
   - webtoken/jwtframework
@@ -152,6 +184,9 @@
       attribute:
       - Token
       - deserialize
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: php.jwt.jose_php_decode example
     code: |
@@ -161,6 +196,10 @@
       function example($input, $url, $id, $payload, $request) {
         Token::deserialize($input);
       }
+  - name: literal jwt negative
+    code: "<?php\nuse emarref\\jwt;\nuse emarref\\jwt;\nfunction example($input, $url,
+      $id, $payload, $request) {\n  Token::serialize($input);\n}\n"
+    expect_no_match: true
   description: emarref Token::deserialize — parses without verification.
   imports:
   - emarref\jwt

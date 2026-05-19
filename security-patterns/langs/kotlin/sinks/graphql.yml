@@ -1,0 +1,75 @@
+- id: kotlin.graphql.graphql_execute_async
+  enabled: true
+  language: kotlin
+  tag: graphql-injection
+  severity: high
+  packages: ["com.graphql-java:graphql-java"]
+  imports:
+  - com
+  - com.graphqljava.graphqljava
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [GraphQL, executeAsync]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: graphql execute async tainted
+    code: |
+      import com.graphqljava.graphqljava.*
+      class App {
+        fun handle(input: String) {
+          GraphQL.executeAsync(input)
+        }
+      }
+    expect_match_text: [GraphQL.executeAsync]
+  - name: graphql execute async literal negative
+    code: |
+      import com.graphqljava.graphqljava.*
+      class App {
+        fun handle() {
+          GraphQL.executeAsync("{ viewer { id } }")
+        }
+      }
+    expect_no_match: true
+  description: "graphql-java GraphQL.executeAsync with a tainted document can drive unexpected resolver execution."
+
+- id: kotlin.graphql.executioninput_query
+  enabled: true
+  language: kotlin
+  tag: graphql-injection
+  severity: high
+  packages: ["com.graphql-java:graphql-java"]
+  imports:
+  - com
+  - com.graphqljava.graphqljava
+  cwe: [CWE-943]
+  match:
+    kind: call
+    callee:
+      attribute: [ExecutionInput, query]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: execution input query tainted
+    code: |
+      import com.graphqljava.graphqljava.*
+      class App {
+        fun handle(input: String) {
+          ExecutionInput.query(input)
+        }
+      }
+    expect_match_text: [ExecutionInput.query]
+  - name: execution input query literal negative
+    code: |
+      import com.graphqljava.graphqljava.*
+      class App {
+        fun handle() {
+          ExecutionInput.query("{ viewer { id } }")
+        }
+      }
+    expect_no_match: true
+  description: "ExecutionInput.query(tainted) constructs a dynamic GraphQL document for later execution."

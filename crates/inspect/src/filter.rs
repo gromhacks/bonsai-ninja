@@ -74,19 +74,18 @@ impl FactKindFilter {
     }
 }
 
-/// Stable, library-level mirror of `bonsai_common::Precision`. Used
-/// by frontends that want to filter `dump-edges` (or future SDK
-/// query results) by precision class without depending on the
-/// `bonsai_common` enum directly.
+/// Stable, library-level mirror of `bonsai_common::Precision`. Frontends
+/// may still parse broad legacy labels, but public flow/call surfaces
+/// are semantic-only: only exact and narrowed classes can match.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PrecisionFilter {
     /// `Precision::Exact` — structural facts; no approximation.
     Exact,
     /// `Precision::Narrowed` — single-candidate resolved call.
     Narrowed,
-    /// `Precision::OverApproximate` — multi-candidate / Virtual edges.
+    /// `Precision::OverApproximate` — diagnostic-only broad edges.
     OverApproximate,
-    /// `Precision::Unknown` — opaque; resolver has no guarantee.
+    /// `Precision::Unknown` — diagnostic-only opaque edges.
     Unknown,
 }
 
@@ -96,13 +95,14 @@ impl PrecisionFilter {
         use bonsai_common::Precision;
         matches!(
             (self, precision),
-            (Self::Exact, Precision::Exact)
-                | (Self::Narrowed, Precision::Narrowed)
-                | (Self::OverApproximate, Precision::OverApproximate)
-                | (Self::Unknown, Precision::Unknown),
+            (Self::Exact, Precision::Exact) | (Self::Narrowed, Precision::Narrowed),
         )
     }
 }
+
+#[cfg(test)]
+#[path = "filter_tests.rs"]
+mod tests;
 
 /// Active inspect filters. All needles are substring patterns matched
 /// against the visible tokens of a rendered chain (or the hit's own

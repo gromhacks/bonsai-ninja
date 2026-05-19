@@ -3,6 +3,7 @@
   enabled: true
   language: rust
   tag: cors
+  category: source-independent
   severity: medium
   packages: [tower_http]
   cwe: [CWE-942]

@@ -95,6 +95,7 @@
   enabled: true
   language: typescript
   tag: graphql-injection
+  category: source-independent
   severity: medium
   packages:
   - express-graphql
@@ -119,6 +120,7 @@
   enabled: true
   language: typescript
   tag: graphql-injection
+  category: source-independent
   severity: medium
   packages:
   - express-graphql
@@ -144,6 +146,7 @@
   enabled: true
   language: typescript
   tag: graphql-injection
+  category: source-independent
   severity: medium
   packages:
   - '@apollo/server'
@@ -169,6 +172,7 @@
   enabled: true
   language: typescript
   tag: graphql-injection
+  category: source-independent
   severity: medium
   packages:
   - graphql-yoga

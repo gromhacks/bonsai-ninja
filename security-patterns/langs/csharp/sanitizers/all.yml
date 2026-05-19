@@ -37,6 +37,8 @@
     kind: call
     callee:
       attribute: [HttpUtility, HtmlEncode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -751,6 +753,8 @@
     kind: call
     callee:
       attribute: [HttpUtility, UrlDecode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -765,6 +769,8 @@
     kind: call
     callee:
       attribute: [Uri, UnescapeDataString]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |

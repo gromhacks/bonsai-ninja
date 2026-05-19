@@ -7,6 +7,7 @@
 //! a refactor would otherwise compile and pass every behavioural
 //! test while violating one of the spec's non-negotiables.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -86,6 +87,108 @@ fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
     panic!("unterminated body for {name}");
 }
 
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("read dir entry under {}: {e}", dir.display()));
+        let path = entry.path();
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if matches!(file_name, ".git" | ".bonsai" | "target") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("file type for {}: {e}", path.display()));
+        if file_type.is_dir() {
+            collect_rs_files(&path, out);
+        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+fn production_analysis_complete_true_occurrences(root: &Path) -> BTreeSet<String> {
+    let mut files = Vec::new();
+    collect_rs_files(&root.join("crates"), &mut files);
+    let mut occurrences = BTreeSet::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file_name = file.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if file.components().any(|part| part.as_os_str() == "tests")
+            || file_name == "tests.rs"
+            || file_name.ends_with("_tests.rs")
+        {
+            continue;
+        }
+        let source = read(&file);
+        let mut pending_cfg_test = false;
+        let mut in_cfg_test_module = false;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("#[cfg(test)]") {
+                pending_cfg_test = true;
+                continue;
+            }
+            if pending_cfg_test && trimmed.starts_with("mod ") {
+                in_cfg_test_module = true;
+            }
+            pending_cfg_test = false;
+            if in_cfg_test_module {
+                continue;
+            }
+            if trimmed.contains("analysis_complete: true") || trimmed.contains("analysis_complete = true") {
+                occurrences.insert(format!("{rel}:{trimmed}"));
+            }
+        }
+    }
+    occurrences
+}
+
+/// User-visible analysis results may not casually hard-code completeness.
+/// The remaining production `analysis_complete=true` sites are reviewed
+/// local facts: adapter-emitted HIR, CFG built from that HIR, and pattern-only
+/// local rule matches. Taint/source/security flow findings derive completion
+/// from their analysis context instead.
+#[test]
+fn production_analysis_complete_true_sites_are_reviewed() {
+    let root = repo_root();
+    let occurrences = production_analysis_complete_true_occurrences(&root);
+    let expected = BTreeSet::from([
+        "crates/browse/src/dumps.rs:analysis_complete: true,".to_string(),
+        "crates/cfg/src/builder.rs:analysis_complete: true,".to_string(),
+        "crates/security/src/analysis/mod.rs:analysis_complete: true,".to_string(),
+    ]);
+    assert_eq!(
+        occurrences, expected,
+        "new production `analysis_complete=true` sites require explicit audit; derive completion from real analysis metadata unless the fact is exact-local"
+    );
+
+    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    assert!(
+        function_body(&security_analysis, "make_finding")
+            .contains("analysis_complete: context.analysis_incomplete_reasons.is_empty()"),
+        "taint/source security findings must derive completeness from analysis context"
+    );
+    assert!(
+        function_body(&security_analysis, "make_pattern_finding")
+            .contains("Pattern-only findings are exact local rule matches"),
+        "the pattern-only completeness exception must stay documented at the construction site"
+    );
+
+    let cfg = read(&root.join("crates/cfg/src/lib.rs"));
+    assert!(
+        function_body(&cfg, "default").contains("analysis_complete: false")
+            && function_body(&cfg, "analysis_complete_default").contains("false"),
+        "synthetic/default CFGs and deserialized legacy CFGs must not claim completion"
+    );
+}
+
 #[derive(Copy, Clone)]
 struct ImportContractCase {
     lang: &'static str,
@@ -127,7 +230,7 @@ const IMPORT_CONTRACT_CASES: &[ImportContractCase] = &[
         module: "dart:io",
         alias: None,
         original_name: None,
-        is_wildcard: false,
+        is_wildcard: true,
     },
     ImportContractCase {
         lang: "elixir",
@@ -1321,6 +1424,10 @@ fn engine_resolves_via_context_not_bare_name() {
             if path.extension().and_then(|s| s.to_str()) != Some("rs") {
                 continue;
             }
+            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if file_name == "tests.rs" || file_name.ends_with("_tests.rs") {
+                continue;
+            }
             let text = read(&path);
             // Strip #[cfg(test)] tail to ignore test-fixture lookups.
             let body = if let Some(idx) = text.find("#[cfg(test)]") {
@@ -1416,6 +1523,15 @@ fn flow_surfaces_do_not_reintroduce_loose_resolution_or_fabricated_paths() {
                 ".find_by_name(",
             ][..],
         ),
+        (
+            "crates/cli/src/commands/inspect.rs",
+            &[
+                "collect_callable_targets(",
+                "collect_callable_targets_with_context",
+                "bonsai_resolve::resolve_callable(",
+                ".find_by_name(",
+            ][..],
+        ),
     ];
     let mut violations = Vec::new();
     for (rel, forbidden) in checks {
@@ -1430,6 +1546,30 @@ fn flow_surfaces_do_not_reintroduce_loose_resolution_or_fabricated_paths() {
         violations.is_empty(),
         "flow-facing surfaces must use caller-context resolution and lineage evidence only:\n  {}",
         violations.join("\n  ")
+    );
+}
+
+#[test]
+fn class_constructor_lookup_preserves_ambiguity() {
+    let root = repo_root();
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    assert!(
+        workspace.contains("fn find_constructor_symbols(&self, class_sym: SymbolId) -> Vec<SymbolId>"),
+        "class-name constructor lookup must return every constructor candidate, not one arbitrary symbol"
+    );
+    let constructor_body = function_body(&workspace, "find_constructor_symbols");
+    assert!(
+        !constructor_body.contains(".first()"),
+        "find_constructor_symbols must not pick the first constructor candidate"
+    );
+    assert!(
+        constructor_body.contains("out.extend(") && constructor_body.contains("out.dedup()"),
+        "fallback constructor-method lookup must preserve and deduplicate every candidate"
+    );
+    let resolver_body = function_body(&workspace, "resolve_function_symbol");
+    assert!(
+        resolver_body.contains("find_constructor_symbols") && resolver_body.contains("AmbiguousSymbol"),
+        "resolve_function_symbol must feed all class-routed constructors into the ambiguity path"
     );
 }
 
@@ -1870,6 +2010,32 @@ fn receiver_method_dispatch_narrows_by_type() {
     );
 }
 
+/// Visibility is not name resolution. A context-aware resolver must
+/// never turn "the nearest public name in the workspace" into a
+/// semantic edge; unqualified names need same lexical scope,
+/// import/alias evidence, an explicit module qualifier, or
+/// receiver/type evidence.
+#[test]
+fn resolver_does_not_use_nearest_public_name_as_semantic_evidence() {
+    let root = repo_root();
+    let resolve_lib = root.join("crates").join("resolve").join("src").join("lib.rs");
+    let text = read(&resolve_lib);
+    let body = function_body(&text, "resolve_callable_with_context");
+    assert!(
+        body.contains("collect_caller_lexical_scope"),
+        "resolve_callable_with_context must restrict unqualified lookup to caller lexical scope"
+    );
+    assert!(
+        !body.contains("retain_closest_module"),
+        "resolve_callable_with_context must not choose a nearest public workspace name"
+    );
+    let class_body = function_body(&text, "resolve_class");
+    assert!(
+        class_body.contains("retain_caller_lexical_symbol_candidates"),
+        "resolve_class must restrict unqualified type lookup to caller lexical scope"
+    );
+}
+
 /// Method ownership must come from adapter-emitted semantic parent
 /// links. Span containment was a temporary fallback that can bind
 /// nested/local declarations to the wrong class in large workspaces.
@@ -1895,6 +2061,472 @@ fn method_dispatch_does_not_use_span_containment_as_parent_fallback() {
             "{rel}: declaring-class inference must not recover ownership by source span"
         );
     }
+}
+
+/// Public IDG-backed taint wrappers are evidence-producing APIs, so
+/// they must default to the semantic precision ceiling. Diagnostic
+/// callers can still opt into unscoped reachability through the
+/// explicit `*_with_max_precision(..., None, ...)` functions.
+#[test]
+fn public_idg_taint_wrappers_are_semantic_by_default() {
+    let root = repo_root();
+    let taint_reachable = read(&root.join("crates/taint/src/reachable.rs"));
+    for function in [
+        "source_seed_reaches_return_from_idg",
+        "entry_taint_call_records_from_idg",
+        "entry_taint_graph_from_idg",
+    ] {
+        let body = function_body(&taint_reachable, function);
+        assert!(
+            body.contains("Some(Precision::Narrowed)"),
+            "{function} must cap default IDG reachability at Precision::Narrowed"
+        );
+        assert!(
+            !body.contains("\n        None,\n"),
+            "{function} must not delegate to unscoped diagnostic reachability by default"
+        );
+    }
+}
+
+/// IDG query-service defaults are evidence-producing APIs. They must
+/// cap reachability at the semantic precision ceiling; unfiltered
+/// reachability is reserved for explicit diagnostic callers.
+#[test]
+fn public_idg_query_defaults_are_semantic_by_default() {
+    let root = repo_root();
+    let idg_service = read(&root.join("crates/idg/src/service.rs"));
+    for function in [
+        "forward_closure",
+        "tainted_call_args_in_closure",
+        "cross_call_edges_in_closure",
+        "cross_call_edges_in_reachable_nodes",
+    ] {
+        let body = function_body(&idg_service, function);
+        assert!(
+            body.contains("Some(SEMANTIC_MAX_PRECISION)"),
+            "{function} must cap default IDG reachability at the semantic precision ceiling"
+        );
+        assert!(
+            !body.contains(", None)") && !body.contains("(closure, None"),
+            "{function} must not delegate to unscoped diagnostic reachability by default"
+        );
+    }
+}
+
+/// Source-analysis and dump-taint are user-visible evidence surfaces.
+/// They may expose unresolved/capped conditions as incomplete
+/// metadata, but the flows they do emit must stay inside the semantic
+/// exact/narrowed precision scope.
+#[test]
+fn source_and_debug_flow_surfaces_are_semantic_only() {
+    let root = repo_root();
+
+    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let browse_taint = read(&root.join("crates/browse/src/taint.rs"));
+    let taint_inter = read(&root.join("crates/taint/src/inter/mod.rs"));
+    let taint_value_flow = read(&root.join("crates/taint/src/value_flow.rs"));
+    let workspace_trace = read(&root.join("crates/workspace/src/cross_module.rs"));
+    let trace_schema = read(&root.join("crates/trace/src/lib.rs"));
+    let cli_inspect = read(&root.join("crates/cli/src/commands/inspect.rs"));
+    let cli_dump = read(&root.join("crates/cli/src/commands/dump.rs"));
+    let cli_security = read(&root.join("crates/cli/src/commands/security.rs"));
+    let inspect_call_edges = read(&root.join("crates/inspect/src/call_edges.rs"));
+    let native_export = read(&root.join("crates/browse/src/native_export.rs"));
+
+    assert!(
+        taint_inter.contains("max_edge_precision: Some(Precision::Narrowed)"),
+        "InterTaintConfig::default must cap flow evidence at the semantic precision ceiling"
+    );
+
+    let value_forward_body = function_body(&taint_value_flow, "forward_closure");
+    assert!(
+        value_forward_body.contains("SEMANTIC_FLOW_MAX_PRECISION"),
+        "ValueFlowGraph::forward_closure must use the semantic precision ceiling by default"
+    );
+    let value_backward_body = function_body(&taint_value_flow, "backward_closure");
+    assert!(
+        value_backward_body.contains("SEMANTIC_FLOW_MAX_PRECISION"),
+        "ValueFlowGraph::backward_closure must use the semantic precision ceiling by default"
+    );
+    let value_intra_body = function_body(&taint_value_flow, "build_intra_entry_graph");
+    assert!(
+        value_intra_body.contains("type FlowEnv")
+            && value_intra_body.contains("fn merge_env")
+            && value_intra_body.contains("FlowEvent::Branch")
+            && value_intra_body.contains("FlowEvent::Call")
+            && value_intra_body.contains("ValueFlowNodeKind::CallArg")
+            && value_intra_body.contains("ValueFlowNodeKind::Return"),
+        "value-flow graph construction must track definition environments, merge branch definitions, and emit call-site/return nodes"
+    );
+    assert!(
+        !value_intra_body.contains(".take(1)"),
+        "value-flow return/call lineage must not pick one arbitrary same-name definition"
+    );
+    let value_result_body = function_body(&taint_value_flow, "build_graph_from_result");
+    let value_idg_body = function_body(&taint_value_flow, "build_graph_from_idg");
+    assert!(
+        value_result_body.contains("find_call_arg_node") && value_idg_body.contains("find_call_arg_node"),
+        "cross-call value-flow edges must start from concrete call-site argument nodes when available"
+    );
+
+    let source_body = function_body(&security_analysis, "run_source_analysis_with_phase_progress");
+    assert!(
+        source_body.contains("max_edge_precision: Some(Precision::Narrowed)"),
+        "security source-analysis must build source-seeded graphs with a semantic precision ceiling"
+    );
+    assert!(
+        source_body.contains("if !precision.is_semantic()"),
+        "security source-analysis must drop diagnostic precision classes before emitting candidates"
+    );
+
+    let trace_call_body = function_body(&workspace_trace, "emit_call");
+    assert!(
+        trace_call_body.contains("StepKind::Diagnostic")
+            && trace_call_body.contains("unresolved-call:")
+            && trace_call_body.contains("ambiguous-call:"),
+        "trace must expose unresolved or ambiguous calls as incomplete diagnostic metadata"
+    );
+    assert!(
+        !trace_call_body.contains("Precision::Unknown"),
+        "trace must not emit unresolved calls as unknown-precision call evidence"
+    );
+    let trace_finalize_body = function_body(&trace_schema, "finalize");
+    assert!(
+        trace_finalize_body.contains("public_semantic_step"),
+        "trace finalization must normalize raw steps through the semantic public boundary"
+    );
+    let trace_public_step_body = function_body(&trace_schema, "public_semantic_step");
+    assert!(
+        trace_public_step_body.contains("!raw_step.precision.is_semantic()")
+            && trace_public_step_body.contains("TraceStepKind::Diagnostic")
+            && trace_public_step_body.contains("diagnostic-precision-step:")
+            && trace_public_step_body.contains("precision: Precision::Exact"),
+        "trace must suppress diagnostic precision as incomplete metadata, not public flow evidence"
+    );
+
+    let inspect_render_body = function_body(&cli_inspect, "render_flow_with_cached_call_spans");
+    assert!(
+        inspect_render_body.contains("if !precision.is_semantic()")
+            && inspect_render_body.contains("return None;"),
+        "inspect must drop diagnostic-precision chains before rendering public flow evidence"
+    );
+    assert!(
+        cli_inspect.contains("analysis_complete: bool")
+            && cli_inspect.contains("analysis_incomplete_reasons: Vec<String>")
+            && cli_inspect.contains("refresh_inspect_completeness")
+            && cli_inspect.contains("inspect occurrence flow evidence capped by")
+            && cli_inspect.contains("inspect decl flow evidence capped by")
+            && cli_inspect.contains("inspect hit list capped by"),
+        "inspect must expose top-level completeness metadata for capped hit/flow evidence"
+    );
+    let inspect_call_span_body = function_body(&inspect_call_edges, "find_call_span_to_func");
+    assert!(
+        inspect_call_span_body.contains("edge.to == target_func && edge.precision.is_semantic()"),
+        "inspect call-site rendering must use semantic callgraph edge spans only"
+    );
+    assert!(
+        !inspect_call_span_body.contains("find_call_span_resolved")
+            && !inspect_call_span_body.contains("collect_local_callable_bindings"),
+        "inspect call-site rendering must not fallback to re-resolving call names"
+    );
+    let inspect_uncached_call_span_body =
+        function_body(&inspect_call_edges, "find_call_span_to_func_uncached");
+    assert!(
+        inspect_uncached_call_span_body.contains("edge.to == target_func && edge.precision.is_semantic()")
+            && !inspect_uncached_call_span_body.contains("find_call_span_resolved")
+            && !inspect_uncached_call_span_body.contains("collect_local_callable_bindings"),
+        "uncached inspect call-site rendering must use semantic callgraph edge spans only"
+    );
+    let dump_edges_body = function_body(&cli_dump, "cmd_dump_edges");
+    assert!(
+        dump_edges_body.contains("PrecisionFilter::OverApproximate | PrecisionFilter::Unknown")
+            && dump_edges_body.contains("semantic-only")
+            && dump_edges_body.find("PrecisionFilter::OverApproximate | PrecisionFilter::Unknown")
+                < dump_edges_body.find("open_project(root)?"),
+        "dump-edges must reject diagnostic precision filters before opening/analyzing the workspace"
+    );
+    let security_precision_body = function_body(&cli_security, "max_precision_from_cli");
+    assert!(
+        security_precision_body.contains("PrecisionFilter::OverApproximate | PrecisionFilter::Unknown")
+            && security_precision_body.contains("semantic-only")
+            && security_precision_body.contains("PrecisionFilter::Narrowed) | None => Precision::Narrowed"),
+        "security taint-analysis must reject diagnostic precision filters and default to narrowed semantic precision"
+    );
+    let export_callgraph_body = function_body(&native_export, "export_structural_callgraph");
+    assert!(
+        export_callgraph_body.contains("edge.precision.is_semantic()"),
+        "native export structural callgraph must emit semantic call edges only"
+    );
+    let export_taint_call_edges_body = function_body(&native_export, "export_taint_call_edges");
+    assert!(
+        export_taint_call_edges_body.contains("edge.precision.is_semantic()"),
+        "native export taint call_edges must emit semantic call edges only"
+    );
+
+    let dump_taint_context_body = function_body(&browse_taint, "workspace_has_callable_named_in_context");
+    assert!(
+        dump_taint_context_body.contains("resolve_callable_with_context")
+            && dump_taint_context_body.contains("ResolveContext::new"),
+        "dump-taint unresolved-call completeness checks must use caller-context resolution"
+    );
+    assert!(
+        !dump_taint_context_body.contains("resolve_callable(global"),
+        "dump-taint completeness checks must not use contextless workspace-wide callable lookup"
+    );
+
+    let dump_taint_body = function_body(&browse_taint, "dump_taint");
+    assert!(
+        dump_taint_body.contains("forward_closure_with_max_precision")
+            && dump_taint_body.contains("Some(SEMANTIC_FLOW_MAX_PRECISION)"),
+        "dump-taint must compute its seed closure inside the semantic precision scope"
+    );
+    assert!(
+        dump_taint_body.contains("cross_call_edges_in_reachable_nodes_with_max_precision")
+            && dump_taint_body.contains("Some(SEMANTIC_FLOW_MAX_PRECISION)"),
+        "dump-taint must filter cross-call evidence to semantic precision"
+    );
+    assert!(
+        !dump_taint_body.contains("with_max_precision(&seed_nodes, None")
+            && !dump_taint_body.contains("with_max_precision(\n            &seed_nodes,\n            None"),
+        "dump-taint must not request unscoped diagnostic reachability"
+    );
+
+    let make_finding_body = function_body(&security_analysis, "make_finding");
+    assert!(
+        make_finding_body.contains("analysis_complete: context.analysis_incomplete_reasons.is_empty()"),
+        "security findings must not hard-code analysis_complete=true"
+    );
+    assert!(
+        make_finding_body.contains("analysis_incomplete_reasons: context.analysis_incomplete_reasons"),
+        "security findings must carry scoped incomplete reasons into the report"
+    );
+    assert!(
+        security_analysis.contains("GraphUnresolvedCallIndex")
+            && security_analysis.contains("reasons_for_terminal_call(call)")
+            && !security_analysis.contains("graph_incomplete_reasons"),
+        "security findings must scope unresolved-call completeness to the terminal evidence path, not the whole source graph"
+    );
+    let merge_finding_body = function_body(&security_analysis, "merge_finding_into_group");
+    assert!(
+        merge_finding_body.contains("merge_analysis_completeness"),
+        "combined security findings must preserve incomplete member-finding metadata"
+    );
+
+    let export_body = read(&root.join("crates/browse/src/native_export.rs"));
+    let chain_limits_body = function_body(&export_body, "for_complete");
+    assert!(
+        chain_limits_body.contains("max_chains_per_target: usize::MAX")
+            && chain_limits_body.contains("max_entry_probes: usize::MAX")
+            && !chain_limits_body.contains("usize::MAX / 16"),
+        "native export --complete-chains/--all must not hide an audit path cap behind complete mode"
+    );
+    let main_body = read(&root.join("crates/cli/src/main.rs"));
+    assert!(
+        main_body.contains("(usize::MAX, usize::MAX, usize::MAX)") && !main_body.contains("usize::MAX / 16"),
+        "inspect --all must pass uncapped max_flows/max_entry_probes/max_hits"
+    );
+    let chain_enumerator_body = read(&root.join("crates/callgraph/src/chains.rs"));
+    assert!(
+        chain_enumerator_body.contains("visited_budget = visited_budget.saturating_add(1)")
+            && chain_enumerator_body.contains("max_probes.saturating_mul(16)"),
+        "chain enumeration must safely support usize::MAX as the uncapped probe budget"
+    );
+    assert!(
+        export_body.contains("use_compressed_complete_chains")
+            && export_body.contains("compressed_callgraph")
+            && export_body.contains("flow_chains_mode")
+            && export_body.contains("chains_mode")
+            && export_body.contains("flow_id_labels_mode"),
+        "native export must use an explicit compressed semantic callgraph mode for dense complete exports"
+    );
+}
+
+/// Dependency manifests and lockfiles can affect semantic import/call
+/// resolution without changing source files. Cache freshness must scan those
+/// metadata files consistently across sidecars, SDK export cache, and CLI page
+/// cache, and it must not miss deeply nested monorepo packages.
+#[test]
+fn cache_dependency_metadata_fingerprints_use_shared_unbounded_walk() {
+    let root = repo_root();
+    let common_dependency_metadata = read(&root.join("crates/common/src/dependency_metadata.rs"));
+    let workspace_cache = read(&root.join("crates/workspace/src/cache_fingerprint.rs"));
+    let sdk = read(&root.join("crates/sdk/src/lib.rs"));
+    let page_cache = read(&root.join("crates/cli/src/page_cache.rs"));
+    let security_deps = read(&root.join("crates/security/src/deps.rs"));
+
+    let walk_body = function_body(&common_dependency_metadata, "walk_dependency_metadata_files");
+    assert!(
+        !walk_body.contains("depth"),
+        "dependency metadata traversal must not be depth-limited; deep manifests affect semantics"
+    );
+    assert!(
+        workspace_cache.contains("walk_dependency_metadata_files(root")
+            || workspace_cache.contains("walk_dependency_metadata_files(root,"),
+        "workspace sidecar fingerprints must use the shared dependency metadata walker"
+    );
+    assert!(
+        sdk.contains("collect_dependency_metadata_fingerprints(root)")
+            && page_cache.contains("collect_dependency_metadata_fingerprints(root)"),
+        "SDK export and CLI page caches must use the shared dependency metadata collector"
+    );
+    assert!(
+        !workspace_cache.contains(", 4,") && !sdk.contains(", 4,") && !page_cache.contains(", 4,"),
+        "cache dependency metadata fingerprints must not reintroduce a depth-4 cap"
+    );
+
+    let deps_walk_body = function_body(&security_deps, "walk_dir");
+    assert!(
+        !deps_walk_body.contains("depth"),
+        "security dependency inventory must not miss deep manifests behind a depth cap"
+    );
+    assert!(
+        function_body(&security_deps, "scan_manifest_files").contains("manifest_target_names"),
+        "security dependency inventory must bound memory with manifest-name filtering, not traversal depth"
+    );
+}
+
+/// Persisted analysis caches are performance artifacts only. Every
+/// sidecar that can replay structural or flow facts must reject stale
+/// data when source content, dependency metadata, matcher policy, or
+/// rule/config semantics change; rendered/export caches must also bind
+/// to rulepack content and pipeline/build versions.
+#[test]
+fn persisted_analysis_caches_bind_all_freshness_inputs() {
+    let root = repo_root();
+    let dataflow = read(&root.join("crates/workspace/src/dataflow.rs"));
+    let value_flow = read(&root.join("crates/workspace/src/value_flow.rs"));
+    let flow_ids = read(&root.join("crates/workspace/src/flow_ids.rs"));
+    let taint_index = read(&root.join("crates/workspace/src/taint_index.rs"));
+    let callgraph_sidecar = read(&root.join("crates/workspace/src/callgraph_sidecar.rs"));
+    let security_analysis = read(&root.join("crates/security/src/analysis/mod.rs"));
+    let sdk = read(&root.join("crates/sdk/src/lib.rs"));
+    let page_cache = read(&root.join("crates/cli/src/page_cache.rs"));
+
+    for (label, source, function) in [
+        ("dataflow", dataflow.as_str(), "dataflow_pipeline_hash"),
+        ("value-flow", value_flow.as_str(), "value_flow_pipeline_hash"),
+        ("flow-ids", flow_ids.as_str(), "flow_ids_pipeline_hash"),
+    ] {
+        let body = function_body(source, function);
+        assert!(
+            body.contains("MATCHER_POLICY_FINGERPRINT")
+                && body.contains("workspace_content_fingerprint(db)")
+                && body.contains("dependency_metadata_fingerprint_for_sidecar(sidecar_path)"),
+            "{label} factstore pipeline hash must bind matcher policy, source content, and dependency metadata"
+        );
+    }
+
+    let taint_graph_body = function_body(&taint_index, "taint_graph_pipeline_hash");
+    assert!(
+        taint_graph_body.contains("MATCHER_POLICY_FINGERPRINT")
+            && taint_graph_body.contains("workspace_content_fingerprint(db)")
+            && taint_graph_body.contains("dependency_metadata_fingerprint_for_sidecar(sidecar_path)")
+            && taint_graph_body.contains("config_fingerprint"),
+        "taint graph sidecar must bind matcher policy, source content, dependency metadata, and rule/config fingerprint"
+    );
+    let taint_config_body = function_body(&security_analysis, "taint_graph_config_fingerprint");
+    assert!(
+        taint_config_body.contains("pack.all_rules()")
+            && taint_config_body.contains("rule.enabled")
+            && taint_config_body.contains("serde_json::to_string(rule)"),
+        "taint graph config fingerprint must include enabled rulepack content, not just rule ids"
+    );
+
+    assert!(
+        callgraph_sidecar.contains("matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT")
+            && callgraph_sidecar.contains("dependency_metadata_fingerprint_for_sidecar(path)")
+            && callgraph_sidecar.contains("fnv1a_bytes64(snapshot.text.as_bytes())")
+            && function_body(&callgraph_sidecar, "load_callgraph_sidecar")
+                .contains("snap.matcher_policy_fingerprint != MATCHER_POLICY_FINGERPRINT")
+            && function_body(&callgraph_sidecar, "load_callgraph_sidecar")
+                .contains("snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path)")
+            && function_body(&callgraph_sidecar, "load_callgraph_sidecar").contains("current.len() != snap.files.len()"),
+        "callgraph sidecar must validate matcher policy, dependency metadata, and the complete source file set"
+    );
+
+    let export_metadata_body = function_body(&sdk, "build_export_cache_metadata");
+    assert!(
+        export_metadata_body.contains("build_fingerprint")
+            && export_metadata_body.contains("pipeline_version")
+            && export_metadata_body.contains("MATCHER_POLICY_FINGERPRINT")
+            && export_metadata_body.contains("workspace_sources")
+            && export_metadata_body.contains("dependency_metadata_fingerprint(root)")
+            && export_metadata_body.contains("rulepack_content_fingerprint"),
+        "export cache metadata must bind build/pipeline version, matcher policy, source content, dependency metadata, and rulepack content"
+    );
+    assert!(
+        page_cache.contains("binary_version")
+            && page_cache.contains("matcher_policy_fingerprint")
+            && page_cache.contains("workspace_fingerprint")
+            && page_cache.contains("dependency_metadata_fingerprint")
+            && page_cache.contains("rulepack_fingerprint")
+            && function_body(&page_cache, "read_cache").contains("current_exe_is_newer_than_cache(&metadata)"),
+        "CLI page cache metadata must bind binary version, executable freshness, matcher policy, source content, dependency metadata, and rulepack content"
+    );
+}
+
+/// `bonsai-ninja index <workspace>` is the cheap structural pass from
+/// `docs/goal.md`, not a hidden full-workspace exact dataflow solve.
+/// Whole-workspace prewarm remains available, but only behind an
+/// explicit opt-in flag or full-prewarm SDK option.
+#[test]
+fn default_index_path_stays_structural_without_eager_dataflow_prewarm() {
+    let root = repo_root();
+    let args = read(&root.join("crates/cli/src/args.rs"));
+    let main = read(&root.join("crates/cli/src/main.rs"));
+    let diagnostics = read(&root.join("crates/cli/src/commands/diagnostics.rs"));
+    let commands_mod = read(&root.join("crates/cli/src/commands/mod.rs"));
+    let workspace = read(&root.join("crates/workspace/src/lib.rs"));
+    let cache_cmd = read(&root.join("crates/cli/src/commands/cache.rs"));
+
+    assert!(
+        args.contains("By default this is a structural parse/index pass only")
+            && args.contains("prewarm_dataflow: bool")
+            && args.contains("#[arg(long)]\n        prewarm_dataflow: bool"),
+        "index CLI must document structural default and expose prewarm_dataflow only as an explicit flag"
+    );
+
+    let index_body = function_body(&diagnostics, "cmd_index");
+    assert!(
+        index_body.contains("if prewarm_dataflow")
+            && index_body.contains("open_project_dataflow_prewarm(root)?")
+            && index_body.contains("open_project_parse_only(root)?"),
+        "cmd_index must route default runs through parse-only open and reserve dataflow prewarm for the explicit flag"
+    );
+    assert!(
+        main.contains(
+            "prewarm_dataflow,\n        } => cmd_index(&workspace, watch, interval_ms, prewarm_dataflow)"
+        ),
+        "CLI dispatch must pass only the parsed index prewarm flag into cmd_index"
+    );
+
+    let parse_only_body = function_body(&workspace, "parse_only");
+    assert!(
+        parse_only_body.contains("load_dataflow_sidecar: false")
+            && parse_only_body.contains("prewarm_dataflow: false")
+            && parse_only_body.contains("save_dataflow_sidecar: false")
+            && parse_only_body.contains("load_value_flow_sidecar: false")
+            && parse_only_body.contains("prewarm_value_flow: false")
+            && parse_only_body.contains("prewarm_flow_ids: false"),
+        "WorkspaceOpenOptions::parse_only must not load or prewarm semantic analysis sidecars"
+    );
+    assert!(
+        function_body(&commands_mod, "open_project_parse_only").contains("OpenOptions::parse_only()"),
+        "CLI parse-only open helper must use WorkspaceOpenOptions::parse_only"
+    );
+    assert!(
+        function_body(&commands_mod, "open_project_dataflow_prewarm")
+            .contains("options.prewarm_dataflow = true")
+            && function_body(&commands_mod, "open_project_dataflow_prewarm")
+                .contains("options.save_dataflow_sidecar = true"),
+        "full dataflow prewarm helper must remain explicit and visibly side-effectful"
+    );
+    assert!(
+        cache_cmd.contains("Open structurally, then refresh bounded reusable")
+            && cache_cmd.contains("Do not route through a full")
+            && cache_cmd.contains("workspace prewarm path here"),
+        "cache rebuild must not regress to full-workspace taint/value-flow/flow-id prewarm"
+    );
 }
 
 /// Receiver type enrichment must run after each adapter has finished
@@ -1926,7 +2558,6 @@ fn db_applies_receiver_type_enrichment_centrally() {
 fn typed_lang_adapters_emit_decl_type_aliases() {
     use bonsai_workspace::Workspace;
     use std::collections::BTreeMap;
-    let root = repo_root();
     // Per-lang fixture: language id, file extension, source carrying
     // a parameter with a typed annotation that the adapter MUST
     // record as a TypeAliasBinding (`name → Type`).
@@ -1960,7 +2591,6 @@ fn typed_lang_adapters_emit_decl_type_aliases() {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     for (lang, file, src) in cases.iter().copied() {
-        let _ = lang; // silence unused warning if no adapter found
         let ws_dir = std::env::temp_dir().join(format!("bonsai-conf-typealiases-{lang}-{stamp}"));
         let _ = std::fs::remove_dir_all(&ws_dir);
         std::fs::create_dir_all(&ws_dir).unwrap_or_else(|e| panic!("mkdir {}: {e}", ws_dir.display()));
@@ -1993,5 +2623,4 @@ fn typed_lang_adapters_emit_decl_type_aliases() {
         "adapters missing Decl.type_aliases extraction:\n{}",
         violations.values().cloned().collect::<Vec<_>>().join("\n")
     );
-    let _ = root; // suppress unused-variable warning
 }

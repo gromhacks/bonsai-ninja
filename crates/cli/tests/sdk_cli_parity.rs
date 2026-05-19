@@ -915,12 +915,26 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
         assert_json_eq(
             &format!("{lang} dump-hir"),
             run_cli(&["dump-hir", ws_arg, entry]),
-            serde_json::to_value(project.dump().hir(entry).expect("sdk dump-hir")).expect("hir json"),
+            serde_json::to_value(
+                project
+                    .dump()
+                    .hir(entry)
+                    .expect("sdk dump-hir")
+                    .expect("sdk dump-hir found"),
+            )
+            .expect("hir json"),
         );
         assert_json_eq(
             &format!("{lang} dump-cfg"),
             run_cli(&["dump-cfg", ws_arg, entry]),
-            serde_json::to_value(project.dump().cfg(entry).expect("sdk dump-cfg")).expect("cfg json"),
+            serde_json::to_value(
+                project
+                    .dump()
+                    .cfg(entry)
+                    .expect("sdk dump-cfg")
+                    .expect("sdk dump-cfg found"),
+            )
+            .expect("cfg json"),
         );
         assert_json_rows_eq(
             &format!("{lang} dump-callgraph"),
@@ -968,6 +982,9 @@ fn dump_and_trace_commands_cli_json_match_sdk_for_every_language() {
                         .collect()
                 }) {
                 bonsai_sdk::ResolveOutcome::Trace(trace) => trace,
+                bonsai_sdk::ResolveOutcome::FileContextNotFound { needle } => {
+                    panic!("{lang} sdk dump-resolve file context not found: {needle}")
+                }
                 bonsai_sdk::ResolveOutcome::CandidateNotFound => {
                     panic!("{lang} sdk dump-resolve candidate not found")
                 }
@@ -1084,11 +1101,12 @@ fn native_export_json_cli_matches_sdk_for_every_language() {
         let ws_path = lang_workspace_path(lang);
         let ws_arg = ws_path.to_str().expect("workspace path utf8");
 
-        let cli = run_cli(&["export", ws_arg, "--full-propagations"]);
+        let cli = run_cli(&["export", ws_arg]);
         let sdk = project
             .export()
             .native_json(bonsai_sdk::NativeExportOptions {
-                full_propagations: true,
+                full_propagations: false,
+                complete_chains: false,
             })
             .unwrap_or_else(|err| panic!("{lang} sdk native export: {err}"));
         assert_json_eq(&format!("{lang} native export"), cli, sdk);

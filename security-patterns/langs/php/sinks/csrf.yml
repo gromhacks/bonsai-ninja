@@ -2,6 +2,7 @@
   enabled: true
   language: php
   tag: csrf
+  category: source-independent
   severity: medium
   packages:
   - wordpress

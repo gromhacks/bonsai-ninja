@@ -1,4 +1,4 @@
-use bonsai_lang_api::LanguageRegistry;
+use bonsai_lang_api::{DeclKind, LanguageRegistry, Visibility};
 use bonsai_security::rule::{
     ArgRegexSpec, ConstraintKind, KeywordArgEqualsSpec, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
     RuleTarget, Severity,
@@ -93,6 +93,17 @@ fn lua_ws(source: &str) -> Workspace {
     let registry = bonsai_adapters::all_languages_registry();
     let ws = Workspace::new(registry);
     ws.vfs().write("app.lua".to_string(), Arc::<str>::from(source));
+    for file in ws.vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+        let _ = ws.db().import_index(file);
+    }
+    ws
+}
+
+fn solidity_ws(source: &str) -> Workspace {
+    let registry = bonsai_adapters::all_languages_registry();
+    let ws = Workspace::new(registry);
+    ws.vfs().write("App.sol".to_string(), Arc::<str>::from(source));
     for file in ws.vfs().all_files() {
         let _ = ws.db().decl_index(file);
         let _ = ws.db().import_index(file);
@@ -349,6 +360,46 @@ def handler(user_input):
         hit.line, 4,
         "param source should point at first body read, not function declaration"
     );
+}
+
+#[test]
+fn param_rule_decl_kind_and_visibility_filters_exclude_non_entry_shapes() {
+    let ws = solidity_ws(
+        r#"
+pragma solidity ^0.8.19;
+
+contract App {
+    modifier audit(bytes calldata data) {
+        sink(data);
+        _;
+    }
+
+    function handle(bytes calldata data) external audit(data) {
+        sink(data);
+    }
+
+    function helper(bytes calldata data) internal {
+        sink(data);
+    }
+
+    function sink(bytes calldata) internal {}
+}
+"#,
+    );
+    let mut rule = target_name_rule("solidity.test.public_method_data_param", MatchKind::Param, "data");
+    rule.language = "solidity".to_string();
+    if let Some(target) = rule.match_spec.target.as_mut() {
+        target.decl_kind_in = vec![DeclKind::Method];
+        target.visibility_in = vec![Visibility::Public];
+    }
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        hits.len(),
+        1,
+        "only the public/external contract method param should match: {hits:?}"
+    );
+    assert_eq!(hits[0].enclosing_fn.as_deref(), Some("handle"));
 }
 
 fn signature(rows: &[bonsai_security::RuleMatch]) -> BTreeSet<(String, String, u32, String, Option<String>)> {

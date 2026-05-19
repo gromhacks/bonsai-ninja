@@ -2,6 +2,7 @@
   enabled: true
   language: javascript
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-295
@@ -17,6 +18,7 @@
   enabled: true
   language: javascript
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-295
@@ -32,6 +34,7 @@
   enabled: true
   language: javascript
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - https
@@ -56,6 +59,7 @@
   enabled: true
   language: javascript
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - request
@@ -77,6 +81,7 @@
   enabled: true
   language: javascript
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - tls
@@ -114,6 +119,7 @@
   enabled: true
   language: javascript
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - grpc
@@ -162,6 +168,7 @@
   enabled: true
   language: javascript
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - axios

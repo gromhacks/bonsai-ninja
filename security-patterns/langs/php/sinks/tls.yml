@@ -2,6 +2,7 @@
   enabled: true
   language: php
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - guzzlehttp/guzzle
@@ -28,6 +29,7 @@
   enabled: true
   language: php
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-295
@@ -43,6 +45,7 @@
   enabled: true
   language: php
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-295
@@ -58,6 +61,7 @@
   enabled: true
   language: php
   tag: weak-tls
+  category: source-independent
   severity: medium
   cwe:
   - CWE-295

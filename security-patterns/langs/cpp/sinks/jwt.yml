@@ -10,6 +10,9 @@
     kind: call
     callee:
       attribute: [jwt, decode]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -20,12 +23,19 @@
         const char *query = arg;
         jwt::decode(arg);
       }
-  description: "jwt::decode (jwt-cpp / cpp-jwt) — flag when verify() is not called on returned token."
+  - name: literal jwt negative
+    code: "#include <jwt-cpp.h>\nvoid example() {\n  const char *arg = \"tainted\"\
+      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  jwt::decode(arg);\n\
+      }\n"
+    expect_no_match: true
+  description: "jwt::decode (jwt-cpp / cpp-jwt) — flag when verify() is not called
+    on returned token."
 
 - id: cpp.jwt.jwtcpp_verifier_algnone
   enabled: true
   language: cpp
   tag: jwt
+  category: source-independent
   severity: critical
   packages: [jwt-cpp]
   cwe: [CWE-347]
@@ -56,6 +66,9 @@
     kind: call
     callee:
       name: l8w8jwt_decode
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -66,4 +79,9 @@
         const char *query = arg;
         l8w8jwt_decode(arg);
       }
+  - name: literal jwt negative
+    code: "#include <l8w8jwt.h>\nvoid example() {\n  const char *arg = \"tainted\"\
+      ;\n  const char *fmt = arg;\n  const char *query = arg;\n  l8w8jwt_decode(arg);\n\
+      }\n"
+    expect_no_match: true
   description: "l8w8jwt_decode — verify alg allow-list is supplied in params."

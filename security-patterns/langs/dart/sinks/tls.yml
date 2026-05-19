@@ -21,6 +21,7 @@
   enabled: true
   language: dart
   tag: weak-tls
+  category: source-independent
   severity: critical
   packages: [dio]
   cwe: [CWE-295]
@@ -48,6 +49,7 @@
   enabled: true
   language: dart
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:

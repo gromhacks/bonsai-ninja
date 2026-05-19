@@ -3,16 +3,20 @@
 //! `dump-ast`). The data extraction lives here; the CLI binary
 //! renders the structured results.
 
-use crate::common::collect_callees;
+use crate::common::format_span;
 use bonsai_callgraph::ResolvedCallGraph;
+use bonsai_common::FuncId;
 use bonsai_lang_api::{Decl, DeclKind, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
+use std::path::Path;
 
 /// `dump-hir` payload: the decl header + its full flow-event tree.
 /// Mirrors the JSON the CLI emits.
 #[derive(Serialize, Clone, Debug)]
 pub struct HirDump {
+    pub analysis_complete: bool,
+    pub analysis_incomplete_reasons: Vec<String>,
     pub name: String,
     pub kind: String,
     pub params: Vec<String>,
@@ -24,6 +28,10 @@ impl HirDump {
     /// Lift a [`Decl`] into the externally-serialised HIR shape.
     fn from_decl(decl: &Decl) -> Self {
         Self {
+            // `dump-hir` is a local structural dump of the adapter-emitted
+            // declaration body; no resolver fan-out or flow solve is involved.
+            analysis_complete: true,
+            analysis_incomplete_reasons: Vec::new(),
             name: decl.name.clone(),
             kind: format!("{:?}", decl.kind).to_lowercase(),
             params: decl.params.clone(),
@@ -33,23 +41,69 @@ impl HirDump {
     }
 }
 
-/// Fetch the HIR (`flow_events` tree + decl header) for the
-/// nearest function/method/constructor named `symbol`. Returns
-/// `None` when no callable decl matches.
-pub fn dump_hir(ws: &Workspace, symbol: &str) -> Option<HirDump> {
-    nearest_callable(ws, symbol).map(|d| HirDump::from_decl(&d))
+#[derive(Serialize, Clone, Debug)]
+pub struct DumpCallableCandidate {
+    pub func_id: u32,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub disambiguator: String,
 }
 
-/// Build the basic-block CFG for the nearest function/method/
-/// constructor named `symbol`. Returns `None` when no callable
-/// decl matches.
-pub fn dump_cfg(ws: &Workspace, symbol: &str) -> Option<bonsai_cfg::Cfg> {
-    let decl = nearest_callable(ws, symbol)?;
-    Some(bonsai_cfg::build_cfg_from_flow(&decl.name, &decl.flow_events))
+#[derive(Clone, Debug)]
+pub struct DumpLookupError {
+    pub symbol: String,
+    pub candidates: Vec<DumpCallableCandidate>,
+}
+
+impl std::fmt::Display for DumpLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "dump target `{}` is ambiguous ({} callable decls). Use path:name or path:line:name.",
+            self.symbol,
+            self.candidates.len()
+        )?;
+        for candidate in self.candidates.iter().take(12) {
+            writeln!(
+                f,
+                "  {}:{}:{} {}  disambiguator: {}",
+                candidate.file, candidate.line, candidate.column, candidate.name, candidate.disambiguator
+            )?;
+        }
+        if self.candidates.len() > 12 {
+            writeln!(f, "  ... {} more candidate(s)", self.candidates.len() - 12)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for DumpLookupError {}
+
+/// Fetch the HIR (`flow_events` tree + decl header) for one callable.
+/// Bare names must resolve to exactly one callable; use `path:name` or
+/// `path:line:name` when a workspace has same-named functions.
+pub fn dump_hir(ws: &Workspace, symbol: &str) -> Result<Option<HirDump>, DumpLookupError> {
+    resolve_single_callable(ws, symbol).map(|decl| decl.map(|d| HirDump::from_decl(&d)))
+}
+
+/// Build the basic-block CFG for one callable. Bare names must resolve
+/// to exactly one callable; use `path:name` or `path:line:name` when a
+/// workspace has same-named functions.
+pub fn dump_cfg(ws: &Workspace, symbol: &str) -> Result<Option<bonsai_cfg::Cfg>, DumpLookupError> {
+    let Some(decl) = resolve_single_callable(ws, symbol)? else {
+        return Ok(None);
+    };
+    Ok(Some(bonsai_cfg::build_cfg_from_flow(
+        &decl.name,
+        &decl.flow_events,
+    )))
 }
 
 /// One row in the `dump-callgraph` table: a function with its
-/// caller-in count and outgoing-callee count.
+/// semantic caller-function count and semantic outgoing-callee count.
 #[derive(Serialize, Clone, Debug)]
 pub struct CallgraphRow {
     pub function: String,
@@ -75,19 +129,13 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
         .flat_map_iter(|&file| {
             let mut per_file: Vec<CallgraphRow> = Vec::new();
             for func_decl in global.functions_in(file) {
-                // Outgoing callees come from the decl's flow events,
-                // de-duped on textual name (the resolver merges
-                // virtuals into a single edge anyway).
-                let mut outgoing: Vec<String> = Vec::new();
-                collect_callees(&func_decl.flow_events, &mut outgoing);
-                outgoing.sort();
-                outgoing.dedup();
                 let func = bonsai_common::FuncId::new(func_decl.symbol.raw());
-                let caller_count = resolved.callers_of(func).count();
+                let caller_count = unique_semantic_callers(resolved, func).len();
+                let outgoing_count = unique_semantic_callees(resolved, func).len();
                 per_file.push(CallgraphRow {
                     function: func_decl.name.clone(),
                     callers: caller_count,
-                    outgoing: outgoing.len(),
+                    outgoing: outgoing_count,
                 });
             }
             per_file.into_iter()
@@ -103,29 +151,98 @@ pub fn callgraph_summary(ws: &Workspace, resolved: &ResolvedCallGraph) -> Vec<Ca
     rows
 }
 
-/// Resolve `symbol` to a function / method / constructor decl, with
-/// short-name fallback. When the bare name matches multiple symbols
-/// across translation units, we sort candidates by (file path, name
-/// span start) and pick the first deterministically — adapter-emitted
-/// `find_by_name` order isn't stable enough to rely on for display.
-pub(crate) fn nearest_callable(ws: &Workspace, symbol: &str) -> Option<Decl> {
+fn unique_semantic_callers(resolved: &ResolvedCallGraph, func: FuncId) -> Vec<FuncId> {
+    let mut callers: Vec<FuncId> = resolved
+        .callers_of(func)
+        .filter(|edge| edge.precision.is_semantic())
+        .map(|edge| edge.from)
+        .collect();
+    callers.sort_by_key(|caller| caller.raw());
+    callers.dedup();
+    callers
+}
+
+fn unique_semantic_callees(resolved: &ResolvedCallGraph, func: FuncId) -> Vec<FuncId> {
+    let mut callees: Vec<FuncId> = resolved
+        .callees_of(func)
+        .filter(|edge| edge.precision.is_semantic())
+        .map(|edge| edge.to)
+        .collect();
+    callees.sort_by_key(|callee| callee.raw());
+    callees.dedup();
+    callees
+}
+
+#[derive(Debug, Default)]
+struct CallableSpec<'a> {
+    file: Option<&'a str>,
+    line: Option<u32>,
+    name: &'a str,
+}
+
+fn split_callable_spec(spec: &str) -> CallableSpec<'_> {
+    let Some(name_idx) = spec.rfind(':') else {
+        return CallableSpec {
+            name: spec,
+            ..Default::default()
+        };
+    };
+    let (head, name) = (&spec[..name_idx], &spec[name_idx + 1..]);
+    if name.is_empty() || head.is_empty() || name.contains(['/', '\\']) {
+        return CallableSpec {
+            name: spec,
+            ..Default::default()
+        };
+    }
+    let path_like = |value: &str| value.contains(['/', '\\']);
+    if let Some((path, maybe_line)) = head.rsplit_once(':') {
+        if path_like(path) {
+            if let Ok(line) = maybe_line.parse::<u32>() {
+                return CallableSpec {
+                    file: Some(path),
+                    line: Some(line),
+                    name,
+                };
+            }
+        }
+    }
+    if path_like(head) {
+        return CallableSpec {
+            file: Some(head),
+            line: None,
+            name,
+        };
+    }
+    CallableSpec {
+        name: spec,
+        ..Default::default()
+    }
+}
+
+/// Resolve `symbol` to exactly one function / method / constructor decl.
+/// Context-free lookup is acceptable here only as an inventory step:
+/// multiple candidates are returned as ambiguity instead of silently
+/// choosing one.
+fn resolve_single_callable(ws: &Workspace, symbol: &str) -> Result<Option<Decl>, DumpLookupError> {
+    let spec = split_callable_spec(symbol);
     let global = ws.db().global_index();
     let vfs = ws.db().vfs();
-    let mut candidates: Vec<Decl> = global
-        .find_by_name(symbol)
-        .iter()
-        .filter_map(|sym| global.decl_of(*sym).cloned())
+    let mut candidates: Vec<Decl> = bonsai_resolve::resolve_callable(&global, spec.name)
+        .into_iter()
+        .filter_map(|func| global.decl_of(bonsai_common::SymbolId::new(func.raw())).cloned())
         .filter(|decl| {
             matches!(
                 decl.kind,
                 DeclKind::Function | DeclKind::Method | DeclKind::Constructor
             )
         })
+        .filter(|decl| {
+            let (file, line, _) = format_span(&decl.name_span, ws);
+            spec.file
+                .is_none_or(|qualifier| file_matches_qualifier(&file, qualifier))
+                && spec.line.is_none_or(|wanted| line == wanted)
+        })
         .collect();
-    // Stable tiebreak: file path first, then position in file, then
-    // SymbolId. Adapter `find_by_name` order isn't deterministic
-    // enough for display — without this sort the same query could
-    // return different decls across runs.
     candidates.sort_by(|a, b| {
         let a_path = vfs
             .path(a.span.file)
@@ -140,5 +257,59 @@ pub(crate) fn nearest_callable(ws: &Workspace, symbol: &str) -> Option<Decl> {
             .then_with(|| a.name_span.start.cmp(&b.name_span.start))
             .then_with(|| a.symbol.raw().cmp(&b.symbol.raw()))
     });
-    candidates.into_iter().next()
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(candidates.into_iter().next()),
+        _ => Err(DumpLookupError {
+            symbol: symbol.to_string(),
+            candidates: candidates.iter().map(|decl| dump_candidate(ws, decl)).collect(),
+        }),
+    }
+}
+
+fn file_matches_qualifier(decl_file: &str, qualifier: &str) -> bool {
+    if decl_file == qualifier {
+        return true;
+    }
+    let canonical_decl = Path::new(decl_file)
+        .canonicalize()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    let canonical_qualifier = Path::new(qualifier)
+        .canonicalize()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    if canonical_decl
+        .as_deref()
+        .zip(canonical_qualifier.as_deref())
+        .is_some_and(|(decl, qual)| decl == qual)
+    {
+        return true;
+    }
+    if decl_file.ends_with(qualifier)
+        && decl_file
+            .as_bytes()
+            .get(decl_file.len().saturating_sub(qualifier.len()).saturating_sub(1))
+            .is_some_and(|b| *b == b'/' || *b == b'\\')
+    {
+        return true;
+    }
+    let decl_basename = decl_file
+        .rsplit_once(['/', '\\'])
+        .map(|(_, tail)| tail)
+        .unwrap_or(decl_file);
+    decl_basename == qualifier
+}
+
+fn dump_candidate(ws: &Workspace, decl: &Decl) -> DumpCallableCandidate {
+    let (file, line, column) = format_span(&decl.name_span, ws);
+    DumpCallableCandidate {
+        func_id: decl.symbol.raw(),
+        name: decl.name.clone(),
+        kind: format!("{:?}", decl.kind).to_lowercase(),
+        disambiguator: format!("{file}:{line}:{}", decl.name),
+        file,
+        line,
+        column,
+    }
 }

@@ -3,6 +3,7 @@
   enabled: true
   language: kotlin
   tag: cors
+  category: source-independent
   severity: medium
   packages: [org.springframework.web.bind.annotation]
   cwe: [CWE-942]

@@ -2,6 +2,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -29,6 +30,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -46,6 +48,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -63,6 +66,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -80,6 +84,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: critical
   packages:
   - okhttp
@@ -105,6 +110,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: critical
   packages:
   - okhttp
@@ -130,6 +136,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: critical
   packages:
   - org.apache.httpcomponents
@@ -154,6 +161,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - org.apache.httpcomponents
@@ -179,6 +187,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-295
@@ -194,6 +203,7 @@
   enabled: true
   language: kotlin
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-327

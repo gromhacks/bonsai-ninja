@@ -1,6 +1,8 @@
 # Elixir JWT sinks (Joken / Guardian / jose).
 - id: elixir.jwt.joken_decode_and_verify
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: jwt
   severity: high
@@ -19,12 +21,17 @@
           Joken.decode_and_verify(input)
         end
       end
-  description: "Joken.decode_and_verify/3 — verifies against the configured default_signer; weak secret, alg=none, or an HS256 signer set from env without strength checks accepts forged tokens."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Joken.decode_and_verify/3 — verifies
+    against the configured default_signer; weak secret, alg=none, or an HS256 signer
+    set from env without strength checks accepts forged tokens."
 
   imports:
   - Joken
 - id: elixir.jwt.joken_verify
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: jwt
   severity: high
@@ -44,7 +51,9 @@
           Joken.verify(input)
         end
       end
-  description: "Joken.verify/3 — explicit signer supplied; misconfigured signer (alg=none, shared weak secret) accepts forged tokens."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Joken.verify/3 — explicit signer
+    supplied; misconfigured signer (alg=none, shared weak secret) accepts forged tokens."
 
   imports:
   - Joken
@@ -59,6 +68,9 @@
     kind: call
     callee:
       attribute: [Joken, peek_claims]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
@@ -68,7 +80,12 @@
           Joken.peek_claims(input)
         end
       end
-  description: "Joken.peek_claims/1 — returns JWT claims without any signature check; trusting the output for authorisation is an auth bypass."
+  - name: literal jwt negative
+    code: "alias Joken\ndefmodule App do\n  def test(\"safe\") do\n    Joken.peek_claims(\"\
+      safe\")\n  end\nend\n"
+    expect_no_match: true
+  description: "Joken.peek_claims/1 — returns JWT claims without any signature check;
+    trusting the output for authorisation is an auth bypass."
 
   imports:
   - Joken
@@ -83,6 +100,9 @@
     kind: call
     callee:
       attribute: [Joken, peek_header]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
@@ -92,12 +112,19 @@
           Joken.peek_header(input)
         end
       end
-  description: "Joken.peek_header/1 — attacker-controlled JWT header (alg, kid); never drive verification decisions from these values (kid-confusion, alg=none)."
+  - name: literal jwt negative
+    code: "alias Joken\ndefmodule App do\n  def test(\"safe\") do\n    Joken.peek_header(\"\
+      safe\")\n  end\nend\n"
+    expect_no_match: true
+  description: "Joken.peek_header/1 — attacker-controlled JWT header (alg, kid); never
+    drive verification decisions from these values (kid-confusion, alg=none)."
 
   imports:
   - Joken
 - id: elixir.jwt.guardian_decode_and_verify
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: jwt
   severity: high
@@ -116,12 +143,17 @@
           Guardian.decode_and_verify(input)
         end
       end
-  description: "Guardian.decode_and_verify/3 — weak `secret_key` / permissive `allowed_algos` (includes :none or :HS256 with short secret) accepts forged tokens."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Guardian.decode_and_verify/3 — weak
+    `secret_key` / permissive `allowed_algos` (includes :none or :HS256 with short
+    secret) accepts forged tokens."
 
   imports:
   - Guardian
 - id: elixir.jwt.jose_jwt_verify
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: jwt
   severity: high
@@ -140,12 +172,17 @@
           :jose_jwt.verify(input)
         end
       end
-  description: "Erlang :jose_jwt.verify/2 — caller must supply the JWK and whitelist algorithms; default behaviour trivially accepts alg=none."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Erlang :jose_jwt.verify/2 — caller
+    must supply the JWK and whitelist algorithms; default behaviour trivially accepts
+    alg=none."
 
   imports:
   - Jose
 - id: elixir.jwt.jose_jwt_verify_strict
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: jwt
   severity: high
@@ -165,7 +202,9 @@
           JOSE.JWT.verify(input)
         end
       end
-  description: "JOSE.JWT.verify/2 — Elixir wrapper over :jose_jwt; same alg-whitelist footgun."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. JOSE.JWT.verify/2 — Elixir wrapper
+    over :jose_jwt; same alg-whitelist footgun."
 
   imports:
   - Jose
@@ -180,6 +219,9 @@
     kind: call
     callee:
       attribute: [JOSE, JWT, peek_payload]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
@@ -189,7 +231,12 @@
           JOSE.JWT.peek_payload(input)
         end
       end
-  description: "JOSE.JWT.peek_payload/1 — returns claims without any signature check; trusting these is auth bypass."
+  - name: literal jwt negative
+    code: "alias Jose\ndefmodule App do\n  def test(\"safe\") do\n    JOSE.JWT.peek_payload(\"\
+      safe\")\n  end\nend\n"
+    expect_no_match: true
+  description: "JOSE.JWT.peek_payload/1 — returns claims without any signature check;
+    trusting these is auth bypass."
 
 # JWT alg-confusion (T400). HMAC verify with an RSA public
 # key — when both HS* and RS* algorithms are allowed in the
@@ -199,7 +246,9 @@
   imports:
   - Jose
 - id: elixir.jwt.alg_confusion
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: elixir
   tag: untrusted-token
   severity: high
@@ -218,6 +267,8 @@
           Joken.verify_and_validate("HS256RS256")
         end
       end
-  description: "Joken verify_and_validate with mixed HMAC+RSA algorithms — alg-confusion vector."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Joken verify_and_validate with mixed
+    HMAC+RSA algorithms — alg-confusion vector."
   imports:
   - Joken

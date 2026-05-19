@@ -72,16 +72,22 @@
   enabled: true
   language: objc
   tag: xxe
+  category: source-independent
   severity: high
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      name: shouldResolveExternalEntities
+      regex: "^[^\\.\\s]+\\.shouldResolveExternalEntities$"
   match_examples:
-  - name: declared shape
+  - name: nsxmlparser external entities member write
     code: |
-      void test(id input) { id target = input; int amount = 1; shouldResolveExternalEntities = input; }
+      void test(id input) { id target = input; int amount = 1; parser.shouldResolveExternalEntities = input; }
+    expect_match_text: [parser.shouldResolveExternalEntities]
+  - name: local shouldResolveExternalEntities variable negative
+    code: |
+      void test(id input) { id shouldResolveExternalEntities = input; }
+    expect_no_match: true
   description: "NSXMLParser.shouldResolveExternalEntities = YES — explicitly enables external entity resolution (XXE)."
 
 - id: objc.xxe.nsxmldocument_initwithxmlstring

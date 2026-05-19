@@ -15,6 +15,9 @@
       attribute:
       - libxmljs
       - parseXml
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: libxmljs parsexml
     code: |
@@ -24,6 +27,13 @@
       }
     expect_match_text:
     - libxmljs.parseXml
+  - name: libxmljs parsexml literal negative
+    code: |
+      const _u = require("libxmljs");
+      function demo(input) {
+        return libxmljs.parseXml("<root/>");
+      }
+    expect_no_match: true
   description: "libxmljs.parseXml — default parser resolves external entities; tainted XML enables XXE file read / SSRF. Merged aliases: javascript.xxe.libxmljs_parsexml_noent."
   aliases:
   - javascript.xxe.libxmljs_parsexml_noent
@@ -42,6 +52,9 @@
     kind: call
     callee:
       regex: ^(parseXml|parseXML|parseXMLString)$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: parse-xml resolve entities
     code: |
@@ -51,6 +64,13 @@
       }
     expect_match_text:
     - parseXml
+  - name: parse-xml literal negative
+    code: |
+      const _u = require("parse-xml");
+      function parse(parseXml, input) {
+        return parseXml("<root/>", { resolveEntities: true });
+      }
+    expect_no_match: true
   description: "parse-xml/libxml-style parser call with entity resolution enabled — tainted XML can trigger XXE file reads or SSRF."
 - id: javascript.xxe.libxmljs_parsexmlstring
   enabled: true
@@ -68,6 +88,9 @@
       attribute:
       - libxmljs
       - parseXmlString
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: libxmljs parsexmlstring
     code: |
@@ -77,11 +100,20 @@
       }
     expect_match_text:
     - libxmljs.parseXmlString
+  - name: libxmljs parsexmlstring literal negative
+    code: |
+      const _u = require("libxmljs");
+      function demo(input) {
+        return libxmljs.parseXmlString("<root/>");
+      }
+    expect_no_match: true
   description: 'libxmljs.parseXmlString. Merged aliases: javascript.xxe.libxmljs_parsexmlstring_noent.'
   aliases:
   - javascript.xxe.libxmljs_parsexmlstring_noent
 - id: javascript.xxe.xmldom_parser
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: javascript
   tag: xxe
   severity: high
@@ -101,7 +133,7 @@
       function demo(input, req, obj) {
         return new DOMParser(input);
       }
-  description: "xmldom DOMParser — historically vulnerable to XXE."
+  description: "Disabled — `new DOMParser()` constructs a parser, not a tainted XML parse. Re-enable with a parseFromString/source-data rule or version-aware package fact."
 - id: javascript.xxe.xml2js_parsestring
   enabled: false
   disabled_reason:
@@ -158,6 +190,7 @@
   enabled: true
   language: javascript
   tag: xxe
+  category: source-independent
   severity: medium
   packages:
   - fast-xml-parser
@@ -200,11 +233,21 @@
       attribute:
       - libxmljs
       - loadXml
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: libxmljs loadXml
     code: "const libxmljs = require(\"libxmljs\");\nfunction parse(input) {\n  return libxmljs.loadXml(input);\n}\n"
     expect_match_text:
     - libxmljs.loadXml
+  - name: libxmljs loadXml literal negative
+    code: |
+      const libxmljs = require("libxmljs");
+      function parse(input) {
+        return libxmljs.loadXml("<root/>");
+      }
+    expect_no_match: true
   description: "libxmljs/libxmljs2 loadXml — XML parser entrypoint; unsafe on tainted XML when entity expansion or network access is enabled. Merged aliases: javascript.xxe.libxmljs_loadxml_unsafe_options."
   aliases:
   - javascript.xxe.libxmljs_loadxml_unsafe_options
@@ -223,6 +266,9 @@
       attribute:
       - xml2json
       - toJson
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: xml2json toJson
     code: |
@@ -232,6 +278,13 @@
       }
     expect_match_text:
     - xml2json.toJson
+  - name: xml2json literal negative
+    code: |
+      const _u = require("xml2json");
+      function demo(xml2json, input) {
+        return xml2json.toJson("<root/>");
+      }
+    expect_no_match: true
   description: "xml2json.toJson(tainted XML) — XML parser path with historical XXE risk."
 - id: javascript.xxe.node_expat_parse_write
   enabled: true
@@ -246,6 +299,9 @@
     kind: call
     callee:
       regex: ^(expatParser|xmlParser)\.(parse|write)$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: node expat parser parse
     code: |
@@ -263,6 +319,13 @@
       }
     expect_match_text:
     - xmlParser.write
+  - name: node expat literal negative
+    code: |
+      const _u = require("node-expat");
+      function demo(expatParser, input) {
+        return expatParser.parse("<root/>");
+      }
+    expect_no_match: true
   description: "node-expat Parser.parse/write on tainted XML — XML entity expansion risk."
 - id: javascript.xxe.libxmljs2_unsafe_options
   enabled: true
@@ -277,6 +340,9 @@
     kind: call
     callee:
       regex: ^libxmljs2\.(parseXml|parseXmlString|loadXml)$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: libxmljs2 parseXml noent
     code: |
@@ -294,4 +360,11 @@
       }
     expect_match_text:
     - libxmljs2.loadXml
+  - name: libxmljs2 literal negative
+    code: |
+      const _u = require("libxmljs2");
+      function parse(libxmljs2, input) {
+        return libxmljs2.parseXml("<root/>", { noent: true });
+      }
+    expect_no_match: true
   description: "libxmljs2 parse/load with noent/dtdload/nonet-unsafe options — explicitly enables XXE file-read or SSRF behavior."

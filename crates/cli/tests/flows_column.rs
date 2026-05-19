@@ -89,6 +89,31 @@ fn ws_for(lang: &str) -> Option<PathBuf> {
     }
 }
 
+fn tempdir_for_test(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = std::env::temp_dir();
+    for attempt in 0..100 {
+        let path = root.join(format!("{name}-{}-{nanos:x}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("create tempdir {}: {e}", path.display()),
+        }
+    }
+    panic!("could not allocate tempdir for {name}");
+}
+
+fn write_flow_label_fan_in_workspace(root: &std::path::Path, callers: usize) {
+    let mut source = String::from("def sink(value):\n    return value\n\n");
+    for idx in 0..callers {
+        source.push_str(&format!("def caller_{idx}(value):\n    return sink(value)\n\n"));
+    }
+    std::fs::write(root.join("app.py"), source).expect("write flow-label fan-in fixture");
+}
+
 /// Run `bonsai-ninja` with the given args + `--no-color` and
 /// return stdout on success. Panics (fails the test) on non-zero
 /// exit so a broken `--flows` pipeline fails loudly rather than
@@ -602,4 +627,28 @@ fn refs_flows_column_populated() {
 fn search_flows_column_populated() {
     // Search for `handle_request` — same reasoning as refs.
     assert_browse_cmd_has_flow_ids("search", &["--query", "handle_request"]);
+}
+
+#[test]
+fn flows_column_warns_when_label_set_is_capped() {
+    let root = tempdir_for_test("bonsai-flow-column-capped-labels");
+    write_flow_label_fan_in_workspace(&root, 40);
+
+    let Some(out) = run(&["defs", root.to_str().unwrap(), "--name", "sink"]) else {
+        return;
+    };
+    assert!(
+        count_flow_ids(&out) > 0,
+        "fan-in fixture should emit flow ids for sink:\n{out}"
+    );
+    assert!(
+        out.contains("semantic-only flows column incomplete"),
+        "capped flow-id labels must be surfaced as incomplete, not just hidden in a table cell:\n{out}"
+    );
+    assert!(
+        out.contains("prefixes, not complete label sets"),
+        "flow-column warning should explain that capped labels are partial:\n{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }

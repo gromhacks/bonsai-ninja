@@ -160,6 +160,7 @@
   enabled: true
   language: php
   tag: access-control
+  category: source-independent
   severity: medium
   packages:
   - wordpress

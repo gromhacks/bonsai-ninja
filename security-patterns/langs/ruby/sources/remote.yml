@@ -257,18 +257,35 @@
   description: "Disabled — bare `data` param matches ordinary helper methods; needs class/context-aware ActionCable receive matching."
 
 - id: ruby.source.graphql_resolver_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: ruby
-  tag: http-input
   trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
   packages: [graphql]
+  imports: [graphql]
   match:
     kind: param
     target:
-      name: resolve
-  description: "Disabled — bare `resolve` param overmatches helper methods; enable only with class-context narrowing for graphql-ruby Resolver / Field#resolve(args)."
+      name: args
+      in_method: [resolve]
+  match_examples:
+  - name: graphql ruby resolver args
+    code: |
+      require "graphql"
+      class ProductResolver
+        def resolve(args)
+          args
+        end
+      end
+  - name: graphql ruby sibling helper negative
+    code: |
+      require "graphql"
+      def helper(args)
+        args
+      end
+    expect_no_match: true
+  description: "graphql-ruby resolver `resolve(args)` parameter — GraphQL caller-supplied arguments. Scoped to the resolver method name so ordinary helper parameters named args stay clean."
 
 - id: ruby.source.hanami_request_params
   enabled: true

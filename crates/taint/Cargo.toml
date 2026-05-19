@@ -19,6 +19,7 @@ bonsai_vfs = { workspace = true }
 bonsai_db = { workspace = true }
 bonsai_idg = { workspace = true }
 ahash = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 parking_lot = "0.12"
 

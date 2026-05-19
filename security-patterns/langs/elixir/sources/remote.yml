@@ -381,23 +381,33 @@
   enabled: true
   language: elixir
   trust: remote
-  tag: http-input
-  payload_types: [json]
+  tag: graphql-input
+  payload_types: [graphql, json]
   frameworks: [absinthe]
   packages: [absinthe]
   match:
     kind: param
     target:
       name: args
+      in_method: [resolve]
   match_examples:
-  - name: declared shape
+  - name: absinthe resolver args
     code: |
       alias Absinthe
       defmodule App do
-        def handle(args) do
+        def resolve(args) do
           args
         end
       end
-  description: "Absinthe resolver `args` — first positional arg of a `resolve fn args, _ -> ... end` callback; carries the GraphQL query variables. Bare-name match: also fires on any other function with an `args` parameter."
+  - name: non resolver args helper negative
+    code: |
+      alias Absinthe
+      defmodule App do
+        def helper(args) do
+          args
+        end
+      end
+    expect_no_match: true
+  description: "Absinthe resolver `resolve(args)` parameter — GraphQL caller-supplied arguments. Scoped to resolver method names so ordinary helpers named args stay clean."
   imports:
   - Absinthe

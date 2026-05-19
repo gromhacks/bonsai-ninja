@@ -6,6 +6,7 @@
   enabled: true
   language: go
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: ["crypto/tls"]
   cwe: [CWE-295]
@@ -28,6 +29,7 @@
   enabled: true
   language: go
   tag: weak-tls
+  category: source-independent
   severity: medium
   packages: ["crypto/tls"]
   cwe: [CWE-326]
@@ -80,6 +82,7 @@
   enabled: true
   language: go
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: ["google.golang.org/grpc"]
   cwe: [CWE-295, CWE-319]

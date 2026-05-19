@@ -17,7 +17,7 @@
 use bonsai_common::FuncId;
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
 use bonsai_vfs::Vfs;
-use bonsai_workspace::{dataflow::DataFlowCache, Workspace};
+use bonsai_workspace::{dataflow::DataFlowCache, Workspace, WorkspaceOpenOptions};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -46,6 +46,19 @@ fn js_adapter() -> AdapterArc {
 
 fn rust_adapter() -> AdapterArc {
     Arc::new(bonsai_lang_rust::RustAdapter::new())
+}
+
+fn tempdir(name: &str) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "bonsai-workspace-dataflow-{name}-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&path).expect("create temp dir");
+    path
 }
 
 fn func_id_by_name(ws: &Workspace, name: &str) -> FuncId {
@@ -294,6 +307,7 @@ fn snapshot_interns_file_paths_and_dependency_metadata() {
     let controller_path = "/w/services/api/controllers/really_long_controller_module.py";
     let sink_path = "/w/services/security/sinks/really_long_sink_module.py";
     let mut controller = String::new();
+    controller.push_str("from really_long_sink_module import sink\n\n");
     for i in 0..12 {
         controller.push_str(&format!("def handle_{i}(req):\n    sink(req)\n\n"));
     }
@@ -477,6 +491,47 @@ fn snapshot_rejects_stale_matcher_policy_fingerprint() {
         surviving, 0,
         "sidecar entries must be rejected after matcher policy drift"
     );
+}
+
+#[test]
+fn factstore_sidecar_rejects_dependency_metadata_change() {
+    let root = tempdir("dependency-metadata");
+    std::fs::write(
+        root.join("app.py"),
+        "def handle(req):\n    sink(req)\ndef sink(value):\n    pass\n",
+    )
+    .expect("write source");
+    std::fs::write(root.join("requirements.txt"), "flask==3.0.0\n").expect("write deps");
+
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(python_adapter());
+    let options = WorkspaceOpenOptions {
+        load_dataflow_sidecar: false,
+        prewarm_dataflow: true,
+        save_dataflow_sidecar: true,
+        load_value_flow_sidecar: false,
+        prewarm_value_flow: false,
+        save_value_flow_sidecar: false,
+        prewarm_flow_ids: false,
+        parse_timeout_ms: None,
+    };
+    let _indexed = Workspace::open_with_options(&root, registry.clone(), options).expect("index workspace");
+    let sidecar = DataFlowCache::factstore_sidecar_path(&root);
+    assert!(sidecar.exists(), "index should write dataflow factstore");
+
+    std::fs::write(root.join("requirements.txt"), "flask==3.0.0\nrequests==2.32.0\n").expect("rewrite deps");
+    let query_ws = Workspace::open_with_options(&root, registry, WorkspaceOpenOptions::parse_only())
+        .expect("open query ws");
+    let loaded = query_ws
+        .dataflow()
+        .load_factstore_sidecar(&sidecar, query_ws.db())
+        .expect("load sidecar");
+    assert_eq!(
+        loaded, 0,
+        "dependency metadata changes must reject persisted analysis sidecars"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
 }
 
 // ===========================================================================
@@ -723,7 +778,10 @@ fn snapshot_rejects_same_function_after_body_change() {
 fn snapshot_rejects_entry_when_downstream_file_changes() {
     let ws = ws_with(
         &[
-            ("/w/a.py", "def handle(req):\n    sink(req)\n"),
+            (
+                "/w/a.py",
+                "from b import sink\n\ndef handle(req):\n    sink(req)\n",
+            ),
             ("/w/b.py", "def sink(y):\n    pass\n"),
         ],
         python_adapter(),
@@ -735,7 +793,7 @@ fn snapshot_rejects_entry_when_downstream_file_changes() {
     let ws2 = Workspace::new(registry);
     ws2.vfs().write(
         "/w/a.py".to_string(),
-        Arc::<str>::from("def handle(req):\n    sink(req)\n"),
+        Arc::<str>::from("from b import sink\n\ndef handle(req):\n    sink(req)\n"),
     );
     ws2.vfs().write(
         "/w/b.py".to_string(),

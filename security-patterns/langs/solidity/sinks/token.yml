@@ -18,11 +18,20 @@
     kind: call
     callee:
       name: transferFrom
+  constraints:
+  - receiver_tainted: true
   match_examples:
-  - name: declared shape
+  - name: tainted token receiver
     code: |
       pragma solidity ^0.8.0;
-      contract App { event Seen(string value); mapping(address => uint256) balances; mapping(address => uint256) allowances; mapping(address => address) owners; mapping(address => bool) whitelist; uint256 Balance; function test(string memory input, address payable target, bytes memory data, uint256 amount) public { transferFrom(input); } }
+      interface IERC20 { function transferFrom(address from, address to, uint256 amount) external returns (bool); }
+      contract App { function test(address target, address from, address to, uint256 amount) public { IERC20(target).transferFrom(from, to, amount); } }
+  - name: literal token receiver negative
+    code: |
+      pragma solidity ^0.8.0;
+      interface IERC20 { function transferFrom(address from, address to, uint256 amount) external returns (bool); }
+      contract App { function test(address from, address to, uint256 amount) public { IERC20(address(0)).transferFrom(from, to, amount); } }
+    expect_no_match: true
   description: "ERC20.transferFrom(from, to, amount) — when invoked on an attacker-supplied token address, the call dispatches into arbitrary bytecode and may reenter, lie about the transferred amount (fee-on-transfer / rebasing), or revert selectively. Pair with allowlist of trusted token addresses or a balance-delta accounting wrapper."
 - id: solidity.token.safe_transfer_from_untrusted
   enabled: false

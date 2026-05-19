@@ -340,7 +340,12 @@ impl<'a> ChainCache<'a> {
                 return hit.clone();
             }
         }
-        let out: Vec<FuncId> = self.resolved_graph().callees_of(func).map(|e| e.to).collect();
+        let out: Vec<FuncId> = self
+            .resolved_graph()
+            .callees_of(func)
+            .filter(|edge| edge.precision.is_semantic())
+            .map(|edge| edge.to)
+            .collect();
         if !self.disabled {
             self.callees_r.lock().insert(func, out.clone());
         }

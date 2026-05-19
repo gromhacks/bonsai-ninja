@@ -3,6 +3,7 @@
   enabled: true
   language: perl
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: ["LWP::UserAgent"]
   cwe: [CWE-295]
@@ -24,6 +25,7 @@
   enabled: true
   language: perl
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: ["Mojo::UserAgent"]
   cwe: [CWE-295]
@@ -45,6 +47,7 @@
   enabled: true
   language: perl
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: ["IO::Socket::SSL"]
   cwe: [CWE-295]
@@ -66,6 +69,7 @@
   enabled: true
   language: perl
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: ["HTTP::Tiny"]
   cwe: [CWE-295]

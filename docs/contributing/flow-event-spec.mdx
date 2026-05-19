@@ -427,8 +427,8 @@ the unexpanded surface.
 Concretely, `lazy_static! { static ref X: Mutex<HashMap<…>> = … }` in
 Rust, `#define LOG(...)` in C, Elixir's `use GenServer`, and Common
 Lisp's `defmacro` all produce executable code the adapter never sees.
-The engine reports `UnsupportedConstruct` for these forms and degrades
-to `Precision::OverApproximate` for any flow that intersects them.
+The engine reports `UnsupportedConstruct` for these forms and marks affected
+analysis incomplete instead of emitting guessed public flows.
 
 A correct treatment requires either:
 

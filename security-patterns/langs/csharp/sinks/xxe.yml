@@ -206,30 +206,40 @@
   enabled: true
   language: csharp
   tag: xxe
+  category: source-independent
   severity: high
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      name: DtdProcessing
+      regex: ^[^\.\s]+\.DtdProcessing$
   match_examples:
-    - name: declared shape
+    - name: xml reader settings dtd processing member write
       code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; DtdProcessing = input; } }
+        class App { void Test(dynamic input) { settings.DtdProcessing = input; } }
+    - name: local dtdprocessing variable negative
+      code: |
+        class App { void Test(dynamic input) { var DtdProcessing = input; } }
+      expect_no_match: true
   description: "XmlReaderSettings.DtdProcessing = Parse — explicitly re-enables DTD/XXE parsing on otherwise-safe XmlReader."
 
 - id: csharp.xxe.prohibitdtd_false
   enabled: true
   language: csharp
   tag: xxe
+  category: source-independent
   severity: high
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      name: ProhibitDtd
+      regex: ^[^\.\s]+\.ProhibitDtd$
   match_examples:
-    - name: declared shape
+    - name: xml reader prohibitdtd member write
       code: |
-        class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; ProhibitDtd = input; } }
+        class App { void Test(dynamic input) { reader.ProhibitDtd = input; } }
+    - name: local prohibitdtd variable negative
+      code: |
+        class App { void Test(dynamic input) { var ProhibitDtd = input; } }
+      expect_no_match: true
   description: "XmlReaderSettings.ProhibitDtd = false (legacy .NET) — re-enables DTD parsing."

@@ -12,10 +12,22 @@ use std::time::Duration;
 use crate::cli_println;
 use crate::progress;
 
-use super::{not_found_with_suggestions, open_project_full, open_project_index_only};
+use super::{
+    not_found_with_suggestions, open_project_dataflow_prewarm, open_project_index_only,
+    open_project_parse_only,
+};
 
-pub(crate) fn cmd_index(root: &std::path::Path, watch: bool, interval_ms: u64) -> Result<()> {
-    let (project, _footer) = open_project_full(root)?;
+pub(crate) fn cmd_index(
+    root: &std::path::Path,
+    watch: bool,
+    interval_ms: u64,
+    prewarm_dataflow: bool,
+) -> Result<()> {
+    let (project, _footer) = if prewarm_dataflow {
+        open_project_dataflow_prewarm(root)?
+    } else {
+        open_project_parse_only(root)?
+    };
     let stats = project.stats();
     cli_println!("{}", serde_json::to_string_pretty(&stats)?);
     flush_stdout()?;
@@ -77,6 +89,7 @@ pub(crate) fn cmd_dump_hir(root: &std::path::Path, symbol: &str) -> Result<()> {
     let dump = project
         .dump()
         .hir(symbol)
+        .map_err(|err| anyhow::anyhow!("dump-hir: {err}"))?
         .ok_or_else(|| not_found_with_suggestions(ws, symbol))?;
     cli_println!("{}", serde_json::to_string_pretty(&dump)?);
     Ok(())
@@ -88,6 +101,7 @@ pub(crate) fn cmd_dump_cfg(root: &std::path::Path, symbol: &str) -> Result<()> {
     let cfg = project
         .dump()
         .cfg(symbol)
+        .map_err(|err| anyhow::anyhow!("dump-cfg: {err}"))?
         .ok_or_else(|| not_found_with_suggestions(ws, symbol))?;
     cli_println!("{}", serde_json::to_string_pretty(&cfg)?);
     Ok(())

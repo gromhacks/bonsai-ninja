@@ -651,6 +651,8 @@
     kind: call
     callee:
       name: curl_easy_unescape
+  taint_semantics:
+    call_result_passthrough_args: [1]
   match_examples:
   - name: generated direct match
     code: |

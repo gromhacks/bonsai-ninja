@@ -1,9 +1,10 @@
 //! Workspace-wide taint-connected data-flow cache.
 //!
-//! Eagerly built at workspace open. For each function, runs
+//! Built lazily by query paths or explicitly by prewarm/export/audit
+//! commands. For each requested function, runs
 //! [`bonsai_taint::taint_facts_for_entry`] once and caches the result
-//! so downstream queries (inspect, export, security) are hash lookups
-//! against the union (the workspace-wide taint-connected graph).
+//! so downstream queries (inspect, export, security) can reuse exact
+//! facts without making the default structural index solve every entry.
 //!
 //! Keyed by [`FuncId`]; built in parallel via rayon (one worker per
 //! function, bounded by `InterTaintConfig::budget`); incremental
@@ -11,6 +12,10 @@
 //! fingerprint; persistable via [`DataFlowCache::save_to_disk`] for
 //! near-instant warm reopens.
 
+use crate::cache_fingerprint::{
+    dependency_metadata_fingerprint_for_sidecar, discard_stale_factstore_sidecar,
+    workspace_content_fingerprint,
+};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{workspace_bonsai_dir, FileId, FuncId, SymbolId, MATCHER_POLICY_FINGERPRINT};
 use bonsai_db::AnalyzerDb;
@@ -35,8 +40,10 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
-pub const DATAFLOW_CACHE_VERSION: u32 = 21;
+pub const DATAFLOW_CACHE_VERSION: u32 = 27;
 static SIDECAR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SnapshotFile {
@@ -89,6 +96,11 @@ pub struct SerializableSnapshot {
     /// a sidecar miss.
     #[serde(default)]
     pub matcher_policy_fingerprint: u128,
+    /// Dependency metadata fingerprint for manifests / lockfiles
+    /// that can influence import and call resolution outside the
+    /// source file set.
+    #[serde(default)]
+    pub dependency_metadata_fingerprint: u64,
     /// Compatibility field for older sidecars. Current snapshots
     /// always persist an empty sanitizer set because sanitizers are
     /// report evidence, not graph inputs.
@@ -108,11 +120,16 @@ pub struct SerializableSnapshot {
 const DATAFLOW_FACTSTORE_TABLE_ID: u32 = 2;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
-/// policy fingerprint into 64 bits so a matcher policy change
-/// invalidates the cache file.
-fn dataflow_pipeline_hash() -> u64 {
+/// policy fingerprint into 64 bits and the current workspace content
+/// fingerprint so a matcher policy or source-tree change invalidates
+/// the cache file before any stale FuncId-keyed entries can hydrate.
+fn dataflow_pipeline_hash(db: &AnalyzerDb, sidecar_path: &Path) -> u64 {
     let raw = MATCHER_POLICY_FINGERPRINT;
-    (raw as u64) ^ ((raw >> 64) as u64)
+    (raw as u64)
+        ^ ((raw >> 64) as u64)
+        ^ u64::from(DATAFLOW_CACHE_VERSION)
+        ^ workspace_content_fingerprint(db)
+        ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
 }
 
 /// Thread-safe per-function taint-facts cache. One instance per
@@ -297,11 +314,7 @@ impl DataFlowCache {
         // post-prewarm: queries get a one-shot decoded `Arc` for the
         // duration of the consumer's borrow and disk holds the
         // canonical copy.
-        let canonical_facts = inner
-            .facts
-            .entry(func)
-            .or_insert_with(|| facts)
-            .clone();
+        let canonical_facts = inner.facts.entry(func).or_insert_with(|| facts).clone();
         inner.dependencies.entry(func).or_insert(dependencies);
         Some((canonical_facts, graph))
     }
@@ -483,8 +496,26 @@ impl DataFlowCache {
                 }
             }
         }
-        // Skip entries already on disk or in memory.
-        let already: AHashSet<FuncId> = self.inner.read().facts.keys().copied().collect();
+        // Skip entries already on disk or in memory, but forward-port
+        // those entries into the replacement factstore below. The
+        // writer atomically replaces `path`; treating cached entries as
+        // "no work" without copying them would make each partial
+        // prewarm shrink the warm sidecar and force repeated analysis.
+        let (already, memory_entries): (AHashSet<FuncId>, Vec<DataFlowMemoryEntry>) = {
+            let inner = self.inner.read();
+            (
+                inner.facts.keys().copied().collect(),
+                inner
+                    .facts
+                    .iter()
+                    .filter_map(|(&func, facts)| {
+                        let graph = inner.graphs.get(&func)?.clone();
+                        let dependencies = inner.dependencies.get(&func).cloned().unwrap_or_default();
+                        Some((func, facts.clone(), graph, dependencies))
+                    })
+                    .collect(),
+            )
+        };
         let disk_clone = self.disk.read().clone();
         let todo: Vec<FuncId> = funcs
             .into_iter()
@@ -504,7 +535,7 @@ impl DataFlowCache {
             // Open the existing sidecar if any so subsequent queries
             // hit disk; treat absent file as "nothing on disk."
             if path.exists() {
-                let _ = self.load_from_disk(path, db);
+                let _ = self.load_factstore_sidecar(path, db);
             }
             return Ok(0);
         }
@@ -514,7 +545,7 @@ impl DataFlowCache {
         let writer = bonsai_factstore::FactStoreWriter::create_with_capacity(
             path,
             DATAFLOW_FACTSTORE_TABLE_ID,
-            dataflow_pipeline_hash(),
+            dataflow_pipeline_hash(db, path),
             todo.len(),
             todo.len().saturating_mul(1024),
             todo.len().saturating_mul(64),
@@ -522,21 +553,48 @@ impl DataFlowCache {
         .map_err(map_factstore_io)?;
         let call_graph = self.call_graph_for(db);
         let global_for_deps = db.global_index();
+        let written_keys = std::sync::Mutex::new(AHashSet::<u64>::default());
+        for (func, facts, graph, dependencies) in memory_entries {
+            let entry = crate::dataflow_disk::DataFlowEntry::from_owned(
+                (*facts).clone(),
+                (*graph).clone(),
+                dependencies,
+            );
+            let payload = crate::dataflow_disk::encode(&entry);
+            let key = u64::from(func.raw());
+            writer.add(key, 0, &payload).map_err(map_factstore_io)?;
+            written_keys.lock().expect("written keys lock").insert(key);
+        }
         todo.par_iter().for_each(|&f| {
             let (facts, graph) = self.compute_facts_and_graph(f, db);
             let dependencies = dependency_files(f, &call_graph, &global_for_deps);
             let entry = crate::dataflow_disk::DataFlowEntry::from_owned(facts, graph, dependencies);
             let payload = crate::dataflow_disk::encode(&entry);
-            if let Err(err) = writer.add(u64::from(f.raw()), 0, &payload) {
+            let key = u64::from(f.raw());
+            if let Err(err) = writer.add(key, 0, &payload) {
                 tracing::warn!(error = %err, "dataflow factstore add failed");
+            } else {
+                written_keys.lock().expect("written keys lock").insert(key);
             }
             on_each_done(f);
         });
+        if let Some(reader) = disk_clone {
+            for item in reader.iter() {
+                let (key, hit) = item.map_err(map_factstore_io)?;
+                if written_keys.lock().expect("written keys lock").contains(&key) {
+                    continue;
+                }
+                writer
+                    .add(key, hit.body_hash, &hit.payload)
+                    .map_err(map_factstore_io)?;
+                written_keys.lock().expect("written keys lock").insert(key);
+            }
+        }
         let written = writer.finish().map_err(map_factstore_io)?;
         let reader = bonsai_factstore::FactStoreReader::open(
             path,
             DATAFLOW_FACTSTORE_TABLE_ID,
-            dataflow_pipeline_hash(),
+            dataflow_pipeline_hash(db, path),
         )
         .map_err(map_factstore_io)?;
         // Drop in-memory state and swap in the disk store.
@@ -569,6 +627,12 @@ impl DataFlowCache {
         // added/removed/renamed callees, which would silently poison
         // every dependency walk that consumed the stale graph.
         *self.cached_call_graph.write() = None;
+        // The factstore sidecar is immutable and was opened against
+        // the pre-edit workspace fingerprint. Keep unaffected
+        // in-memory entries below, but never hydrate from disk after a
+        // live edit because the header cannot be revalidated without
+        // reopening against the new workspace state.
+        *self.disk.write() = None;
         let mut inner = self.inner.write();
         let stale: AHashSet<FuncId> = inner
             .facts
@@ -721,6 +785,7 @@ impl DataFlowCache {
             version: DATAFLOW_CACHE_VERSION,
             sanitizer_fingerprint: EMPTY_SANITIZER_FINGERPRINT,
             matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
+            dependency_metadata_fingerprint: 0,
             sanitizer_tokens: Vec::new(),
             files: snapshot_files,
             entries,
@@ -886,7 +951,8 @@ impl DataFlowCache {
     /// written sidecar must not survive a crash and contradict the
     /// content-addressed contract.
     pub fn save_to_disk(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<()> {
-        let snap = self.snapshot(db);
+        let mut snap = self.snapshot(db);
+        snap.dependency_metadata_fingerprint = dependency_metadata_fingerprint_for_sidecar(path);
         let bytes =
             bincode::serialize(&snap).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if let Some(parent) = path.parent() {
@@ -947,6 +1013,9 @@ impl DataFlowCache {
                 return Ok(0);
             }
         };
+        if snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
+            return Ok(0);
+        }
         Ok(self.load_snapshot(snap, db))
     }
 
@@ -973,14 +1042,14 @@ impl DataFlowCache {
     /// cache's disk store. Returns the number of entries the file
     /// contains. Non-existent / version-mismatched / corrupt files
     /// silently return `Ok(0)` after logging.
-    pub fn load_factstore_sidecar(&self, path: &Path) -> std::io::Result<usize> {
+    pub fn load_factstore_sidecar(&self, path: &Path, db: &AnalyzerDb) -> std::io::Result<usize> {
         if !path.exists() {
             return Ok(0);
         }
         let reader = match bonsai_factstore::FactStoreReader::open(
             path,
             DATAFLOW_FACTSTORE_TABLE_ID,
-            dataflow_pipeline_hash(),
+            dataflow_pipeline_hash(db, path),
         ) {
             Ok(reader) => reader,
             Err(err) => {
@@ -989,6 +1058,7 @@ impl DataFlowCache {
                     error = %err,
                     "ignoring stale or corrupt dataflow factstore sidecar"
                 );
+                discard_stale_factstore_sidecar(path, &err);
                 return Ok(0);
             }
         };
@@ -1179,6 +1249,7 @@ fn snapshot_call_graph(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
                 .map(|adapter| adapter.capabilities().module_export_aliases)
                 .unwrap_or(&[])
         },
+        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
     )
 }
 
@@ -1226,59 +1297,5 @@ fn unique_sidecar_tmp_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{process_is_alive, unique_sidecar_tmp_path, SidecarWriteLock};
-    use std::path::{Path, PathBuf};
-
-    fn tempdir(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("bonsai-dataflow-{name}-{}-{stamp}", std::process::id()));
-        std::fs::create_dir(&path).expect("create temp dir");
-        path
-    }
-
-    #[test]
-    fn sidecar_tmp_paths_are_unique_per_write() {
-        let path = Path::new("/tmp/dataflow.v2.bin");
-        let first = unique_sidecar_tmp_path(path);
-        let second = unique_sidecar_tmp_path(path);
-
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), path.parent());
-        assert!(first
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("dataflow.v2.bin.tmp.")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn process_probe_recognizes_current_process() {
-        assert!(process_is_alive(std::process::id()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn process_probe_rejects_implausible_pid() {
-        assert!(!process_is_alive(u32::MAX));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stale_sidecar_lock_is_reclaimed() {
-        let root = tempdir("stale-lock");
-        let sidecar = root.join("dataflow.v2.bin");
-        let lock_path = SidecarWriteLock::lock_path(&sidecar);
-        std::fs::write(&lock_path, u32::MAX.to_string()).expect("write stale lock");
-
-        let lock = SidecarWriteLock::acquire(&sidecar).expect("reclaim stale lock");
-        assert!(lock_path.exists());
-        drop(lock);
-        assert!(!lock_path.exists());
-        std::fs::remove_dir_all(&root).ok();
-    }
-}
+#[path = "dataflow_tests.rs"]
+mod tests;

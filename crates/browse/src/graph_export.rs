@@ -8,14 +8,21 @@
 
 use crate::common::format_span;
 use crate::imports::{imports, ImportsFilters};
-use bonsai_common::{FuncId, SymbolId};
-use bonsai_lang_api::DeclKind;
+use bonsai_common::{FuncId, Precision};
+use bonsai_lang_api::{DeclKind, FlowEvent};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 use serde_json::{Number, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
+
+const GRAPH_EXPORT_SEMANTIC_MAX_PRECISION: Precision = Precision::Narrowed;
+const GRAPH_EXPORT_INCOMPLETE_REASON: &str = "graph database formats export semantic structural edges and local flow facts; exhaustive interprocedural taint propagation records are available in native JSON with --full-propagations";
+
+fn graph_export_analysis_incomplete_reasons() -> Vec<String> {
+    vec![GRAPH_EXPORT_INCOMPLETE_REASON.to_string()]
+}
 
 /// Graph database formats exposed by the SDK and CLI.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -130,6 +137,9 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
     );
 
     let mut file_ids: BTreeMap<String, String> = BTreeMap::new();
+    let idg = db
+        .idg_service()
+        .unwrap_or_else(|| ws.build_and_seed_idg_service());
     for file in global.all_files() {
         let path = ws
             .vfs()
@@ -177,7 +187,6 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
     }
 
     let mut func_ids: BTreeMap<u32, String> = BTreeMap::new();
-    let mut func_name_to_ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for file in global.all_files() {
         for decl in global.decls_in(file) {
             match decl.kind {
@@ -185,10 +194,6 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
                     let (path, line, _) = format_span(&decl.name_span, ws);
                     let func_id = format!("func_{}", decl.symbol.raw());
                     func_ids.insert(decl.symbol.raw(), func_id.clone());
-                    func_name_to_ids
-                        .entry(decl.name.clone())
-                        .or_default()
-                        .push(func_id.clone());
                     graph.node(
                         func_id.clone(),
                         "Function",
@@ -239,7 +244,12 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
     }
 
     let resolved = ws.resolved_call_graph();
-    for edge in &resolved.inner().edges {
+    for edge in resolved
+        .inner()
+        .edges
+        .iter()
+        .filter(|edge| edge.precision <= GRAPH_EXPORT_SEMANTIC_MAX_PRECISION)
+    {
         let Some(source) = func_ids.get(&edge.from.raw()) else {
             continue;
         };
@@ -260,121 +270,87 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
         );
     }
 
-    for (func_raw, func_id) in &func_ids {
-        let func = FuncId::new(*func_raw);
-        let facts = ws.dataflow().facts_for(func, db);
-        for (kind, tokens) in &facts.by_kind {
-            let kind = format!("{kind:?}").to_lowercase();
-            let mut tokens: Vec<_> = tokens.iter().cloned().collect();
-            tokens.sort();
-            for token in tokens {
-                let token_id = stable_graph_id("token", &format!("{kind}\0{token}"));
+    for file in global.all_files() {
+        for decl in global.decls_in(file) {
+            if !matches!(
+                decl.kind,
+                DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+            ) {
+                continue;
+            }
+            let Some(func_id) = func_ids.get(&decl.symbol.raw()) else {
+                continue;
+            };
+
+            let mut facts: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
+            insert_graph_fact(&mut facts, "decl", &decl.name);
+            for param in &decl.params {
+                insert_graph_fact(&mut facts, "decl", param);
+            }
+            collect_structural_graph_facts(&decl.flow_events, &mut facts);
+            for (kind, tokens) in facts {
+                for token in tokens {
+                    let token_id = stable_graph_id("token", &format!("{kind}\0{token}"));
+                    graph.node(
+                        token_id.clone(),
+                        "Token",
+                        [
+                            ("kind", Value::String(kind.to_string())),
+                            ("value", Value::String(token)),
+                        ],
+                    );
+                    graph.edge(
+                        func_id.clone(),
+                        token_id,
+                        "HAS_FACT",
+                        [("kind", Value::String(kind.to_string()))],
+                    );
+                }
+            }
+
+            let returns_taint_of = return_taint_indices_from_idg(
+                idg.as_ref(),
+                FuncId::new(decl.symbol.raw()),
+                decl.params.len(),
+            );
+            for param_index in returns_taint_of {
+                let param_id = stable_graph_id("param", &format!("{func_id}\0{param_index}"));
                 graph.node(
-                    token_id.clone(),
-                    "Token",
+                    param_id.clone(),
+                    "Parameter",
                     [
-                        ("kind", Value::String(kind.clone())),
-                        ("value", Value::String(token)),
+                        ("function_id", Value::String(func_id.clone())),
+                        ("param_index", number_usize(param_index)),
                     ],
                 );
                 graph.edge(
                     func_id.clone(),
-                    token_id,
-                    "HAS_FACT",
-                    [("kind", Value::String(kind.clone()))],
+                    param_id,
+                    "RETURNS_TAINT_OF",
+                    [("param_index", number_usize(param_index))],
                 );
             }
         }
-
-        let summary = bonsai_taint::function_summary(db, func);
-        for &param_index in &summary.returns_taint_of {
-            let param_id = stable_graph_id("param", &format!("{func_id}\0{param_index}"));
-            graph.node(
-                param_id.clone(),
-                "Parameter",
-                [
-                    ("function_id", Value::String(func_id.clone())),
-                    ("param_index", number_usize(param_index)),
-                ],
-            );
-            graph.edge(
-                func_id.clone(),
-                param_id,
-                "RETURNS_TAINT_OF",
-                [("param_index", number_usize(param_index))],
-            );
-        }
     }
 
-    let mut symbol_nodes: BTreeSet<String> = BTreeSet::new();
-    for (entry_raw, entry_id) in &func_ids {
-        let entry = FuncId::new(*entry_raw);
-        let entry_name = global
-            .decl_of(SymbolId::new(*entry_raw))
-            .map(|d| d.name.clone())
-            .unwrap_or_else(|| entry_id.clone());
-        graph.edge(
-            workspace_id.clone(),
-            entry_id.clone(),
-            "HAS_TAINT_ENTRY",
-            [("entry", Value::String(entry_name.clone()))],
-        );
-
-        let taint_graph = ws.dataflow().graph_for(entry, db);
-        for record in &taint_graph.call_records {
-            let Some(caller) = func_ids.get(&record.caller.raw()) else {
-                continue;
-            };
-            let Some(callee) = func_ids.get(&record.callee.raw()) else {
-                continue;
-            };
-            let (_, call_line, _) = format_span(&record.call_span, ws);
-            graph.edge(
-                caller.clone(),
-                callee.clone(),
-                "TAINT_PROPAGATES",
-                [
-                    ("entry", Value::String(entry_name.clone())),
-                    ("entry_func_id", number(*entry_raw)),
-                    ("call_line", number(call_line)),
-                ],
-            );
-        }
-        for call in &taint_graph.tainted_calls {
-            let Some(caller) = func_ids.get(&call.caller.raw()) else {
-                continue;
-            };
-            let symbol_id = resolve_function_or_symbol(&func_name_to_ids, &call.name, &mut symbol_nodes);
-            let (_, call_line, _) = format_span(&call.call_span, ws);
-            graph.edge(
-                caller.clone(),
-                symbol_id,
-                "TAINTED_CALL",
-                [
-                    ("entry", Value::String(entry_name.clone())),
-                    ("entry_func_id", number(*entry_raw)),
-                    ("name", Value::String(call.name.clone())),
-                    ("call_line", number(call_line)),
-                    (
-                        "tainted_args",
-                        strings_value(
-                            &call
-                                .tainted_args
-                                .iter()
-                                .map(|a| a.value_text.clone())
-                                .collect::<Vec<_>>(),
-                        ),
-                    ),
-                    ("tainted_receiver", opt_string(call.tainted_receiver.as_deref())),
-                ],
-            );
-        }
-    }
-
-    for symbol in symbol_nodes {
-        let id = stable_graph_id("symbol", &symbol);
-        graph.node(id, "Symbol", [("name", Value::String(symbol))]);
-    }
+    graph.node(
+        workspace_id,
+        "Workspace",
+        [
+            ("semantic_max_precision", Value::String("narrowed".to_string())),
+            ("taint_propagations_complete", Value::Bool(false)),
+            ("analysis_complete", Value::Bool(false)),
+            (
+                "analysis_incomplete_reasons",
+                strings_value(&graph_export_analysis_incomplete_reasons()),
+            ),
+            ("taint_propagations_saturated_entries", number_usize(0)),
+            (
+                "taint_propagations_incomplete_reason",
+                Value::String(GRAPH_EXPORT_INCOMPLETE_REASON.to_string()),
+            ),
+        ],
+    );
 
     graph.edges.sort_by(|a, b| {
         a.source
@@ -384,6 +360,138 @@ pub fn graph_projection(ws: &Workspace, workspace_root: &Path) -> GraphProjectio
             .then(a.id.cmp(&b.id))
     });
     graph
+}
+
+fn insert_graph_fact(facts: &mut BTreeMap<&'static str, BTreeSet<String>>, kind: &'static str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    facts.entry(kind).or_default().insert(value.to_string());
+}
+
+fn collect_structural_graph_facts(
+    events: &[FlowEvent],
+    facts: &mut BTreeMap<&'static str, BTreeSet<String>>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name, receiver, args, ..
+            } => {
+                insert_graph_fact(facts, "call", name);
+                if let Some(receiver) = receiver {
+                    insert_graph_fact(facts, "read", receiver);
+                }
+                for arg in args {
+                    insert_graph_fact(facts, "arg", &arg.value_text);
+                    if let Some(place) = arg.place.as_deref() {
+                        insert_graph_fact(facts, "read", place);
+                    }
+                }
+            }
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_names,
+                source_call,
+                source_call_args,
+                ..
+            } => {
+                insert_graph_fact(facts, "write", target);
+                if let Some(source_name) = source_name {
+                    insert_graph_fact(facts, "read", source_name);
+                }
+                for source_name in source_names {
+                    insert_graph_fact(facts, "read", source_name);
+                }
+                if let Some(source_call) = source_call {
+                    insert_graph_fact(facts, "call", source_call);
+                }
+                for arg in source_call_args {
+                    insert_graph_fact(facts, "arg", arg);
+                }
+            }
+            FlowEvent::Return {
+                value_text,
+                value_name,
+                ..
+            } => {
+                if let Some(value_name) = value_name {
+                    insert_graph_fact(facts, "read", value_name);
+                }
+                if let Some(value_text) = value_text {
+                    insert_graph_fact(facts, "arg", value_text);
+                }
+            }
+            FlowEvent::Throw { value_name, .. } => {
+                if let Some(value_name) = value_name {
+                    insert_graph_fact(facts, "read", value_name);
+                }
+            }
+            FlowEvent::Yield { value_text, .. }
+            | FlowEvent::Await {
+                value_name: value_text,
+                ..
+            } => {
+                if let Some(value_text) = value_text {
+                    insert_graph_fact(facts, "read", value_text);
+                }
+            }
+            FlowEvent::Branch {
+                condition,
+                then_events,
+                else_events,
+                ..
+            } => {
+                if let Some(condition) = condition {
+                    insert_graph_fact(facts, "arg", condition);
+                }
+                collect_structural_graph_facts(then_events, facts);
+                collect_structural_graph_facts(else_events, facts);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_structural_graph_facts(body, facts);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                ..
+            } => {
+                if let Some(catch_param) = catch_param {
+                    insert_graph_fact(facts, "write", catch_param);
+                }
+                collect_structural_graph_facts(body, facts);
+                collect_structural_graph_facts(catch_events, facts);
+                collect_structural_graph_facts(finally_events, facts);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn return_taint_indices_from_idg(
+    idg: &bonsai_idg::IdgQueryService,
+    func: FuncId,
+    param_count: usize,
+) -> Vec<usize> {
+    let Some(return_node) = idg.return_node_of(func) else {
+        return Vec::new();
+    };
+    let params = idg.param_nodes_of(func);
+    if params.is_empty() {
+        return Vec::new();
+    }
+    let backward: ahash::AHashSet<bonsai_idg::WsNodeId> =
+        idg.backward_closure(&[return_node]).into_iter().collect();
+    params
+        .into_iter()
+        .take(param_count)
+        .enumerate()
+        .filter_map(|(idx, param)| backward.contains(&param).then_some(idx))
+        .collect()
 }
 
 /// Render a graph database export from the SDK projection.
@@ -433,9 +541,13 @@ pub fn render_networkx_json(graph: &GraphProjection, workspace_root: &Path) -> s
         })
         .collect();
     let out = serde_json::json!({
+        "analysis_complete": false,
+        "analysis_incomplete_reasons": graph_export_analysis_incomplete_reasons(),
         "directed": true,
         "multigraph": true,
         "graph": {
+            "analysis_complete": false,
+            "analysis_incomplete_reasons": graph_export_analysis_incomplete_reasons(),
             "name": "bonsai-ninja export",
             "engine_version": env!("CARGO_PKG_VERSION"),
             "workspace_root": workspace_root.display().to_string(),
@@ -573,24 +685,6 @@ fn methods_inside_decl(decls: &[bonsai_lang_api::Decl], container: &bonsai_lang_
         .collect()
 }
 
-/// Resolve a callee name to a graph node id. If exactly one
-/// workspace function declares this name, we point the edge at
-/// that function. Otherwise (zero or many candidates) we synthesise
-/// a Symbol node so the graph still records the textual reference.
-fn resolve_function_or_symbol(
-    func_name_to_ids: &BTreeMap<String, Vec<String>>,
-    name: &str,
-    symbol_nodes: &mut BTreeSet<String>,
-) -> String {
-    match func_name_to_ids.get(name).map(Vec::as_slice) {
-        Some([only]) => only.clone(),
-        _ => {
-            symbol_nodes.insert(name.to_string());
-            stable_graph_id("symbol", name)
-        }
-    }
-}
-
 /// Build a stable graph id of the form `<prefix>_<16-hex>` over
 /// the FNV-1a-64 hash of `key`. Stable across runs — the same
 /// `(prefix, key)` always produces the same id, so external
@@ -713,28 +807,5 @@ fn cypher_value(value: &Value) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai_lang_api::LanguageRegistry;
-    use std::sync::Arc;
-
-    #[test]
-    fn renders_networkx_graphml_and_cypher_from_sdk_projection() {
-        let registry = Arc::new(LanguageRegistry::new());
-        let ws = Workspace::new(registry);
-        let root = Path::new("fixture");
-
-        let networkx = render_graph_export(&ws, root, GraphExportFormat::Networkx).unwrap();
-        assert!(networkx.contains("\"networkx-node-link\""));
-        assert!(networkx.contains("\"nodes\""));
-        assert!(networkx.contains("\"links\""));
-
-        let graphml = render_graph_export(&ws, root, GraphExportFormat::Graphml).unwrap();
-        assert!(graphml.starts_with("<?xml"));
-        assert!(graphml.contains("<graphml"));
-
-        let cypher = render_graph_export(&ws, root, GraphExportFormat::Cypher).unwrap();
-        assert!(cypher.contains("CREATE CONSTRAINT bonsai_node_id"));
-        assert!(cypher.contains("MERGE (n:BonsaiNode:WORKSPACE"));
-    }
-}
+#[path = "graph_export_tests.rs"]
+mod tests;

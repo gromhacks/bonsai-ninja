@@ -39,6 +39,7 @@
   enabled: true
   language: kotlin
   tag: xxe
+  category: source-independent
   severity: high
   cwe: [CWE-611]
   match:
@@ -95,6 +96,7 @@
   enabled: true
   language: kotlin
   tag: xxe
+  category: source-independent
   severity: high
   cwe: [CWE-611]
   match:

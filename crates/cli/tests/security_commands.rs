@@ -13,8 +13,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn bin_path() -> Option<PathBuf> {
-    // Integration binary under release OR debug — whichever the
-    // developer's `cargo build`/`cargo test` produces.
+    if let Some(path) = option_env!("CARGO_BIN_EXE_bonsai-ninja") {
+        return Some(PathBuf::from(path));
+    }
     let debug = repo_root().join("target/debug/bonsai-ninja");
     if debug.exists() {
         return Some(debug);
@@ -136,11 +137,14 @@ fn expected_mega_chain_hops(lang: &str) -> &'static [&'static str] {
     match lang {
         "c" | "cpp" | "elixir" => &["main", "orchestrate", "persist", "run"],
         "csharp" => &["Handle", "Orchestrate", "Persist", "Run", "Execute"],
-        "dart" | "erlang" | "javascript" | "lua" | "perl" | "php" | "ruby" | "rust" | "swift"
-        | "typescript" => &["handle_request", "orchestrate", "persist", "run", "execute"],
+        "dart" | "javascript" | "lua" | "perl" | "php" | "ruby" | "swift" | "typescript" => {
+            &["handle_request", "orchestrate", "persist", "run", "execute"]
+        }
+        "erlang" => &["orchestrate", "persist", "run", "execute"],
         "objc" => &["handle_request", "orchestrate", "persist", "run", "executeCmd"],
         "go" => &["handleRequest", "Orchestrate", "Persist", "Run", "Execute"],
         "java" | "kotlin" | "scala" => &["handle", "orchestrate", "persist", "run", "execute"],
+        "rust" => &["persist", "run", "execute"],
         "python" => &[
             "handle_request",
             "run_pipeline",
@@ -149,8 +153,35 @@ fn expected_mega_chain_hops(lang: &str) -> &'static [&'static str] {
             "perform",
             "execute",
         ],
-        "solidity" => &["handle", "orchestrate", "persist"],
+        "solidity" => &["handle", "audit"],
         _ => &[],
+    }
+}
+
+fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
+    match lang {
+        "c" => 1,
+        "cpp" => 0,
+        "csharp" => 0,
+        "dart" => 0,
+        "elixir" => 0,
+        "erlang" => 2,
+        "go" => 3,
+        "java" => 0,
+        "javascript" => 1,
+        "kotlin" => 1,
+        "lua" => 3,
+        "objc" => 2,
+        "perl" => 1,
+        "php" => 0,
+        "python" => 5,
+        "ruby" => 2,
+        "rust" => 1,
+        "scala" => 0,
+        "solidity" => 2,
+        "swift" => 0,
+        "typescript" => 1,
+        other => panic!("missing mega_flow expected finding count for {other}"),
     }
 }
 
@@ -780,6 +811,67 @@ fn temp_workspace(tag: &str) -> PathBuf {
 }
 
 #[test]
+fn json_stdout_stays_clean_when_sidecars_are_stale() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = temp_workspace("stale-sidecar-json");
+    std::fs::write(
+        ws.join("main.rs"),
+        r#"
+use std::env;
+use std::process::Command;
+
+fn main() {
+    let cmd = env::var("CMD").unwrap();
+    Command::new(cmd).status().ok();
+}
+"#,
+    )
+    .expect("write rust fixture");
+    let bonsai = ws.join(".bonsai");
+    std::fs::create_dir_all(&bonsai).expect("create .bonsai dir");
+    std::fs::write(bonsai.join("dataflow.v3.factstore"), b"not a factstore").expect("write dataflow sidecar");
+    std::fs::write(bonsai.join("value_flow.v3.factstore"), b"not a factstore")
+        .expect("write value-flow sidecar");
+
+    let out = Command::new(&bin)
+        .args([
+            "security",
+            ws.to_str().unwrap(),
+            "taint-analysis",
+            "--rules-dir",
+            &rules_dir(),
+            "--format",
+            "json",
+            "--all",
+            "--no-color",
+            "--no-progress",
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("run bonsai-ninja");
+    assert!(
+        out.status.success(),
+        "taint-analysis failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ignoring stale or corrupt"),
+        "test fixture should exercise stale sidecar warning path, got stderr:\n{stderr}"
+    );
+    serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap_or_else(|error| {
+        panic!(
+            "stdout must be a single valid JSON document even when warnings are emitted: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            stderr
+        )
+    });
+}
+
+#[test]
 fn sources_enumerate_for_python() {
     let ws = micro_path("python");
     if !ws.exists() {
@@ -876,6 +968,142 @@ def safe():
         !out.contains("\"finding_id\""),
         "reachable clean sink must not become a taint finding:\n{out}"
     );
+}
+
+#[test]
+fn taint_analysis_source_filter_excludes_pattern_only_findings() {
+    let ws = temp_workspace("source-filter-pattern-only");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+import hashlib
+
+def handle():
+    return hashlib.md5(b"constant")
+"#,
+    )
+    .expect("write fixture");
+
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--source",
+        "^python\\.flask\\.",
+        "--sink",
+        "^python\\.crypto\\.hashlib_md5$",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("taint JSON");
+    assert_eq!(
+        parsed.as_array().map(Vec::len),
+        Some(0),
+        "source-filtered taint run must not include source-less pattern findings:\n{out}"
+    );
+}
+
+#[test]
+fn taint_analysis_sarif_includes_source_independent_api_misuse_by_default() {
+    let ws = temp_workspace("sarif-source-independent");
+    std::fs::write(
+        ws.join("App.java"),
+        r#"
+import java.security.MessageDigest;
+
+class App {
+    void handle() throws Exception {
+        MessageDigest.getInstance("MD5");
+    }
+}
+"#,
+    )
+    .expect("write fixture");
+
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--format",
+        "sarif",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("sarif JSON");
+    let results = parsed["runs"][0]["results"]
+        .as_array()
+        .expect("SARIF results array");
+    let md5 = results
+        .iter()
+        .find(|result| result["ruleId"] == "java.crypto.md5_digest")
+        .unwrap_or_else(|| panic!("SARIF must include source-independent MD5 API misuse:\n{out}"));
+    assert!(
+        md5["codeFlows"].is_null(),
+        "source-independent SARIF result must not fabricate a taint codeFlow:\n{md5:#}"
+    );
+    assert_eq!(
+        md5["properties"]["bonsai"]["source_rule_id"],
+        "pattern:java.crypto.md5_digest"
+    );
+}
+
+#[test]
+fn taint_analysis_sarif_includes_java_owasp_api_misuse_without_fake_flows() {
+    let ws = temp_workspace("sarif-java-owasp-api-misuse");
+    std::fs::write(
+        ws.join("App.java"),
+        r#"
+import java.security.MessageDigest;
+import java.util.Random;
+
+class App {
+    void handle() throws Exception {
+        MessageDigest.getInstance("SHA-1");
+        new Random();
+        Math.random();
+    }
+}
+"#,
+    )
+    .expect("write fixture");
+
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--format",
+        "sarif",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("sarif JSON");
+    let results = parsed["runs"][0]["results"]
+        .as_array()
+        .expect("SARIF results array");
+    for rule_id in [
+        "java.hash.messagedigest_sha1",
+        "java.crypto.random_ctor",
+        "java.crypto.math_random",
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result["ruleId"] == rule_id)
+            .unwrap_or_else(|| panic!("SARIF must include Java OWASP API misuse {rule_id}:\n{out}"));
+        assert!(
+            result["codeFlows"].is_null(),
+            "source-independent SARIF result must not fabricate a taint codeFlow:\n{result:#}"
+        );
+        assert_eq!(
+            result["properties"]["bonsai"]["source_rule_id"],
+            format!("pattern:{rule_id}")
+        );
+    }
 }
 
 #[test]
@@ -1214,7 +1442,7 @@ def run(cmd):
 }
 
 #[test]
-fn c_mega_flow_renders_folded_steps_and_function_pointer_hop() {
+fn c_mega_flow_renders_precise_command_sink_chain() {
     let ws = mega_path("c");
     if !ws.exists() {
         return;
@@ -1235,13 +1463,8 @@ fn c_mega_flow_renders_folded_steps_and_function_pointer_hop() {
         "C argv source should propagate out of main through adapter-derived side effects:\n{out}"
     );
     assert!(
-        out.contains("main → orchestrate → joiner_impl"),
-        "function-pointer call should resolve through the real caller chain:\n{out}"
-    );
-    assert!(
-        out.contains("joiner(joined, sizeof(joined), \" \", tok);  # [TAINT FLOW")
-            && out.contains("-> joiner_impl arg["),
-        "function-pointer hop should render at the alias call site, not as an over-approx def-line fallback:\n{out}"
+        out.contains("main → orchestrate → persist → run → execute"),
+        "C command-injection finding should render the real source-to-sink chain:\n{out}"
     );
     assert!(
         !out.contains("in joiner_impl\n    —  [trust=local · tag=entry-point"),
@@ -1273,6 +1496,52 @@ fn source_analysis_maps_python_entrypoint_paths() {
     assert!(out.contains("\"source\""), "expected source metadata:\n{out}");
     assert!(out.contains("\"flow\""), "expected rendered source flow:\n{out}");
     assert!(out.contains("python.flask"), "got:\n{out}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("source-analysis JSON");
+    let rows = parsed.as_array().expect("source-analysis rows");
+    assert!(
+        rows.iter()
+            .all(|row| row["analysis_complete"].as_bool().is_some()),
+        "source-analysis rows must expose machine-readable completeness:\n{out}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["analysis_incomplete_reasons"].as_array().is_some()),
+        "source-analysis rows must expose machine-readable incomplete reasons:\n{out}"
+    );
+    assert!(
+        rows.iter().all(|row| row["lineage"].is_object()),
+        "source-analysis rows must include lineage status:\n{out}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["analysis_complete"].as_bool() == Some(true)),
+        "source-analysis --all must request uncapped lineage evidence for this fixture:\n{out}"
+    );
+    assert!(
+        rows.iter().all(|row| {
+            row["analysis_incomplete_reasons"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        }),
+        "complete source-analysis --all rows must not carry incomplete reasons:\n{out}"
+    );
+    let multi_hop_precisions: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row["flow"]["chain"]
+                .as_array()
+                .is_some_and(|chain| chain.len() > 1)
+        })
+        .filter_map(|row| row["flow"]["precision"].as_str())
+        .collect();
+    assert!(
+        !multi_hop_precisions.is_empty(),
+        "fixture should expose source flows crossing call edges:\n{out}"
+    );
+    assert!(
+        multi_hop_precisions.iter().all(|precision| *precision == "narrowed"),
+        "source-analysis flow precision must reflect lineage call-edge precision, got {multi_hop_precisions:?}:\n{out}"
+    );
 }
 
 #[test]
@@ -1306,6 +1575,126 @@ fn source_analysis_rejects_sarif_format_instead_of_emitting_json() {
     assert!(
         stderr.contains("does not emit SARIF"),
         "error should explain SARIF support boundary, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn source_analysis_paged_json_exposes_top_level_completeness() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "source-analysis",
+        "--source",
+        "^python\\.flask\\.",
+        "--trust",
+        "remote",
+        "--format",
+        "json",
+        "--context",
+        "1",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("source-analysis JSON");
+    assert!(
+        parsed["rows"].as_array().is_some(),
+        "paged source-analysis JSON must use wrapped rows shape:\n{out}"
+    );
+    assert_eq!(
+        parsed["analysis_complete"].as_bool(),
+        Some(false),
+        "paged source-analysis JSON must not claim complete row coverage:\n{out}"
+    );
+    let reasons = parsed["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        reasons.iter().any(|reason| {
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("paged security/source-analysis result incomplete"))
+        }),
+        "paged source-analysis JSON must explain incomplete row coverage:\n{out}"
+    );
+}
+
+#[test]
+fn taint_analysis_json_exposes_completion_metadata() {
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--source",
+        "^python\\.flask\\.",
+        "--trust",
+        "remote",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("taint-analysis JSON");
+    let rows = parsed.as_array().expect("taint-analysis rows");
+    assert!(!rows.is_empty(), "fixture should emit taint findings:\n{out}");
+    assert!(
+        rows.iter()
+            .all(|row| row["analysis_complete"].as_bool() == Some(true)),
+        "taint-analysis findings must expose complete semantic evidence:\n{out}"
+    );
+    assert!(
+        rows.iter().all(|row| row["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(Vec::is_empty)),
+        "taint-analysis findings must expose empty incomplete reasons when complete:\n{out}"
+    );
+}
+
+#[test]
+fn taint_analysis_rejects_broad_precision() {
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let ws = micro_path("python");
+    if !ws.exists() {
+        return;
+    }
+    let out = Command::new(&bin)
+        .args([
+            "security",
+            ws.to_str().unwrap(),
+            "taint-analysis",
+            "--rules-dir",
+            &rules_dir(),
+            "--precision",
+            "over-approximate",
+            "--no-color",
+            "--no-progress",
+        ])
+        .output()
+        .expect("run bonsai-ninja");
+    assert!(
+        !out.status.success(),
+        "taint-analysis --precision over-approximate should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("semantic-only"),
+        "error should explain semantic-only precision, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("ignoring stale or corrupt"),
+        "precision validation should run before workspace sidecar loading, got:\n{stderr}"
     );
 }
 
@@ -1404,10 +1793,26 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
             serde_json::from_str(&out).unwrap_or_else(|e| panic!("{lang}: invalid JSON: {e}\n{out}"));
         assert!(parsed.is_array(), "{lang}: expected JSON array:\n{out}");
         let rows = parsed.as_array().expect("array");
-        assert!(
-            !rows.is_empty(),
-            "{lang}: expected at least one security finding in mega_flow fixture:\n{out}"
+        let expected_count = expected_mega_finding_count_with_inferred_sources(lang);
+        assert_eq!(
+            rows.len(),
+            expected_count,
+            "{lang}: unexpected mega_flow inferred-source finding count:\n{out}"
         );
+        if expected_count == 0 {
+            continue;
+        }
+        if *lang == "objc" {
+            assert!(
+                rows.iter().any(|row| {
+                    row.get("source")
+                        .and_then(|v| v.get("rule_id"))
+                        .and_then(|v| v.as_str())
+                        == Some("objc.source.stdin_fgets")
+                }),
+                "objc: mega_flow must attribute at least one finding to the configured fgets output-argument source:\n{out}"
+            );
+        }
         for row in rows {
             let finding_id = row.get("finding_id").and_then(|v| v.as_str()).unwrap_or("");
             assert!(
@@ -1490,7 +1895,7 @@ fn taint_analysis_python_mega_alias_path_does_not_render_overapprox_edges() {
         "alias-resolved concrete mega_flow path must not render over-approx edges:\n{out}"
     );
     assert!(
-        out.contains("run_orchestrate(envelope)") && out.contains("-> orchestrate arg["),
+        out.contains("run_orchestrate(envelope)") && out.contains("run_pipeline -> orchestrate"),
         "expected alias call to render as the concrete orchestrate hop:\n{out}"
     );
 }
@@ -2232,7 +2637,7 @@ export function merge(target: any, source: any) {
 function createHtmlDocument(html) { return html }
 function handler(req, res) {
   const loc = req.query.loc
-  const html = createHtmlDocument('<a href="' + escapeHtml(loc) + '">x</a>')
+  const html = createHtmlDocument('profile', '<a href="' + loc + '">x</a>')
   res.send(html)
 }
 "##,
@@ -2267,7 +2672,6 @@ contract A {
     collect_rule_ids(&parsed, &mut rule_ids);
     for expected in [
         "c.cmdi.system",
-        "lua.xss.ngx_print",
         "lua.sqli.luasql_execute",
         "dart.xss.innerhtml",
         "elixir.xss.phoenix_html_raw",

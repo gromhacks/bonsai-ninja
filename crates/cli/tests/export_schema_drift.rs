@@ -172,6 +172,65 @@ fn assert_func_refs_resolve(lang: &str, export: &Value) {
     );
 }
 
+fn assert_top_level_callgraph_is_semantic(lang: &str, export: &Value) {
+    let rows = export
+        .get("callgraph")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("[{lang}] export missing callgraph"));
+    for row in rows {
+        let precision = row
+            .get("precision")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        assert!(
+            matches!(precision, "exact" | "narrowed"),
+            "[{lang}] export.callgraph must be semantic-only; got precision={precision} row={row}"
+        );
+    }
+    let summary_count = export
+        .get("summary")
+        .and_then(|s| s.get("call_edge_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::MAX);
+    assert_eq!(
+        summary_count,
+        rows.len() as u64,
+        "[{lang}] summary.call_edge_count must match semantic callgraph rows"
+    );
+}
+
+fn assert_flow_graph_names_are_workspace_functions(lang: &str, export: &Value) {
+    let Some(taint_graph) = export.get("taint_graph") else {
+        panic!("[{lang}] export missing taint_graph");
+    };
+    let known_names: BTreeSet<String> = taint_graph
+        .get("functions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let rows = export
+        .get("flow_graph")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("[{lang}] export missing flow_graph"));
+    for row in rows {
+        for field in ["callers", "outgoing"] {
+            if let Some(names) = row.get(field).and_then(Value::as_array) {
+                for name in names {
+                    let Some(name) = name.as_str() else {
+                        panic!("[{lang}] flow_graph.{field} contains non-string value: {name}");
+                    };
+                    assert!(
+                        known_names.contains(name),
+                        "[{lang}] flow_graph.{field} contains non-workspace function `{name}` in row {row}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn every_lang_micro_export_funcid_refs_resolve() {
     let Some(_) = bin_path() else {
@@ -183,5 +242,7 @@ fn every_lang_micro_export_funcid_refs_resolve() {
             continue;
         };
         assert_func_refs_resolve(lang, &export);
+        assert_top_level_callgraph_is_semantic(lang, &export);
+        assert_flow_graph_names_are_workspace_functions(lang, &export);
     }
 }

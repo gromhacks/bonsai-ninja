@@ -17,6 +17,7 @@
   enabled: true
   language: solidity
   tag: access-control
+  category: source-independent
   severity: medium
   cwe: [CWE-287]
   match:

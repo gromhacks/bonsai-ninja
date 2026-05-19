@@ -1,0 +1,36 @@
+use super::*;
+
+fn parse_import_specs(src: &str) -> Vec<ImportSpec> {
+    let language = language_from_pack(PACK_NAME).expect("ruby grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set ruby grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse ruby source");
+    parse_imports(&tree, src.as_bytes(), FileId::new(0))
+}
+
+#[test]
+fn require_relative_emits_statement_import_and_local_wildcard_binding() {
+    let imports = parse_import_specs("require_relative 'helpers'\n");
+
+    assert!(imports.iter().any(|spec| {
+        spec.module == "helpers"
+            && spec.alias.is_none()
+            && !spec.is_wildcard
+            && spec.original_name.is_none()
+            && spec.scope == ImportScope::Module
+    }));
+    assert!(imports.iter().any(|spec| {
+        spec.module == "helpers"
+            && spec.alias.is_none()
+            && spec.is_wildcard
+            && spec.original_name.is_none()
+            && spec.scope == ImportScope::Local
+    }));
+}
+
+#[test]
+fn autoload_does_not_emit_wildcard_callable_import() {
+    let imports = parse_import_specs("autoload :Helpers, 'helpers'\n");
+
+    assert!(imports.iter().all(|spec| !spec.is_wildcard));
+}

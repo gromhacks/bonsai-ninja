@@ -42,7 +42,11 @@ pub(crate) fn cmd_read_file(args: ReadFileArgs<'_>) -> Result<()> {
         line_range,
         from: args.from,
         to: args.to,
-        max_inlined_bodies: args.max_inlined_bodies,
+        max_inlined_bodies: if args.all {
+            Some(0)
+        } else {
+            args.max_inlined_bodies
+        },
     };
     let out = project.browse().read_file(filters)?;
 
@@ -145,6 +149,20 @@ fn render_text(out: &ReadFileOut, compact: bool) {
     cli_println!("{}", u.heading(&header));
     if let Some(module) = &out.locator.module {
         cli_println!("{} {}", u.label("module:"), u.name(module));
+    }
+    if !out.analysis_complete {
+        let reasons = if out.analysis_incomplete_reasons.is_empty() {
+            "analysis-incomplete".to_string()
+        } else {
+            out.analysis_incomplete_reasons.join("; ")
+        };
+        cli_println!("{} {}", u.warn("semantic-only view incomplete:"), u.dim(&reasons));
+        if out.truncated.callers_dropped > 0 || out.truncated.callees_dropped > 0 {
+            cli_println!(
+                "{}",
+                u.dim("rerun with --all or --max-inlined-bodies 0 to include every cross-file body")
+            );
+        }
     }
 
     if !out.findings_in_view.is_empty() {

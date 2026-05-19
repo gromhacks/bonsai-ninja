@@ -491,6 +491,8 @@
     kind: call
     callee:
       name: removingPercentEncoding
+  taint_semantics:
+    call_result_passthrough_receiver: true
   match_examples:
   - name: declared shape
     code: |

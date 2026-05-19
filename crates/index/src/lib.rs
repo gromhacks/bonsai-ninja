@@ -8,8 +8,33 @@
 
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{short_qualified_tail, FileId, SymbolId};
-use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, Ref};
+use bonsai_lang_api::{Decl, DeclIndex, DeclKind, FlowEvent, Ref, Visibility};
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DeclDedupKey {
+    kind: DeclKind,
+    name: String,
+    qualified_name: Option<String>,
+    module_path: bonsai_lang_api::ModulePath,
+    span: bonsai_common::Span,
+    name_span: bonsai_common::Span,
+    body_span: Option<bonsai_common::Span>,
+}
+
+impl From<&Decl> for DeclDedupKey {
+    fn from(decl: &Decl) -> Self {
+        Self {
+            kind: decl.kind,
+            name: decl.name.clone(),
+            qualified_name: decl.qualified_name.clone(),
+            module_path: decl.module_path.clone(),
+            span: decl.span,
+            name_span: decl.name_span,
+            body_span: decl.body_span,
+        }
+    }
+}
 
 /// A merged view over all per-file decl indices.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -54,6 +79,7 @@ impl GlobalIndex {
         bonsai_lang_api::apply_call_receiver_types(&mut index);
         bonsai_lang_api::apply_assign_value_kind(&mut index);
         bonsai_lang_api::apply_assign_call_result_types(&mut index);
+        dedup_decl_index_defs(&mut index);
         let file = index.file;
         if self.by_file.contains_key(&file) {
             self.remove_file(file);
@@ -278,6 +304,131 @@ impl GlobalIndex {
     }
 }
 
+fn dedup_decl_index_defs(index: &mut DeclIndex) {
+    let mut seen: AHashMap<DeclDedupKey, usize> = AHashMap::new();
+    let mut local_aliases: AHashMap<SymbolId, SymbolId> = AHashMap::new();
+    let mut deduped: Vec<Decl> = Vec::with_capacity(index.defs.len());
+    for decl in index.defs.drain(..) {
+        let key = DeclDedupKey::from(&decl);
+        if let Some(existing_idx) = seen.get(&key).copied() {
+            let existing_symbol = deduped[existing_idx].symbol;
+            local_aliases.insert(decl.symbol, existing_symbol);
+            merge_duplicate_decl(&mut deduped[existing_idx], decl);
+        } else {
+            seen.insert(key, deduped.len());
+            deduped.push(decl);
+        }
+    }
+    if !local_aliases.is_empty() {
+        for decl in &mut deduped {
+            if let Some(parent) = decl.parent.and_then(|parent| local_aliases.get(&parent).copied()) {
+                decl.parent = Some(parent);
+            }
+        }
+        for reference in &mut index.refs {
+            if let Some(resolved) = reference
+                .resolved
+                .and_then(|resolved| local_aliases.get(&resolved).copied())
+            {
+                reference.resolved = Some(resolved);
+            }
+        }
+    }
+    index.defs = deduped;
+}
+
+fn merge_duplicate_decl(into: &mut Decl, mut duplicate: Decl) {
+    if into.qualified_name.is_none() {
+        into.qualified_name = duplicate.qualified_name.take();
+    }
+    if into.module_path.is_empty() && !duplicate.module_path.is_empty() {
+        into.module_path = duplicate.module_path;
+    }
+    into.visibility = most_restrictive_visibility(into.visibility, duplicate.visibility);
+    if into.parent.is_none() {
+        into.parent = duplicate.parent;
+    }
+    if into.body_span.is_none() {
+        into.body_span = duplicate.body_span;
+    }
+    extend_unique(&mut into.flow_events, duplicate.flow_events);
+    into.has_implicit_returns |= duplicate.has_implicit_returns;
+
+    let duplicate_params = duplicate.params;
+    let params_match = !duplicate_params.is_empty() && into.params == duplicate_params;
+    if into.params.is_empty() {
+        into.params = duplicate_params;
+    }
+    merge_param_annotations(
+        &mut into.param_annotations,
+        duplicate.param_annotations,
+        params_match,
+    );
+
+    extend_unique(&mut into.type_aliases, duplicate.type_aliases);
+    extend_unique_strings(&mut into.bases, duplicate.bases);
+    if into.receiver_param_index.is_none() {
+        into.receiver_param_index = duplicate.receiver_param_index;
+    }
+    extend_unique(&mut into.receiver_field_writes, duplicate.receiver_field_writes);
+    extend_unique_strings(
+        &mut into.implicit_receiver_names,
+        duplicate.implicit_receiver_names,
+    );
+    extend_unique_strings(&mut into.receiver_state_sources, duplicate.receiver_state_sources);
+    if into.return_type.is_none() {
+        into.return_type = duplicate.return_type;
+    }
+}
+
+fn merge_param_annotations(into: &mut Vec<Vec<String>>, duplicate: Vec<Vec<String>>, params_match: bool) {
+    if duplicate.is_empty() {
+        return;
+    }
+    if into.is_empty() {
+        *into = duplicate;
+        return;
+    }
+    if params_match && into.len() == duplicate.len() {
+        for (target, values) in into.iter_mut().zip(duplicate) {
+            extend_unique_strings(target, values);
+        }
+    }
+}
+
+fn most_restrictive_visibility(left: Visibility, right: Visibility) -> Visibility {
+    if visibility_rank(right) < visibility_rank(left) {
+        right
+    } else {
+        left
+    }
+}
+
+fn visibility_rank(visibility: Visibility) -> u8 {
+    match visibility {
+        Visibility::Private => 0,
+        Visibility::Module => 1,
+        Visibility::Crate => 2,
+        Visibility::Protected => 3,
+        Visibility::Internal => 4,
+        Visibility::Public => 5,
+    }
+}
+
+fn extend_unique<T: PartialEq>(target: &mut Vec<T>, values: Vec<T>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
+fn extend_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        push_unique(target, value);
+    }
+}
+
 fn enrich_receiver_types_in_events(events: &mut [FlowEvent], bases_by_type: &AHashMap<String, Vec<String>>) {
     for event in events {
         match event {
@@ -374,86 +525,5 @@ fn dedup_strings(values: &mut Vec<String>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai_common::{FileId, Span, SymbolId};
-    use bonsai_lang_api::Visibility;
-
-    fn decl(file: FileId, local_symbol: u32, name: &str) -> Decl {
-        let span = Span::new(file, 0, u64::try_from(name.len()).unwrap());
-        Decl {
-            symbol: SymbolId::new(local_symbol),
-            kind: DeclKind::Function,
-            name: name.to_string(),
-            qualified_name: Some(format!("file{}::{name}", file.raw())),
-            module_path: bonsai_lang_api::ModulePath::default(),
-            span,
-            name_span: span,
-            visibility: Visibility::Private,
-            parent: None,
-            body_span: Some(span),
-            flow_events: Vec::new(),
-            has_implicit_returns: false,
-            params: Vec::new(),
-            param_annotations: Vec::new(),
-            type_aliases: Vec::new(),
-            bases: Vec::new(),
-            receiver_param_index: None,
-            receiver_field_writes: Vec::new(),
-            implicit_receiver_names: Vec::new(),
-            receiver_state_sources: Vec::new(),
-            return_type: None,
-        }
-    }
-
-    #[test]
-    fn len_and_empty_track_live_decls_after_removal() {
-        let file = FileId::new(7);
-        let mut index = GlobalIndex::new();
-        index.insert(DeclIndex {
-            file,
-            defs: vec![decl(file, 0, "one"), decl(file, 1, "two")],
-            refs: Vec::new(),
-            strings: Vec::new(),
-            comments: Vec::new(),
-        });
-
-        assert_eq!(index.len(), 2);
-        assert!(!index.is_empty());
-
-        index.remove_file(file);
-
-        assert_eq!(index.len(), 0);
-        assert!(index.is_empty());
-        assert!(index.find_by_name("file7::one").is_empty());
-    }
-
-    #[test]
-    fn reinserting_file_replaces_name_lookup_entries() {
-        let file = FileId::new(3);
-        let mut index = GlobalIndex::new();
-        index.insert(DeclIndex {
-            file,
-            defs: vec![decl(file, 0, "old")],
-            refs: Vec::new(),
-            strings: Vec::new(),
-            comments: Vec::new(),
-        });
-        index.insert(DeclIndex {
-            file,
-            defs: vec![decl(file, 0, "new")],
-            refs: Vec::new(),
-            strings: Vec::new(),
-            comments: Vec::new(),
-        });
-
-        assert_eq!(index.len(), 1);
-        assert!(index.find_by_name("file3::old").is_empty());
-        let new_symbols = index.find_by_name("file3::new");
-        assert_eq!(new_symbols.len(), 1);
-        assert_eq!(
-            index.decl_of(new_symbols[0]).map(|d| d.name.as_str()),
-            Some("new")
-        );
-    }
-}
+#[path = "tests.rs"]
+mod tests;

@@ -3,6 +3,7 @@
   enabled: true
   language: go
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: ["crypto/md5"]
   cwe: [CWE-327]
@@ -27,6 +28,7 @@
   enabled: true
   language: go
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: ["crypto/md5"]
   cwe: [CWE-327]
@@ -51,6 +53,7 @@
   enabled: true
   language: go
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: ["crypto/sha1"]
   cwe: [CWE-327]
@@ -75,6 +78,7 @@
   enabled: true
   language: go
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: ["crypto/sha1"]
   cwe: [CWE-327]
@@ -99,6 +103,7 @@
   enabled: true
   language: go
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: ["crypto/des"]
   cwe: [CWE-327]
@@ -123,6 +128,7 @@
   enabled: true
   language: go
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: ["crypto/des"]
   cwe: [CWE-327]
@@ -147,6 +153,7 @@
   enabled: true
   language: go
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: ["crypto/rc4"]
   cwe: [CWE-327]
@@ -171,6 +178,7 @@
   enabled: true
   language: go
   tag: weak-randomness
+  category: source-independent
   severity: medium
   packages: ["math/rand"]
   cwe: [CWE-330, CWE-338]
@@ -195,6 +203,7 @@
   enabled: true
   language: go
   tag: weak-randomness
+  category: source-independent
   severity: medium
   packages: ["math/rand"]
   cwe: [CWE-330, CWE-338]

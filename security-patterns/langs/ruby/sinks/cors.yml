@@ -3,6 +3,7 @@
   enabled: true
   language: ruby
   tag: cors
+  category: source-independent
   severity: medium
   packages: [rack-cors]
   cwe: [CWE-942]

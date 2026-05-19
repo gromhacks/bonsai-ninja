@@ -728,6 +728,8 @@
     kind: call
     callee:
       attribute: [StringEscapeUtils, escapeJava]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -921,6 +923,8 @@
     kind: call
     callee:
       attribute: [URLDecoder, decode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |

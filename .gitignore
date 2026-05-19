@@ -36,6 +36,12 @@ pnpm-debug.log*
 # Multi-MB OSS repos; clone with: git clone --depth 1 <url> examples/ctfs/<name>
 /examples/ctfs/
 
+# Large benchmark targets cloned on demand (Redis, OWASP Benchmark, etc.).
+/benchmarks/
+
+# Local benchmark/scorecard outputs; regenerate from scripts or benchmark harnesses.
+/runs/
+
 # Local pack-audit reports (regenerable via scripts/pack_audit.py).
 /build/
 

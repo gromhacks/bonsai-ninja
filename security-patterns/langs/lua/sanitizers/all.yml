@@ -345,6 +345,8 @@
     kind: call
     callee:
       attribute: [ngx, unescape_uri]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: lua.passthrough.ngx_unescape_uri example
     code: |
@@ -353,6 +355,42 @@
       end
     expect_match_text: ["ngx.unescape_uri"]
   description: "ngx.unescape_uri(s) — OpenResty URL decode; preserves taint."
+- id: lua.passthrough.string_upper
+  enabled: true
+  language: lua
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, upper]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string.upper preserves taint
+    code: |
+      function example(input)
+        return string.upper(input)
+      end
+    expect_match_text: ["string.upper"]
+  description: "string.upper(s) — case-normalizes but preserves taint from s."
+- id: lua.passthrough.string_lower
+  enabled: true
+  language: lua
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, lower]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string.lower preserves taint
+    code: |
+      function example(input)
+        return string.lower(input)
+      end
+    expect_match_text: ["string.lower"]
+  description: "string.lower(s) — case-normalizes but preserves taint from s."
 
 # CSRF middleware / decorator presence sanitizers (T303).
 # Tagged `csrf-protect` so the engine credits the `csrf` sink

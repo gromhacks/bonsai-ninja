@@ -1,5 +1,5 @@
 //! Python language adapter.
-use bonsai_common::{FileId, Span};
+use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of, GENERIC_HANDLER},
@@ -235,9 +235,35 @@ impl LanguageAdapter for PythonAdapter {
                     decl.bases = bases.clone();
                 }
             }
+            let match_pattern_bindings = collect_python_match_pattern_bindings(&tree, file, src);
+            let property_fn_spans = collect_python_property_function_spans(&tree, file, src);
+            let property_aliases = collect_python_property_aliases(&idx, &property_fn_spans);
+            let property_aliases_by_decl = python_property_aliases_by_decl(&idx, &property_aliases);
+            let callable_spans: Vec<Span> = idx
+                .defs
+                .iter()
+                .filter(|decl| {
+                    matches!(
+                        decl.kind,
+                        bonsai_lang_api::DeclKind::Function
+                            | bonsai_lang_api::DeclKind::Method
+                            | bonsai_lang_api::DeclKind::Constructor
+                    )
+                })
+                .map(|decl| decl.span)
+                .collect();
             for decl in &mut idx.defs {
+                let owned_match_patterns: Vec<PythonMatchPatternBindings> = match_pattern_bindings
+                    .iter()
+                    .filter(|pattern| python_match_pattern_owned_by_decl(pattern, decl.span, &callable_spans))
+                    .cloned()
+                    .collect();
+                augment_python_match_pattern_flow_events(&mut decl.flow_events, &owned_match_patterns);
                 augment_python_comprehension_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
                 augment_python_dict_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
+                if let Some(property_aliases_for_decl) = property_aliases_by_decl.get(&decl.symbol) {
+                    augment_python_property_flow_events(&mut decl.flow_events, property_aliases_for_decl);
+                }
                 rewrite_python_constant_reflection(&mut decl.flow_events);
                 rewrite_python_generator_send(&mut decl.flow_events);
             }
@@ -372,6 +398,288 @@ fn merge_python_param_binder_annotations(decl: &mut bonsai_lang_api::Decl, binde
             anns.dedup();
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PythonPropertyAlias {
+    class_symbol: SymbolId,
+    property_name: String,
+    receiver_name: String,
+    target_tail: String,
+}
+
+fn collect_python_property_function_spans(tree: &Tree, file: FileId, src: &[u8]) -> Vec<Span> {
+    let mut spans = Vec::new();
+    for decorated in collect_kinds(tree, &["decorated_definition"]) {
+        if !python_decorated_definition_has_property(&decorated, src) {
+            continue;
+        }
+        let Some(function) = first_named_child_of_kind(decorated, &["function_definition"]) else {
+            continue;
+        };
+        let span = span_of(file, &function);
+        if !spans.contains(&span) {
+            spans.push(span);
+        }
+    }
+    spans
+}
+
+fn python_decorated_definition_has_property(node: &Node<'_>, src: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    let has_property = node
+        .named_children(&mut cursor)
+        .any(|child| child.kind() == "decorator" && python_decorator_is_property(&child, src));
+    has_property
+}
+
+fn python_decorator_is_property(node: &Node<'_>, src: &[u8]) -> bool {
+    let text = node_text(node, src).trim();
+    text.strip_prefix('@')
+        .map(str::trim)
+        .is_some_and(|decorator| decorator == "property")
+}
+
+fn collect_python_property_aliases(idx: &DeclIndex, property_fn_spans: &[Span]) -> Vec<PythonPropertyAlias> {
+    let mut aliases = Vec::new();
+    for decl in &idx.defs {
+        if !property_fn_spans.contains(&decl.span) {
+            continue;
+        }
+        let Some(class_symbol) = decl.parent else {
+            continue;
+        };
+        let Some(receiver_idx) = decl.receiver_param_index else {
+            continue;
+        };
+        let Some(receiver_name) = decl.params.get(receiver_idx) else {
+            continue;
+        };
+        let Some(target_tail) = python_property_return_tail(decl, receiver_name) else {
+            continue;
+        };
+        aliases.push(PythonPropertyAlias {
+            class_symbol,
+            property_name: decl.name.clone(),
+            receiver_name: receiver_name.clone(),
+            target_tail,
+        });
+    }
+    aliases
+}
+
+fn python_property_return_tail(decl: &bonsai_lang_api::Decl, receiver_name: &str) -> Option<String> {
+    for event in &decl.flow_events {
+        if let Some(tail) = python_property_return_tail_from_event(event, receiver_name) {
+            return Some(tail);
+        }
+    }
+    None
+}
+
+fn python_property_return_tail_from_event(
+    event: &bonsai_lang_api::FlowEvent,
+    receiver_name: &str,
+) -> Option<String> {
+    match event {
+        bonsai_lang_api::FlowEvent::Return {
+            value_text,
+            value_name,
+            ..
+        } => value_text
+            .as_deref()
+            .or(value_name.as_deref())
+            .and_then(|value| python_receiver_access_tail(value, receiver_name)),
+        bonsai_lang_api::FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => then_events
+            .iter()
+            .chain(else_events.iter())
+            .find_map(|event| python_property_return_tail_from_event(event, receiver_name)),
+        bonsai_lang_api::FlowEvent::Loop { body, .. }
+        | bonsai_lang_api::FlowEvent::Defer { body, .. }
+        | bonsai_lang_api::FlowEvent::Using { body, .. } => body
+            .iter()
+            .find_map(|event| python_property_return_tail_from_event(event, receiver_name)),
+        bonsai_lang_api::FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => body
+            .iter()
+            .chain(catch_events.iter())
+            .chain(finally_events.iter())
+            .find_map(|event| python_property_return_tail_from_event(event, receiver_name)),
+        _ => None,
+    }
+}
+
+fn python_receiver_access_tail(value: &str, receiver_name: &str) -> Option<String> {
+    let value = value.trim();
+    let tail = value.strip_prefix(receiver_name)?.strip_prefix('.')?.trim();
+    (!tail.is_empty()
+        && tail
+            .chars()
+            .all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric()))
+    .then(|| tail.to_string())
+}
+
+fn python_property_aliases_for_decl(
+    idx: &DeclIndex,
+    decl: &bonsai_lang_api::Decl,
+    property_aliases: &[PythonPropertyAlias],
+) -> Vec<PythonPropertyAlias> {
+    let Some(class_symbol) = decl.parent else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen_classes = std::collections::HashSet::new();
+    collect_python_property_aliases_for_class(
+        idx,
+        class_symbol,
+        property_aliases,
+        &mut seen_classes,
+        &mut out,
+    );
+    if let Some(receiver_name) = python_decl_receiver_name(decl) {
+        for alias in &mut out {
+            alias.receiver_name.clone_from(&receiver_name);
+        }
+    }
+    out
+}
+
+fn python_decl_receiver_name(decl: &bonsai_lang_api::Decl) -> Option<String> {
+    decl.receiver_param_index
+        .and_then(|idx| decl.params.get(idx))
+        .filter(|name| !name.trim().is_empty())
+        .cloned()
+}
+
+fn python_property_aliases_by_decl(
+    idx: &DeclIndex,
+    property_aliases: &[PythonPropertyAlias],
+) -> std::collections::HashMap<SymbolId, Vec<PythonPropertyAlias>> {
+    let mut by_decl = std::collections::HashMap::new();
+    for decl in &idx.defs {
+        let aliases = python_property_aliases_for_decl(idx, decl, property_aliases);
+        if !aliases.is_empty() {
+            by_decl.insert(decl.symbol, aliases);
+        }
+    }
+    by_decl
+}
+
+fn collect_python_property_aliases_for_class(
+    idx: &DeclIndex,
+    class_symbol: SymbolId,
+    property_aliases: &[PythonPropertyAlias],
+    seen_classes: &mut std::collections::HashSet<SymbolId>,
+    out: &mut Vec<PythonPropertyAlias>,
+) {
+    if !seen_classes.insert(class_symbol) {
+        return;
+    }
+    for alias in property_aliases
+        .iter()
+        .filter(|alias| alias.class_symbol == class_symbol)
+    {
+        if !out.iter().any(|existing| existing == alias) {
+            out.push(alias.clone());
+        }
+    }
+    let Some(class_decl) = idx.defs.iter().find(|decl| decl.symbol == class_symbol) else {
+        return;
+    };
+    for base in &class_decl.bases {
+        let Some(base_symbol) = idx
+            .defs
+            .iter()
+            .find(|decl| {
+                matches!(decl.kind, bonsai_lang_api::DeclKind::Class)
+                    && (decl.name == *base || decl.name == base.rsplit('.').next().unwrap_or(base))
+            })
+            .map(|decl| decl.symbol)
+        else {
+            continue;
+        };
+        collect_python_property_aliases_for_class(idx, base_symbol, property_aliases, seen_classes, out);
+    }
+}
+
+fn augment_python_property_flow_events(
+    events: &mut [bonsai_lang_api::FlowEvent],
+    property_aliases: &[PythonPropertyAlias],
+) {
+    if property_aliases.is_empty() {
+        return;
+    }
+    for event in events {
+        match event {
+            bonsai_lang_api::FlowEvent::Assign { source_names, .. } => {
+                augment_python_property_source_names(source_names, property_aliases);
+            }
+            bonsai_lang_api::FlowEvent::Call { args, .. } => {
+                for arg in args {
+                    augment_python_property_source_names(&mut arg.source_names, property_aliases);
+                }
+            }
+            bonsai_lang_api::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_python_property_flow_events(then_events, property_aliases);
+                augment_python_property_flow_events(else_events, property_aliases);
+            }
+            bonsai_lang_api::FlowEvent::Loop { body, .. }
+            | bonsai_lang_api::FlowEvent::Defer { body, .. }
+            | bonsai_lang_api::FlowEvent::Using { body, .. } => {
+                augment_python_property_flow_events(body, property_aliases);
+            }
+            bonsai_lang_api::FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_python_property_flow_events(body, property_aliases);
+                augment_python_property_flow_events(catch_events, property_aliases);
+                augment_python_property_flow_events(finally_events, property_aliases);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn augment_python_property_source_names(
+    source_names: &mut Vec<String>,
+    property_aliases: &[PythonPropertyAlias],
+) {
+    let existing = source_names.clone();
+    for source in existing {
+        for alias in property_aliases {
+            if let Some(rewritten) = python_property_alias_source_name(&source, alias) {
+                push_python_source_name(source_names, rewritten);
+            }
+        }
+    }
+}
+
+fn python_property_alias_source_name(source: &str, alias: &PythonPropertyAlias) -> Option<String> {
+    let prefix = format!("{}.{}", alias.receiver_name, alias.property_name);
+    let source = source.trim();
+    if source == prefix {
+        return Some(format!("{}.{}", alias.receiver_name, alias.target_tail));
+    }
+    let tail = source.strip_prefix(&prefix)?.strip_prefix('.')?;
+    if tail.is_empty() {
+        return None;
+    }
+    Some(format!("{}.{}.{}", alias.receiver_name, alias.target_tail, tail))
 }
 
 fn augment_python_comprehension_flow_events(events: &mut [bonsai_lang_api::FlowEvent], source: &str) {
@@ -590,6 +898,352 @@ fn push_python_source_name(out: &mut Vec<String>, value: String) {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PythonMatchPatternBindings {
+    span: Span,
+    subject: String,
+    coarse_targets: Vec<String>,
+    assignments: Vec<bonsai_lang_api::FlowEvent>,
+}
+
+fn collect_python_match_pattern_bindings(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<PythonMatchPatternBindings> {
+    let mut out = Vec::new();
+    collect_python_match_pattern_bindings_from_node(tree.root_node(), file, src, &mut out);
+    out
+}
+
+fn collect_python_match_pattern_bindings_from_node(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<PythonMatchPatternBindings>,
+) {
+    if node.kind() == "match_statement" {
+        if let Some(bindings) = collect_python_match_pattern_bindings_for_statement(node, file, src) {
+            out.push(bindings);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_match_pattern_bindings_from_node(child, file, src, out);
+    }
+}
+
+fn collect_python_match_pattern_bindings_for_statement(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<PythonMatchPatternBindings> {
+    let subject_node = node.child_by_field_name("subject")?;
+    let subject = node_text(&subject_node, src).trim();
+    if !python_match_capture_identifier(subject) {
+        return None;
+    }
+
+    let mut bindings = PythonMatchPatternBindings {
+        span: span_of(file, &node),
+        subject: subject.to_string(),
+        coarse_targets: Vec::new(),
+        assignments: Vec::new(),
+    };
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_python_case_clause_pattern_bindings(child, subject, file, src, &mut bindings);
+    }
+
+    (!bindings.coarse_targets.is_empty()).then_some(bindings)
+}
+
+fn collect_python_case_clause_pattern_bindings(
+    case_clause: Node<'_>,
+    subject: &str,
+    file: FileId,
+    src: &[u8],
+    bindings: &mut PythonMatchPatternBindings,
+) {
+    if case_clause.kind() == "case_pattern" {
+        collect_python_dict_pattern_bindings(case_clause, subject, file, src, bindings);
+        return;
+    }
+
+    let mut cursor = case_clause.walk();
+    for child in case_clause.named_children(&mut cursor) {
+        if child.kind() == "case_pattern" {
+            collect_python_dict_pattern_bindings(child, subject, file, src, bindings);
+        } else {
+            collect_python_case_clause_pattern_bindings(child, subject, file, src, bindings);
+        }
+    }
+}
+
+fn collect_python_dict_pattern_bindings(
+    node: Node<'_>,
+    subject: &str,
+    file: FileId,
+    src: &[u8],
+    bindings: &mut PythonMatchPatternBindings,
+) {
+    if node.kind() != "dict_pattern" {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            collect_python_dict_pattern_bindings(child, subject, file, src, bindings);
+        }
+        return;
+    }
+
+    let mut pending_key: Option<String> = None;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "string" => {
+                pending_key = python_static_dict_key(node_text(&child, src));
+            }
+            "case_pattern" => {
+                let Some(field) = pending_key.take() else {
+                    continue;
+                };
+                let Some(target) = python_pattern_binding_identifier(child, src) else {
+                    continue;
+                };
+                push_python_source_name(&mut bindings.coarse_targets, target.clone());
+                let source = format!("{subject}.{field}");
+                if bindings.assignments.iter().any(|event| {
+                    matches!(
+                        event,
+                        bonsai_lang_api::FlowEvent::Assign {
+                            span,
+                            target: existing_target,
+                            source_name: Some(existing_source),
+                            ..
+                        } if *span == span_of(file, &child)
+                            && existing_target == &target
+                            && existing_source == &source
+                    )
+                }) {
+                    continue;
+                }
+                bindings.assignments.push(bonsai_lang_api::FlowEvent::Assign {
+                    span: span_of(file, &child),
+                    target,
+                    source_name: Some(source.clone()),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: vec![source],
+                    declares_new_binding: false,
+                    value_kind: None,
+                });
+            }
+            "splat_pattern" => {
+                if let Some(target) = python_splat_pattern_binding_identifier(child, src) {
+                    push_python_source_name(&mut bindings.coarse_targets, target);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn python_pattern_binding_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let text = node_text(&node, src).trim();
+    python_match_capture_identifier(text).then(|| text.to_string())
+}
+
+fn python_splat_pattern_binding_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "identifier" {
+            continue;
+        }
+        let text = node_text(&child, src).trim();
+        if python_match_capture_identifier(text) {
+            return Some(text.to_string());
+        }
+    }
+    let text = node_text(&node, src).trim().trim_start_matches("**").trim();
+    python_match_capture_identifier(text).then(|| text.to_string())
+}
+
+fn python_match_capture_identifier(text: &str) -> bool {
+    if matches!(
+        text,
+        "" | "_" | "True" | "False" | "None" | "case" | "if" | "in" | "and" | "or" | "not"
+    ) {
+        return false;
+    }
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_alphanumeric())
+}
+
+fn augment_python_match_pattern_flow_events(
+    events: &mut Vec<bonsai_lang_api::FlowEvent>,
+    patterns: &[PythonMatchPatternBindings],
+) {
+    if patterns.is_empty() {
+        return;
+    }
+    let mut inserted_patterns = Vec::new();
+    augment_python_match_pattern_flow_events_inner(events, patterns, &mut inserted_patterns);
+    insert_missing_python_match_pattern_assignments(events, patterns, &inserted_patterns);
+}
+
+fn augment_python_match_pattern_flow_events_inner(
+    events: &mut Vec<bonsai_lang_api::FlowEvent>,
+    patterns: &[PythonMatchPatternBindings],
+    inserted_patterns: &mut Vec<usize>,
+) {
+    for event in events.iter_mut() {
+        match event {
+            bonsai_lang_api::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_python_match_pattern_flow_events_inner(then_events, patterns, inserted_patterns);
+                augment_python_match_pattern_flow_events_inner(else_events, patterns, inserted_patterns);
+            }
+            bonsai_lang_api::FlowEvent::Loop { body, .. }
+            | bonsai_lang_api::FlowEvent::Defer { body, .. }
+            | bonsai_lang_api::FlowEvent::Using { body, .. } => {
+                augment_python_match_pattern_flow_events_inner(body, patterns, inserted_patterns);
+            }
+            bonsai_lang_api::FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_python_match_pattern_flow_events_inner(body, patterns, inserted_patterns);
+                augment_python_match_pattern_flow_events_inner(catch_events, patterns, inserted_patterns);
+                augment_python_match_pattern_flow_events_inner(finally_events, patterns, inserted_patterns);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let replacement = if let bonsai_lang_api::FlowEvent::Assign {
+            span,
+            target,
+            source_name,
+            source_call,
+            ..
+        } = &event
+        {
+            python_match_pattern_replacement(
+                patterns,
+                *span,
+                target,
+                source_name.as_deref(),
+                source_call.as_deref(),
+            )
+        } else {
+            None
+        };
+
+        if let Some(pattern_idx) = replacement {
+            if !inserted_patterns.contains(&pattern_idx) {
+                rewritten.extend(patterns[pattern_idx].assignments.clone());
+                inserted_patterns.push(pattern_idx);
+            }
+            continue;
+        }
+
+        rewritten.push(event);
+    }
+    *events = rewritten;
+}
+
+fn insert_missing_python_match_pattern_assignments(
+    events: &mut Vec<bonsai_lang_api::FlowEvent>,
+    patterns: &[PythonMatchPatternBindings],
+    inserted_patterns: &[usize],
+) {
+    for (pattern_idx, pattern) in patterns.iter().enumerate() {
+        if inserted_patterns.contains(&pattern_idx) {
+            continue;
+        }
+        let insert_at = events
+            .iter()
+            .position(|event| python_flow_event_span(event).start >= pattern.span.start)
+            .unwrap_or(events.len());
+        for assignment in pattern.assignments.iter().rev() {
+            events.insert(insert_at, assignment.clone());
+        }
+    }
+}
+
+fn python_match_pattern_replacement(
+    patterns: &[PythonMatchPatternBindings],
+    span: Span,
+    target: &str,
+    source_name: Option<&str>,
+    source_call: Option<&str>,
+) -> Option<usize> {
+    if source_call.is_some_and(|source_call| !source_call.is_empty()) {
+        return None;
+    }
+    patterns.iter().position(|pattern| {
+        pattern.span == span
+            && source_name == Some(pattern.subject.as_str())
+            && pattern.coarse_targets.iter().any(|candidate| candidate == target)
+    })
+}
+
+fn python_match_pattern_owned_by_decl(
+    pattern: &PythonMatchPatternBindings,
+    decl_span: Span,
+    callable_spans: &[Span],
+) -> bool {
+    if !python_span_contains(decl_span, pattern.span) {
+        return false;
+    }
+    let Some(owner) = callable_spans
+        .iter()
+        .copied()
+        .filter(|span| python_span_contains(*span, pattern.span))
+        .min_by_key(|span| span.end.saturating_sub(span.start))
+    else {
+        return false;
+    };
+    owner == decl_span
+}
+
+fn python_span_contains(outer: Span, inner: Span) -> bool {
+    outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn python_flow_event_span(event: &bonsai_lang_api::FlowEvent) -> Span {
+    match event {
+        bonsai_lang_api::FlowEvent::Assign { span, .. }
+        | bonsai_lang_api::FlowEvent::Call { span, .. }
+        | bonsai_lang_api::FlowEvent::Return { span, .. }
+        | bonsai_lang_api::FlowEvent::Throw { span, .. }
+        | bonsai_lang_api::FlowEvent::Branch { span, .. }
+        | bonsai_lang_api::FlowEvent::Loop { span, .. }
+        | bonsai_lang_api::FlowEvent::Try { span, .. }
+        | bonsai_lang_api::FlowEvent::Defer { span, .. }
+        | bonsai_lang_api::FlowEvent::Using { span, .. }
+        | bonsai_lang_api::FlowEvent::Yield { span, .. }
+        | bonsai_lang_api::FlowEvent::Await { span, .. }
+        | bonsai_lang_api::FlowEvent::Break { span, .. }
+        | bonsai_lang_api::FlowEvent::Continue { span, .. }
+        | bonsai_lang_api::FlowEvent::Lifecycle { span, .. } => *span,
+    }
+}
+
 fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>, source: &str) {
     for event in events.iter_mut() {
         match event {
@@ -628,7 +1282,7 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
             if let Some(rhs) = python_assignment_rhs_text(source, *span) {
                 for (field, value) in python_dict_field_initializers(&rhs) {
                     push_python_source_name(known_fields.entry(target.clone()).or_default(), field.clone());
-                    let source_names = python_access_tokens(&value);
+                    let source_names = python_value_source_names(&value);
                     synthetic.push(bonsai_lang_api::FlowEvent::Assign {
                         span: *span,
                         target: format!("{target}.{field}"),
@@ -636,6 +1290,18 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
                         source_call: None,
                         source_call_args: Vec::new(),
                         source_names,
+                        declares_new_binding: false,
+                        value_kind: None,
+                    });
+                }
+                for field_read in python_static_get_field_reads(&rhs) {
+                    synthetic.push(bonsai_lang_api::FlowEvent::Assign {
+                        span: *span,
+                        target: target.clone(),
+                        source_name: Some(field_read.clone()),
+                        source_call: None,
+                        source_call_args: Vec::new(),
+                        source_names: vec![field_read],
                         declares_new_binding: false,
                         value_kind: None,
                     });
@@ -663,6 +1329,187 @@ fn augment_python_dict_flow_events(events: &mut Vec<bonsai_lang_api::FlowEvent>,
         rewritten.extend(synthetic);
     }
     *events = rewritten;
+}
+
+fn python_value_source_names(text: &str) -> Vec<String> {
+    let mut out = python_access_tokens(text);
+    for field_read in python_static_subscript_field_reads(text) {
+        push_python_source_name(&mut out, field_read);
+    }
+    for field_read in python_static_get_field_reads(text) {
+        push_python_source_name(&mut out, field_read);
+    }
+    out
+}
+
+fn python_static_subscript_field_reads(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '[' if depth == 0 => {
+                let Some(receiver) = python_receiver_before_index(text, idx) else {
+                    depth = depth.saturating_add(1);
+                    continue;
+                };
+                let Some(end) = python_matching_bracket_end(text, idx + 1) else {
+                    depth = depth.saturating_add(1);
+                    continue;
+                };
+                if let Some(field) = python_static_dict_key(&text[idx + 1..end]) {
+                    push_python_source_name(&mut out, format!("{receiver}.{field}"));
+                }
+                depth = depth.saturating_add(1);
+            }
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn python_static_get_field_reads(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '.' if depth == 0 && text[idx..].starts_with(".get(") => {
+                let Some(receiver) = python_receiver_before_dot_get(text, idx) else {
+                    continue;
+                };
+                let args_start = idx + ".get(".len();
+                let Some(args_end) = python_matching_paren_end(text, args_start) else {
+                    continue;
+                };
+                let args = &text[args_start..args_end];
+                let Some(first_arg) = python_split_top_level(args, ',').into_iter().next() else {
+                    continue;
+                };
+                if let Some(field) = python_static_dict_key(&first_arg) {
+                    push_python_source_name(&mut out, format!("{receiver}.{field}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn python_receiver_before_index(text: &str, index_idx: usize) -> Option<String> {
+    let prefix = text.get(..index_idx)?;
+    let mut start = index_idx;
+    for (idx, ch) in prefix.char_indices().rev() {
+        if ch == '.' || ch == '_' || ch.is_ascii_alphanumeric() {
+            start = idx;
+            continue;
+        }
+        break;
+    }
+    let receiver = text[start..index_idx].trim_matches('.');
+    if receiver.is_empty() {
+        None
+    } else {
+        Some(receiver.to_string())
+    }
+}
+
+fn python_receiver_before_dot_get(text: &str, dot_idx: usize) -> Option<String> {
+    let prefix = text.get(..dot_idx)?;
+    let mut start = dot_idx;
+    for (idx, ch) in prefix.char_indices().rev() {
+        if ch == '.' || ch == '_' || ch.is_ascii_alphanumeric() {
+            start = idx;
+            continue;
+        }
+        break;
+    }
+    let receiver = text[start..dot_idx].trim_matches('.');
+    if receiver.is_empty() {
+        None
+    } else {
+        Some(receiver.to_string())
+    }
+}
+
+fn python_matching_bracket_end(text: &str, args_start: usize) -> Option<usize> {
+    python_matching_delimiter_end(text, args_start, '[', ']')
+}
+
+fn python_matching_paren_end(text: &str, args_start: usize) -> Option<usize> {
+    python_matching_delimiter_end(text, args_start, '(', ')')
+}
+
+fn python_matching_delimiter_end(
+    text: &str,
+    args_start: usize,
+    open_delimiter: char,
+    close_delimiter: char,
+) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 1usize;
+    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < args_start) {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            ch if ch == open_delimiter => depth = depth.saturating_add(1),
+            ch if ch == close_delimiter => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn python_dict_field_initializers(text: &str) -> Vec<(String, String)> {

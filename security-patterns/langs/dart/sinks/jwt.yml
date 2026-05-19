@@ -2,7 +2,9 @@
 - id: dart.jwt.dart_jsonwebtoken_verify
   aliases:
   - dart.jwt.alg_confusion
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: dart
   tag: jwt
   severity: high
@@ -22,7 +24,9 @@
       import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken
       // uses dart_jsonwebtoken
       void test() { var input = "x"; var amount = 1; JWT.verify(input); }
-  description: "dart_jsonwebtoken JWT.verify — check algorithm whitelist + key pinning. Also covers merged aliases: dart.jwt.alg_confusion."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. dart_jsonwebtoken JWT.verify — check
+    algorithm whitelist + key pinning. Also covers merged aliases: dart.jwt.alg_confusion."
 
   imports:
   - dart_jsonwebtoken/dart_jsonwebtoken.dart
@@ -37,6 +41,9 @@
     kind: call
     callee:
       attribute: [JWT, decode]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
@@ -47,6 +54,13 @@
       import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken
       // uses dart_jsonwebtoken
       void test() { var input = "x"; var amount = 1; JWT.decode(input); }
+  - name: literal jwt negative
+    code: "import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\nimport 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\n\
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\nimport 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';\n\
+      import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart'; // dart_jsonwebtoken\n\
+      // uses dart_jsonwebtoken\nvoid test() { var \"safe\" = \"x\"; var amount =
+      1; JWT.decode(\"safe\"); }\n"
+    expect_no_match: true
   description: "dart_jsonwebtoken JWT.decode — does not verify signature."
 
   imports:
@@ -62,6 +76,9 @@
     kind: call
     callee:
       attribute: [JsonWebToken, unverified]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
@@ -72,12 +89,20 @@
       import 'package:jose/jose.dart'; // jose
       // uses jose
       void test() { var input = "x"; var amount = 1; JsonWebToken.unverified(input); }
+  - name: literal jwt negative
+    code: "import 'package:jose/jose.dart';\nimport 'package:jose/jose.dart';\nimport
+      'package:jose/jose.dart';\nimport 'package:jose/jose.dart';\nimport 'package:jose/jose.dart';
+      // jose\n// uses jose\nvoid test() { var \"safe\" = \"x\"; var amount = 1; JsonWebToken.unverified(\"\
+      safe\"); }\n"
+    expect_no_match: true
   description: "jose JsonWebToken.unverified — explicit no-verify."
 
   imports:
   - jose/jose.dart
 - id: dart.jwt.jaguar_verify
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: dart
   tag: jwt
   severity: high
@@ -96,7 +121,9 @@
       import 'package:jaguar_jwt/jaguar_jwt.dart';
       import 'package:jaguar_jwt/jaguar_jwt.dart';
       void test() { var input = "x"; var amount = 1; verifyJwtHS256Signature(input); }
-  description: "jaguar_jwt verifyJwtHS256Signature — check secret not attacker-controlled."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. jaguar_jwt verifyJwtHS256Signature
+    — check secret not attacker-controlled."
 
   imports:
   - jaguar_jwt/jaguar_jwt.dart
@@ -111,6 +138,9 @@
     kind: call
     callee:
       attribute: [JWT, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
@@ -121,6 +151,12 @@
       import 'package:corsac_jwt/corsac_jwt.dart'; // corsac_jwt
       // uses corsac_jwt
       void test() { var input = "x"; var amount = 1; JWT.parse(input); }
+  - name: literal jwt negative
+    code: "import 'package:corsac_jwt/corsac_jwt.dart';\nimport 'package:corsac_jwt/corsac_jwt.dart';\n\
+      import 'package:corsac_jwt/corsac_jwt.dart';\nimport 'package:corsac_jwt/corsac_jwt.dart';\n\
+      import 'package:corsac_jwt/corsac_jwt.dart'; // corsac_jwt\n// uses corsac_jwt\n\
+      void test() { var \"safe\" = \"x\"; var amount = 1; JWT.parse(\"safe\"); }\n"
+    expect_no_match: true
   description: "corsac_jwt JWT.parse — does not verify signature."
 
 # JWT alg-confusion (T400). HMAC verify with an RSA public
