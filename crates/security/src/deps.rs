@@ -21,7 +21,8 @@
 use crate::loader::Rulepack;
 use crate::pkg::import_matches_package;
 use crate::rule::{Rule, Severity};
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
+use bonsai_common::dependency_metadata::dependency_metadata_dir_skipped;
 use bonsai_lang_api::RefKind;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -53,7 +54,7 @@ pub struct DependencyInventory {
 /// Build the inventory. Scans the workspace root for manifest / lockfile
 /// basenames and the workspace index for import / module facts.
 pub fn build_inventory(pack: &Rulepack, ws: &Workspace, root: &Path) -> DependencyInventory {
-    let manifest_files = scan_manifest_files(root);
+    let manifest_files = scan_manifest_files(root, pack);
     let imports_by_lang = collect_workspace_imports(ws);
 
     let mut by_key: AHashMap<(String, String), DependencyRow> = AHashMap::new();
@@ -218,6 +219,10 @@ fn is_dependency_manifest_file(path: &str) -> bool {
     let Some(basename) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return false;
     };
+    is_dependency_manifest_basename(basename)
+}
+
+fn is_dependency_manifest_basename(basename: &str) -> bool {
     matches!(
         basename,
         "Cargo.toml"
@@ -304,26 +309,37 @@ fn is_pkg_name_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b'@')
 }
 
-/// Walk `root` four levels deep collecting every regular-file path.
-/// The output drives the manifest-name and lockfile-name lookups
-/// performed by `rule_evidence`. Depth caps work in cooperation with
-/// the skip-set in `walk_dir` so vendored / generated trees aren't
-/// scanned.
-fn scan_manifest_files(root: &Path) -> Vec<String> {
+/// Walk `root` collecting relevant manifest and lockfile paths. The
+/// traversal is intentionally not depth-limited: monorepos commonly place
+/// package manifests many levels below the workspace root, and missing one
+/// would make dependency evidence incomplete. The basename filter keeps the
+/// inventory from retaining every regular file path in large repositories.
+fn scan_manifest_files(root: &Path, pack: &Rulepack) -> Vec<String> {
+    let target_names = manifest_target_names(pack);
     let mut paths = Vec::new();
-    walk_dir(root, &mut paths, 4);
+    walk_dir(root, &target_names, &mut paths);
+    paths.sort();
+    paths.dedup();
     paths
 }
 
-/// Recursive directory walker bounded by `depth`. Skips known
-/// vendored / build / cache directory names so dependency inventory
-/// doesn't pick up evidence from `node_modules/`, `target/`,
-/// `.venv/`, etc. — these would mistake third-party manifests for
-/// first-party project evidence.
-fn walk_dir(dir: &Path, out: &mut Vec<String>, depth: u32) {
-    if depth == 0 {
-        return;
+fn manifest_target_names(pack: &Rulepack) -> AHashSet<String> {
+    let mut target_names = AHashSet::new();
+    for rule in pack.all_rules() {
+        if !rule.enabled {
+            continue;
+        }
+        target_names.extend(rule.manifests.iter().cloned());
+        target_names.extend(rule.lockfiles.iter().cloned());
     }
+    target_names
+}
+
+/// Recursive directory walker. Skips known vendored / build / cache
+/// directory names so dependency inventory doesn't pick up evidence from
+/// `node_modules/`, `target/`, `.venv/`, etc. — these would mistake
+/// third-party manifests for first-party project evidence.
+fn walk_dir(dir: &Path, target_names: &AHashSet<String>, out: &mut Vec<String>) {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -349,35 +365,12 @@ fn walk_dir(dir: &Path, out: &mut Vec<String>, depth: u32) {
             Some(n) => n.to_string(),
             None => continue,
         };
-        // Mirror the `path_looks_minified` skip-set used by
-        // `bonsai_workspace::Workspace::ingest_dir`. Without this
-        // wider list, dependency inventory walked into vendored
-        // trees / venvs / build outputs and mistook their manifests
-        // for first-party project evidence.
-        if matches!(
-            name.as_str(),
-            "node_modules"
-                | "vendor"
-                | "bower_components"
-                | "target"
-                | ".git"
-                | ".bonsai"
-                | "dist"
-                | "build"
-                | "out"
-                | ".next"
-                | ".nuxt"
-                | "__pycache__"
-                | "coverage"
-                | ".coverage"
-                | ".venv"
-                | "venv"
-        ) {
+        if dependency_metadata_dir_skipped(&name) {
             continue;
         }
         if path.is_dir() {
-            walk_dir(&path, out, depth - 1);
-        } else if path.is_file() {
+            walk_dir(&path, target_names, out);
+        } else if path.is_file() && (target_names.contains(&name) || is_dependency_manifest_basename(&name)) {
             out.push(path.display().to_string());
         }
     }
@@ -424,94 +417,5 @@ fn collect_workspace_imports(ws: &Workspace) -> AHashMap<String, Vec<(String, St
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::loader::{LanguagePack, Rulepack};
-    use crate::rule::{MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget, Severity};
-
-    fn temp_root(tag: &str) -> std::path::PathBuf {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir(&path).expect("temp dir");
-        path
-    }
-
-    fn package_rule(package: &str) -> Rule {
-        Rule {
-            id: "java.test.package_gate".to_string(),
-            aliases: Vec::new(),
-            enabled: true,
-            disabled_reason: None,
-            title: None,
-            tag: Some("test".to_string()),
-            severity: Some(Severity::Critical),
-            trust: None,
-            category: None,
-            cwe: vec![],
-            owasp: vec![],
-            frameworks: vec![],
-            packages: vec![package.to_string()],
-            imports: vec![],
-            modules: vec![],
-            manifests: vec![],
-            lockfiles: vec![],
-            payload_types: vec![],
-            match_spec: MatchSpec {
-                kind: MatchKind::Call,
-                callee: Some(RuleTarget {
-                    name: Some("lookup".to_string()),
-                    ..Default::default()
-                }),
-                target: None,
-                search_depth: 0,
-            },
-            taint_semantics: None,
-            constraints: RuleConstraint::default(),
-            match_examples: Vec::new(),
-            description: "test".to_string(),
-            kind: RuleKind::Sink,
-            language: "java".to_string(),
-            source_path: "test.yml".to_string(),
-        }
-    }
-
-    #[test]
-    fn dependency_inventory_treats_manifest_package_name_as_evidence() {
-        let root = temp_root("bonsai-deps-package");
-        std::fs::write(
-            root.join("pom.xml"),
-            r"<project><artifactId>log4j-core</artifactId></project>",
-        )
-        .expect("pom");
-        std::fs::write(root.join("JndiLookup.java"), "class JndiLookup {}\n").expect("java");
-
-        let registry = bonsai_adapters::all_languages_registry();
-        let ws = Workspace::index(&root, registry).expect("workspace");
-
-        let mut pack = Rulepack::default();
-        pack.packs.insert(
-            "java".to_string(),
-            LanguagePack {
-                language: "java".to_string(),
-                sources: Vec::new(),
-                sinks: vec![package_rule("log4j-core")],
-                sanitizers: Vec::new(),
-            },
-        );
-
-        let inventory = build_inventory(&pack, &ws, &root);
-        assert!(
-            inventory.rows.iter().any(|row| {
-                row.key == "log4j-core"
-                    && row.signals.iter().any(|signal| signal == "packages:log4j-core")
-                    && row.evidence_files.iter().any(|file| file.ends_with("pom.xml"))
-            }),
-            "expected log4j-core manifest evidence, got {:?}",
-            inventory.rows
-        );
-    }
-}
+#[path = "deps_tests.rs"]
+mod tests;

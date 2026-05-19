@@ -504,7 +504,7 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             span: span_of(file, &node),
             module,
             alias: None,
-            is_wildcard: false,
+            is_wildcard: true,
             original_name: None,
             scope: ImportScope::Module,
         });

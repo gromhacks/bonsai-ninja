@@ -15,6 +15,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Println(name + value)\n}\n"
@@ -43,6 +45,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Print(name + value)\n}\n"
@@ -71,6 +75,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Fatal(name + value)\n}\n"
@@ -99,6 +105,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  log.Panic(name + value)\n}\n"
@@ -127,6 +135,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Info(name + value)\n}\n"
@@ -157,6 +167,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: slog info concat
     code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Info(\"login user=\" + user)\n}\n"
@@ -191,6 +203,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: slog warn tainted message
     code: "package main\nimport \"log/slog\"\nfunc audit(user string) {\n  slog.Warn(\"user=\" + user)\n}\n"
@@ -226,6 +240,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: zerolog tainted message
     code: |
@@ -268,6 +284,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|fmt\.Sprintf|Sprintf|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "package main\n\nfunc example() {\n  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  logger.Error(name + value)\n}\n"

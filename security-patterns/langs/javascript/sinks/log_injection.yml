@@ -13,6 +13,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\+|`|\$\{|\\n|\\r)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: app log info concat
     code: "function demo(app, body) {\n  return app.log.info(\"login failed: \" + body);\n}\n"

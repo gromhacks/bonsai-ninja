@@ -1,9 +1,10 @@
 //! `bonsai-ninja args` data layer.
 //!
-//! Returns every call-site argument captured in any function's
-//! `flow_events`, with positional / keyword info and the call's
-//! callee. Useful for security review ("which call sites pass an
-//! `os.system` argument that came from `request.args`?") and for
+//! Returns every syntactic call-site argument captured in any
+//! function's `flow_events`, with positional / keyword info and the
+//! call's callee text. This is not a resolved semantic caller→callee
+//! edge surface. Useful for security review ("which call sites pass
+//! an `os.system` argument that came from `request.args`?") and for
 //! refactor scoping.
 
 use crate::common::{format_span, make_name_filter};
@@ -11,6 +12,8 @@ use crate::strings::enclosing_fn_for_file_line;
 use bonsai_lang_api::FlowEvent;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
+
+pub(crate) const ARG_RESOLUTION_SCOPE: &str = "syntactic-call-site-argument";
 
 /// Filter bundle for [`args`]. Every field is optional; `None`
 /// skips that filter. `regex` controls how `callee` and `value`
@@ -41,6 +44,9 @@ pub struct ArgsFilters<'a> {
 /// column in the CLI's table render and a key in its JSON output.
 #[derive(Serialize, Clone, Debug)]
 pub struct ArgOut {
+    /// Explicitly declares that this row is call-site argument
+    /// inventory, not a resolved semantic caller→callee edge.
+    pub resolution_scope: &'static str,
     /// Callee name as it appears at the call site (qualified form
     /// like `os.system` or `cursor.execute`).
     pub callee: String,
@@ -183,6 +189,7 @@ fn walk_args(events: &[FlowEvent], ws: &Workspace, out: &mut Vec<ArgFact>) {
                     let (path, line, column) = format_span(&arg.span, ws);
                     out.push(ArgFact {
                         out: ArgOut {
+                            resolution_scope: ARG_RESOLUTION_SCOPE,
                             callee: name.clone(),
                             position,
                             keyword: arg.name.clone(),
@@ -208,6 +215,7 @@ fn walk_args(events: &[FlowEvent], ws: &Workspace, out: &mut Vec<ArgFact>) {
                 for (position, value) in source_call_args.iter().enumerate() {
                     out.push(ArgFact {
                         out: ArgOut {
+                            resolution_scope: ARG_RESOLUTION_SCOPE,
                             callee: name.clone(),
                             position,
                             keyword: None,
@@ -285,53 +293,5 @@ fn arg_callees_shadow(real: &str, assignment: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn drops_assignment_args_shadowed_by_real_call_args() {
-        let mut facts = vec![
-            fact("eval", 0, "py_expr", 10, ArgOrigin::RealCall),
-            fact("eval", 1, "{\"attributes\": attributes}", 19, ArgOrigin::RealCall),
-            fact("eval", 0, "py_expr", 5, ArgOrigin::AssignmentSourceCall),
-            fact(
-                "eval",
-                1,
-                "{\"attributes\": attributes}",
-                5,
-                ArgOrigin::AssignmentSourceCall,
-            ),
-            fact("other", 0, "py_expr", 5, ArgOrigin::AssignmentSourceCall),
-        ];
-
-        drop_shadowed_assignment_args(&mut facts);
-
-        assert_eq!(facts.len(), 3);
-        assert_eq!(
-            facts
-                .iter()
-                .map(|fact| (fact.out.callee.as_str(), fact.out.position, fact.origin))
-                .collect::<Vec<_>>(),
-            vec![
-                ("eval", 0, ArgOrigin::RealCall),
-                ("eval", 1, ArgOrigin::RealCall),
-                ("other", 0, ArgOrigin::AssignmentSourceCall),
-            ]
-        );
-    }
-
-    fn fact(callee: &str, position: usize, value: &str, column: u32, origin: ArgOrigin) -> ArgFact {
-        ArgFact {
-            out: ArgOut {
-                callee: callee.to_string(),
-                position,
-                keyword: None,
-                value: value.to_string(),
-                file: "app.py".to_string(),
-                line: 42,
-                column,
-            },
-            origin,
-        }
-    }
-}
+#[path = "args_tests.rs"]
+mod tests;

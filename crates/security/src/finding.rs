@@ -239,6 +239,16 @@ pub struct Finding {
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub representative_flow_id: Option<String>,
+    /// Whether this finding's source-to-sink evidence was computed to
+    /// completion for the requested semantic scope. Public findings are
+    /// emitted only from complete semantic evidence; the explicit field keeps
+    /// downstream consumers from having to infer that from absence of broad
+    /// precision.
+    pub analysis_complete: bool,
+    /// Machine-readable reasons when `analysis_complete` is false. Kept even
+    /// when empty so JSON consumers can treat taint-analysis and
+    /// source-analysis rows uniformly.
+    pub analysis_incomplete_reasons: Vec<String>,
     /// Function-level chain (entry → … → sink-enclosing-fn) for this
     /// finding's representative flow. Empty for pattern-only findings
     /// and direct cases without a multi-hop resolved lineage.

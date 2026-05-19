@@ -2,7 +2,7 @@ defmodule MyApp.AuthService do
   def verify_token(token) do
     query = "SELECT user_id FROM tokens WHERE token = '" <> token <> "'"
     # sink: SQL injection via concatenation
-    IO.puts(query)
+    MyApp.Repo.query(query)
     1
   end
 

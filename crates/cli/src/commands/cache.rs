@@ -11,12 +11,12 @@
 
 use anyhow::{Context, Result};
 
-use crate::args::CacheAction;
+use crate::args::{BrowseFormat, CacheAction};
 use crate::progress;
 use crate::{cli_println, ui};
 
 use super::export::warm_export_cache_for_project;
-use super::open_project_full;
+use super::open_project_index_only;
 
 /// Handler for `bonsai-ninja cache <stats|clear|rebuild>`. Operates
 /// on the on-disk `.bonsai/` cache under the target workspace.
@@ -29,10 +29,14 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
         cli_println!("{}  {}", ui.label(&format!("{key:>26}")), value);
     };
     match action {
-        CacheAction::Stats { workspace } => {
+        CacheAction::Stats { workspace, format } => {
             let workspace_root = workspace.unwrap_or(std::env::current_dir()?);
             let cache = bonsai_sdk::WorkspaceCache::new(&workspace_root);
             let stats = cache.stats()?;
+            if matches!(format, BrowseFormat::Json | BrowseFormat::Sarif) {
+                cli_println!("{}", serde_json::to_string_pretty(&stats)?);
+                return Ok(());
+            }
             print_kv("scope", "in-process (per command invocation)");
             print_kv(
                 "reachable cap",
@@ -74,7 +78,7 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
             // expensive artifact users actually want to reason about.
             if stats.dataflow_sidecar_exists {
                 print_kv(
-                    "dataflow sidecar",
+                    "dataflow legacy sidecar",
                     &format!(
                         "{} ({} bytes)",
                         stats.dataflow_sidecar.display(),
@@ -83,10 +87,60 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
                 );
             } else {
                 print_kv(
-                    "dataflow sidecar",
+                    "dataflow legacy sidecar",
                     &format!("{} (not present)", stats.dataflow_sidecar.display()),
                 );
             }
+            if stats.dataflow_factstore_sidecar_exists {
+                print_kv(
+                    "dataflow factstore",
+                    &format!(
+                        "{} ({} bytes)",
+                        stats.dataflow_factstore_sidecar.display(),
+                        stats.dataflow_factstore_sidecar_bytes
+                    ),
+                );
+            } else {
+                print_kv(
+                    "dataflow factstore",
+                    &format!("{} (not present)", stats.dataflow_factstore_sidecar.display()),
+                );
+            }
+            print_sidecar(
+                &print_kv,
+                "value-flow factstore",
+                &stats.value_flow_sidecar,
+                stats.value_flow_sidecar_exists,
+                stats.value_flow_sidecar_bytes,
+            );
+            print_sidecar(
+                &print_kv,
+                "flow-id factstore",
+                &stats.flow_ids_sidecar,
+                stats.flow_ids_sidecar_exists,
+                stats.flow_ids_sidecar_bytes,
+            );
+            print_sidecar(
+                &print_kv,
+                "callgraph sidecar",
+                &stats.callgraph_sidecar,
+                stats.callgraph_sidecar_exists,
+                stats.callgraph_sidecar_bytes,
+            );
+            print_sidecar(
+                &print_kv,
+                "IDG factstore",
+                &stats.idg_sidecar,
+                stats.idg_sidecar_exists,
+                stats.idg_sidecar_bytes,
+            );
+            print_sidecar(
+                &print_kv,
+                "taint-graph factstore",
+                &stats.taint_graph_sidecar,
+                stats.taint_graph_sidecar_exists,
+                stats.taint_graph_sidecar_bytes,
+            );
             if stats.export_sidecar_exists {
                 print_kv(
                     "export sidecar",
@@ -125,12 +179,19 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
                 // Remove just the dataflow sidecar, leaving the rest
                 // of `.bonsai/` intact.
                 let stats = cache.stats()?;
-                if stats.dataflow_sidecar_exists {
-                    let freed = stats.dataflow_sidecar_bytes;
+                if stats.dataflow_sidecar_exists || stats.dataflow_factstore_sidecar_exists {
+                    let freed = stats
+                        .dataflow_sidecar_bytes
+                        .saturating_add(stats.dataflow_factstore_sidecar_bytes);
                     cache
                         .clear_dataflow_only()
                         .with_context(|| format!("removing {}", stats.dataflow_sidecar.display()))?;
-                    print_kv("removed", &stats.dataflow_sidecar.display().to_string());
+                    if stats.dataflow_sidecar_exists {
+                        print_kv("removed", &stats.dataflow_sidecar.display().to_string());
+                    }
+                    if stats.dataflow_factstore_sidecar_exists {
+                        print_kv("removed", &stats.dataflow_factstore_sidecar.display().to_string());
+                    }
                     print_kv("freed", &format!("{freed} bytes"));
                 } else {
                     print_kv(
@@ -146,10 +207,46 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
                     // exactly what got removed.
                     if stats.dataflow_sidecar_exists {
                         print_kv(
-                            "  dataflow sidecar",
+                            "  dataflow legacy sidecar",
                             &stats.dataflow_sidecar.display().to_string(),
                         );
                     }
+                    if stats.dataflow_factstore_sidecar_exists {
+                        print_kv(
+                            "  dataflow factstore",
+                            &stats.dataflow_factstore_sidecar.display().to_string(),
+                        );
+                    }
+                    print_existing_sidecar(
+                        &print_kv,
+                        "  value-flow factstore",
+                        &stats.value_flow_sidecar,
+                        stats.value_flow_sidecar_exists,
+                    );
+                    print_existing_sidecar(
+                        &print_kv,
+                        "  flow-id factstore",
+                        &stats.flow_ids_sidecar,
+                        stats.flow_ids_sidecar_exists,
+                    );
+                    print_existing_sidecar(
+                        &print_kv,
+                        "  callgraph sidecar",
+                        &stats.callgraph_sidecar,
+                        stats.callgraph_sidecar_exists,
+                    );
+                    print_existing_sidecar(
+                        &print_kv,
+                        "  IDG factstore",
+                        &stats.idg_sidecar,
+                        stats.idg_sidecar_exists,
+                    );
+                    print_existing_sidecar(
+                        &print_kv,
+                        "  taint-graph factstore",
+                        &stats.taint_graph_sidecar,
+                        stats.taint_graph_sidecar_exists,
+                    );
                     if stats.export_sidecar_exists {
                         print_kv("  export sidecar", &stats.export_sidecar.display().to_string());
                     }
@@ -176,61 +273,109 @@ pub(crate) fn cmd_cache(action: CacheAction) -> Result<()> {
             );
             Ok(())
         }
-        CacheAction::Rebuild { workspace } => {
+        CacheAction::Rebuild {
+            workspace,
+            export: warm_export,
+        } => {
             let workspace_root = workspace.unwrap_or(std::env::current_dir()?);
             let cache = bonsai_sdk::WorkspaceCache::new(&workspace_root);
             let stats = cache.stats()?;
-            let sidecar = stats.dataflow_sidecar.clone();
-            let export_sidecar = stats.export_sidecar.clone();
-            // Step 1: drop the persisted sidecar so the SDK open
-            // can't rehydrate a stale entry.
-            if stats.dataflow_sidecar_exists {
-                let freed = stats.dataflow_sidecar_bytes;
+            if stats.bonsai_dir_exists {
+                let freed = stats.total_bytes;
                 cache
-                    .clear_dataflow_only()
-                    .with_context(|| format!("removing {}", sidecar.display()))?;
-                print_kv("removed stale sidecar", &sidecar.display().to_string());
+                    .clear_all()
+                    .with_context(|| format!("removing {}", stats.bonsai_dir.display()))?;
+                print_kv("removed stale cache", &stats.bonsai_dir.display().to_string());
                 print_kv("freed", &format!("{freed} bytes"));
             }
-            if stats.export_sidecar_exists {
-                let freed = stats.export_sidecar_bytes;
-                std::fs::remove_file(&export_sidecar)
-                    .with_context(|| format!("removing {}", export_sidecar.display()))?;
-                print_kv("removed stale export", &export_sidecar.display().to_string());
-                print_kv("freed", &format!("{freed} bytes"));
-            }
-            // Step 2: open the workspace — this runs full indexing +
-            // `prewarm_all` + writes the sidecar back. Open emits its
-            // own progress (ingest spinner, parse bar, dataflow bar);
-            // the post-open warm phases below are silent so we wrap
-            // them in spinners.
+
+            // Open structurally, then refresh bounded reusable
+            // sidecars explicitly. Do not route through a full
+            // workspace prewarm path here: that computes
+            // dataflow/value-flow/flow-id caches and can retain
+            // gigabytes on broad workspaces. Exact taint and
+            // source-analysis commands compute their requested scope
+            // when invoked; cache rebuild only prepares structural
+            // artifacts those exact commands can reuse.
             print_kv("rebuilding", &workspace_root.display().to_string());
-            let (project, _footer) = open_project_full(&workspace_root)?;
-            let entries_now = project.workspace().dataflow().len();
-            let spin = progress::spinner("writing dataflow sidecar");
-            project
-                .save_dataflow_sidecar()
-                .with_context(|| format!("writing {}", sidecar.display()))?;
+            let (project, _footer) = open_project_index_only(&workspace_root)?;
+            let workspace = project.workspace();
+
+            let spin = progress::spinner("warming callgraph sidecar");
+            let _ = workspace.cached_resolved_call_graph();
+            workspace
+                .save_callgraph_sidecar(&workspace_root)
+                .with_context(|| format!("writing {}", stats.callgraph_sidecar.display()))?;
             spin.finish_and_clear();
-            let size = std::fs::metadata(&sidecar).map(|m| m.len()).unwrap_or(0);
-            print_kv("wrote sidecar", &sidecar.display().to_string());
-            print_kv("entries", &entries_now.to_string());
-            print_kv("size", &format!("{size} bytes"));
-            let spin = progress::spinner("warming export cache");
-            warm_export_cache_for_project(&project)?;
+
+            let spin = progress::spinner("warming IDG sidecar");
+            let _ = workspace.build_and_seed_idg_service();
             spin.finish_and_clear();
-            let export_size = project.cache().stats()?.export_sidecar_bytes;
-            print_kv("wrote export sidecar", &export_sidecar.display().to_string());
-            print_kv("export size", &format!("{export_size} bytes"));
+
+            if warm_export {
+                let spin = progress::spinner("warming export cache");
+                warm_export_cache_for_project(&project)?;
+                spin.finish_and_clear();
+            }
+
+            let rebuilt = project.cache().stats()?;
+            print_sidecar(
+                &print_kv,
+                "wrote callgraph sidecar",
+                &rebuilt.callgraph_sidecar,
+                rebuilt.callgraph_sidecar_exists,
+                rebuilt.callgraph_sidecar_bytes,
+            );
+            print_sidecar(
+                &print_kv,
+                "wrote IDG factstore",
+                &rebuilt.idg_sidecar,
+                rebuilt.idg_sidecar_exists,
+                rebuilt.idg_sidecar_bytes,
+            );
+            if warm_export {
+                print_sidecar(
+                    &print_kv,
+                    "wrote export sidecar",
+                    &rebuilt.export_sidecar,
+                    rebuilt.export_sidecar_exists,
+                    rebuilt.export_sidecar_bytes,
+                );
+            } else {
+                print_kv("export sidecar", "not warmed (pass --export)");
+            }
             cli_println!();
             cli_println!(
                 "{}",
                 ui.dim(
-                    "note: future opens of this workspace will load this sidecar \
-                     and default export can stream the warmed export sidecar."
+                    "note: cache rebuild refreshes bounded structural sidecars. \
+                     The export JSON cache is warmed only with --export. \
+                     Exact taint/source/security commands still compute their \
+                     requested scope before rendering; caches only make that \
+                     work faster when fresh."
                 )
             );
             Ok(())
         }
+    }
+}
+
+fn print_existing_sidecar<F>(print_kv: &F, label: &str, path: &std::path::Path, exists: bool)
+where
+    F: Fn(&str, &str),
+{
+    if exists {
+        print_kv(label, &path.display().to_string());
+    }
+}
+
+fn print_sidecar<F>(print_kv: &F, label: &str, path: &std::path::Path, exists: bool, bytes: u64)
+where
+    F: Fn(&str, &str),
+{
+    if exists {
+        print_kv(label, &format!("{} ({} bytes)", path.display(), bytes));
+    } else {
+        print_kv(label, &format!("{} (not present)", path.display()));
     }
 }

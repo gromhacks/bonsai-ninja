@@ -261,16 +261,50 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
             .and_then(|assignment| first_named_child_of_kind(&assignment, "variable_list"))
             .and_then(|var_list| first_named_child_of_kind(&var_list, "identifier"))
             .map(|ident| node_text(&ident, src).to_string());
+        let member = call_node
+            .parent()
+            .filter(|parent| parent.kind() == "dot_index_expression")
+            .and_then(|dot| dot.child_by_field_name("field"))
+            .map(|field| node_text(&field, src).to_string())
+            .filter(|field| !field.trim().is_empty());
         imports.push(ImportSpec {
             span: span_of(file, &call_node),
-            module,
+            module: module.clone(),
             alias,
             is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });
+        if let Some(member) = member {
+            if let Some(local) = local_lua_assignment_target_for_call(call_node, src) {
+                imports.push(ImportSpec {
+                    span: span_of(file, &call_node),
+                    module,
+                    alias: Some(local),
+                    is_wildcard: false,
+                    original_name: Some(member),
+                    scope: ImportScope::Local,
+                });
+            }
+        }
     }
     imports
+}
+
+fn local_lua_assignment_target_for_call(call_node: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    let expr_node = call_node
+        .parent()
+        .filter(|parent| parent.kind() == "dot_index_expression")
+        .unwrap_or(call_node);
+    let assignment = expr_node
+        .parent()
+        .filter(|parent| parent.kind() == "expression_list")
+        .and_then(|expr_list| expr_list.parent())
+        .filter(|parent| parent.kind() == "assignment_statement")?;
+    first_named_child_of_kind(&assignment, "variable_list")
+        .and_then(|var_list| first_named_child_of_kind(&var_list, "identifier"))
+        .map(|ident| node_text(&ident, src).to_string())
+        .filter(|text| !text.trim().is_empty())
 }
 
 fn lua_file_module_name(file: FileId, ctx: &AdapterContext<'_>) -> Option<String> {
@@ -358,3 +392,7 @@ fn collect_lua_table_member_decl_spans(
     }
     member_spans
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

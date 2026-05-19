@@ -130,6 +130,7 @@
   enabled: true
   language: typescript
   tag: xxe
+  category: source-independent
   severity: medium
   packages:
   - fast-xml-parser

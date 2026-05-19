@@ -410,3 +410,38 @@
       class App { void Test() { dynamic input = "x"; dynamic target = input; dynamic amount = 1; WebSocket.ReceiveAsync(input); } }
     expect_match_text: [WebSocket.ReceiveAsync]
   description: "System.Net.WebSockets WebSocket.ReceiveAsync — frame bytes supplied by the websocket peer."
+
+- id: csharp.source.graphql_resolvefieldcontext_getargument
+  enabled: true
+  language: csharp
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  packages: [GraphQL]
+  match:
+    kind: call
+    callee:
+      regex: '(^|[.])GetArgument(<[^>]+>)?$'
+  constraints:
+  - min_args: 1
+  - receiver_type_in: [IResolveFieldContext, ResolveFieldContext]
+  match_examples:
+  - name: graphql resolve context argument
+    code: |
+      using GraphQL;
+      class App {
+        string Resolve(IResolveFieldContext context) {
+          return context.GetArgument<string>("q");
+        }
+      }
+  - name: non graphql argument helper negative
+    code: |
+      using GraphQL;
+      class App {
+        string Resolve(Helper context) {
+          return context.GetArgument("q");
+        }
+      }
+      class Helper { public string GetArgument(string name) => name; }
+    expect_no_match: true
+  description: "GraphQL.NET IResolveFieldContext.GetArgument(name) — resolver argument supplied by the GraphQL caller. Receiver type is required so generic helper GetArgument methods stay clean."

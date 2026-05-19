@@ -9,11 +9,13 @@
     kind: call
     callee:
       name: fgets
+  taint_semantics:
+    source_output_args: [0]
   match_examples:
     - name: declared shape
       code: |
         void test(id input) { id target = input; int amount = 1; fgets(input); }
-  description: "fgets(buf, size, stdin) — interactive stdin read; buf is tainted."
+  description: "fgets(buf, size, stdin) — interactive stdin read; buf is tainted via output argument 0."
 
 - id: objc.source.nsprocessinfo_arguments
   enabled: true

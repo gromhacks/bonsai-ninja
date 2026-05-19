@@ -132,7 +132,7 @@ fn calls_lists_callees_with_caller_and_code_snippet() {
     let Some(out) = run(&["calls", ws.to_str().unwrap()]) else {
         return;
     };
-    for h in &["callee", "caller", "location", "code"] {
+    for h in &["callee text", "caller", "location", "code"] {
         assert!(out.contains(h), "calls header missing `{h}`: {out}");
     }
     assert!(out.contains("os.system"), "os.system call not listed: {out}");
@@ -167,9 +167,10 @@ fn calls_json_shape() {
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("calls --format json: valid JSON");
     let first = &v.as_array().expect("array")[0];
-    for f in &["callee", "file", "line", "column", "caller"] {
+    for f in &["resolution_scope", "callee", "file", "line", "column", "caller"] {
         assert!(first.get(f).is_some(), "calls JSON missing `{f}`: {first}");
     }
+    assert_eq!(first["resolution_scope"], "syntactic-call-site");
 }
 
 // -----------------------------------------------------------------------------
@@ -273,7 +274,7 @@ fn args_table_shows_callee_pos_and_value() {
     let Some(out) = run(&["args", ws.to_str().unwrap()]) else {
         return;
     };
-    for h in &["callee", "pos", "arg", "caller", "location", "code"] {
+    for h in &["callee text", "pos", "arg", "caller", "location", "code"] {
         assert!(out.contains(h), "args header missing `{h}`: {out}");
     }
     assert!(out.contains("os.system"), "args: os.system missing: {out}");
@@ -293,6 +294,17 @@ fn args_callee_filter() {
         !out.contains("os.system"),
         "args callee filter leaked other rows: {out}"
     );
+}
+
+#[test]
+fn args_json_declares_syntactic_scope() {
+    let ws = ws_path();
+    let Some(out) = run(&["args", ws.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("args --format json: valid JSON");
+    let first = &v.as_array().expect("array")[0];
+    assert_eq!(first["resolution_scope"], "syntactic-call-site-argument");
 }
 
 // -----------------------------------------------------------------------------
@@ -413,6 +425,48 @@ fn index_prints_file_count() {
 }
 
 #[test]
+fn index_default_does_not_write_dataflow_sidecars() {
+    let tmp = tempdir_for_test("bonsai_index_structural_only");
+    write_tiny_python_workspace(&tmp);
+
+    let Some(out) = run(&["index", tmp.to_str().unwrap()]) else {
+        return;
+    };
+    assert!(out.contains("files"), "index summary missing: {out}");
+    assert!(
+        !tmp.join(".bonsai/dataflow.v2.bin").exists(),
+        "default index must not write the legacy dataflow sidecar"
+    );
+    assert!(
+        !tmp.join(".bonsai/dataflow.v3.factstore").exists(),
+        "default index must not write the factstore dataflow sidecar"
+    );
+}
+
+#[test]
+fn index_prewarm_dataflow_writes_factstore_sidecar() {
+    let tmp = tempdir_for_test("bonsai_index_prewarm_dataflow");
+    write_tiny_python_workspace(&tmp);
+
+    let Some(out) = run(&["index", tmp.to_str().unwrap(), "--prewarm-dataflow"]) else {
+        return;
+    };
+    assert!(out.contains("files"), "index summary missing: {out}");
+    assert!(
+        tmp.join(".bonsai/dataflow.v3.factstore").exists(),
+        "`index --prewarm-dataflow` must write the streaming factstore sidecar"
+    );
+    assert!(
+        !tmp.join(".bonsai/value_flow.v3.factstore").exists(),
+        "`index --prewarm-dataflow` must not prewarm unrelated value-flow sidecars"
+    );
+    assert!(
+        !tmp.join(".bonsai/flow_ids.v3.factstore").exists(),
+        "`index --prewarm-dataflow` must not prewarm unrelated flow-id sidecars"
+    );
+}
+
+#[test]
 fn trace_from_entry_produces_flow() {
     let ws = ws_path();
     let Some(out) = run(&["trace", ws.to_str().unwrap(), "handle_request"]) else {
@@ -483,6 +537,274 @@ fn trace_json_format_still_emits_json() {
     assert!(out.contains("\"trace_id\""), "JSON missing trace_id: {out}");
 }
 
+#[test]
+fn trace_source_to_sink_json_rebuilds_summary_after_sink_slice() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "trace",
+        ws.to_str().unwrap(),
+        "--from",
+        "handle_request",
+        "--to",
+        "os.system",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
+    let steps = v["steps"].as_array().expect("steps array");
+    let step_ids: std::collections::HashSet<u64> =
+        steps.iter().filter_map(|step| step["id"].as_u64()).collect();
+    assert_eq!(
+        v["summary"]["total_steps"].as_u64(),
+        Some(steps.len() as u64),
+        "source-to-sink trace summary must match the sliced step list:\n{out}"
+    );
+    assert!(
+        v["edges"].as_array().expect("edges array").iter().all(|edge| {
+            edge["from_step"]
+                .as_u64()
+                .is_some_and(|id| step_ids.contains(&id))
+                && edge["to_step"].as_u64().is_some_and(|id| step_ids.contains(&id))
+        }),
+        "source-to-sink trace edges must not point past the sliced step list:\n{out}"
+    );
+    let max_step = step_ids.iter().copied().max().unwrap_or(0);
+    assert!(
+        v["paths"].as_array().expect("paths array").iter().all(|path| {
+            path["first_step"].as_u64().unwrap_or(u64::MAX) <= max_step
+                && path["last_step"].as_u64().unwrap_or(u64::MAX) <= max_step
+        }),
+        "source-to-sink trace path summaries must be rebuilt after slicing:\n{out}"
+    );
+}
+
+#[test]
+fn trace_source_to_sink_external_match_is_exact_not_substring() {
+    let tmp = tempdir_for_test("bonsai_trace_external_sink_exact");
+    std::fs::write(
+        tmp.join("app.py"),
+        r#"
+import os
+
+def entry(value):
+    os.system_safe(value)
+    os.system(value)
+"#,
+    )
+    .expect("write trace fixture");
+
+    let Some(out) = run(&[
+        "trace",
+        tmp.to_str().unwrap(),
+        "--from",
+        "entry",
+        "--to",
+        "os.system",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
+    let steps = v["steps"].as_array().expect("steps array");
+    let last_message = steps
+        .last()
+        .and_then(|step| step["message"].as_str())
+        .unwrap_or_default();
+    assert_eq!(
+        last_message, "Unresolved call os.system",
+        "external sink matching must stop on the exact call, not an earlier substring match:\n{out}"
+    );
+    assert!(
+        v["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .all(|diag| diag["code"].as_str() != Some("sink-not-reached")),
+        "exact external sink should be reached:\n{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn trace_rejects_ambiguous_bare_entry_and_accepts_file_context() {
+    let tmp = tempdir_for_test("bonsai_trace_ambiguous_entry");
+    let a = tmp.join("a.py");
+    let b = tmp.join("b.py");
+    std::fs::write(
+        &a,
+        r#"
+def dup(value):
+    return a_only(value)
+
+def a_only(value):
+    return value
+"#,
+    )
+    .expect("write a.py");
+    std::fs::write(
+        &b,
+        r#"
+def dup(value):
+    return b_only(value)
+
+def b_only(value):
+    return value
+"#,
+    )
+    .expect("write b.py");
+    let Some(bin) = bin_path() else {
+        return;
+    };
+
+    let ambiguous = Command::new(&bin)
+        .args([
+            "trace",
+            tmp.to_str().unwrap(),
+            "dup",
+            "--format",
+            "json",
+            "--no-color",
+        ])
+        .output()
+        .expect("run ambiguous trace");
+    assert!(
+        !ambiguous.status.success(),
+        "ambiguous trace must fail instead of choosing one candidate"
+    );
+    let stderr = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(
+        stderr.contains("ambiguous") && stderr.contains("path:line:name"),
+        "ambiguous trace should explain exact disambiguation; stderr:\n{stderr}"
+    );
+
+    let disambiguator = format!("{}:2:dup", a.display());
+    let qualified = Command::new(&bin)
+        .args([
+            "trace",
+            tmp.to_str().unwrap(),
+            &disambiguator,
+            "--format",
+            "json",
+            "--no-color",
+        ])
+        .output()
+        .expect("run qualified trace");
+    assert!(
+        qualified.status.success(),
+        "file-qualified trace should resolve exactly; stderr:\n{}",
+        String::from_utf8_lossy(&qualified.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&qualified.stdout).expect("qualified trace JSON");
+    let rendered = serde_json::to_string(&parsed).expect("trace JSON renders");
+    assert!(
+        rendered.contains("a_only") && !rendered.contains("b_only"),
+        "file-qualified trace should stay on the selected duplicate:\n{rendered}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn trace_json_marks_analysis_incomplete_when_step_cap_hits() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "trace",
+        ws.to_str().unwrap(),
+        "handle_request",
+        "--max-steps",
+        "1",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
+    assert_eq!(
+        v["summary"]["analysis_complete"], false,
+        "trace must not claim completeness after max-steps truncation:\n{out}"
+    );
+    let reasons = v["summary"]["truncation_reasons"]
+        .as_array()
+        .expect("truncation_reasons array");
+    assert!(
+        reasons.iter().any(|reason| reason.as_str() == Some("max-steps")),
+        "trace must explain max-steps truncation reasons:\n{out}"
+    );
+}
+
+#[test]
+fn trace_json_marks_unresolved_call_incomplete_without_depth_limit() {
+    let tmp = tempdir_for_test("bonsai_trace_unresolved_call_incomplete");
+    std::fs::write(
+        tmp.join("app.py"),
+        r#"
+def entry(value):
+    missing_call(value)
+"#,
+    )
+    .expect("write trace fixture");
+
+    let Some(out) = run(&["trace", tmp.to_str().unwrap(), "entry", "--format", "json"]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON parses");
+    assert_eq!(
+        v["summary"]["analysis_complete"], false,
+        "trace must not claim completeness when a call cannot be resolved:\n{out}"
+    );
+    let incomplete_reasons = v["summary"]["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        incomplete_reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("unresolved-call:missing_call")),
+        "trace must explain unresolved call incompleteness:\n{out}"
+    );
+    assert!(
+        v["summary"]["truncation_reasons"]
+            .as_array()
+            .is_none_or(|reasons| reasons.is_empty()),
+        "unresolved calls are not budget truncation:\n{out}"
+    );
+    assert!(
+        v["paths"]
+            .as_array()
+            .expect("paths array")
+            .iter()
+            .all(|path| path["terminated_by"].as_str() != Some("DepthLimit")),
+        "unresolved calls must not masquerade as path depth limits:\n{out}"
+    );
+    assert!(
+        v["paths"]
+            .as_array()
+            .expect("paths array")
+            .iter()
+            .any(|path| path["terminated_by"].as_str() == Some("UnknownCall")),
+        "unresolved call paths should terminate as UnknownCall:\n{out}"
+    );
+    assert!(
+        v["steps"].as_array().expect("steps array").iter().any(|step| {
+            step["kind"].as_str() == Some("Diagnostic")
+                && step["message"].as_str() == Some("Unresolved call missing_call")
+                && step["precision"].as_str() == Some("exact")
+        }),
+        "unresolved call should be exact diagnostic metadata, not unknown call evidence:\n{out}"
+    );
+    assert!(
+        v["steps"].as_array().expect("steps array").iter().all(|step| {
+            !(step["kind"].as_str() == Some("Call") && step["message"].as_str() == Some("Call missing_call"))
+        }),
+        "unresolved calls must not be emitted as call evidence:\n{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
 /// `--format dot` produces a Graphviz digraph for piping to `dot`.
 #[test]
 fn trace_dot_format_emits_digraph() {
@@ -510,7 +832,72 @@ fn export_produces_valid_json() {
     let Some(out) = run(&["export", ws.to_str().unwrap()]) else {
         return;
     };
-    let _: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
+    let value: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
+    assert_eq!(
+        value["analysis_scope"]["semantic_max_precision"], "narrowed",
+        "native export should declare semantic-only call/flow precision"
+    );
+    assert_eq!(
+        value["analysis_scope"]["full_propagations"], false,
+        "default export scope should declare omitted propagation records"
+    );
+    assert_eq!(
+        value["analysis_complete"], false,
+        "default export must not claim whole-document completeness when propagation records are omitted"
+    );
+    assert!(
+        value["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|text| text.contains("--full-propagations")))),
+        "default export should expose top-level incomplete scope reasons"
+    );
+    assert_eq!(
+        value["taint_graph"]["propagations_complete"], false,
+        "default export should not claim omitted propagation records are complete"
+    );
+    assert!(
+        value["taint_graph"]["propagations_omitted_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("--full-propagations")),
+        "default export should explain how to request exact propagation records"
+    );
+}
+
+#[test]
+fn export_full_propagations_materializes_exact_records() {
+    let ws = ws_path();
+    for flag in ["--full-propagations", "--all"] {
+        let Some(out) = run(&["export", ws.to_str().unwrap(), flag]) else {
+            return;
+        };
+        let value: serde_json::Value = serde_json::from_str(&out).expect("export should be valid JSON");
+        assert_eq!(
+            value["taint_graph"]["propagations_complete"], true,
+            "{flag} should mark propagation records complete"
+        );
+        assert_eq!(
+            value["analysis_scope"]["full_propagations"], true,
+            "{flag} should declare the propagation export scope"
+        );
+        if flag == "--all" {
+            assert_eq!(
+                value["analysis_scope"]["complete_chains"], true,
+                "--all should request the complete chain evidence scope"
+            );
+            assert_eq!(
+                value["analysis_complete"], true,
+                "--all should be complete on the micro workspace"
+            );
+        }
+        assert!(
+            value["taint_graph"]["propagations"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty()),
+            "{flag} should materialize propagation rows"
+        );
+    }
 }
 
 #[test]
@@ -522,11 +909,19 @@ fn export_includes_flow_chains_and_flow_graph() {
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
     let chains = v["flow_chains"].as_array().expect("flow_chains is array");
     assert!(!chains.is_empty(), "flow_chains should list reachable targets");
+    assert!(
+        v["flow_chains_complete"].is_boolean(),
+        "export must state whether flow_chains are exhaustive"
+    );
     // run_admin_command is reachable from handle_request.
     let rac = chains
         .iter()
         .find(|c| c["target"].as_str() == Some("run_admin_command"))
         .expect("run_admin_command in flow_chains");
+    assert!(
+        rac["truncated"].is_boolean(),
+        "flow_chains rows must expose truncation state"
+    );
     let first_chain: Vec<String> = rac["chains"][0]
         .as_array()
         .expect("chain array")
@@ -557,6 +952,311 @@ fn export_includes_flow_chains_and_flow_graph() {
         .collect();
     assert!(outgoing.contains(&"get_user".to_string()));
     assert!(outgoing.contains(&"update_user".to_string()));
+    assert!(
+        !outgoing.contains(&"request.args.get".to_string()),
+        "flow_graph.outgoing should contain semantic workspace callees only"
+    );
+}
+
+#[test]
+fn export_marks_capped_chain_sections_incomplete() {
+    let tmp = tempdir_for_test("bonsai_export_chain_completeness");
+    write_fan_in_python_workspace(&tmp, 20);
+
+    let Some(out) = run(&["export", tmp.to_str().unwrap()]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(
+        v["flow_chains_complete"], false,
+        "top-level flow_chains must not claim completeness after hitting the chain cap"
+    );
+    assert_eq!(
+        v["analysis_complete"], false,
+        "top-level export must not claim completeness when any evidence section is capped"
+    );
+    assert!(
+        v["analysis_incomplete_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons
+                .iter()
+                .any(|reason| reason.as_str().is_some_and(|text| text.contains("flow_chains")))),
+        "top-level export should name capped flow_chains in incomplete reasons"
+    );
+    assert!(
+        v["flow_chains_truncated_targets"].as_u64().unwrap_or(0) > 0,
+        "top-level export must count truncated flow_chains targets"
+    );
+    let flow_sink = v["flow_chains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["target"].as_str() == Some("sink"))
+        .expect("sink row in flow_chains");
+    assert_eq!(flow_sink["truncated"], true);
+    assert!(
+        flow_sink["truncation_reason"].as_str().is_some(),
+        "truncated flow_chains rows must explain why"
+    );
+
+    let tg = &v["taint_graph"];
+    assert_eq!(
+        tg["chains_complete"], false,
+        "taint_graph.chains must not claim completeness after hitting the chain cap"
+    );
+    assert!(
+        tg["chains_truncated_targets"].as_u64().unwrap_or(0) > 0,
+        "taint_graph must count truncated chain targets"
+    );
+    let taint_sink = tg["chains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["target"].as_str() == Some("sink"))
+        .expect("sink row in taint_graph.chains");
+    assert_eq!(taint_sink["truncated"], true);
+    assert!(
+        taint_sink["truncation_reason"].as_str().is_some(),
+        "truncated taint_graph.chains rows must explain why"
+    );
+    assert!(
+        tg["flow_id_labels_complete"].is_boolean(),
+        "taint_graph must state flow-id label completeness"
+    );
+}
+
+#[test]
+fn export_complete_chains_lifts_chain_caps() {
+    let tmp = tempdir_for_test("bonsai_export_complete_chains");
+    const FAN_IN_CALLERS: usize = 300;
+    write_fan_in_python_workspace(&tmp, FAN_IN_CALLERS);
+
+    for flag in ["--complete-chains", "--all"] {
+        let Some(out) = run(&["export", tmp.to_str().unwrap(), flag]) else {
+            return;
+        };
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(
+            v["flow_chains_complete"], true,
+            "{flag} must make top-level export.flow_chains exhaustive"
+        );
+        assert_eq!(
+            v["flow_chains_truncated_targets"].as_u64().unwrap_or(1),
+            0,
+            "{flag} must clear top-level chain truncation counts"
+        );
+        if flag == "--all" {
+            assert_eq!(
+                v["analysis_complete"], true,
+                "--all should be complete for the fan-in audit fixture"
+            );
+        } else {
+            assert_eq!(
+                v["analysis_complete"], false,
+                "--complete-chains alone still omits propagation records"
+            );
+        }
+        let flow_sink = v["flow_chains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["target"].as_str() == Some("sink"))
+            .expect("sink row in flow_chains");
+        assert_eq!(
+            flow_sink["truncated"], false,
+            "{flag} sink flow_chains row is complete"
+        );
+        assert!(
+            flow_sink["chains"]
+                .as_array()
+                .is_some_and(|chains| chains.len() >= FAN_IN_CALLERS),
+            "{flag} must include every fan-in chain for sink"
+        );
+
+        let tg = &v["taint_graph"];
+        assert_eq!(
+            tg["chains_complete"], true,
+            "{flag} must make taint_graph.chains exhaustive"
+        );
+        assert_eq!(
+            tg["chains_truncated_targets"].as_u64().unwrap_or(1),
+            0,
+            "{flag} must clear taint_graph chain truncation counts"
+        );
+        let taint_sink = tg["chains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["target"].as_str() == Some("sink"))
+            .expect("sink row in taint_graph.chains");
+        assert_eq!(
+            taint_sink["truncated"], false,
+            "{flag} taint_graph sink row is complete"
+        );
+        assert!(
+            taint_sink["chains"]
+                .as_array()
+                .is_some_and(|chains| chains.len() >= FAN_IN_CALLERS),
+            "{flag} must include every fan-in FuncId chain for sink"
+        );
+        assert_eq!(
+            tg["flow_id_labels_complete"], true,
+            "{flag} must make taint_graph.flow_id_labels exhaustive"
+        );
+        assert_eq!(
+            tg["flow_id_labels_truncated_functions"].as_u64().unwrap_or(1),
+            0,
+            "{flag} must clear flow-id-label truncation counts"
+        );
+        let sink_labels = tg["flow_id_labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["function"].as_str() == Some("sink"))
+            .expect("sink row in taint_graph.flow_id_labels");
+        assert_eq!(
+            sink_labels["truncated"], false,
+            "{flag} sink flow-id labels are complete"
+        );
+        assert!(
+            sink_labels["labels"]
+                .as_array()
+                .is_some_and(|labels| labels.len() >= FAN_IN_CALLERS),
+            "{flag} must include every fan-in flow-id label for sink"
+        );
+    }
+}
+
+#[test]
+fn export_entry_points_use_semantic_callgraph_not_bare_tail_matches() {
+    let tmp = tempdir_for_test("bonsai_export_entrypoints_semantic");
+    let mut source = String::from("def caller():\n    external.helper(\"x\")\n\n");
+    for idx in 0..80 {
+        source.push_str(&format!(
+            "# padding line {idx:02} keeps this external call from looking like a decorator\n"
+        ));
+    }
+    source.push_str("\ndef helper(user):\n    return user\n");
+    std::fs::write(tmp.join("app.py"), source).expect("write export fixture");
+
+    let Some(out) = run(&["export", tmp.to_str().unwrap()]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("export JSON");
+    let entry_points = v["taint_graph"]["entry_points"]
+        .as_array()
+        .expect("entry_points array");
+    let names: std::collections::BTreeSet<&str> = entry_points
+        .iter()
+        .filter_map(|entry| entry["function"].as_str())
+        .collect();
+    assert!(
+        names.contains("helper"),
+        "external.helper(...) must not mark local helper() as called; entry-point inference should use resolved semantic callgraph:\n{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn inspect_occurrence_hits_mark_capped_flow_evidence() {
+    let tmp = tempdir_for_test("bonsai_inspect_occurrence_flow_completeness");
+    write_fan_in_python_workspace(&tmp, 20);
+
+    let Some(out) = run(&[
+        "inspect",
+        tmp.to_str().unwrap(),
+        "--query",
+        "sink",
+        "--kind",
+        "call",
+        "--max-flows",
+        "1",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    assert_eq!(
+        v["analysis_complete"], false,
+        "inspect must not claim top-level completeness when occurrence flow evidence is capped:\n{out}"
+    );
+    let incomplete_reasons = v["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        incomplete_reasons.iter().any(|reason| {
+            reason.as_str().is_some_and(|reason| {
+                reason.contains("inspect occurrence flow evidence capped by max-flows cap")
+            })
+        }),
+        "inspect top-level incomplete reasons must name capped occurrence flow evidence:\n{out}"
+    );
+    assert!(
+        v["summary"]["flow_truncated_hits"].as_u64().unwrap_or(0) > 0,
+        "inspect summary must count occurrence hits with capped flow evidence:\n{out}"
+    );
+    let hit = v["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["flow_truncated_by"].as_str().is_some())
+        .expect("at least one occurrence hit must explain flow truncation");
+    assert!(
+        hit["flow_truncated_by"]
+            .as_str()
+            .unwrap()
+            .contains("max-flows cap"),
+        "truncated occurrence hit must name the max-flows cap: {hit}"
+    );
+}
+
+#[test]
+fn inspect_decl_sidebar_uses_semantic_callgraph_edges() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "verify_token",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    let decl = v["decl_hits"]
+        .as_array()
+        .and_then(|decls| {
+            decls
+                .iter()
+                .find(|decl| decl["symbol"].as_str() == Some("verify_token"))
+        })
+        .expect("verify_token decl hit");
+
+    let callers: Vec<String> = decl["direct_callers"]
+        .as_array()
+        .expect("direct_callers array")
+        .iter()
+        .filter_map(|caller| caller["symbol"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        callers,
+        vec!["get_user".to_string(), "update_user".to_string()],
+        "direct_callers must be resolved caller functions, not raw target-name refs:\n{out}"
+    );
+
+    let callees: Vec<String> = decl["callees"]
+        .as_array()
+        .expect("callees array")
+        .iter()
+        .filter_map(|callee| callee.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        callees.is_empty(),
+        "verify_token has no resolved workspace callees; lexical external calls must not appear as flow edges: {callees:?}"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -1358,6 +2058,38 @@ fn cache_help_documents_persisted_sidecar_workflow() {
         out.contains("cache rebuild ./src"),
         "cache help should advertise rebuilding the sidecars: {out}"
     );
+    assert!(
+        out.contains("dataflow.v3.factstore"),
+        "cache help should name the current factstore sidecar: {out}"
+    );
+    assert!(
+        out.contains("cache stats"),
+        "cache help should advertise cache stats for benchmark tooling: {out}"
+    );
+}
+
+#[test]
+fn cache_stats_json_reports_analysis_sidecars() {
+    let ws = ws_path();
+    let Some(out) = run(&["cache", "stats", ws.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let value: serde_json::Value = serde_json::from_str(&out).expect("cache stats JSON");
+    for key in [
+        "bonsai_dir",
+        "dataflow_factstore_sidecar",
+        "value_flow_sidecar",
+        "flow_ids_sidecar",
+        "callgraph_sidecar",
+        "idg_sidecar",
+        "taint_graph_sidecar",
+        "export_sidecar",
+    ] {
+        assert!(
+            value.get(key).is_some(),
+            "cache stats JSON missing `{key}`: {out}"
+        );
+    }
 }
 
 #[test]
@@ -1479,12 +2211,185 @@ fn every_help_menu_renders_and_documents_core_surface() {
 }
 
 #[test]
+fn tree_json_reports_complete_semantic_view_when_unbounded() {
+    let ws = ws_path();
+    let Some(out) = run(&["tree", ws.to_str().unwrap(), "--all", "--format", "json"]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("tree JSON must parse");
+    assert_eq!(
+        parsed["analysis_complete"].as_bool(),
+        Some(true),
+        "unbounded tree view should be complete on the micro fixture:\n{out}"
+    );
+    assert!(
+        parsed["analysis_incomplete_reasons"]
+            .as_array()
+            .expect("analysis_incomplete_reasons array")
+            .is_empty(),
+        "complete tree output must not carry incomplete reasons:\n{out}"
+    );
+}
+
+#[test]
+fn tree_json_marks_depth_limited_view_incomplete() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "tree",
+        ws.to_str().unwrap(),
+        "--max-depth",
+        "0",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("tree JSON must parse");
+    assert_eq!(
+        parsed["analysis_complete"].as_bool(),
+        Some(false),
+        "depth-limited tree must not claim complete workspace context:\n{out}"
+    );
+    let reasons = parsed["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        reasons.iter().any(|reason| reason
+            .as_str()
+            .is_some_and(|s| s.starts_with("tree-files-truncated:"))),
+        "tree must explain depth-limited truncation:\n{out}"
+    );
+}
+
+#[test]
+fn tree_compact_text_marks_depth_limited_view_incomplete() {
+    let ws = ws_path();
+    let Some(out) = run(&["tree", ws.to_str().unwrap(), "--max-depth", "0", "--compact"]) else {
+        return;
+    };
+    assert!(
+        out.contains("semantic-only tree incomplete"),
+        "compact tree output must surface incomplete semantic context:\n{out}"
+    );
+    assert!(
+        out.contains("tree-files-truncated:"),
+        "compact tree output must show the machine-readable reason:\n{out}"
+    );
+}
+
+#[test]
+fn read_file_json_reports_complete_semantic_view_when_unbounded() {
+    let ws = ws_path();
+    let rules = repo_root().join("security-patterns");
+    let Some(out) = run(&[
+        "read-file",
+        ws.to_str().unwrap(),
+        "gateway.py",
+        "--rules-dir",
+        rules.to_str().unwrap(),
+        "--all",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("read-file JSON must parse");
+    assert_eq!(
+        parsed["analysis_complete"].as_bool(),
+        Some(true),
+        "unbounded semantic read-file view should be complete:\n{out}"
+    );
+    assert!(
+        parsed["analysis_incomplete_reasons"]
+            .as_array()
+            .expect("analysis_incomplete_reasons array")
+            .is_empty(),
+        "complete read-file output must not carry incomplete reasons:\n{out}"
+    );
+    let findings = parsed["findings_in_view"]
+        .as_array()
+        .expect("findings_in_view array");
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding["analysis_complete"].as_bool().is_some()),
+        "read-file finding digests must expose per-finding completeness:\n{out}"
+    );
+}
+
+#[test]
+fn read_file_json_marks_inlined_body_truncation_incomplete() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "read-file",
+        ws.to_str().unwrap(),
+        "gateway.py",
+        "--max-inlined-bodies",
+        "1",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("read-file JSON must parse");
+    assert_eq!(
+        parsed["analysis_complete"].as_bool(),
+        Some(false),
+        "truncated cross-file bodies must mark read-file incomplete:\n{out}"
+    );
+    assert!(
+        parsed["truncated"]["callees_dropped"].as_u64().unwrap_or(0) > 0,
+        "fixture should drop at least one semantic callee body under cap:\n{out}"
+    );
+    let reasons = parsed["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        reasons.iter().any(|reason| reason
+            .as_str()
+            .is_some_and(|s| s.starts_with("inlined-bodies-truncated:"))),
+        "read-file must explain the body truncation reason:\n{out}"
+    );
+}
+
+#[test]
+fn read_file_compact_text_marks_incomplete_when_body_context_truncated() {
+    let ws = ws_path();
+    let Some(out) = run(&[
+        "read-file",
+        ws.to_str().unwrap(),
+        "gateway.py",
+        "--max-inlined-bodies",
+        "1",
+        "--compact",
+    ]) else {
+        return;
+    };
+    assert!(
+        out.contains("semantic-only view incomplete"),
+        "compact read-file output must surface incomplete semantic context:\n{out}"
+    );
+    assert!(
+        out.contains("inlined-bodies-truncated:"),
+        "compact read-file output must show the machine-readable reason:\n{out}"
+    );
+}
+
+#[test]
 fn dump_hir_emits_flow_event_tree() {
     let ws = ws_path();
     let Some(out) = run(&["dump-hir", ws.to_str().unwrap(), "handle_request"]) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("dump-hir should be valid JSON");
+    assert_eq!(v["analysis_complete"], true);
+    assert!(
+        v["analysis_incomplete_reasons"]
+            .as_array()
+            .expect("analysis_incomplete_reasons array")
+            .is_empty(),
+        "exact dump-hir should not carry incomplete reasons: {out}"
+    );
     assert_eq!(v["name"], "handle_request");
     let flow = v["flow_events"].as_array().expect("flow_events array");
     assert!(
@@ -1498,12 +2403,88 @@ fn dump_hir_emits_flow_event_tree() {
 }
 
 #[test]
+fn dump_hir_rejects_ambiguous_bare_symbol_and_accepts_file_context() {
+    let root = tempdir_for_test("dump-hir-ambiguous-symbol");
+    let a = root.join("a.py");
+    let b = root.join("b.py");
+    std::fs::write(&a, "def dup(x):\n    y = x\n    return y\n").expect("write a.py");
+    std::fs::write(&b, "def dup(x):\n    z = x\n    return z\n").expect("write b.py");
+    let Some(bin) = bin_path() else {
+        return;
+    };
+
+    let ambiguous = Command::new(&bin)
+        .args(["dump-hir", root.to_str().unwrap(), "dup", "--no-color"])
+        .output()
+        .expect("run ambiguous dump-hir");
+    assert!(
+        !ambiguous.status.success(),
+        "ambiguous dump-hir must fail instead of choosing one candidate"
+    );
+    let stderr = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(
+        stderr.contains("ambiguous") && stderr.contains("path:name"),
+        "ambiguous dump-hir should explain how to disambiguate; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("a.py:1:dup") && stderr.contains("b.py:1:dup"),
+        "ambiguous dump-hir should list concrete candidate keys; stderr:\n{stderr}"
+    );
+
+    let disambiguator = format!("{}:1:dup", a.display());
+    let qualified = Command::new(&bin)
+        .args(["dump-hir", root.to_str().unwrap(), &disambiguator, "--no-color"])
+        .output()
+        .expect("run qualified dump-hir");
+    assert!(
+        qualified.status.success(),
+        "file-qualified dump-hir should resolve exactly; stderr:\n{}",
+        String::from_utf8_lossy(&qualified.stderr)
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&qualified.stdout).expect("qualified dump-hir JSON");
+    assert_eq!(parsed["name"], "dup");
+}
+
+#[test]
+fn dump_cfg_rejects_ambiguous_bare_symbol() {
+    let root = tempdir_for_test("dump-cfg-ambiguous-symbol");
+    std::fs::write(root.join("a.py"), "def dup(x):\n    return x\n").expect("write a.py");
+    std::fs::write(root.join("b.py"), "def dup(x):\n    return x\n").expect("write b.py");
+    let Some(bin) = bin_path() else {
+        return;
+    };
+
+    let out = Command::new(&bin)
+        .args(["dump-cfg", root.to_str().unwrap(), "dup", "--no-color"])
+        .output()
+        .expect("run ambiguous dump-cfg");
+    assert!(
+        !out.status.success(),
+        "ambiguous dump-cfg must fail instead of choosing one candidate"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("dump-cfg:") && stderr.contains("ambiguous"),
+        "ambiguous dump-cfg should be explicit; stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn dump_cfg_emits_entry_and_exit_blocks() {
     let ws = ws_path();
     let Some(out) = run(&["dump-cfg", ws.to_str().unwrap(), "update_user"]) else {
         return;
     };
     let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["analysis_complete"], true);
+    assert!(
+        v["analysis_incomplete_reasons"]
+            .as_array()
+            .expect("analysis_incomplete_reasons array")
+            .is_empty(),
+        "exact dump-cfg should not carry incomplete reasons: {out}"
+    );
     let entry = v["entry"].as_u64().expect("entry id");
     let exit = v["exit"].as_u64().expect("exit id");
     let blocks = v["blocks"].as_array().expect("blocks array");
@@ -1554,6 +2535,113 @@ fn dump_callgraph_reports_nonzero_edges() {
     assert!(
         row.contains(" 2 "),
         "verify_token should show 2 callers, got row: {row}"
+    );
+}
+
+#[test]
+fn dump_callgraph_counts_semantic_workspace_edges_only() {
+    let ws = ws_path();
+    let Some(out) = run(&["dump-callgraph", ws.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-callgraph JSON");
+    let rows = rows.as_array().expect("dump-callgraph rows");
+    let row = |name: &str| {
+        rows.iter()
+            .find(|row| row["function"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("{name} row present in dump-callgraph"))
+    };
+    assert_eq!(
+        row("verify_token")["callers"].as_u64(),
+        Some(2),
+        "caller counts should dedupe semantic caller functions"
+    );
+    assert_eq!(
+        row("verify_token")["outgoing"].as_u64(),
+        Some(0),
+        "outgoing counts should not include lexical external calls"
+    );
+    assert_eq!(
+        row("handle_request")["outgoing"].as_u64(),
+        Some(2),
+        "outgoing counts should include only resolved workspace callees"
+    );
+}
+
+#[test]
+fn dump_edges_uses_semantic_resolved_callgraph_edges_only() {
+    let ws = ws_path();
+    let Some(out) = run(&["dump-edges", ws.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-edges JSON");
+    let rows = rows.as_array().expect("dump-edges rows");
+
+    let pairs: std::collections::BTreeSet<(String, String)> = rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["caller_name"].as_str()?.to_string(),
+                row["callee_name"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        std::collections::BTreeSet::from([
+            ("get_user".to_string(), "verify_token".to_string()),
+            ("handle_request".to_string(), "get_user".to_string()),
+            ("handle_request".to_string(), "update_user".to_string()),
+            ("update_user".to_string(), "run_admin_command".to_string()),
+            ("update_user".to_string(), "verify_token".to_string()),
+        ]),
+        "dump-edges must be a view over resolved workspace callgraph edges only:\n{out}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| matches!(row["precision"].as_str(), Some("exact" | "narrowed"))),
+        "dump-edges must not expose broad precision classes:\n{out}"
+    );
+}
+
+#[test]
+fn dump_edges_does_not_bare_tail_unaliased_import_qualified_call() {
+    let root = tempdir_for_test("dump-edges-unaliased-import-qualified");
+    std::fs::write(
+        root.join("app.js"),
+        r#"
+import "./external";
+
+function system(cmd) {
+  return cmd;
+}
+
+function entry(cmd) {
+  external.system(cmd);
+}
+"#,
+    )
+    .expect("write app.js");
+
+    let Some(out) = run(&["dump-edges", root.to_str().unwrap(), "--format", "json"]) else {
+        return;
+    };
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("dump-edges JSON");
+    let rows = rows.as_array().expect("dump-edges rows");
+    let pairs: std::collections::BTreeSet<(String, String)> = rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["caller_name"].as_str()?.to_string(),
+                row["callee_name"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+
+    assert!(
+        !pairs.contains(&("entry".to_string(), "system".to_string())),
+        "side-effect import-qualified external.system must resolve through the import target \
+         or remain unresolved; it must not bare-tail into local system():\n{out}"
     );
 }
 
@@ -2733,6 +3821,11 @@ fn cache_clear_removes_existing_dir() {
     let cache_dir = tmp.join(".bonsai");
     std::fs::create_dir_all(cache_dir.join("subdir")).expect("mkdir cache");
     std::fs::write(cache_dir.join("subdir/file.bin"), b"some bytes").expect("write file");
+    let stats = bonsai_sdk::WorkspaceCache::new(&tmp)
+        .stats()
+        .expect("cache stats");
+    std::fs::write(&stats.callgraph_sidecar, b"callgraph bytes").expect("write callgraph");
+    std::fs::write(&stats.idg_sidecar, b"idg bytes").expect("write idg");
     assert!(cache_dir.exists(), "fixture setup failed");
 
     let Some(out) = run(&["cache", "clear", tmp.to_str().unwrap()]) else {
@@ -2747,8 +3840,33 @@ fn cache_clear_removes_existing_dir() {
         "cache clear output missing `freed`:\n{out}"
     );
     assert!(
+        out.contains("callgraph sidecar") && out.contains("IDG factstore"),
+        "cache clear must list structural sidecars it removes:\n{out}"
+    );
+    assert!(
         !cache_dir.exists(),
         "cache clear must actually delete the .bonsai dir"
+    );
+}
+
+#[test]
+fn cache_clear_dataflow_only_removes_factstore_sidecar() {
+    let tmp = tempdir_for_test("bonsai_cache_clear_factstore");
+    let cache_dir = tmp.join(".bonsai");
+    std::fs::create_dir_all(&cache_dir).expect("mkdir cache");
+    let factstore = cache_dir.join("dataflow.v3.factstore");
+    std::fs::write(&factstore, b"factstore bytes").expect("write factstore");
+
+    let Some(out) = run(&["cache", "clear", tmp.to_str().unwrap(), "--dataflow-only"]) else {
+        return;
+    };
+    assert!(
+        out.contains("removed"),
+        "cache clear --dataflow-only output missing `removed`:\n{out}"
+    );
+    assert!(
+        !factstore.exists(),
+        "cache clear --dataflow-only must remove the factstore sidecar"
     );
 }
 
@@ -2770,6 +3888,32 @@ fn tempdir_for_test(name: &str) -> PathBuf {
         }
     }
     panic!("could not allocate tempdir for {name}");
+}
+
+fn write_tiny_python_workspace(root: &std::path::Path) {
+    std::fs::write(
+        root.join("app.py"),
+        r#"
+def source():
+    return input()
+
+def sink(value):
+    return value
+
+def handle():
+    return sink(source())
+"#,
+    )
+    .expect("write tiny python workspace");
+}
+
+fn write_fan_in_python_workspace(root: &std::path::Path, callers: usize) {
+    let mut source = String::new();
+    for idx in 0..callers {
+        source.push_str(&format!("def entry_{idx}():\n    return sink()\n\n"));
+    }
+    source.push_str("def sink():\n    return 1\n");
+    std::fs::write(root.join("app.py"), source).expect("write fan-in python workspace");
 }
 
 // -----------------------------------------------------------------------------
@@ -4685,6 +5829,8 @@ fn every_lang_micro_dump_resolve_json_carries_stage_trace() {
         for required in [
             "query",
             "short",
+            "analysis_complete",
+            "analysis_incomplete_reasons",
             "primary_lookup_name",
             "primary_candidate_count",
             "fallback_applied",
@@ -4704,6 +5850,148 @@ fn every_lang_micro_dump_resolve_json_carries_stage_trace() {
             c.lang,
         );
     }
+}
+
+#[test]
+fn dump_resolve_in_file_uses_semantic_context() {
+    let root = tempdir_for_test("dump-resolve-semantic-context");
+    std::fs::write(
+        root.join("a.rs"),
+        "fn helper() {}\npub fn entry_a() { helper(); }\n",
+    )
+    .expect("write a.rs");
+    std::fs::write(
+        root.join("b.rs"),
+        "fn helper() {}\npub fn entry_b() { helper(); }\n",
+    )
+    .expect("write b.rs");
+
+    let Some(out) = run(&[
+        "dump-resolve",
+        root.to_str().unwrap(),
+        "helper",
+        "--in-file",
+        "a.rs",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-resolve JSON must parse");
+    assert_eq!(
+        parsed.get("outcome").and_then(|v| v.as_str()),
+        Some("narrowed"),
+        "file-context resolve should narrow to one semantic candidate:\n{out}"
+    );
+    assert_eq!(
+        parsed.get("fallback_applied").and_then(|v| v.as_bool()),
+        Some(false),
+        "file-context resolve must not use broad literal fallback:\n{out}"
+    );
+    let candidates = parsed
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .expect("candidates array");
+    assert_eq!(
+        candidates.len(),
+        1,
+        "expected one same-file helper candidate:\n{out}"
+    );
+    let file = candidates[0]
+        .get("file")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        file.ends_with("a.rs"),
+        "semantic file context should keep a.rs helper, got {file}:\n{out}"
+    );
+    assert_eq!(
+        parsed.get("analysis_complete").and_then(|v| v.as_bool()),
+        Some(true),
+        "single-candidate file-context resolve should be complete:\n{out}"
+    );
+    assert!(
+        parsed
+            .get("analysis_incomplete_reasons")
+            .and_then(|v| v.as_array())
+            .is_some_and(Vec::is_empty),
+        "complete resolve should not carry incomplete reasons:\n{out}"
+    );
+}
+
+#[test]
+fn dump_resolve_contextless_ambiguity_is_marked_incomplete() {
+    let root = tempdir_for_test("dump-resolve-contextless-ambiguous");
+    std::fs::write(
+        root.join("a.rs"),
+        "fn helper() {}\npub fn entry_a() { helper(); }\n",
+    )
+    .expect("write a.rs");
+    std::fs::write(
+        root.join("b.rs"),
+        "fn helper() {}\npub fn entry_b() { helper(); }\n",
+    )
+    .expect("write b.rs");
+
+    let Some(out) = run(&[
+        "dump-resolve",
+        root.to_str().unwrap(),
+        "helper",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-resolve JSON must parse");
+    assert_eq!(
+        parsed.get("outcome").and_then(|v| v.as_str()),
+        Some("ambiguous"),
+        "contextless duplicate name should stay ambiguous:\n{out}"
+    );
+    assert_eq!(
+        parsed.get("analysis_complete").and_then(|v| v.as_bool()),
+        Some(false),
+        "ambiguous contextless resolve must not be presented as complete:\n{out}"
+    );
+    let reasons = parsed
+        .get("analysis_incomplete_reasons")
+        .and_then(|v| v.as_array())
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        reasons.iter().any(|reason| reason
+            .as_str()
+            .is_some_and(|text| text.contains("context-required:helper"))),
+        "contextless ambiguity should explain the missing semantic context:\n{out}"
+    );
+}
+
+#[test]
+fn dump_resolve_rejects_missing_in_file_context() {
+    let root = tempdir_for_test("dump-resolve-missing-context");
+    std::fs::write(root.join("a.rs"), "fn helper() {}\n").expect("write a.rs");
+    let Some(bin) = bin_path() else {
+        return;
+    };
+    let out = Command::new(bin)
+        .args([
+            "dump-resolve",
+            root.to_str().unwrap(),
+            "helper",
+            "--in-file",
+            "missing.rs",
+            "--no-color",
+        ])
+        .output()
+        .expect("run dump-resolve");
+    assert!(
+        !out.status.success(),
+        "missing --in-file context must fail instead of falling back to global resolution"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--in-file `missing.rs` did not match any indexed file"),
+        "missing context error should be explicit; stderr:\n{stderr}"
+    );
 }
 
 #[test]
@@ -4908,7 +6196,15 @@ fn every_lang_micro_dump_taint_json_shape() {
             return;
         };
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-taint JSON must parse");
-        for required in ["source", "seeds", "sanitizers", "precision", "records"] {
+        for required in [
+            "source",
+            "seeds",
+            "sanitizers",
+            "analysis_complete",
+            "analysis_incomplete_reasons",
+            "precision",
+            "records",
+        ] {
             assert!(
                 parsed.get(required).is_some(),
                 "{}: JSON missing required field `{required}`; got:\n{out}",
@@ -4916,11 +6212,149 @@ fn every_lang_micro_dump_taint_json_shape() {
             );
         }
         assert!(
-            json_tree_contains_id_field(&parsed, "taint_id", "T:"),
-            "{}: JSON records must carry `taint_id` fields; got:\n{out}",
+            parsed["analysis_complete"].as_bool().is_some(),
+            "{}: dump-taint JSON must expose analysis_complete; got:\n{out}",
+            c.lang,
+        );
+        let incomplete_reasons = parsed["analysis_incomplete_reasons"]
+            .as_array()
+            .expect("analysis_incomplete_reasons array");
+        if parsed["analysis_complete"].as_bool() == Some(true) {
+            assert!(
+                incomplete_reasons.is_empty(),
+                "{}: complete dump-taint output must not carry incomplete reasons; got:\n{out}",
+                c.lang,
+            );
+        } else {
+            assert!(
+                !incomplete_reasons.is_empty(),
+                "{}: incomplete dump-taint output must explain why; got:\n{out}",
+                c.lang,
+            );
+        }
+        assert!(
+            parsed["records"].as_array().expect("records array").is_empty()
+                || json_tree_contains_id_field(&parsed, "taint_id", "T:"),
+            "{}: non-empty JSON records must carry `taint_id` fields; got:\n{out}",
+            c.lang,
+        );
+        assert!(
+            matches!(parsed["precision"].as_str(), Some("exact" | "narrowed")),
+            "{}: dump-taint report precision must be semantic-only; got:\n{out}",
+            c.lang,
+        );
+        assert!(
+            parsed["records"]
+                .as_array()
+                .expect("records array")
+                .iter()
+                .all(|record| matches!(record["edge_precision"].as_str(), Some("exact" | "narrowed"))),
+            "{}: dump-taint records must be semantic-only; got:\n{out}",
             c.lang,
         );
     }
+}
+
+#[test]
+fn dump_taint_cpp_micro_resolved_workspace_calls_are_complete() {
+    let ws = lang_ws("cpp");
+    let Some(out) = run(&[
+        "dump-taint",
+        ws.to_str().unwrap(),
+        "--source",
+        "update_user",
+        "--seed",
+        "token",
+        "--seed",
+        "action",
+        "--format",
+        "json",
+    ]) else {
+        return;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("dump-taint JSON must parse");
+    assert_eq!(
+        parsed["analysis_complete"].as_bool(),
+        Some(true),
+        "resolved workspace callees in the C++ micro fixture must render complete dump-taint evidence:\n{out}"
+    );
+    let reasons = parsed["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        reasons.is_empty(),
+        "resolved C++ micro dump-taint evidence should not claim unresolved calls:\n{out}"
+    );
+}
+
+#[test]
+fn dump_taint_budget_flag_does_not_truncate_exact_idg_report() {
+    let ws = lang_ws("python");
+    let common = [
+        "dump-taint",
+        ws.to_str().unwrap(),
+        "--source",
+        "update_user",
+        "--seed",
+        "token",
+        "--seed",
+        "action",
+        "--seed",
+        "$token",
+        "--seed",
+        "$action",
+        "--format",
+        "json",
+    ];
+    let Some(full) = run(&common) else {
+        return;
+    };
+    let mut budgeted_args = common.to_vec();
+    budgeted_args.splice(common.len() - 2..common.len() - 2, ["--budget", "1"]);
+    let Some(budgeted) = run(&budgeted_args) else {
+        return;
+    };
+
+    let full: serde_json::Value = serde_json::from_str(full.trim()).expect("full dump-taint JSON");
+    let budgeted: serde_json::Value =
+        serde_json::from_str(budgeted.trim()).expect("budgeted dump-taint JSON");
+    let full_records = full
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .expect("full records");
+    let budgeted_records = budgeted
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .expect("budgeted records");
+
+    assert!(
+        full_records.len() > 1,
+        "fixture must expose multiple propagations for the budget regression"
+    );
+    assert_eq!(
+        budgeted_records.len(),
+        full_records.len(),
+        "--budget must not truncate exact dump-taint evidence"
+    );
+    assert_eq!(
+        budgeted.get("saturated").and_then(serde_json::Value::as_bool),
+        Some(false),
+        "IDG-backed dump-taint should not mark exact output saturated"
+    );
+    assert_eq!(
+        budgeted
+            .get("analysis_complete")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "IDG-backed dump-taint should mark exact output complete"
+    );
+    assert!(
+        budgeted
+            .get("analysis_incomplete_reasons")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty),
+        "IDG-backed dump-taint should not report incomplete reasons"
+    );
 }
 
 // =============================================================================

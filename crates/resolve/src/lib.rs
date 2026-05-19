@@ -7,7 +7,7 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{short_qualified_tail, FileId, SymbolId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{AliasTarget, ImportSpec, ModulePath, Visibility};
+use bonsai_lang_api::{AliasTarget, ImportSpec, ModulePath, Visibility, WILDCARD_IMPORT_ALIAS_PREFIX};
 
 /// Caller-side context the resolver consults when narrowing a
 /// candidate set. Built by callgraph / taint / matcher at edge-
@@ -30,12 +30,16 @@ use bonsai_lang_api::{AliasTarget, ImportSpec, ModulePath, Visibility};
 ///   chain). When `None`, no receiver-type filter applies.
 /// - `alias_map`: caller-local imports; the resolver may rewrite
 ///   `name` through this map before lookup.
+/// - `file_path_lookup`: workspace file paths used only as a
+///   semantic backstop when an import path is more precise than an
+///   adapter-populated module path.
 #[derive(Clone, Debug)]
 pub struct ResolveContext<'a> {
     pub caller_file: FileId,
     pub caller_module: &'a ModulePath,
     pub receiver_type: Option<SymbolId>,
     pub alias_map: Option<&'a AHashMap<String, AliasTarget>>,
+    pub file_path_lookup: Option<FilePathLookup<'a>>,
 }
 
 impl<'a> ResolveContext<'a> {
@@ -46,6 +50,7 @@ impl<'a> ResolveContext<'a> {
             caller_module,
             receiver_type: None,
             alias_map: None,
+            file_path_lookup: None,
         }
     }
 
@@ -59,6 +64,29 @@ impl<'a> ResolveContext<'a> {
     pub fn with_alias_map(mut self, alias_map: &'a AHashMap<String, AliasTarget>) -> Self {
         self.alias_map = Some(alias_map);
         self
+    }
+
+    #[must_use]
+    pub fn with_file_path_lookup(mut self, lookup: &'a dyn Fn(FileId) -> Option<String>) -> Self {
+        self.file_path_lookup = Some(FilePathLookup { lookup });
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct FilePathLookup<'a> {
+    lookup: &'a dyn Fn(FileId) -> Option<String>,
+}
+
+impl<'a> FilePathLookup<'a> {
+    fn path_for(self, file: FileId) -> Option<String> {
+        (self.lookup)(file)
+    }
+}
+
+impl std::fmt::Debug for FilePathLookup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FilePathLookup(..)")
     }
 }
 
@@ -154,15 +182,37 @@ pub fn resolve_callable_with_context(
             .map(|(decl, _)| bonsai_common::FuncId::new(decl.symbol.raw()))
             .collect::<Vec<_>>()
     };
-    let mut out = collect(name);
+    let collect_caller_lexical_scope = |lookup: &str| {
+        let mut out = collect(lookup);
+        retain_caller_lexical_func_candidates(global, &mut out, ctx);
+        out
+    };
+    let resolve_alias = |lookup: &str| {
+        let mut out = Vec::new();
+        if let Some(rewrite) = rewrite_through_alias_map_with_target(lookup, ctx) {
+            out = collect(&rewrite.rewritten);
+            if out.is_empty() {
+                // Only module/namespace aliases get a bare-tail retry,
+                // and even then candidates are retained only when they
+                // live in that module. Type aliases such as
+                // `value -> String` must not turn `value.equals` into a
+                // workspace-wide `equals` lookup.
+                if let (Some(target_module), Some((_, tail))) = (
+                    rewrite.target_module.as_deref(),
+                    rewrite.rewritten.rsplit_once(['.', ':']),
+                ) {
+                    out = collect(tail);
+                    out.retain(|func| candidate_in_alias_target(global, *func, target_module, ctx));
+                }
+            }
+        }
+        out
+    };
+
+    let mut out = collect_caller_lexical_scope(name);
     if out.is_empty() {
         if let Some(no_bang) = name.strip_suffix('!') {
-            out = collect(no_bang);
-        }
-    }
-    if out.is_empty() {
-        if let Some((receiver, method)) = split_member_head_tail(name) {
-            out = resolve_callable_member_with_context(global, receiver, method, ctx);
+            out = collect_caller_lexical_scope(no_bang);
         }
     }
     // Walk the alias map: `cp.exec` where `cp = require("child_process")`
@@ -176,16 +226,24 @@ pub fn resolve_callable_with_context(
     // `collect(tail)` is a workspace-wide leaf lookup that would
     // otherwise stitch together unrelated workspace functions.
     if out.is_empty() {
-        if let Some(rewrite) = rewrite_through_alias_map_with_target(name, ctx) {
-            out = collect(&rewrite.rewritten);
-            if out.is_empty() {
-                if let Some((_, tail)) = rewrite.rewritten.rsplit_once(['.', ':']) {
-                    out = collect(tail);
-                    if let Some(target_module) = rewrite.target_module.as_deref() {
-                        out.retain(|func| candidate_in_alias_target(global, *func, target_module));
-                    }
-                }
-            }
+        out = resolve_alias(name);
+    }
+    if out.is_empty() {
+        if let Some(no_bang) = name.strip_suffix('!') {
+            out = resolve_alias(no_bang);
+        }
+    }
+    if out.is_empty() && unqualified_lookup_name(name) {
+        for target_module in wildcard_import_modules(ctx) {
+            let mut candidates = collect(name);
+            candidates.retain(|func| candidate_in_alias_target(global, *func, target_module, ctx));
+            out.extend(candidates);
+        }
+        dedup_func_ids(&mut out);
+    }
+    if out.is_empty() {
+        if let Some((receiver, method)) = split_member_head_tail(name) {
+            out = resolve_callable_member_with_context(global, receiver, method, ctx);
         }
     }
     // Workspace-rooted qualified call: `crate::X::Y` (Rust),
@@ -199,6 +257,138 @@ pub fn resolve_callable_with_context(
         out = resolve_workspace_rooted_call(global, name, ctx);
     }
     out
+}
+
+fn unqualified_lookup_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('.')
+        && !trimmed.contains("::")
+        && !trimmed.contains(':')
+        && !trimmed.contains('\\')
+}
+
+fn wildcard_import_modules<'a>(ctx: &'a ResolveContext<'_>) -> Vec<&'a str> {
+    let Some(map) = ctx.alias_map else {
+        return Vec::new();
+    };
+    let mut modules = Vec::new();
+    for (key, target) in map {
+        if !key.starts_with(WILDCARD_IMPORT_ALIAS_PREFIX) {
+            continue;
+        }
+        if let AliasTarget::Namespace { module } = target {
+            if !module.is_empty() && !modules.iter().any(|seen| seen == module) {
+                modules.push(module.as_str());
+            }
+        }
+    }
+    modules
+}
+
+/// Retain only declarations that an unqualified reference can reach
+/// without import / receiver / module-qualifier evidence. A public
+/// declaration elsewhere in the workspace is not enough: visibility
+/// answers "may this be called once named", not "does this call name
+/// that declaration".
+fn retain_caller_lexical_func_candidates(
+    global: &GlobalIndex,
+    candidates: &mut Vec<bonsai_common::FuncId>,
+    ctx: &ResolveContext<'_>,
+) {
+    candidates.retain(|func| {
+        let sym = SymbolId::new(func.raw());
+        let Some(decl) = global.decl_of(sym) else {
+            return false;
+        };
+        let Some(decl_file) = global.declaring_file(sym) else {
+            return false;
+        };
+        candidate_in_caller_lexical_scope(decl, decl_file, ctx)
+    });
+}
+
+fn retain_caller_lexical_symbol_candidates(
+    global: &GlobalIndex,
+    candidates: &mut Vec<SymbolId>,
+    ctx: &ResolveContext<'_>,
+) {
+    candidates.retain(|symbol| {
+        let Some(decl) = global.decl_of(*symbol) else {
+            return false;
+        };
+        let Some(decl_file) = global.declaring_file(*symbol) else {
+            return false;
+        };
+        candidate_in_caller_lexical_scope(decl, decl_file, ctx)
+    });
+}
+
+fn candidate_in_caller_lexical_scope(
+    decl: &bonsai_lang_api::Decl,
+    decl_file: FileId,
+    ctx: &ResolveContext<'_>,
+) -> bool {
+    if matches!(
+        decl.kind,
+        bonsai_lang_api::DeclKind::Method | bonsai_lang_api::DeclKind::Constructor
+    ) {
+        return decl_file == ctx.caller_file;
+    }
+    decl_file == ctx.caller_file
+        || (!decl.module_path.is_empty() && decl.module_path.matches(ctx.caller_module))
+        || same_directory_unqualified_module_candidate(decl, decl_file, ctx)
+}
+
+fn same_directory_unqualified_module_candidate(
+    decl: &bonsai_lang_api::Decl,
+    decl_file: FileId,
+    ctx: &ResolveContext<'_>,
+) -> bool {
+    if decl_file == ctx.caller_file {
+        return false;
+    }
+    let Some(lookup) = ctx.file_path_lookup else {
+        return false;
+    };
+    let Some(decl_path) = lookup.path_for(decl_file) else {
+        return false;
+    };
+    let Some(caller_path) = lookup.path_for(ctx.caller_file) else {
+        return false;
+    };
+    if (!decl.module_path.is_empty() || !ctx.caller_module.is_empty())
+        && !same_directory_global_namespace_extension(&caller_path)
+    {
+        return false;
+    }
+    file_parent_dir(&decl_path).is_some_and(|decl_dir| file_parent_dir(&caller_path) == Some(decl_dir))
+}
+
+fn file_parent_dir(path: &str) -> Option<&str> {
+    let trimmed = path.trim();
+    let idx = trimmed.rfind(['/', '\\'])?;
+    Some(&trimmed[..idx])
+}
+
+fn same_directory_global_namespace_extension(path: &str) -> bool {
+    matches!(
+        path.rsplit('.').next().unwrap_or_default(),
+        "c" | "h"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "hpp"
+            | "hh"
+            | "hxx"
+            | "m"
+            | "mm"
+            | "kt"
+            | "kts"
+            | "swift"
+            | "pl"
+            | "pm"
+    )
 }
 
 /// Final-fallback resolver for fully-qualified workspace paths
@@ -249,7 +439,12 @@ fn resolve_workspace_rooted_call(
         if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
             continue;
         }
-        if !module_target_matches_decl_module_path(mod_path, &decl.module_path) {
+        if !module_target_matches_decl_module_path(mod_path, &decl.module_path)
+            && !ctx
+                .file_path_lookup
+                .and_then(|lookup| lookup.path_for(decl_file))
+                .is_some_and(|path| module_target_matches_path(mod_path, &path))
+        {
             continue;
         }
         out.push(bonsai_common::FuncId::new(decl.symbol.raw()));
@@ -429,8 +624,8 @@ struct AliasRewrite {
     /// `Some(module)` for [`AliasTarget::Namespace`] and
     /// [`AliasTarget::Member`] aliases — the dotted module identity
     /// the alias points at. `None` for [`AliasTarget::Type`] aliases
-    /// (those route through class-member resolution which already
-    /// constrains by the type's own decl).
+    /// so unresolved external types cannot fall back to a bare method
+    /// name elsewhere in the workspace.
     target_module: Option<String>,
 }
 
@@ -553,12 +748,82 @@ fn try_suffix_match(target: &[&str], decl: &[String]) -> bool {
 /// matching leaf identifier — turning `Envelope::method` (where
 /// `Envelope` was a type-only import) into an entry pointing at
 /// some unrelated `method()` decl elsewhere in the workspace.
-fn candidate_in_alias_target(global: &GlobalIndex, func: bonsai_common::FuncId, target_module: &str) -> bool {
-    let sym = SymbolId::new(func.raw());
-    let Some(decl) = global.decl_of(sym) else {
+fn candidate_in_alias_target(
+    global: &GlobalIndex,
+    func: bonsai_common::FuncId,
+    target_module: &str,
+    ctx: &ResolveContext<'_>,
+) -> bool {
+    symbol_in_alias_target(global, SymbolId::new(func.raw()), target_module, ctx)
+}
+
+fn symbol_in_alias_target(
+    global: &GlobalIndex,
+    symbol: SymbolId,
+    target_module: &str,
+    ctx: &ResolveContext<'_>,
+) -> bool {
+    let Some(decl) = global.decl_of(symbol) else {
         return false;
     };
-    module_target_matches_decl_module_path(target_module, &decl.module_path)
+    if module_target_matches_decl_module_path_from_context(
+        target_module,
+        &decl.module_path,
+        ctx.caller_module,
+    ) {
+        return true;
+    }
+    let Some(decl_file) = global.declaring_file(symbol) else {
+        return false;
+    };
+    ctx.file_path_lookup
+        .and_then(|lookup| lookup.path_for(decl_file))
+        .is_some_and(|path| module_target_matches_path(target_module, &path))
+}
+
+fn module_target_matches_decl_module_path_from_context(
+    target_module: &str,
+    decl_module: &bonsai_lang_api::ModulePath,
+    caller_module: &bonsai_lang_api::ModulePath,
+) -> bool {
+    if let Some(target_segments) = relative_module_target_segments(target_module, caller_module) {
+        return decl_module.segments == target_segments;
+    }
+    module_target_matches_decl_module_path(target_module, decl_module)
+}
+
+fn relative_module_target_segments(
+    target_module: &str,
+    caller_module: &bonsai_lang_api::ModulePath,
+) -> Option<Vec<String>> {
+    let target = target_module.trim();
+    if !(target == "."
+        || target == ".."
+        || target.starts_with("./")
+        || target.starts_with("../")
+        || target.starts_with(".\\")
+        || target.starts_with("..\\"))
+    {
+        return None;
+    }
+    if caller_module.segments.is_empty() {
+        return None;
+    }
+    let normalized = target.replace('\\', "/");
+    let mut segments = caller_module.segments.clone();
+    segments.pop();
+    for raw in normalized.split('/') {
+        let part = raw.trim();
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            segments.pop()?;
+            continue;
+        }
+        segments.push(strip_extension(part).to_string());
+    }
+    (!segments.is_empty()).then_some(segments)
 }
 
 /// Trim the call-argument list off a callee text. `Foo(arg)` →
@@ -778,11 +1043,16 @@ pub fn prune_receiver_type_names_for_dispatch(
 }
 
 /// Walk a class's hierarchy, accumulating callable candidates that
-/// share `method_name`. Visibility-filtered through `ctx`, with
-/// memoisation across both methods and classes so cycles in `bases`
-/// (rare but possible during incremental indexing) don't loop.
-/// Stops walking up the chain once a class declares the method
-/// locally — the parent class's same-named method is shadowed.
+/// share `method_name`. The initial method visibility is filtered
+/// through the call-site `ctx`, while base-class names are resolved
+/// from each class declaration's own file/module context. That keeps
+/// inherited dispatch semantic for imported subclasses:
+/// `pipeline.py` may know `AuditedRepository`, but
+/// `AuditedRepository(Repository)` must resolve `Repository` in
+/// `storage.py`, not in the caller's lexical scope. Memoisation
+/// across both methods and classes prevents cycles in `bases` from
+/// looping. Stops walking up the chain once a class declares the
+/// method locally — the parent class's same-named method is shadowed.
 pub fn collect_method_candidates_for_class(
     global: &GlobalIndex,
     class_sym: bonsai_common::SymbolId,
@@ -845,7 +1115,7 @@ fn collect_method_candidates_for_class_inner(
         if !visibility_allows(decl, decl_file, &decl.module_path, ctx) {
             continue;
         }
-        if decl.parent == Some(class_sym) && seen_methods.insert(decl.symbol) {
+        if decl_belongs_to_class(decl, class_sym, class_decl) && seen_methods.insert(decl.symbol) {
             matched_local_method = true;
             out.push(bonsai_common::FuncId::new(decl.symbol.raw()));
         }
@@ -853,8 +1123,9 @@ fn collect_method_candidates_for_class_inner(
     if matched_local_method {
         return;
     }
+    let base_ctx = ResolveContext::new(class_file, &class_decl.module_path);
     for base in &class_decl.bases {
-        for base_sym in resolve_class(global, base, ctx) {
+        for base_sym in resolve_class(global, base, &base_ctx) {
             collect_method_candidates_for_class_inner(
                 global,
                 base_sym,
@@ -866,6 +1137,20 @@ fn collect_method_candidates_for_class_inner(
             );
         }
     }
+}
+
+fn decl_belongs_to_class(
+    decl: &bonsai_lang_api::Decl,
+    class_sym: SymbolId,
+    class_decl: &bonsai_lang_api::Decl,
+) -> bool {
+    if decl.parent == Some(class_sym) {
+        return true;
+    }
+    let class_span = class_decl.body_span.unwrap_or(class_decl.span);
+    decl.name_span.file == class_span.file
+        && decl.name_span.start >= class_span.start
+        && decl.name_span.end <= class_span.end
 }
 
 /// Lift each `TypeAliasBinding` into the alias-target map as a
@@ -907,6 +1192,40 @@ pub fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
     let Some(target_leaf) = target_parts.last() else {
         return false;
     };
+    if target_parts.len() > 1 {
+        if path_parts
+            .windows(target_parts.len())
+            .any(|window| window == target_parts)
+        {
+            return true;
+        }
+        for stripped in absolute_module_prefix_variants(&target_parts) {
+            if !stripped.is_empty()
+                && stripped.len() <= path_parts.len()
+                && path_parts
+                    .windows(stripped.len())
+                    .any(|window| window == stripped)
+            {
+                return true;
+            }
+        }
+        // Workspaces are often opened below their language-level
+        // module root (`import "app/util"` while the checked-out
+        // target path is just `util/util.go`). Keep the match
+        // semantic by requiring a real suffix of the import target to
+        // appear in the candidate file path; this is path evidence,
+        // not a bare callee-name fallback.
+        for suffix_start in 1..target_parts.len() {
+            let suffix = &target_parts[suffix_start..];
+            if !suffix.is_empty()
+                && suffix.len() <= path_parts.len()
+                && path_parts_contains_workspace_suffix(&path_parts, suffix)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
     if path_parts
         .last()
         .is_some_and(|file| strip_extension(file) == target_leaf.as_str())
@@ -921,12 +1240,23 @@ pub fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
     {
         return true;
     }
-    if target_parts.len() > path_parts.len() {
+    false
+}
+
+fn path_parts_contains_workspace_suffix(path_parts: &[String], suffix: &[String]) -> bool {
+    if suffix.is_empty() || suffix.len() > path_parts.len() {
         return false;
     }
+    if suffix.len() > 1 {
+        return path_parts.windows(suffix.len()).any(|window| window == suffix);
+    }
+    let Some(leaf) = suffix.first() else {
+        return false;
+    };
     path_parts
-        .windows(target_parts.len())
-        .any(|window| window == target_parts)
+        .iter()
+        .take(path_parts.len().saturating_sub(1))
+        .any(|part| part == leaf)
 }
 
 /// Split a module import target (`com.example.Utils`,
@@ -935,10 +1265,11 @@ pub fn module_target_matches_path(alias_target: &str, file_path: &str) -> bool {
 /// Trailing extensions and `.` / `..` segments are dropped.
 #[must_use]
 pub fn module_import_parts(text: &str) -> Vec<String> {
-    let parts: Vec<&str> = if text.contains('/') {
-        text.split('/').collect()
+    let normalized = text.replace("::", ".");
+    let parts: Vec<&str> = if normalized.contains('/') {
+        normalized.split('/').collect()
     } else {
-        text.split('.').collect()
+        normalized.split('.').collect()
     };
     parts
         .into_iter()
@@ -947,6 +1278,21 @@ pub fn module_import_parts(text: &str) -> Vec<String> {
             (!part.is_empty() && part != "." && part != "..").then(|| strip_extension(part).to_string())
         })
         .collect()
+}
+
+fn absolute_module_prefix_variants(parts: &[String]) -> Vec<&[String]> {
+    let mut out = Vec::new();
+    if matches!(parts.first().map(String::as_str), Some("crate" | "self")) {
+        out.push(&parts[1..]);
+    }
+    let mut start = 0usize;
+    while parts.get(start).is_some_and(|part| part == "super") {
+        start += 1;
+    }
+    if start > 0 {
+        out.push(&parts[start..]);
+    }
+    out
 }
 
 /// Split an absolute or relative file path (`/abs/dir/file.py`,
@@ -1008,6 +1354,7 @@ pub fn resolve_class(
     let mut out = Vec::new();
     for lookup in type_lookup_variants(name) {
         out.extend(collect(&lookup));
+        retain_caller_lexical_symbol_candidates(global, &mut out, ctx);
         if !out.is_empty() {
             dedup_symbols(&mut out);
             return out;
@@ -1034,7 +1381,17 @@ pub fn resolve_class(
                     if let Some(target_module) = rewrite.target_module.as_deref() {
                         candidates.retain(|sym| {
                             global.decl_of(*sym).is_some_and(|decl| {
-                                module_target_matches_decl_module_path(target_module, &decl.module_path)
+                                let path_match = global
+                                    .declaring_file(*sym)
+                                    .and_then(|file| {
+                                        ctx.file_path_lookup.and_then(|lookup| lookup.path_for(file))
+                                    })
+                                    .is_some_and(|path| module_target_matches_path(target_module, &path));
+                                module_target_matches_decl_module_path_from_context(
+                                    target_module,
+                                    &decl.module_path,
+                                    ctx.caller_module,
+                                ) || path_match
                             })
                         });
                     }
@@ -1044,6 +1401,19 @@ pub fn resolve_class(
                         return out;
                     }
                 }
+            }
+        }
+    }
+    if out.is_empty() && unqualified_lookup_name(name) {
+        for lookup in type_lookup_variants(name) {
+            for target_module in wildcard_import_modules(ctx) {
+                let mut candidates = collect(&lookup);
+                candidates.retain(|symbol| symbol_in_alias_target(global, *symbol, target_module, ctx));
+                out.extend(candidates);
+            }
+            if !out.is_empty() {
+                dedup_symbols(&mut out);
+                return out;
             }
         }
     }
@@ -1158,8 +1528,9 @@ pub fn short_tail(name: &str) -> &str {
 
 /// Build a `{local_name → resolved}` alias map from `ImportSpec`s.
 /// Covers every symbol- and module-level alias shape adapters emit
-/// (`from x import y as z`, `import os as o`, Go `import "fmt"` self-
-/// binding, Scala `{a => b}`, PHP / Kotlin renaming, etc.).
+/// (`from x import y as z`, `import os as o`, unaliased module
+/// bindings such as `import os` / `use std::io`, Go `import "fmt"`
+/// self-binding, Scala `{a => b}`, PHP / Kotlin renaming, etc.).
 ///
 /// Source `imports` from `bonsai_db::AnalyzerDb::imports_for` so
 /// every downstream pass (browse, matcher, taint reachability)
@@ -1185,8 +1556,99 @@ pub fn alias_map_for_file(imports: &[ImportSpec]) -> AHashMap<String, String> {
                     .or_insert_with(|| import.module.clone());
             }
         }
+        // Unaliased module import: derive the local binding from the
+        // module path so qualified calls (`os.system`, `std::io::read`)
+        // are treated as import-qualified. If the alias target cannot
+        // resolve semantically, callers leave the edge unresolved
+        // instead of retrying the bare tail.
+        if !import.is_wildcard && import.alias.is_none() && import.original_name.is_none() {
+            if let Some(local) = module_local_binding(&import.module) {
+                map.entry(local).or_insert_with(|| import.module.clone());
+            }
+        }
     }
     map
+}
+
+fn module_local_binding(module: &str) -> Option<String> {
+    let trimmed = module
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
+        .trim_end_matches(['/', '\\'])
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path_like = trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.');
+    let mut candidate = if path_like {
+        trimmed
+            .rsplit(['/', '\\'])
+            .next()
+            .and_then(strip_known_import_extension)
+            .or_else(|| trimmed.rsplit(['/', '\\']).next())
+            .unwrap_or(trimmed)
+    } else if let Some(stem) = strip_known_import_extension(trimmed) {
+        stem.rsplit(['.', ':']).next().unwrap_or(stem)
+    } else if let Some((_, tail)) = trimmed.rsplit_once("::") {
+        tail
+    } else if let Some((_, tail)) = trimmed.rsplit_once(':') {
+        tail
+    } else if let Some((_, tail)) = trimmed.rsplit_once('.') {
+        tail
+    } else {
+        trimmed
+    };
+    candidate = candidate.trim();
+    let mut chars = candidate.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+fn strip_known_import_extension(module: &str) -> Option<&str> {
+    let (stem, ext) = module.rsplit_once('.')?;
+    let ext = ext.trim();
+    if matches!(
+        ext,
+        "c" | "cc"
+            | "cpp"
+            | "cs"
+            | "cxx"
+            | "dart"
+            | "erl"
+            | "ex"
+            | "exs"
+            | "h"
+            | "hh"
+            | "hpp"
+            | "hrl"
+            | "java"
+            | "js"
+            | "kt"
+            | "kts"
+            | "lua"
+            | "m"
+            | "mm"
+            | "php"
+            | "pl"
+            | "pm"
+            | "py"
+            | "rb"
+            | "rs"
+            | "scala"
+            | "sol"
+            | "swift"
+            | "ts"
+    ) {
+        Some(stem)
+    } else {
+        None
+    }
 }
 
 // Note: a previous version of this file shipped a Go-stdlib package
@@ -1201,248 +1663,4 @@ pub fn alias_map_for_file(imports: &[ImportSpec]) -> AHashMap<String, String> {
 // library/API tables in engine crates.
 
 #[cfg(test)]
-mod tests {
-    // Path-tail aliasing for unaliased Go imports (`import "io/fs"`
-    // → local `fs`) is now an adapter responsibility — see
-    // `crates/lang_go/src/lib.rs::parse_imports`. Resolve simply
-    // honors `ImportSpec.alias` whether the adapter populated it
-    // explicitly or implicitly. Coverage for the path-tail rule
-    // lives in the lang_go and per-lang CLI conformance tests.
-
-    use super::*;
-    use bonsai_common::{FileId, Span, SymbolId};
-    use bonsai_lang_api::{AliasTarget, DeclIndex, ImportScope, ImportSpec, ModulePath};
-
-    fn span() -> Span {
-        Span::new(FileId::new(0), 0, 0)
-    }
-
-    fn spec(module: &str, alias: Option<&str>, original: Option<&str>) -> ImportSpec {
-        ImportSpec {
-            span: span(),
-            module: module.to_string(),
-            alias: alias.map(str::to_string),
-            is_wildcard: false,
-            original_name: original.map(str::to_string),
-            scope: ImportScope::Module,
-        }
-    }
-
-    #[test]
-    fn aliased_member_binds_local_to_original_symbol() {
-        // The kotlin double-tail drift guard at the unit level: an
-        // adapter that produces `module="x.y", alias="Z",
-        // original_name="z"` (the corrected pass-8 shape) must
-        // produce `Z → z`, NOT `Z → "x.y.z"`. If a future change
-        // re-routes alias resolution through the generic
-        // extractor — which would emit `module="x.y.z",
-        // alias="Z", original_name=None` — `Z` would map to the
-        // dotted module path and downstream callee resolution
-        // would expand `Z(...)` to `"x.y.z.z(...)"`.
-        let map = alias_map_for_file(&[spec("x.y", Some("Z"), Some("z"))]);
-        assert_eq!(map.get("Z").map(String::as_str), Some("z"));
-        assert!(
-            !map.values().any(|v| v.contains('.')),
-            "alias must not be dotted: {map:?}"
-        );
-    }
-
-    #[test]
-    fn from_x_import_y_as_z_binds_z_to_y() {
-        // Python `from flask import request as req` → req → request.
-        let map = alias_map_for_file(&[spec("flask", Some("req"), Some("request"))]);
-        assert_eq!(map.get("req").map(String::as_str), Some("request"));
-    }
-
-    #[test]
-    fn module_only_alias_binds_local_to_module() {
-        // Python `import os as o` → o → os.
-        let map = alias_map_for_file(&[spec("os", Some("o"), None)]);
-        assert_eq!(map.get("o").map(String::as_str), Some("os"));
-    }
-
-    #[test]
-    fn member_alias_whole_name_rewrites_to_module_member() {
-        let mut map = ahash::AHashMap::new();
-        map.insert(
-            "u".to_string(),
-            AliasTarget::Member {
-                module: "pkg".to_string(),
-                member: "util".to_string(),
-            },
-        );
-        let module = ModulePath::default();
-        let ctx = ResolveContext::new(FileId::new(0), &module).with_alias_map(&map);
-
-        assert_eq!(
-            rewrite_through_alias_map_with_target("u", &ctx)
-                .map(|r| r.rewritten)
-                .as_deref(),
-            Some("pkg.util")
-        );
-    }
-
-    #[test]
-    fn member_alias_prefix_preserves_imported_member() {
-        let mut map = ahash::AHashMap::new();
-        map.insert(
-            "u".to_string(),
-            AliasTarget::Member {
-                module: "pkg".to_string(),
-                member: "util".to_string(),
-            },
-        );
-        let module = ModulePath::default();
-        let ctx = ResolveContext::new(FileId::new(0), &module).with_alias_map(&map);
-
-        assert_eq!(
-            rewrite_through_alias_map_with_target("u.run", &ctx)
-                .map(|r| r.rewritten)
-                .as_deref(),
-            Some("pkg.util.run")
-        );
-    }
-
-    #[test]
-    fn rewrite_handles_double_colon_separator() {
-        // Rust / C++ `pipeline::orchestrate` must split into the
-        // module head and bare tail, not chop at the first `:`
-        // (which would leave a stray colon in the rewritten form).
-        let mut map = ahash::AHashMap::new();
-        map.insert(
-            "pipeline".to_string(),
-            AliasTarget::Namespace {
-                module: "pipeline".to_string(),
-            },
-        );
-        let module = ModulePath::default();
-        let ctx = ResolveContext::new(FileId::new(0), &module).with_alias_map(&map);
-
-        assert_eq!(
-            rewrite_through_alias_map_with_target("pipeline::orchestrate", &ctx)
-                .map(|r| r.rewritten)
-                .as_deref(),
-            Some("pipeline.orchestrate")
-        );
-    }
-
-    #[test]
-    fn module_target_match_handles_php_namespace_separator() {
-        // PHP `use App\Util as H;` produces alias target
-        // `App\Util`. The decl module path is `["App"]` (file
-        // namespace). Match should drop the trailing class-name
-        // segment and accept the suffix.
-        let module = ModulePath::from_segments(["App"]);
-        assert!(module_target_matches_decl_module_path("App\\Util", &module));
-    }
-
-    #[test]
-    fn module_target_match_handles_dart_file_extension() {
-        // Dart `import 'storage.dart' as store;` exposes the
-        // `.dart` extension in the alias target. The decl path
-        // canonicalizes to `["storage"]`; the trailing-segment
-        // drop is what closes the gap.
-        let module = ModulePath::from_segments(["storage"]);
-        assert!(module_target_matches_decl_module_path("storage.dart", &module));
-    }
-
-    #[test]
-    fn module_target_match_rejects_unrelated_modules() {
-        // Negative: alias `Envelope` (a type-only import) must
-        // not match a decl in module `helpers` even though both
-        // are workspace-internal.
-        let module = ModulePath::from_segments(["helpers"]);
-        assert!(!module_target_matches_decl_module_path("Envelope", &module));
-    }
-
-    #[test]
-    fn self_binding_alias_kept_for_external_head_detection() {
-        // Go `import "fmt"` (adapter sets alias = path tail)
-        // → fmt → fmt. The taint engine relies on this entry
-        // existing so `fmt.Println` is recognised as an external-
-        // package head instead of bare-tailing into a workspace
-        // function literally named `Println`.
-        let map = alias_map_for_file(&[spec("fmt", Some("fmt"), None)]);
-        assert_eq!(map.get("fmt").map(String::as_str), Some("fmt"));
-    }
-
-    #[test]
-    fn class_resolution_rewrites_alias_map() {
-        let mut global = GlobalIndex::new();
-        let file = FileId::new(1);
-        let span = Span::new(file, 0, 20);
-        let class = bonsai_lang_api::Decl {
-            symbol: SymbolId::new(0),
-            kind: bonsai_lang_api::DeclKind::Class,
-            name: "Service".to_string(),
-            qualified_name: Some("pkg.Service".to_string()),
-            module_path: ModulePath::from_segments(["pkg"]),
-            span,
-            name_span: span,
-            visibility: bonsai_lang_api::Visibility::Public,
-            parent: None,
-            body_span: None,
-            flow_events: Vec::new(),
-            has_implicit_returns: false,
-            params: Vec::new(),
-            param_annotations: Vec::new(),
-            type_aliases: Vec::new(),
-            bases: Vec::new(),
-            receiver_param_index: None,
-            receiver_field_writes: Vec::new(),
-            implicit_receiver_names: Vec::new(),
-            receiver_state_sources: Vec::new(),
-            return_type: None,
-        };
-        global.insert(DeclIndex {
-            file,
-            defs: vec![class],
-            refs: Vec::new(),
-            strings: Vec::new(),
-            comments: Vec::new(),
-        });
-
-        let caller_module = ModulePath::from_segments(["pkg"]);
-        let mut aliases = AHashMap::new();
-        aliases.insert(
-            "Svc".to_string(),
-            AliasTarget::Type {
-                type_name: "pkg.Service".to_string(),
-            },
-        );
-        let ctx = ResolveContext::new(file, &caller_module).with_alias_map(&aliases);
-        let hits = resolve_class(&global, "Svc", &ctx);
-        assert_eq!(hits.len(), 1, "aliased type should resolve by rewritten tail");
-    }
-
-    #[test]
-    fn redundant_alias_equal_to_original_is_skipped() {
-        // `from x import y as y` would produce a no-op binding.
-        // We skip redundant entries to keep the map tight.
-        let map = alias_map_for_file(&[spec("x", Some("y"), Some("y"))]);
-        assert!(map.is_empty(), "redundant alias should not emit: {map:?}");
-    }
-
-    #[test]
-    fn empty_inputs_produce_empty_map() {
-        assert!(alias_map_for_file(&[]).is_empty());
-    }
-
-    #[test]
-    fn first_alias_wins_on_collision() {
-        // `import os as o` followed by `import "other" as o` —
-        // first entry wins for the module-alias case (insert via
-        // `entry().or_insert_with`).
-        let map = alias_map_for_file(&[spec("os", Some("o"), None), spec("other", Some("o"), None)]);
-        assert_eq!(map.get("o").map(String::as_str), Some("os"));
-    }
-
-    #[test]
-    fn unaliased_import_produces_no_entry() {
-        // `import os` (no alias, no original_name) — nothing to
-        // bind locally; downstream callee lookup falls through to
-        // bare-name resolution.
-        let map = alias_map_for_file(&[spec("os", None, None)]);
-        assert!(map.is_empty(), "unaliased import should not emit: {map:?}");
-    }
-}
+mod tests;

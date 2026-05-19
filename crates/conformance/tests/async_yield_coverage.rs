@@ -245,11 +245,10 @@ fn async_yield_cross_language_coverage() {
             }
         }
     }
-    if !failures.is_empty() {
-        panic!(
-            "async/yield coverage gaps ({} total):\n{}",
-            failures.len(),
-            failures.join("\n")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "async/yield coverage gaps ({} total):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

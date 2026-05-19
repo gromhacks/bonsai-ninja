@@ -79,7 +79,7 @@
   match:
     kind: write
     target:
-      name: balances
+      regex: "^balances(\\.|$)"
   match_examples:
     - name: declared shape
       code: |

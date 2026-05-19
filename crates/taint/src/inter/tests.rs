@@ -71,6 +71,15 @@ fn config(sanitizers: &[&str]) -> InterTaintConfig {
     }
 }
 
+#[test]
+fn default_inter_taint_config_is_semantic_only() {
+    assert_eq!(
+        InterTaintConfig::default().max_edge_precision,
+        Some(Precision::Narrowed),
+        "taint defaults must cap public flow evidence at the semantic precision ceiling",
+    );
+}
+
 fn arg(index: u64, text: &str, place: Option<&str>) -> bonsai_lang_api::CallArg {
     bonsai_lang_api::CallArg {
         span: Span::new(FileId::new(0), index, index + 1),
@@ -189,6 +198,26 @@ fn call_arg_taint_uses_adapter_source_names_for_interpolation_operands() {
     let mut different = arg(1, "\"prefix $cap suffix\"", None);
     different.source_names = vec!["$cap".to_string()];
     assert!(!call_arg_is_tainted(&different, &state));
+}
+
+#[test]
+fn assignment_rhs_field_reads_do_not_match_sibling_fields() {
+    let state = seed(&["data.user"]);
+
+    assert!(
+        assignment_rhs_is_tainted("data[\"user\"]", &state),
+        "exact field read must match the same tainted field"
+    );
+    assert!(
+        !assignment_rhs_is_tainted("data[\"cmd\"]", &state),
+        "tainted sibling field must not taint a different field read"
+    );
+
+    let span = Span::new(FileId::new(0), 0, 1);
+    assert!(
+        !assignment_source_names_any_tainted(&["data".to_string()], span, None, None, &state,),
+        "bare carrier source names without RHS text must not inherit sibling field taint"
+    );
 }
 
 #[test]
@@ -760,6 +789,122 @@ fn configured_source_output_arg_introduces_taint_after_clean_initialization() {
 }
 
 #[test]
+fn configured_output_arg_flow_taints_later_buffer_consumer() {
+    let format_span = Span::new(FileId::INVALID, 11, 20);
+    let sink_span = Span::new(FileId::INVALID, 21, 30);
+    let events = vec![
+        FlowEvent::Call {
+            span: format_span,
+            name: "sprintf".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![
+                arg(11, "buf", Some("buf")),
+                arg(12, "\"echo %s\"", None),
+                arg(13, "user", Some("user")),
+            ],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "system".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![arg(21, "buf", Some("buf"))],
+        },
+    ];
+    let db = python_ws_one_file("def placeholder():\n    pass\n");
+    let config = InterTaintConfig {
+        output_arg_flows: vec![OutputArgFlow {
+            callee: "sprintf".to_string(),
+            output_arg_index: 0,
+            value_start_arg_index: Some(1),
+            value_arg_indices: Vec::new(),
+        }],
+        ..config(&[])
+    };
+    let aliases = AHashMap::new();
+    let alias_targets = AHashMap::new();
+    let local_bindings = AHashMap::new();
+    let const_bindings = AHashMap::new();
+    let ctx = SinkWalkCtx {
+        sink_span,
+        config: &config,
+        db: &db,
+        aliases: &aliases,
+        alias_targets: &alias_targets,
+        local_bindings: &local_bindings,
+        const_bindings: &const_bindings,
+        caller: func_id_of(&db, "placeholder"),
+    };
+    let (_, found) = walk_events_for_sink(
+        &events,
+        seed(&["user"]),
+        &ctx,
+        &parking_lot::RwLock::new(AHashMap::new()),
+    );
+    assert!(
+        found,
+        "configured output-arg flow should taint the formatted buffer"
+    );
+}
+
+#[test]
+fn unconfigured_output_arg_flow_does_not_taint_later_buffer_consumer() {
+    let format_span = Span::new(FileId::INVALID, 11, 20);
+    let sink_span = Span::new(FileId::INVALID, 21, 30);
+    let events = vec![
+        FlowEvent::Call {
+            span: format_span,
+            name: "sprintf".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![
+                arg(11, "buf", Some("buf")),
+                arg(12, "\"echo %s\"", None),
+                arg(13, "user", Some("user")),
+            ],
+        },
+        FlowEvent::Call {
+            span: sink_span,
+            name: "system".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: bonsai_lang_api::CallKind::Function,
+            args: vec![arg(21, "buf", Some("buf"))],
+        },
+    ];
+    let db = python_ws_one_file("def placeholder():\n    pass\n");
+    let config = config(&[]);
+    let aliases = AHashMap::new();
+    let alias_targets = AHashMap::new();
+    let local_bindings = AHashMap::new();
+    let const_bindings = AHashMap::new();
+    let ctx = SinkWalkCtx {
+        sink_span,
+        config: &config,
+        db: &db,
+        aliases: &aliases,
+        alias_targets: &alias_targets,
+        local_bindings: &local_bindings,
+        const_bindings: &const_bindings,
+        caller: func_id_of(&db, "placeholder"),
+    };
+    let (_, found) = walk_events_for_sink(
+        &events,
+        seed(&["user"]),
+        &ctx,
+        &parking_lot::RwLock::new(AHashMap::new()),
+    );
+    assert!(
+        !found,
+        "unconfigured calls must not get hidden output-arg propagation"
+    );
+}
+
+#[test]
 fn compound_non_call_assignment_rhs_preserves_taint() {
     let src = r#"
 sub entry {
@@ -1020,7 +1165,7 @@ def entry(user_input):
 }
 
 #[test]
-fn unresolved_out_param_side_effect_marks_precision_over_approximate() {
+fn unresolved_out_param_side_effect_does_not_propagate() {
     let src = "
 def entry(user_input):
     buf = ''
@@ -1032,55 +1177,56 @@ def entry(user_input):
     let result = interprocedural_taint(entry, &seed(&["user_input"]), &config(&[]), &db);
     assert_eq!(
         result.precision,
-        Precision::OverApproximate,
-        "opaque out-param side effect is conservative and must be visible as over-approximate"
+        Precision::Exact,
+        "opaque out-param side effects must not degrade or invent flow"
     );
     assert!(
-        result
+        !result
             .tainted_calls
             .iter()
             .any(|call| call.name == "os_system"
                 && call.tainted_args.iter().any(|arg| arg.value_text == "buf")),
-        "opaque side effect should taint the later sink arg: {:?}",
+        "opaque side effect should not taint the later sink arg: {:?}",
         result.tainted_calls
     );
 }
 
 #[test]
-fn multi_candidate_callee_degrades_precision() {
-    // Two different `run` functions in the workspace — the call
-    // resolves to both, so edge kind = Virtual and precision =
-    // OverApproximate.
-    let src = "
-def run(a):
-    os_system(a)
-
-class Other:
-    def run(self, a):
-        os_system(a)
-
+fn multi_candidate_callee_does_not_propagate() {
+    let db = python_ws_multi(&[
+        (
+            "main.py",
+            "
 def entry(user_input):
     run(user_input)
-";
-    let db = python_ws_one_file(src);
+",
+        ),
+        (
+            "a.py",
+            "
+def run(a):
+    os_system(a)
+",
+        ),
+        (
+            "b.py",
+            "
+def run(a):
+    os_system(a)
+",
+        ),
+    ]);
     let entry = func_id_of(&db, "entry");
     let result = interprocedural_taint(entry, &seed(&["user_input"]), &config(&[]), &db);
-    // We expect at least one Virtual edge in the records
-    // because `run` has multiple candidates.
-    let virtuals: Vec<_> = result
-        .call_records
-        .iter()
-        .filter(|c| c.edge_kind == EdgeKind::Virtual)
-        .collect();
     assert!(
-        !virtuals.is_empty(),
-        "multi-candidate `run` must produce Virtual edges; got {:?}",
+        result.call_records.is_empty(),
+        "ambiguous `run` must not produce call records; got {:?}",
         result.call_records,
     );
     assert_eq!(
         result.precision,
-        Precision::OverApproximate,
-        "worst precision must meet down to over-approximate",
+        Precision::Exact,
+        "ambiguous callee must not degrade precision by guessing",
     );
 }
 
@@ -1161,6 +1307,48 @@ def entry(user_input):
             .iter()
             .any(|c| c.caller == entry && c.callee == sink),
         "alias `run_it` → `sink` must resolve through the alias map",
+    );
+}
+
+#[test]
+fn import_qualified_candidate_does_not_retry_bare_tail() {
+    let db = python_ws_one_file(
+        r#"
+import fmt as fmt
+
+class fmt:
+    pass
+
+def Println(value):
+    sink(value)
+
+def entry(value):
+    pass
+"#,
+    );
+    let entry = func_id_of(&db, "entry");
+    let aliases = AHashMap::from_iter([("fmt".to_string(), "fmt".to_string())]);
+    let alias_targets = AHashMap::from_iter([(
+        "fmt".to_string(),
+        AliasTarget::Namespace {
+            module: "fmt".to_string(),
+        },
+    )]);
+
+    let candidates = resolve_call_candidates_with_caller(
+        "fmt:Println",
+        &aliases,
+        &alias_targets,
+        &AHashMap::new(),
+        &db,
+        entry,
+        &InterTaintConfig::default(),
+    );
+
+    assert!(
+        candidates.is_empty(),
+        "fmt:Println must resolve through the fmt import target or remain unresolved; \
+         retrying bare Println fabricates a taint edge to the local function"
     );
 }
 
@@ -1427,6 +1615,62 @@ def main():
         "Yield/Await/comprehension handlers must not invent taint on empty seed; got {:?}",
         result.call_records
     );
+}
+
+#[test]
+fn constructor_named_arg_taints_only_matching_receiver_field() {
+    let src = r#"
+class Repository:
+    def __init__(self, data, who="anon"):
+        self._data = data
+        self.who = who
+
+    def persist(self):
+        cmd = self._data["cmd"]
+        sink_cmd(cmd)
+        sink_who(self.who)
+
+def entry(valid, user):
+    repo = Repository(valid, who=user)
+    repo.persist()
+"#;
+    let db = python_ws_one_file(src);
+    let entry = func_id_of(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["user"]), &config(&[]), &db);
+
+    assert!(
+        result.tainted_calls.iter().any(|call| call.name == "sink_who"),
+        "constructor named arg should taint the matching receiver field: {:?}",
+        result.tainted_calls
+    );
+    assert!(
+        result.tainted_calls.iter().all(|call| call.name != "sink_cmd"),
+        "constructor named arg must not taint unrelated data field: {:?}",
+        result.tainted_calls
+    );
+}
+
+fn receiver_allows_name_fallback(
+    receiver: &str,
+    aliases: &AHashMap<String, String>,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> bool {
+    let receiver = normalise_qualified_text(receiver);
+    let receiver = receiver.trim();
+    if receiver.is_empty() {
+        return false;
+    }
+    if receiver
+        .chars()
+        .any(|ch| matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`') || ch.is_whitespace())
+    {
+        return false;
+    }
+    let head = receiver
+        .split(&['.', ':', '\\', '('][..])
+        .next()
+        .unwrap_or(receiver);
+    aliases.contains_key(head) || alias_targets.contains_key(head)
 }
 
 #[test]

@@ -3,6 +3,7 @@
   enabled: true
   language: dart
   tag: cors
+  category: source-independent
   severity: medium
   packages: [shelf_cors_headers]
   cwe: [CWE-942]

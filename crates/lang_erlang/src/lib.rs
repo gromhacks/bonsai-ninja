@@ -96,9 +96,14 @@ impl LanguageAdapter for ErlangAdapter {
         // need textual analysis of byte ranges.
         if let Some((snapshot, _)) = parse_with(PACK_NAME, file, ctx) {
             for decl in &mut decl_index.defs {
-                augment_erlang_record_param_patterns(decl, snapshot.text.as_ref());
+                if let Some(params) = erlang_clause_param_slots(snapshot.text.as_ref(), decl.span, &decl.name)
+                {
+                    decl.params = params;
+                }
+                augment_erlang_param_pattern_bindings(decl, snapshot.text.as_ref());
                 normalize_erlang_access_events(&mut decl.flow_events, snapshot.text.as_ref());
                 augment_erlang_record_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
+                inject_erlang_fun_ref_aliases(&mut decl.flow_events, snapshot.text.as_ref());
                 augment_erlang_tail_return_event(&mut decl.flow_events, decl.span, snapshot.text.as_ref());
             }
         } else {
@@ -155,14 +160,25 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     //   `pp_include_lib` for `-include_lib("app/include/X.hrl").`
     for import_node in collect_kinds(tree, &["import_attribute"]) {
         if let Some(module_node) = import_node.child_by_field_name("module") {
+            let module = node_text(&module_node, src).to_string();
             imports.push(ImportSpec {
                 span: span_of(file, &import_node),
-                module: node_text(&module_node, src).to_string(),
+                module: module.clone(),
                 alias: None,
                 is_wildcard: false,
                 original_name: None,
                 scope: ImportScope::Module,
             });
+            for imported in erlang_imported_function_names(&import_node, src) {
+                imports.push(ImportSpec {
+                    span: span_of(file, &import_node),
+                    module: module.clone(),
+                    alias: None,
+                    is_wildcard: false,
+                    original_name: Some(imported),
+                    scope: ImportScope::Local,
+                });
+            }
         }
     }
     for include_node in collect_kinds(tree, &["pp_include", "pp_include_lib"]) {
@@ -185,6 +201,27 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
     }
     imports
+}
+
+fn erlang_imported_function_names(import_node: &tree_sitter::Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![*import_node];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "fa" {
+            if let Some(fun_node) = node.child_by_field_name("fun") {
+                let name = node_text(&fun_node, src).trim().to_string();
+                if !name.is_empty() && !out.iter().any(|existing| existing == &name) {
+                    out.push(name);
+                }
+            }
+            continue;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
 }
 
 /// Rewrite flow events so that `maps:get/2` calls and `Record#tag.field`
@@ -266,11 +303,86 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
     }
 }
 
+/// Add exact callback-alias facts for Erlang's function-reference
+/// syntax: `Cb = fun helper/1`.
+fn inject_erlang_fun_ref_aliases(events: &mut Vec<FlowEvent>, src: &str) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_erlang_fun_ref_aliases(then_events, src);
+                inject_erlang_fun_ref_aliases(else_events, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_erlang_fun_ref_aliases(body, src);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_erlang_fun_ref_aliases(body, src);
+                inject_erlang_fun_ref_aliases(catch_events, src);
+                inject_erlang_fun_ref_aliases(finally_events, src);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let alias = erlang_fun_ref_alias_assignment(&event, src);
+        rewritten.push(event);
+        if let Some(alias) = alias {
+            rewritten.push(alias);
+        }
+    }
+    *events = rewritten;
+}
+
+fn erlang_fun_ref_alias_assignment(event: &FlowEvent, src: &str) -> Option<FlowEvent> {
+    let FlowEvent::Assign { span, .. } = event else {
+        return None;
+    };
+    let span_text = erlang_span_text(src, *span)?;
+    let (lhs, rhs) = split_top_level_match_expr(span_text)?;
+    let target = lhs.trim();
+    if !erlang_variable_name(target) {
+        return None;
+    }
+    let source_name = erlang_fun_ref_source(rhs.trim().trim_end_matches('.').trim())?;
+    Some(FlowEvent::Assign {
+        span: *span,
+        target: target.to_string(),
+        source_name: Some(source_name),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: true,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    })
+}
+
+fn erlang_fun_ref_source(rhs: &str) -> Option<String> {
+    let rest = rhs.strip_prefix("fun ")?.trim_start();
+    let (name, arity) = rest.rsplit_once('/')?;
+    let name = name.trim();
+    let arity = arity.trim();
+    if !erlang_atom_name(name) || !arity.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// Synthesize parameter destructuring assignments for Erlang record
 /// patterns in function heads. `f(R = #user{name = N}) -> ...` turns
 /// into a synthetic `N = R.name` Assign event prepended to the body so
 /// the taint engine can flow `R.name -> N`.
-fn augment_erlang_record_param_patterns(decl: &mut bonsai_lang_api::Decl, src: &str) {
+fn augment_erlang_param_pattern_bindings(decl: &mut bonsai_lang_api::Decl, src: &str) {
     let Some(decl_text) = erlang_span_text(src, decl.span) else {
         return;
     };
@@ -280,35 +392,57 @@ fn augment_erlang_record_param_patterns(decl: &mut bonsai_lang_api::Decl, src: &
     let raw_args = split_top_level_args(params_text);
     let mut synthetic_events = Vec::new();
     for (param_index, raw_arg) in raw_args.iter().enumerate() {
+        let slot_param_name = decl
+            .params
+            .get(param_index)
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("_Arg{param_index}"));
         let bindings = erlang_record_pattern_bindings(raw_arg);
-        if bindings.is_empty() {
+        if !bindings.is_empty() {
+            // Pick the variable bound to the whole record (or fall back to
+            // the existing param name, or a generated `Arg<i>`).
+            let param_name = erlang_pattern_param_name(raw_arg)
+                .or_else(|| {
+                    decl.params
+                        .get(param_index)
+                        .filter(|name| erlang_variable_name(name))
+                        .cloned()
+                })
+                .unwrap_or_else(|| format!("Arg{param_index}"));
+            // Replace the param at this index so callers see the canonical
+            // record-bound name rather than the raw pattern text.
+            if param_index < decl.params.len() {
+                decl.params[param_index].clone_from(&param_name);
+            } else {
+                decl.params.push(param_name.clone());
+            }
+            for (field_name, bound_variable) in bindings {
+                synthetic_events.push(FlowEvent::Assign {
+                    span: decl.span,
+                    target: bound_variable,
+                    source_name: Some(format!("{param_name}.{field_name}")),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: vec![format!("{param_name}.{field_name}")],
+                    declares_new_binding: false,
+                    value_kind: None,
+                });
+            }
             continue;
         }
-        // Pick the variable bound to the whole record (or fall back to
-        // the existing param name, or a generated `Arg<i>`).
-        let param_name = erlang_pattern_param_name(raw_arg)
-            .or_else(|| {
-                decl.params
-                    .get(param_index)
-                    .filter(|name| erlang_variable_name(name))
-                    .cloned()
-            })
-            .unwrap_or_else(|| format!("Arg{param_index}"));
-        // Replace the param at this index so callers see the canonical
-        // record-bound name rather than the raw pattern text.
-        if param_index < decl.params.len() {
-            decl.params[param_index].clone_from(&param_name);
-        } else {
-            decl.params.push(param_name.clone());
-        }
-        for (field_name, bound_variable) in bindings {
+
+        for bound_variable in erlang_pattern_bound_variables(raw_arg) {
+            if bound_variable == "_" || bound_variable == slot_param_name {
+                continue;
+            }
             synthetic_events.push(FlowEvent::Assign {
                 span: decl.span,
                 target: bound_variable,
-                source_name: Some(format!("{param_name}.{field_name}")),
+                source_name: Some(slot_param_name.clone()),
                 source_call: None,
                 source_call_args: Vec::new(),
-                source_names: vec![format!("{param_name}.{field_name}")],
+                source_names: vec![slot_param_name.clone()],
                 declares_new_binding: false,
                 value_kind: None,
             });
@@ -485,6 +619,29 @@ fn erlang_function_params_text(text: &str) -> Option<&str> {
     Some(&header[open_paren + 1..close_paren])
 }
 
+fn erlang_clause_param_slots(src: &str, span: bonsai_common::Span, name: &str) -> Option<Vec<String>> {
+    let text = erlang_span_text(src, span)?;
+    let arrow_offset = find_erlang_arrow(text)?;
+    let header = &text[..arrow_offset];
+    let name_start = header.find(name)?;
+    let after_name = header[name_start + name.len()..].trim_start();
+    if !after_name.starts_with('(') {
+        return Some(Vec::new());
+    }
+    let close = find_matching_erlang_delim(after_name, 0, b'(', b')')?;
+    let params_text = &after_name[1..close];
+    if params_text.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    let args = split_top_level_args(params_text);
+    Some(
+        args.iter()
+            .enumerate()
+            .map(|(idx, arg)| erlang_pattern_param_name(arg).unwrap_or_else(|| format!("_Arg{idx}")))
+            .collect(),
+    )
+}
+
 /// Pick the variable name out of a pattern fragment. Handles the
 /// `R = #user{...}` shape by treating `=` as a separator and returning
 /// the first variable-shaped token.
@@ -496,6 +653,13 @@ fn erlang_pattern_param_name(arg: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn erlang_pattern_bound_variables(arg: &str) -> Vec<String> {
+    erlang_value_source_names(arg)
+        .into_iter()
+        .filter(|name| erlang_variable_name(name))
+        .collect()
 }
 
 /// Extract `(field, variable)` pairs from a record pattern. Only entries
@@ -1123,3 +1287,6 @@ fn collect_erlang_exported_names(tree: &tree_sitter::Tree, src: &[u8]) -> std::c
     }
     exported_names
 }
+
+#[cfg(test)]
+mod tests;

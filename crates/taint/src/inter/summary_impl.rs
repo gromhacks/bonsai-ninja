@@ -59,10 +59,11 @@ use crate::{
 
 use super::{
     apply_event_transfer, apply_unresolved_call_side_effects, arg_text_is_tainted, bind_param_taint,
-    call_receiver_from_name, identifier_value_occurs, insert_descendant_target_taint, insert_target_taint,
-    insert_value_target_taint, normalise_qualified_text, normalise_target_text, push_unique_string,
-    qualified_wildcard_seed_matches, value_marker, FunctionSummary, InterTaintConfig, ParamSideEffect,
-    ReturnAccessPath,
+    call_arg_is_directly_tainted, call_receiver_from_name, identifier_value_occurs,
+    insert_descendant_target_taint, insert_target_taint, insert_value_target_taint, named_field_initializers,
+    normalise_qualified_text, normalise_target_text, push_unique_string, qualified_wildcard_seed_matches,
+    value_marker, FunctionSummary, InterTaintConfig, ParamSideEffect, ReturnAccessPath, ReturnElementTaint,
+    ReturnFieldTaint,
 };
 
 /// Compute the return-taint summary for one function by running the
@@ -80,12 +81,16 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
     let mut returns_taint_of = Vec::new();
     let mut returns_descendant_taint_of = Vec::new();
     let mut returns_container_taint_of = Vec::new();
+    let mut returns_field_taint_of = Vec::new();
+    let mut returns_element_taint_of = Vec::new();
     // Functions with no params have no transit to record — short-circuit.
     if decl.params.is_empty() {
         return FunctionSummary {
             returns_taint_of,
             returns_descendant_taint_of,
             returns_container_taint_of,
+            returns_field_taint_of,
+            returns_element_taint_of,
             returns_access_paths: Vec::new(),
             taints_params_from: Vec::new(),
         };
@@ -150,6 +155,19 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         }
         // Container transit: `return {"k": param}` builds a fresh
         // container, so the caller should see descendant taint.
+        collect_return_field_taints(
+            &decl.flow_events,
+            param_idx,
+            param,
+            &value_tainted_at_end,
+            &mut returns_field_taint_of,
+        );
+        collect_return_element_taints(
+            &decl.flow_events,
+            param_idx,
+            &value_tainted_at_end,
+            &mut returns_element_taint_of,
+        );
         if contains_tainted_container_return(&decl.flow_events, &value_tainted_at_end) {
             returns_container_taint_of.push(param_idx);
         }
@@ -158,6 +176,8 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         returns_taint_of,
         returns_descendant_taint_of,
         returns_container_taint_of,
+        returns_field_taint_of,
+        returns_element_taint_of,
         returns_access_paths: compute_return_access_paths(decl),
         taints_params_from: compute_param_side_effects(decl),
     }
@@ -171,6 +191,221 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
 fn return_name_has_descendant_taint(name: &str, tainted: &TokenSet) -> bool {
     let normalised = normalise_qualified_text(name.trim());
     !normalised.is_empty() && qualified_wildcard_seed_matches(&normalised, tainted)
+}
+
+fn collect_return_field_taints(
+    events: &[FlowEvent],
+    param_idx: usize,
+    param: &str,
+    tainted: &TokenSet,
+    out: &mut Vec<ReturnFieldTaint>,
+) {
+    let mut aliases: AHashMap<String, Vec<String>> = AHashMap::new();
+    collect_return_field_taints_with_aliases(events, param_idx, param, tainted, &mut aliases, out);
+}
+
+fn collect_return_field_taints_with_aliases(
+    events: &[FlowEvent],
+    param_idx: usize,
+    param: &str,
+    tainted: &TokenSet,
+    aliases: &mut AHashMap<String, Vec<String>>,
+    out: &mut Vec<ReturnFieldTaint>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_names,
+                source_call_args,
+                ..
+            } => {
+                let mut paths_for_target = Vec::new();
+                for source in source_name
+                    .iter()
+                    .map(String::as_str)
+                    .chain(source_names.iter().map(String::as_str))
+                    .chain(source_call_args.iter().map(String::as_str))
+                {
+                    collect_source_access_paths(source, param, aliases, &mut paths_for_target);
+                }
+                for path in paths_for_target {
+                    insert_access_alias(aliases, target, &path);
+                }
+            }
+            FlowEvent::Return {
+                value_text: Some(text),
+                ..
+            }
+            | FlowEvent::Yield {
+                value_text: Some(text),
+                ..
+            } => {
+                for (field, value) in named_field_initializers(text) {
+                    if arg_text_is_tainted(&value, tainted) {
+                        push_return_field_taint(out, param_idx, &field, None);
+                    }
+                    let mut source_paths = Vec::new();
+                    collect_source_access_paths(&value, param, aliases, &mut source_paths);
+                    for source_path in source_paths {
+                        push_return_field_taint(out, param_idx, &field, Some(source_path));
+                    }
+                }
+                for spread in spread_operand_names(text) {
+                    for field in concrete_tainted_fields_for_spread(&spread, tainted) {
+                        push_return_field_taint(out, param_idx, &field, None);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                let mut then_aliases = aliases.clone();
+                collect_return_field_taints_with_aliases(
+                    then_events,
+                    param_idx,
+                    param,
+                    tainted,
+                    &mut then_aliases,
+                    out,
+                );
+                let mut else_aliases = aliases.clone();
+                collect_return_field_taints_with_aliases(
+                    else_events,
+                    param_idx,
+                    param,
+                    tainted,
+                    &mut else_aliases,
+                    out,
+                );
+                merge_access_aliases(aliases, then_aliases);
+                merge_access_aliases(aliases, else_aliases);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_field_taints_with_aliases(body, param_idx, param, tainted, aliases, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                let mut body_aliases = aliases.clone();
+                collect_return_field_taints_with_aliases(
+                    body,
+                    param_idx,
+                    param,
+                    tainted,
+                    &mut body_aliases,
+                    out,
+                );
+                let mut catch_aliases = aliases.clone();
+                collect_return_field_taints_with_aliases(
+                    catch_events,
+                    param_idx,
+                    param,
+                    tainted,
+                    &mut catch_aliases,
+                    out,
+                );
+                merge_access_aliases(&mut body_aliases, catch_aliases);
+                collect_return_field_taints_with_aliases(
+                    finally_events,
+                    param_idx,
+                    param,
+                    tainted,
+                    &mut body_aliases,
+                    out,
+                );
+                merge_access_aliases(aliases, body_aliases);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_return_field_taint(
+    out: &mut Vec<ReturnFieldTaint>,
+    param: usize,
+    field: &str,
+    source_path: Option<String>,
+) {
+    let field = field.trim().trim_matches('.');
+    if field.is_empty() {
+        return;
+    }
+    let source_path = source_path
+        .map(|path| path.trim().trim_matches('.').to_string())
+        .filter(|path| !path.is_empty());
+    if !out.iter().any(|existing| {
+        existing.param == param && existing.field == field && existing.source_path == source_path
+    }) {
+        out.push(ReturnFieldTaint {
+            param,
+            field: field.to_string(),
+            source_path,
+        });
+    }
+}
+
+fn collect_return_element_taints(
+    events: &[FlowEvent],
+    param_idx: usize,
+    tainted: &TokenSet,
+    out: &mut Vec<ReturnElementTaint>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_text: Some(text),
+                ..
+            }
+            | FlowEvent::Yield {
+                value_text: Some(text),
+                ..
+            } => {
+                for (index, element) in return_positional_elements(text).into_iter().enumerate() {
+                    if call_arg_is_directly_tainted(&element, tainted) {
+                        push_return_element_taint(out, param_idx, index);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_return_element_taints(then_events, param_idx, tainted, out);
+                collect_return_element_taints(else_events, param_idx, tainted, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_return_element_taints(body, param_idx, tainted, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_return_element_taints(body, param_idx, tainted, out);
+                collect_return_element_taints(catch_events, param_idx, tainted, out);
+                collect_return_element_taints(finally_events, param_idx, tainted, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_return_element_taint(out: &mut Vec<ReturnElementTaint>, param: usize, index: usize) {
+    if !out
+        .iter()
+        .any(|existing| existing.param == param && existing.index == index)
+    {
+        out.push(ReturnElementTaint { param, index });
+    }
 }
 
 /// Walk the decl once per parameter, tracking every aliased access
@@ -242,6 +477,9 @@ fn walk_return_access_path_events(
                     .into_iter()
                     .flatten()
                 {
+                    if return_text_constructs_container(terminal_return_expression_text(return_value)) {
+                        continue;
+                    }
                     let mut direct_paths = Vec::new();
                     collect_source_access_paths(return_value, param, aliases, &mut direct_paths);
                     // Returning an aliased target yields all access paths bound to that alias.
@@ -260,6 +498,9 @@ fn walk_return_access_path_events(
             FlowEvent::Yield { value_text, .. } => {
                 // Yields are "returns over time" for our purposes — same handling.
                 if let Some(yield_value) = value_text.as_deref() {
+                    if return_text_constructs_container(terminal_return_expression_text(yield_value)) {
+                        continue;
+                    }
                     let mut direct_paths = Vec::new();
                     collect_source_access_paths(yield_value, param, aliases, &mut direct_paths);
                     for (alias, alias_paths) in aliases.iter() {
@@ -347,6 +588,11 @@ fn collect_source_access_paths(
     // Direct hit: `source` is `param.foo.bar` — extract `foo.bar`.
     if let Some(path) = access_path_from_param(source, param) {
         push_unique_string(out, path);
+    }
+    for access in qualified_accesses(source) {
+        if let Some(path) = access_path_from_param(&access, param) {
+            push_unique_string(out, path);
+        }
     }
     // Indirect hit: `source` matches a previously-aliased target — inherit its paths.
     for key in access_alias_keys(source) {
@@ -976,7 +1222,11 @@ fn contains_tainted_return(events: &[FlowEvent], tainted: &TokenSet) -> bool {
 }
 
 fn return_value_text_is_tainted(text: &str, tainted: &TokenSet) -> bool {
-    arg_text_is_tainted(terminal_return_expression_text(text), tainted)
+    let returned = terminal_return_expression_text(text);
+    if return_text_constructs_container(returned) {
+        return false;
+    }
+    call_arg_is_directly_tainted(returned, tainted)
 }
 
 fn terminal_return_expression_text(text: &str) -> &str {
@@ -1035,22 +1285,10 @@ fn contains_tainted_container_return(events: &[FlowEvent], tainted: &TokenSet) -
             | FlowEvent::Yield {
                 value_text: Some(text),
                 ..
-            } if return_text_constructs_container(text) && arg_text_is_tainted(text, tainted) => {
-                return true;
-            }
-            FlowEvent::Branch {
-                condition,
-                then_events,
-                else_events,
-                ..
-            } if condition
-                .as_deref()
-                .is_some_and(|condition| arg_text_is_tainted(condition, tainted))
-                && (events_have_dynamic_container_return(then_events)
-                    || events_have_dynamic_container_return(else_events)) =>
+            } if return_text_constructs_container(text)
+                && arg_text_is_tainted(text, tainted)
+                && !return_container_taint_is_field_precise(text, tainted) =>
             {
-                // Tainted condition guarding a dynamic container return — caller sees taint
-                // even though no single source name persists into the returned container.
                 return true;
             }
             FlowEvent::Branch {
@@ -1087,6 +1325,115 @@ fn contains_tainted_container_return(events: &[FlowEvent], tainted: &TokenSet) -
     false
 }
 
+fn return_container_taint_is_field_precise(text: &str, tainted: &TokenSet) -> bool {
+    let fields = named_field_initializers(text);
+    let precise_named_field = fields
+        .iter()
+        .any(|(_, value)| arg_text_is_tainted(value, tainted));
+    let precise_spread_field = spread_operand_names(text)
+        .iter()
+        .any(|spread| !concrete_tainted_fields_for_spread(spread, tainted).is_empty());
+    let broad_spread = return_text_has_broadly_tainted_spread(text, tainted);
+    let every_tainted_value_has_precise_field = fields
+        .iter()
+        .any(|(_, value)| arg_text_is_tainted(value, tainted))
+        && all_tainted_container_values_are_named_fields(text, &fields, tainted);
+    (precise_named_field || precise_spread_field) && !broad_spread && every_tainted_value_has_precise_field
+}
+
+fn return_text_has_broadly_tainted_spread(text: &str, tainted: &TokenSet) -> bool {
+    spread_operand_names(text)
+        .iter()
+        .any(|spread| spread_operand_is_broadly_tainted(spread, tainted))
+}
+
+fn all_tainted_container_values_are_named_fields(
+    text: &str,
+    fields: &[(String, String)],
+    tainted: &TokenSet,
+) -> bool {
+    let returned = terminal_return_expression_text(text).trim();
+    let Some((open, close)) = returned
+        .chars()
+        .next()
+        .and_then(|ch| matching_container_delims(ch).map(|close| (ch, close)))
+    else {
+        return false;
+    };
+    let Some(inner) = balanced_wrapped_inner(returned, open, close) else {
+        return false;
+    };
+    let parts = split_top_level_csv(inner);
+    if parts.is_empty() {
+        return false;
+    }
+    parts.into_iter().all(|part| {
+        if let Some(idx) = top_level_field_separator(&part) {
+            let value_start = if part[idx..].starts_with("=>") {
+                idx + 2
+            } else {
+                idx + 1
+            };
+            let key = part[..idx].trim();
+            let value = part[value_start..].trim();
+            return !arg_text_is_tainted(&part, tainted)
+                || (arg_text_is_tainted(value, tainted) && !arg_text_is_tainted(key, tainted));
+        }
+        if fields
+            .iter()
+            .any(|(field, value)| field == value && value.trim() == part.trim())
+        {
+            return true;
+        }
+        !arg_text_is_tainted(&part, tainted)
+    })
+}
+
+fn spread_operand_names(text: &str) -> Vec<String> {
+    let mut spreads = Vec::new();
+    for token in identifier_tokens_outside_strings(text) {
+        if (text.contains(&format!("**{token}")) || text.contains(&format!("...{token}")))
+            && !spreads.iter().any(|existing| existing == &token)
+        {
+            spreads.push(token);
+        }
+    }
+    spreads
+}
+
+fn spread_operand_is_broadly_tainted(spread: &str, tainted: &TokenSet) -> bool {
+    let spread = normalise_target_text(spread);
+    if spread.is_empty() {
+        return false;
+    }
+    tainted.contains(&spread)
+        || tainted.contains(&value_marker(&spread))
+        || tainted.contains(&format!("{spread}.*"))
+}
+
+fn concrete_tainted_fields_for_spread(spread: &str, tainted: &TokenSet) -> Vec<String> {
+    let spread = normalise_target_text(spread);
+    if spread.is_empty() {
+        return Vec::new();
+    }
+    let prefix = format!("{spread}.");
+    let mut fields = Vec::new();
+    for seed in tainted {
+        if seed.contains("#__value") || seed.ends_with(".*") {
+            continue;
+        }
+        let normalised = normalise_qualified_text(seed);
+        let Some(field) = normalised.strip_prefix(&prefix) else {
+            continue;
+        };
+        let field = field.trim().trim_matches('.');
+        if !field.is_empty() && !fields.iter().any(|existing| existing == field) {
+            fields.push(field.to_string());
+        }
+    }
+    fields
+}
+
 /// Cheap syntactic gate: the return text begins with a container
 /// constructor (`{...}`, `[...]`, or `(...)` carrying nested braces).
 fn return_text_constructs_container(text: &str) -> bool {
@@ -1096,6 +1443,146 @@ fn return_text_constructs_container(text: &str) -> bool {
         // Tuples may wrap a dict / list literal — `({"x": y})`.
         || trimmed.starts_with('(') && (trimmed.contains('{') || trimmed.contains('['))
         || return_text_starts_with_type_constructor(trimmed)
+}
+
+fn return_positional_elements(text: &str) -> Vec<String> {
+    let returned = terminal_return_expression_text(text).trim();
+    let Some((open, close)) = returned
+        .chars()
+        .next()
+        .and_then(|ch| matching_container_delims(ch).map(|close| (ch, close)))
+    else {
+        return Vec::new();
+    };
+    let Some(inner) = balanced_wrapped_inner(returned, open, close) else {
+        return Vec::new();
+    };
+    let elements = split_top_level_csv(inner);
+    if elements.len() <= 1
+        || elements
+            .iter()
+            .any(|element| top_level_field_separator(element).is_some())
+    {
+        return Vec::new();
+    }
+    elements
+}
+
+fn matching_container_delims(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        _ => None,
+    }
+}
+
+fn balanced_wrapped_inner(text: &str, open: char, close: char) -> Option<&str> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut open_end = None;
+    for (idx, ch) in text.char_indices() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch == open {
+            if depth == 0 {
+                open_end = Some(idx + ch.len_utf8());
+            }
+            depth += 1;
+            continue;
+        }
+        if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                let start = open_end?;
+                if text[idx + ch.len_utf8()..].trim().is_empty() {
+                    return Some(&text[start..idx]);
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
+fn split_top_level_csv(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(text[start..idx].trim().to_string());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+fn top_level_field_separator(text: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if let Some(open_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == open_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ':' | '=' if depth == 0 => return Some(idx),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn return_text_starts_with_type_constructor(text: &str) -> bool {
@@ -1113,68 +1600,6 @@ fn return_text_starts_with_type_constructor(text: &str) -> bool {
             .next()
             .and_then(|tail| tail.chars().next())
             .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
-}
-
-/// True when any return / yield in `events` builds a container
-/// whose body references at least one runtime identifier (i.e. it's
-/// not a fully-static literal like `{"k": "v"}` or `[1, 2, 3]`).
-fn events_have_dynamic_container_return(events: &[FlowEvent]) -> bool {
-    for event in events {
-        match event {
-            FlowEvent::Return {
-                value_text: Some(text),
-                ..
-            }
-            | FlowEvent::Yield {
-                value_text: Some(text),
-                ..
-            } if return_text_constructs_container(text) && return_text_has_dynamic_identifier(text) => {
-                return true;
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                if events_have_dynamic_container_return(then_events)
-                    || events_have_dynamic_container_return(else_events)
-                {
-                    return true;
-                }
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                if events_have_dynamic_container_return(body) {
-                    return true;
-                }
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                if events_have_dynamic_container_return(body)
-                    || events_have_dynamic_container_return(catch_events)
-                    || events_have_dynamic_container_return(finally_events)
-                {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// True when `text` mentions a runtime identifier — anything that
-/// isn't a hardcoded boolean / null literal.
-fn return_text_has_dynamic_identifier(text: &str) -> bool {
-    identifier_tokens_outside_strings(text).iter().any(|token| {
-        !matches!(
-            token.as_str(),
-            "true" | "false" | "True" | "False" | "null" | "None" | "nil"
-        )
-    })
 }
 
 /// Tail-position evidence: when no explicit `Return` carries a

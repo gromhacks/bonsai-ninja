@@ -44,6 +44,9 @@ Required for every rule:
 
 Sinks also need `cwe: [CWE-NNN]` and `severity: low|medium|high|critical|info`.
 Sources also need `trust: remote|local|service|ipc|database|library|config|physical`.
+Use source `tag` values to describe the trust boundary, not the sink
+class; for example `network-input`, `archive-input`, `graphql-input`,
+`env-input`, or `cli-input`.
 
 ## Disabled rules
 
@@ -88,12 +91,18 @@ Recent capability promotions unblock several rule families:
 | `name` | `name: get` | Bare callee — pair with `packages:`. |
 | `attribute` | `[requests, get]` | Fully-qualified path. Alias-aware. |
 | `regex` | `^.*\\.body$` | For variable receivers with a fixed verb. |
+| `base_name_in` | `[args, variables]` | Optional base/receiver identifier filter for receiver-agnostic regexes. |
 | `annotation` | `RequestParam` | Walks `Decl.param_annotations`. |
+| `decl_kind_in` | `[method]` | Param-rule filter over adapter-emitted `Decl.kind`. |
+| `visibility_in` | `[public]` | Param-rule filter over adapter-emitted `Decl.visibility`. |
 
 Scope qualifiers `in_class` and `in_method` consult `Decl.parent` and
 `Decl.bases`, so a class `WebSocketHandler` matches subclasses as well.
 `Decl.parent` is adapter-derived AST ownership; rule matching does not
 recover class membership from source-span containment.
+Param-rule qualifiers `decl_kind_in` and `visibility_in` are also
+adapter facts; they should be used when a source applies only to public
+entrypoints and not to same-named internal/helper parameters.
 
 ## Constraints
 
@@ -114,12 +123,21 @@ Constraints are post-filters applied after the basic match. All must pass.
 | `enclosing_fn_annotation: …` | Outer function carries a decorator. |
 | `not_in_test_dir: true` | Skip test paths. |
 
-`arg_tainted` is intentionally narrow. It only evaluates syntactic call
-arguments against engine `TaintedCallKind::Call` records — that includes
-real `FlowEvent::Call` arguments and nested receiver calls extracted from
-chains. Assignment `source_call` metadata, write/return records, and other
-diagnostic operands may render in traces but cannot satisfy an
-`arg_tainted` sink constraint.
+`arg_tainted` is intentionally narrow. For `call` and `new` rules it
+evaluates syntactic call arguments against engine `TaintedCallKind::Call`
+records — that includes real `FlowEvent::Call` arguments and nested
+receiver calls extracted from chains. For `write` rules it may also evaluate
+the synthetic write operand, where `index: 0` is the assignment RHS. This
+lets assignment sinks require a tainted value without encoding library API
+names in the engine. Return records and other diagnostic operands may render
+in traces but cannot satisfy an `arg_tainted` sink constraint.
+
+Source-independent API/config misuse rules should not fake taint
+constraints. Examples include disabled autoescape, permissive resource URL
+configuration, parser entity-processing settings, and weak crypto/random
+API calls. Keep those as local pattern findings; source-to-sink rules for
+injection, path, command, queue, header, XSS, and prototype-pollution data
+sinks should name the vulnerable tainted operand explicitly.
 
 Use `receiver_tainted: true` for receiver-state sinks where the security
 operand is left of the call operator, such as `cmd.!` or
@@ -144,7 +162,10 @@ is not simply "return value is tainted" or "arg N is tainted."
 
 | Field | Rule kind | Effect |
 |---|---|---|
-| `taint_semantics.source_output_args: [N, ...]` | source | Treat only the listed call arguments as tainted outputs. Use for C/C++ out-buffer APIs such as `recv(fd, buf, len, flags)` and `SSL_read(ssl, buf, len)`. |
+| `taint_semantics.source_output_args: [N, ...]` | source | Treat only the listed call arguments as tainted outputs. Use for out-buffer APIs such as `recv(fd, buf, len, flags)`, `SSL_read(ssl, buf, len)`, and `fgets(buf, size, stdin)`. |
+| `taint_semantics.call_result_passthrough_args: [N, ...]` | sanitizer/passthrough | Treat the listed call arguments as flowing unchanged to the call result. Use for decode/unescape APIs that preserve attacker control while changing representation. |
+| `taint_semantics.call_result_passthrough_receiver: true` | sanitizer/passthrough | Treat the method receiver as flowing unchanged to the call result. Use for receiver transforms such as `value.removingPercentEncoding`. |
+| `taint_semantics.output_arg_flows` | source/sink/sanitizer/passthrough | Treat selected value arguments as flowing into a listed output argument. Use for formatter/copy APIs that write a tainted payload into a caller-owned buffer. |
 | `taint_semantics.clean_output_overwrite` | sanitizer | Treat an output argument as clean when the configured value inputs are clean. |
 | `taint_semantics.taint_receiver_from_args: true` | sink | Treat tainted arguments as mutating the receiver state for later `receiver_tainted` sinks, using the rule's structured callee target. |
 
@@ -152,6 +173,31 @@ is not simply "return value is tainted" or "arg N is tainted."
 from tainting unrelated operands such as file descriptors, size
 arguments, flags, or handles while still introducing taint at the source
 call site for the real output buffer.
+
+`call_result_passthrough_args` and `call_result_passthrough_receiver`
+keep representation-changing APIs configurable in the rulepack. The
+engine supplies the generic mechanism: if a configured argument or method
+receiver is tainted at a matching call, the call return is tainted. The
+API name and transfer shape stay in YAML so projects can add or remove
+decode/unescape or case-normalization models without rebuilding the
+engine. Matching normalizes the common qualified-name separators
+(`.`, `::`, `->`, and Erlang `:`) before comparing rulepack callees with
+adapter-emitted call text.
+
+`output_arg_flows` handles APIs where the dangerous value is written
+into an argument rather than returned. Each entry declares
+`output_arg_index` plus either `value_start_arg_index` or
+`value_arg_indices`. If any configured value argument is tainted at a
+matching call, post-call reads of the output argument are tainted. API
+names and argument indices stay in YAML; the engine has no built-in
+formatter or copy function table.
+
+`clean_output_overwrite` is the overwrite counterpart: the configured
+output argument gets a fresh writer at the call site. Clean configured
+value inputs leave that writer clean, while tainted configured value
+inputs still flow into it. This prevents stale buffer taint from leaking
+past a real overwrite without turning formatter APIs into hardcoded
+engine sanitizers.
 
 ## Receiver Context
 
@@ -217,6 +263,17 @@ workspace dataflow graph is still used by navigation and export surfaces,
 but source-to-sink findings and their rendered flow IDs come from this
 source-specific taint evidence.
 
+Regression coverage for the May 2026 benchmark gaps is part of the
+shipped CLI test suite. The covered shapes include Go and JavaScript
+cross-file handler-to-service flows, JavaScript and TypeScript GraphQL
+resolver `args.<field>` sources, Python GraphQL arguments reaching
+untyped `conn.execute(...)` SQL sinks, browser `document.URL` DOM-XSS
+sources, and Java JAX-RS / Vert.x / graphql-java request sources. The
+GraphQL JS/TS source rules intentionally match exact resolver receiver
+names (`args.<field>` and `variables.<field>`) rather than any object with
+a common property name, so sibling values such as `user.id` do not become
+tainted just because a GraphQL package is imported.
+
 ## Sanitizer credit
 
 Sanitizer rules don't change the engine's propagation. After the engine
@@ -236,12 +293,21 @@ Three:
 - **text** (default) — themed terminal output.
 - **json** — stable schema documented in `crates/security/src/report.rs`.
 - **sarif** — SARIF 2.1.0 for `security taint-analysis` findings,
-  GitHub code scanning, and the CVEBench-SAST harness.
+  GitHub code scanning, and the CVEBench-SAST harness. SARIF includes
+  exact source-independent API/config misuse findings by default; those
+  rows have no `codeFlows` and use `pattern:<sink-rule-id>` as their
+  source id.
 
 Finding JSON and SARIF are content-stable: the same workspace produces
 the same bytes (sorted findings, deterministic `finding_id`s, no
 timestamps in the default emission). That property is exercised by
 `crates/security/tests/report_stability.rs`.
+
+Each taint finding carries `analysis_complete` and
+`analysis_incomplete_reasons`. Public findings are emitted only from complete
+semantic evidence today, so the field is normally `true` with an empty reason
+list; if a future mode reports incomplete evidence, it must populate the same
+fields instead of relying on implicit precision.
 
 ## Source-analysis mode
 
@@ -255,6 +321,11 @@ That means a source such as `request.args.get("cmd")` follows the value it
 introduced, not every parameter, local, or unrelated branch in the entry
 function. Text output is labelled `SOURCE FLOW` to distinguish these paths
 from generic `inspect` call flows.
+
+Each JSON row carries `analysis_complete`, `analysis_incomplete_reasons`,
+and `lineage`. If representative lineage rendering hits its hop or path
+budget, the row is explicitly marked incomplete instead of being presented
+as complete evidence.
 
 ## Text flow labels
 

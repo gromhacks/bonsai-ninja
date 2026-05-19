@@ -250,11 +250,12 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
                 }
             }
         }
+        let exposes_unqualified_library = alias.is_none() && combinator_names.is_empty();
         imports.push(ImportSpec {
             span: span_of(file, &import_node),
             module: module.clone(),
             alias,
-            is_wildcard: false,
+            is_wildcard: exposes_unqualified_library,
             original_name: None,
             scope: ImportScope::Module,
         });

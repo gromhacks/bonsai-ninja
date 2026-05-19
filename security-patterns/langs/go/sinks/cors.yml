@@ -3,6 +3,7 @@
   enabled: true
   language: go
   tag: cors
+  category: source-independent
   severity: medium
   packages: [github.com/gin-contrib/cors]
   cwe: [CWE-942]
@@ -28,6 +29,7 @@
   enabled: true
   language: go
   tag: cors
+  category: source-independent
   severity: medium
   packages: [github.com/gorilla/handlers]
   cwe: [CWE-942]

@@ -195,6 +195,7 @@
   enabled: true
   language: php
   tag: xss
+  category: source-independent
   severity: high
   packages:
   - twig
@@ -220,6 +221,7 @@
   enabled: true
   language: php
   tag: ssti
+  category: source-independent
   severity: high
   packages:
   - smarty

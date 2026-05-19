@@ -1227,6 +1227,290 @@
   description: "ldap.NewSearchRequest with a constant []string attribute list — constrains returned LDAP attributes to a finite
     allowlist."
 
+# Value-splitting passthroughs. These APIs do not sanitize the
+# underlying data; they only split a string/byte slice into iterable
+# elements. The taint engine owns the generic call-result mechanism,
+# while these rulepack entries own the editable API names.
+- id: go.passthrough.builtin_append
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: append
+  taint_semantics:
+    call_result_passthrough_args: [0, 1]
+  match_examples:
+  - name: append preserves appended value taint
+    code: |
+      package main
+      func example(items []string, target string) []string {
+        return append(items, target)
+      }
+    expect_match_text: [append]
+  description: "append(slice, value, ...) - returned slice derives from the input slice and appended values; preserves taint."
+- id: go.passthrough.strings_trim_space
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, TrimSpace]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: strings trimspace preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.TrimSpace(target)
+      }
+    expect_match_text: [strings.TrimSpace]
+  description: "strings.TrimSpace(s) - trims surrounding whitespace but preserves taint from s."
+- id: go.passthrough.strings_to_upper
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, ToUpper]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: strings toupper preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.ToUpper(target)
+      }
+    expect_match_text: [strings.ToUpper]
+  description: "strings.ToUpper(s) - case-normalizes but preserves taint from s."
+- id: go.passthrough.strings_to_lower
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, ToLower]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: strings tolower preserves taint
+    code: |
+      package main
+      import "strings"
+      func example(target string) string {
+        return strings.ToLower(target)
+      }
+    expect_match_text: [strings.ToLower]
+  description: "strings.ToLower(s) - case-normalizes but preserves taint from s."
+- id: go.passthrough.strings_fields
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, Fields]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "strings"
+      func example(target string) {
+        strings.Fields(target)
+      }
+    expect_match_text: [strings.Fields]
+  description: "strings.Fields(s) - iterable elements preserve taint from s."
+- id: go.passthrough.strings_split
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, Split]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "strings"
+      func example(target string) {
+        strings.Split(target, ",")
+      }
+    expect_match_text: [strings.Split]
+  description: "strings.Split(s, sep) - iterable elements preserve taint from s."
+- id: go.passthrough.strings_split_n
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, SplitN]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "strings"
+      func example(target string) {
+        strings.SplitN(target, ",", 2)
+      }
+    expect_match_text: [strings.SplitN]
+  description: "strings.SplitN(s, sep, n) - iterable elements preserve taint from s."
+- id: go.passthrough.strings_split_after
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, SplitAfter]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "strings"
+      func example(target string) {
+        strings.SplitAfter(target, ",")
+      }
+    expect_match_text: [strings.SplitAfter]
+  description: "strings.SplitAfter(s, sep) - iterable elements preserve taint from s."
+- id: go.passthrough.strings_split_after_n
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [strings, SplitAfterN]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "strings"
+      func example(target string) {
+        strings.SplitAfterN(target, ",", 2)
+      }
+    expect_match_text: [strings.SplitAfterN]
+  description: "strings.SplitAfterN(s, sep, n) - iterable elements preserve taint from s."
+- id: go.passthrough.bytes_fields
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [bytes, Fields]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "bytes"
+      func example(target []byte) {
+        bytes.Fields(target)
+      }
+    expect_match_text: [bytes.Fields]
+  description: "bytes.Fields(b) - iterable elements preserve taint from b."
+- id: go.passthrough.bytes_split
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [bytes, Split]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "bytes"
+      func example(target []byte) {
+        bytes.Split(target, []byte(","))
+      }
+    expect_match_text: [bytes.Split]
+  description: "bytes.Split(b, sep) - iterable elements preserve taint from b."
+- id: go.passthrough.bytes_split_n
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [bytes, SplitN]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "bytes"
+      func example(target []byte) {
+        bytes.SplitN(target, []byte(","), 2)
+      }
+    expect_match_text: [bytes.SplitN]
+  description: "bytes.SplitN(b, sep, n) - iterable elements preserve taint from b."
+- id: go.passthrough.bytes_split_after
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [bytes, SplitAfter]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "bytes"
+      func example(target []byte) {
+        bytes.SplitAfter(target, []byte(","))
+      }
+    expect_match_text: [bytes.SplitAfter]
+  description: "bytes.SplitAfter(b, sep) - iterable elements preserve taint from b."
+- id: go.passthrough.bytes_split_after_n
+  enabled: true
+  language: go
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [bytes, SplitAfterN]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: generated direct match
+    code: |
+      package main
+      import "bytes"
+      func example(target []byte) {
+        bytes.SplitAfterN(target, []byte(","), 2)
+      }
+    expect_match_text: [bytes.SplitAfterN]
+  description: "bytes.SplitAfterN(b, sep, n) - iterable elements preserve taint from b."
+
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
 # identity edge (T104) — taint propagates THROUGH instead of
@@ -1240,6 +1524,8 @@
     kind: call
     callee:
       attribute: [url, QueryUnescape]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated direct match
     code: |
@@ -1261,6 +1547,8 @@
     kind: call
     callee:
       attribute: [url, PathUnescape]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated direct match
     code: |

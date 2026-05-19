@@ -57,6 +57,11 @@ pub struct TraceSummary {
     pub language: String,
     pub workspace_root: String,
     pub entrypoints: Vec<String>,
+    pub analysis_complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub truncation_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis_incomplete_reasons: Vec<String>,
     pub total_steps: usize,
     pub total_paths: usize,
     pub explored_paths: usize,
@@ -244,15 +249,16 @@ impl std::fmt::Debug for FinalizeCtx<'_> {
 /// spans to file paths / line-columns via the VFS.
 pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
     let mut steps: Vec<TraceStep> = Vec::with_capacity(raw.steps.len());
-    let mut edges: Vec<TraceEdge> = Vec::new();
     let mut precision = Precision::Exact;
     let mut span_caches: ahash::AHashMap<bonsai_common::FileId, SpanMap> = ahash::AHashMap::new();
+    let mut analysis_incomplete_reasons = raw.incomplete_reasons.clone();
 
     for (idx, raw_step) in raw.steps.iter().enumerate() {
         let source_span = span_to_source(&raw_step.span, vfs, &mut span_caches);
         let func_name = (ctx.func_name)(raw_step.func).unwrap_or_else(|| format!("func#{}", raw_step.func));
         let module = (ctx.func_module)(raw_step.func).unwrap_or_default();
-        precision = precision.meet(raw_step.precision);
+        let public_step = public_semantic_step(raw_step, &mut analysis_incomplete_reasons);
+        precision = precision.meet(public_step.precision);
         // u64 ids prevent the wrap-to-zero / collapse-to-MAX hazards
         // that u32 step counters had on very large traces.
         let id = idx as u64;
@@ -264,36 +270,38 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
             // surface is "lossless"; we don't mutate path identity.
             path_id: u64::from(raw_step.path_id),
             order: id.saturating_add(1),
-            kind: map_step_kind(raw_step.kind),
-            message: raw_step.message.clone(),
+            kind: public_step.kind,
+            message: public_step.message,
             function: func_name,
             module,
             file: source_span.file.clone(),
             span: source_span,
             state_before: None,
             state_after: None,
-            precision: raw_step.precision,
-            notes: notes_for(raw_step),
+            precision: public_step.precision,
+            notes: public_step.notes,
         });
     }
 
-    for win in steps.windows(2) {
-        if win[0].path_id != win[1].path_id {
-            continue;
-        }
-        edges.push(TraceEdge {
-            from_step: win[0].id,
-            to_step: win[1].id,
-            kind: edge_kind(&win[0], &win[1]),
-        });
-    }
+    let edges = trace_edges(&steps);
 
+    let mut truncation_reasons = raw.truncation_reasons.clone();
+    if raw.truncated && truncation_reasons.is_empty() {
+        truncation_reasons.push("unknown".to_string());
+    }
+    truncation_reasons.sort();
+    truncation_reasons.dedup();
+    analysis_incomplete_reasons.sort();
+    analysis_incomplete_reasons.dedup();
     let paths = path_summaries(&steps, raw.truncated);
 
     let summary = TraceSummary {
         language: ctx.language.to_string(),
         workspace_root: ctx.workspace_root.to_string(),
         entrypoints: ctx.entry_funcs.iter().map(|(_, name)| name.clone()).collect(),
+        analysis_complete: !raw.truncated && analysis_incomplete_reasons.is_empty(),
+        truncation_reasons,
+        analysis_incomplete_reasons,
         total_steps: steps.len(),
         total_paths: paths.len(),
         explored_paths: paths.len(),
@@ -333,6 +341,142 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
     }
 }
 
+struct PublicStep {
+    kind: TraceStepKind,
+    message: String,
+    precision: Precision,
+    notes: Vec<String>,
+}
+
+fn public_semantic_step(raw_step: &RawStep, incomplete_reasons: &mut Vec<String>) -> PublicStep {
+    if !raw_step.precision.is_semantic() {
+        incomplete_reasons.push(format!("diagnostic-precision-step:{:?}", raw_step.kind));
+        return PublicStep {
+            kind: TraceStepKind::Diagnostic,
+            message: format!("Suppressed diagnostic-precision {:?} step", raw_step.kind),
+            precision: Precision::Exact,
+            notes: Vec::new(),
+        };
+    }
+
+    PublicStep {
+        kind: map_step_kind(raw_step.kind),
+        message: raw_step.message.clone(),
+        precision: raw_step.precision,
+        notes: notes_for(raw_step),
+    }
+}
+
+/// Truncate a finalized trace after `step_index` and rebuild all
+/// derived sections so the artifact remains internally coherent.
+///
+/// Source-to-sink views intentionally slice a full entry trace at the
+/// first reached sink. The step list, edges, path summaries, and
+/// summary counters must agree after that slice; otherwise callers see
+/// partial evidence with stale whole-trace metadata.
+pub fn truncate_after_step(result: &mut TraceResult, step_index: usize) {
+    if result.steps.is_empty() {
+        result.edges.clear();
+        result.paths.clear();
+        result.summary.total_steps = 0;
+        result.summary.total_paths = 0;
+        result.summary.explored_paths = 0;
+        result.summary.truncated_paths = 0;
+        result.summary.precision = Precision::Exact;
+        return;
+    }
+    let keep = step_index.saturating_add(1).min(result.steps.len());
+    result.steps.truncate(keep);
+    result.edges = trace_edges(&result.steps);
+    let trace_was_truncated = !result.summary.truncation_reasons.is_empty();
+    result.paths = path_summaries(&result.steps, trace_was_truncated);
+    result.summary.analysis_incomplete_reasons =
+        incomplete_reasons_for_steps(&result.summary.analysis_incomplete_reasons, &result.steps);
+    result.summary.analysis_complete =
+        result.summary.truncation_reasons.is_empty() && result.summary.analysis_incomplete_reasons.is_empty();
+    result.summary.total_steps = result.steps.len();
+    result.summary.total_paths = result.paths.len();
+    result.summary.explored_paths = result.paths.len();
+    result.summary.truncated_paths = result
+        .paths
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.terminated_by,
+                PathTermination::DepthLimit | PathTermination::LoopLimit
+            )
+        })
+        .count();
+    result.summary.precision = result
+        .steps
+        .iter()
+        .fold(Precision::Exact, |acc, step| acc.meet(step.precision));
+}
+
+fn incomplete_reasons_for_steps(reasons: &[String], steps: &[TraceStep]) -> Vec<String> {
+    let mut filtered = Vec::new();
+    for reason in reasons {
+        let Some(call_name) = incomplete_call_reason_name(reason) else {
+            filtered.push(reason.clone());
+            continue;
+        };
+        if steps.iter().any(|step| trace_step_calls_name(step, call_name)) {
+            filtered.push(reason.clone());
+        }
+    }
+    filtered.sort();
+    filtered.dedup();
+    filtered
+}
+
+fn incomplete_call_reason_name(reason: &str) -> Option<&str> {
+    if let Some(name) = reason.strip_prefix("unresolved-call:") {
+        return Some(name);
+    }
+    reason
+        .strip_prefix("ambiguous-call:")
+        .and_then(|rest| rest.rsplit_once(':').map(|(name, _)| name))
+}
+
+fn trace_step_calls_name(step: &TraceStep, call_name: &str) -> bool {
+    match step.kind {
+        TraceStepKind::Call | TraceStepKind::Diagnostic => {}
+        _ => return false,
+    }
+    trace_step_callee_label(&step.message).is_some_and(|callee| callee == call_name)
+}
+
+fn trace_step_callee_label(message: &str) -> Option<&str> {
+    [
+        "Method call ",
+        "Indirect call ",
+        "Call ",
+        "Macro ",
+        "New ",
+        "Unresolved call ",
+        "Ambiguous call ",
+    ]
+    .iter()
+    .find_map(|prefix| message.strip_prefix(prefix))
+    .map(str::trim)
+    .filter(|callee| !callee.is_empty())
+}
+
+fn trace_edges(steps: &[TraceStep]) -> Vec<TraceEdge> {
+    let mut edges = Vec::new();
+    for win in steps.windows(2) {
+        if win[0].path_id != win[1].path_id {
+            continue;
+        }
+        edges.push(TraceEdge {
+            from_step: win[0].id,
+            to_step: win[1].id,
+            kind: edge_kind(&win[0], &win[1]),
+        });
+    }
+    edges
+}
+
 /// Group the linear `steps` into per-path summaries. Each summary
 /// records first/last step ids, accumulated precision, and the
 /// reason the path terminated (Throw / Return / DepthLimit when the
@@ -358,6 +502,8 @@ fn path_summaries(steps: &[TraceStep], truncated: bool) -> Vec<PathSummary> {
                 path_constraints: Vec::new(),
                 terminated_by: if truncated {
                     PathTermination::DepthLimit
+                } else if path_steps.iter().any(|step| is_unresolved_call_diagnostic(step)) {
+                    PathTermination::UnknownCall
                 } else if path_steps.iter().any(|step| step.kind == TraceStepKind::Throw) {
                     PathTermination::Throw
                 } else if path_steps.iter().any(|step| step.kind == TraceStepKind::Return) {
@@ -371,6 +517,11 @@ fn path_summaries(steps: &[TraceStep], truncated: bool) -> Vec<PathSummary> {
         .collect();
     paths.sort_by_key(|path| path.path_id);
     paths
+}
+
+fn is_unresolved_call_diagnostic(step: &TraceStep) -> bool {
+    step.kind == TraceStepKind::Diagnostic
+        && (step.message.starts_with("Unresolved call ") || step.message.starts_with("Ambiguous call "))
 }
 
 /// Lift the interpreter's [`StepKind`] vocabulary to the
@@ -450,3 +601,7 @@ fn span_to_source(
         end_byte: span.end,
     }
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

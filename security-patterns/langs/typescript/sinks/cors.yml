@@ -2,6 +2,7 @@
   enabled: true
   language: typescript
   tag: cors
+  category: source-independent
   severity: medium
   packages:
   - cors
@@ -23,6 +24,7 @@
   enabled: true
   language: typescript
   tag: cors
+  category: source-independent
   severity: medium
   packages:
   - '@nestjs/core'
@@ -48,6 +50,7 @@
   enabled: true
   language: typescript
   tag: cors
+  category: source-independent
   severity: medium
   packages:
   - '@nestjs/core'

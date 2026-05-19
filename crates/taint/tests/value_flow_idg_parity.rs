@@ -13,7 +13,7 @@
 
 mod common;
 
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use bonsai_callgraph::ResolvedCallGraph;
 use bonsai_common::FuncId;
 use bonsai_db::AnalyzerDb;
@@ -48,8 +48,14 @@ fn seed_idg_on(db: &AnalyzerDb) {
                 .map(|adapter| adapter.capabilities().module_export_aliases)
                 .unwrap_or(&[])
         },
+        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
     );
-    let ws = workspace_adapter::build(global.as_ref(), &cg);
+    let ws = workspace_adapter::build_with_file_info(
+        global.as_ref(),
+        &cg,
+        |_| AHashMap::new(),
+        |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+    );
     let svc = Arc::new(IdgQueryService::new(Arc::new(ws), global));
     db.set_idg_service(svc);
 }

@@ -15,10 +15,12 @@
 
 use ahash::{AHashMap, AHashSet};
 use anyhow::{anyhow, Context, Result};
-use bonsai_common::FuncId;
+use bonsai_common::{
+    dependency_metadata::collect_dependency_metadata_fingerprints, FuncId, MATCHER_POLICY_FINGERPRINT,
+};
 use bonsai_lang_api::{Decl, LanguageRegistry};
 use bonsai_workspace::{FileRefreshKind, WorkspaceOpenOptions};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
     fs,
@@ -31,7 +33,10 @@ use std::{
     time::Duration,
 };
 
-const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v4.json";
+const DEFAULT_EXPORT_CACHE_FILE: &str = "export.default.v8.json";
+const DEFAULT_EXPORT_CACHE_METADATA_FILE: &str = "export.default.v8.meta.json";
+const DEFAULT_EXPORT_CACHE_METADATA_VERSION: u32 = 1;
+const DEFAULT_EXPORT_CACHE_PIPELINE_VERSION: &str = "native-export-cache-v5";
 static EXPORT_CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub mod read_file;
@@ -56,8 +61,8 @@ pub use bonsai_browse::{
 pub use bonsai_inspect::{
     chain_matches_filters, chain_to_names, compute_flow_id, compute_flow_labels_from, compute_group_id,
     find_call_span_by_name, find_call_span_to_func_uncached, find_enclosing_func, func_display_name,
-    matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, ChainCache, FactKindFilter,
-    InspectFilters, Matcher, PrecisionFilter, ResolvedChain,
+    matching_decls, matching_func_ids, name_token_match, CallEdgeResolver, CallPathTruncation, ChainCache,
+    FactKindFilter, InspectFilters, Matcher, PrecisionFilter, ResolvedChain,
 };
 pub use bonsai_security::{
     canonical_sink_audit_applies, drain_runtime_disabled_rules, filter_rules_to_workspace_languages,
@@ -69,9 +74,9 @@ pub use bonsai_security::{
     PackRuleRow, PackTreeFile, PackTreeLanguage, PackTreeReport, PackTreeRule, PackValidationIssue,
     PackValidationReport, Rule, RuleKind, RuleMatch, Rulepack, RuntimeDisabledRule, SecurityInventoryOptions,
     SecurityMatchRow, SecurityReport, Severity, SourceAnalysisCandidate, SourceAnalysisOptions,
-    SourceAnalysisReport, TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg,
-    TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES, ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS,
-    FAMILY_NOT_APPLICABLE,
+    SourceAnalysisReport, SourceLineageLimits, SourceLineageStatus, SourceLineageSummary,
+    TaintAnalysisOptions, TaintAnalysisReport, TaintPropagationArg, TaintPropagationStep, TrustClass,
+    CANONICAL_SINK_FAMILIES, ECOSYSTEM_SPECIFIC_SINK_AUDIT_LANGS, FAMILY_NOT_APPLICABLE,
 };
 pub use bonsai_trace::{PathSummary, TraceResult, TraceStep, TraceStepKind};
 pub use bonsai_workspace::value_flow::{
@@ -160,7 +165,9 @@ impl Bonsai {
 
     /// Load and attach a security rulepack. The rulepack classifies
     /// sources, sinks, and sanitizer evidence for security reports; it does
-    /// not change the semantic dataflow graph built by [`Self::index`].
+    /// not change semantic propagation facts; exact analyses and explicit
+    /// prewarm sidecars use one propagation profile regardless of the
+    /// attached rulepack.
     pub fn with_rulepack(mut self, root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let pack = bonsai_security::load_rulepack(&root)
@@ -170,41 +177,39 @@ impl Bonsai {
         Ok(self)
     }
 
-    /// Parse, index, prewarm dataflow, and save the dataflow sidecar.
+    /// Parse and structurally index the workspace. Missing exact
+    /// analysis facts are computed by the query that requests them;
+    /// use [`Self::open_with_options`] with
+    /// [`WorkspaceOpenOptions::full_prewarm`] for explicit cache
+    /// rebuild/audit prewarm.
     ///
     /// Rulepacks are report classifiers, not propagation inputs: sources,
     /// sinks, and sanitizers are applied by `bonsai_security` after graph
-    /// construction. The persisted sidecar therefore has one semantic
+    /// construction. Explicit prewarm sidecars therefore have one semantic
     /// propagation profile regardless of the attached rulepack.
     pub fn index(&self, root: impl AsRef<Path>) -> Result<Project> {
         let root = root.as_ref();
-        let ws = Workspace::open_with_options(
-            root,
-            self.registry.clone(),
-            self.apply_workspace_options(WorkspaceOpenOptions::default()),
-        )?;
-        Ok(self.project(root, ws))
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
+        let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
+        Ok(self.project(root, ws, options))
     }
 
-    /// Parse, index, prewarm dataflow, and save the dataflow sidecar,
-    /// emitting progress events for terminal frontends.
+    /// Parse and structurally index the workspace, emitting progress
+    /// events for terminal frontends.
     pub fn index_with_progress<F>(&self, root: impl AsRef<Path>, on_event: F) -> Result<Project>
     where
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
-        self.open_with_options_and_progress(root, WorkspaceOpenOptions::default(), on_event)
+        self.open_with_options_and_progress(root, WorkspaceOpenOptions::parse_only(), on_event)
     }
 
-    /// Open a workspace for fast queries: load the dataflow sidecar and compute
-    /// misses lazily.
+    /// Open a workspace for fast semantic queries: load the dataflow sidecar
+    /// and compute requested missing facts on demand.
     pub fn open_query(&self, root: impl AsRef<Path>) -> Result<Project> {
         let root = root.as_ref();
-        let ws = Workspace::open_with_options(
-            root,
-            self.registry.clone(),
-            self.apply_workspace_options(WorkspaceOpenOptions::query_only()),
-        )?;
-        Ok(self.project(root, ws))
+        let options = self.apply_workspace_options(WorkspaceOpenOptions::query_only());
+        let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
+        Ok(self.project(root, ws, options))
     }
 
     /// Open a workspace with explicit sidecar/prewarm behavior.
@@ -214,9 +219,9 @@ impl Bonsai {
         options: WorkspaceOpenOptions,
     ) -> Result<Project> {
         let root = root.as_ref();
-        let ws =
-            Workspace::open_with_options(root, self.registry.clone(), self.apply_workspace_options(options))?;
-        Ok(self.project(root, ws))
+        let options = self.apply_workspace_options(options);
+        let ws = Workspace::open_with_options(root, self.registry.clone(), options)?;
+        Ok(self.project(root, ws, options))
     }
 
     /// Open a workspace with explicit sidecar/prewarm behavior,
@@ -231,8 +236,9 @@ impl Bonsai {
         F: Fn(WorkspaceOpenEvent) + Sync,
     {
         let root = root.as_ref();
+        let options = self.apply_workspace_options(options);
         let ws = self.workspace_with_options_and_progress(root, options, &on_event)?;
-        Ok(self.project(root, ws))
+        Ok(self.project(root, ws, options))
     }
 
     /// Open a root-only cache handle. This does not parse or index the
@@ -288,7 +294,7 @@ impl Bonsai {
 
     /// Wrap an opened workspace in the [`Project`] facade with the
     /// SDK's current registry and rulepack handles attached.
-    fn project(&self, root: &Path, workspace: Workspace) -> Project {
+    fn project(&self, root: &Path, workspace: Workspace, open_options: WorkspaceOpenOptions) -> Project {
         Project {
             root: root.to_path_buf(),
             workspace,
@@ -296,6 +302,7 @@ impl Bonsai {
             rulepack: self.rulepack.clone(),
             rulepack_root: self.rulepack_root.clone(),
             fingerprints: Arc::new(Mutex::new(initial_fingerprints(root, &self.registry))),
+            refresh_options: open_options,
         }
     }
 
@@ -331,8 +338,7 @@ impl Bonsai {
         // cache landed there but not here — the OWASP single-core
         // cliff was reintroduced multiple times before being
         // collapsed onto this delegation.
-        let opts = self.apply_workspace_options(options);
-        Workspace::open_with_options_and_events(root, self.registry.clone(), opts, on_event)
+        Workspace::open_with_options_and_events(root, self.registry.clone(), options, on_event)
             .with_context(|| format!("opening workspace at {}", root.display()))
     }
 }
@@ -346,6 +352,7 @@ pub struct Project {
     rulepack: Option<Arc<Rulepack>>,
     rulepack_root: Option<PathBuf>,
     fingerprints: Arc<Mutex<AHashMap<PathBuf, u64>>>,
+    refresh_options: WorkspaceOpenOptions,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -389,6 +396,7 @@ impl Project {
             registry,
             rulepack: None,
             rulepack_root: None,
+            refresh_options: WorkspaceOpenOptions::default(),
         }
     }
 
@@ -487,10 +495,14 @@ impl Project {
         }
 
         if report.changed() {
-            let pending = self.workspace.dataflow().pending_count(self.workspace.db());
-            self.workspace.dataflow().prewarm_all(self.workspace.db());
-            report.dataflow_entries_built = pending;
-            let _ = self.save_dataflow_sidecar();
+            if self.refresh_options.prewarm_dataflow {
+                let pending = self.workspace.dataflow().pending_count(self.workspace.db());
+                self.workspace.dataflow().prewarm_all(self.workspace.db());
+                report.dataflow_entries_built = pending;
+                if self.refresh_options.save_dataflow_sidecar {
+                    let _ = self.save_dataflow_sidecar();
+                }
+            }
             *previous = current_map;
         }
         Ok(report)
@@ -555,6 +567,14 @@ impl Project {
         self.refresh_from_disk_best_effort();
         Inspect { project: self }
     }
+
+    fn current_source_fingerprint(&self) -> ExportCacheContentFingerprint {
+        let fingerprints = self.fingerprints.lock().expect("fingerprint lock");
+        source_fingerprint_from_pairs(
+            &self.root,
+            fingerprints.iter().map(|(path, hash)| (path.as_path(), *hash)),
+        )
+    }
 }
 
 fn initial_fingerprints(root: &Path, registry: &Arc<LanguageRegistry>) -> AHashMap<PathBuf, u64> {
@@ -581,6 +601,24 @@ pub struct CacheStats {
     pub dataflow_sidecar: PathBuf,
     pub dataflow_sidecar_exists: bool,
     pub dataflow_sidecar_bytes: u64,
+    pub dataflow_factstore_sidecar: PathBuf,
+    pub dataflow_factstore_sidecar_exists: bool,
+    pub dataflow_factstore_sidecar_bytes: u64,
+    pub value_flow_sidecar: PathBuf,
+    pub value_flow_sidecar_exists: bool,
+    pub value_flow_sidecar_bytes: u64,
+    pub flow_ids_sidecar: PathBuf,
+    pub flow_ids_sidecar_exists: bool,
+    pub flow_ids_sidecar_bytes: u64,
+    pub callgraph_sidecar: PathBuf,
+    pub callgraph_sidecar_exists: bool,
+    pub callgraph_sidecar_bytes: u64,
+    pub idg_sidecar: PathBuf,
+    pub idg_sidecar_exists: bool,
+    pub idg_sidecar_bytes: u64,
+    pub taint_graph_sidecar: PathBuf,
+    pub taint_graph_sidecar_exists: bool,
+    pub taint_graph_sidecar_bytes: u64,
     pub export_sidecar: PathBuf,
     pub export_sidecar_exists: bool,
     pub export_sidecar_bytes: u64,
@@ -613,6 +651,18 @@ impl WorkspaceCache {
         self
     }
 
+    /// Attach the rulepack root discovered by the same precedence the
+    /// CLI uses (`BONSAI_RULES_DIR`, workspace-local, parent-local,
+    /// then cwd-local). Useful for root-only cache reads before a
+    /// [`Project`] has been opened.
+    #[must_use]
+    pub fn with_discovered_rulepack_root(mut self) -> Self {
+        if let Some(rulepack_root) = Bonsai::discover_rulepack_root(&self.root) {
+            self.rulepack_root = Some(rulepack_root);
+        }
+        self
+    }
+
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -621,18 +671,49 @@ impl WorkspaceCache {
     pub fn stats(&self) -> std::io::Result<CacheStats> {
         let bonsai_dir = self.root.join(".bonsai");
         let dataflow_sidecar = bonsai_workspace::dataflow::DataFlowCache::sidecar_path(&self.root);
+        let dataflow_factstore_sidecar =
+            bonsai_workspace::dataflow::DataFlowCache::factstore_sidecar_path(&self.root);
+        let value_flow_sidecar = bonsai_workspace::value_flow::ValueFlowCache::sidecar_path(&self.root);
+        let flow_ids_sidecar = bonsai_workspace::flow_ids::FlowIdCache::sidecar_path(&self.root);
+        let callgraph_sidecar = bonsai_workspace::callgraph_sidecar::callgraph_sidecar_path(&self.root);
+        let idg_sidecar = bonsai_workspace::idg_sidecar_path(&self.root);
+        let taint_graph_sidecar = bonsai_workspace::taint_index::TaintGraphIndex::sidecar_path(&self.root);
         let export_sidecar = default_export_cache_path(&self.root);
         let total_bytes = dir_size(&bonsai_dir)?;
-        let dataflow_sidecar_bytes = fs::metadata(&dataflow_sidecar).map_or(0, |meta| meta.len());
-        let export_sidecar_bytes = fs::metadata(&export_sidecar).map_or(0, |meta| meta.len());
+        let dataflow_sidecar_bytes = file_size(&dataflow_sidecar);
+        let dataflow_factstore_sidecar_bytes = file_size(&dataflow_factstore_sidecar);
+        let value_flow_sidecar_bytes = file_size(&value_flow_sidecar);
+        let flow_ids_sidecar_bytes = file_size(&flow_ids_sidecar);
+        let callgraph_sidecar_bytes = file_size(&callgraph_sidecar);
+        let idg_sidecar_bytes = file_size(&idg_sidecar);
+        let taint_graph_sidecar_bytes = file_size(&taint_graph_sidecar);
+        let export_sidecar_bytes = file_size(&export_sidecar);
         Ok(CacheStats {
             bonsai_dir_exists: bonsai_dir.is_dir(),
             dataflow_sidecar_exists: dataflow_sidecar.is_file(),
+            dataflow_factstore_sidecar_exists: dataflow_factstore_sidecar.is_file(),
+            value_flow_sidecar_exists: value_flow_sidecar.is_file(),
+            flow_ids_sidecar_exists: flow_ids_sidecar.is_file(),
+            callgraph_sidecar_exists: callgraph_sidecar.is_file(),
+            idg_sidecar_exists: idg_sidecar.is_file(),
+            taint_graph_sidecar_exists: taint_graph_sidecar.is_file(),
             export_sidecar_exists: export_sidecar.is_file(),
             bonsai_dir,
             total_bytes,
             dataflow_sidecar,
             dataflow_sidecar_bytes,
+            dataflow_factstore_sidecar,
+            dataflow_factstore_sidecar_bytes,
+            value_flow_sidecar,
+            value_flow_sidecar_bytes,
+            flow_ids_sidecar,
+            flow_ids_sidecar_bytes,
+            callgraph_sidecar,
+            callgraph_sidecar_bytes,
+            idg_sidecar,
+            idg_sidecar_bytes,
+            taint_graph_sidecar,
+            taint_graph_sidecar_bytes,
             export_sidecar,
             export_sidecar_bytes,
         })
@@ -647,9 +728,14 @@ impl WorkspaceCache {
     }
 
     pub fn clear_dataflow(&self) -> std::io::Result<()> {
-        let sidecar = bonsai_workspace::dataflow::DataFlowCache::sidecar_path(&self.root);
-        if sidecar.exists() {
-            fs::remove_file(sidecar)?;
+        let sidecars = [
+            bonsai_workspace::dataflow::DataFlowCache::sidecar_path(&self.root),
+            bonsai_workspace::dataflow::DataFlowCache::factstore_sidecar_path(&self.root),
+        ];
+        for sidecar in sidecars {
+            if sidecar.exists() {
+                fs::remove_file(sidecar)?;
+            }
         }
         Ok(())
     }
@@ -737,6 +823,10 @@ impl Cache<'_> {
     }
 }
 
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path).map_or(0, |meta| meta.len())
+}
+
 /// Recursive size of every file under `path`. Tolerates entries that
 /// vanish mid-walk (concurrent cleaner, log rotation) by skipping
 /// `NotFound` errors instead of failing the whole stat.
@@ -774,6 +864,10 @@ fn default_export_cache_path(root: &Path) -> PathBuf {
     root.join(".bonsai").join(DEFAULT_EXPORT_CACHE_FILE)
 }
 
+fn default_export_cache_metadata_path(root: &Path) -> PathBuf {
+    root.join(".bonsai").join(DEFAULT_EXPORT_CACHE_METADATA_FILE)
+}
+
 fn unique_default_export_tmp_path(cache: &Path) -> PathBuf {
     let counter = EXPORT_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut name = cache
@@ -784,10 +878,42 @@ fn unique_default_export_tmp_path(cache: &Path) -> PathBuf {
     cache.with_file_name(name)
 }
 
-fn write_default_export_cache(cache: &Path, out: &str) -> Result<()> {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ExportCacheContentFingerprint {
+    files: usize,
+    digest: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ExportCacheMetadata {
+    metadata_version: u32,
+    cache_file: String,
+    cache_bytes: u64,
+    engine_version: String,
+    build_fingerprint: String,
+    pipeline_version: String,
+    matcher_policy_fingerprint: u128,
+    workspace_sources: ExportCacheContentFingerprint,
+    dependency_metadata: ExportCacheContentFingerprint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rulepack: Option<ExportCacheContentFingerprint>,
+}
+
+fn write_default_export_cache(
+    cache: &Path,
+    root: &Path,
+    rulepack_root: Option<&Path>,
+    workspace_sources: ExportCacheContentFingerprint,
+    out: &str,
+) -> Result<()> {
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)?;
     }
+    let cache_bytes = out
+        .len()
+        .checked_add(1)
+        .context("export cache output too large to write")? as u64;
+    let metadata = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_bytes)?;
     let tmp = unique_default_export_tmp_path(cache);
     {
         let file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
@@ -801,144 +927,284 @@ fn write_default_export_cache(cache: &Path, out: &str) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(err.into());
     }
+    let mut metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
+    metadata_bytes.push(b'\n');
+    write_atomic_bytes(&default_export_cache_metadata_path(root), &metadata_bytes)?;
+    sync_parent_dir(cache);
+    Ok(())
+}
+
+fn write_default_export_cache_with<F>(
+    cache: &Path,
+    root: &Path,
+    rulepack_root: Option<&Path>,
+    workspace_sources: ExportCacheContentFingerprint,
+    write_json: F,
+) -> Result<()>
+where
+    F: FnOnce(&mut dyn Write) -> Result<()>,
+{
     if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = unique_default_export_tmp_path(cache);
+    {
+        let file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut writer = io::BufWriter::with_capacity(1024 * 1024, file);
+        write_json(&mut writer)?;
+        writeln!(writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+    }
+    let cache_bytes = fs::metadata(&tmp)?.len();
+    let metadata = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_bytes)?;
+    if let Err(err) = fs::rename(&tmp, cache) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    let mut metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
+    metadata_bytes.push(b'\n');
+    write_atomic_bytes(&default_export_cache_metadata_path(root), &metadata_bytes)?;
+    sync_parent_dir(cache);
+    Ok(())
+}
+
+fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = unique_default_export_tmp_path(path);
+    {
+        let file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut writer = io::BufWriter::with_capacity(64 * 1024, file);
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+    }
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    sync_parent_dir(path);
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             if let Ok(dir) = fs::File::open(parent) {
                 let _ = dir.sync_all();
             }
         }
     }
+}
+
+/// Validate the freshness of an already-opened export cache file. The
+/// export bytes are trusted only when the adjacent metadata sidecar
+/// matches the current source content, dependency metadata, rulepack
+/// content, matcher policy, and cache pipeline version.
+fn export_cache_is_fresh_via_fd(root: &Path, rulepack_root: Option<&Path>, cache: &fs::File) -> Result<bool> {
+    let Ok(cache_metadata) = cache.metadata() else {
+        return Ok(false);
+    };
+    if !cache_metadata.is_file() || cache_metadata.len() == 0 {
+        return Ok(false);
+    }
+    let Ok(Some(saved)) = read_export_cache_metadata(root) else {
+        return Ok(false);
+    };
+    let workspace_sources = workspace_source_fingerprint_from_disk(root)?;
+    let expected = build_export_cache_metadata(root, rulepack_root, workspace_sources, cache_metadata.len())?;
+    if saved != expected {
+        return Ok(false);
+    }
+    Ok(!current_exe_is_newer_than_cache(&cache_metadata))
+}
+
+fn read_export_cache_metadata(root: &Path) -> Result<Option<ExportCacheMetadata>> {
+    let path = default_export_cache_metadata_path(root);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+fn build_export_cache_metadata(
+    root: &Path,
+    rulepack_root: Option<&Path>,
+    workspace_sources: ExportCacheContentFingerprint,
+    cache_bytes: u64,
+) -> Result<ExportCacheMetadata> {
+    Ok(ExportCacheMetadata {
+        metadata_version: DEFAULT_EXPORT_CACHE_METADATA_VERSION,
+        cache_file: DEFAULT_EXPORT_CACHE_FILE.to_string(),
+        cache_bytes,
+        engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_fingerprint: export_cache_build_fingerprint().to_string(),
+        pipeline_version: DEFAULT_EXPORT_CACHE_PIPELINE_VERSION.to_string(),
+        matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
+        workspace_sources,
+        dependency_metadata: dependency_metadata_fingerprint(root)?,
+        rulepack: rulepack_root.map(rulepack_content_fingerprint).transpose()?,
+    })
+}
+
+fn export_cache_build_fingerprint() -> &'static str {
+    option_env!("BONSAI_BUILD_FINGERPRINT").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+fn current_exe_is_newer_than_cache(cache_metadata: &fs::Metadata) -> bool {
+    let Ok(cache_modified) = cache_metadata.modified() else {
+        return false;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Ok(exe_meta) = fs::metadata(exe) else {
+        return false;
+    };
+    let Ok(exe_modified) = exe_meta.modified() else {
+        return false;
+    };
+    exe_modified > cache_modified
+}
+
+fn workspace_source_fingerprint_from_disk(root: &Path) -> Result<ExportCacheContentFingerprint> {
+    let registry = bonsai_adapters::all_languages_registry();
+    let workspace = Workspace::new(registry);
+    let fingerprints = workspace
+        .source_file_fingerprints(root)
+        .with_context(|| format!("fingerprinting workspace sources under {}", root.display()))?;
+    Ok(source_fingerprint_from_pairs(
+        root,
+        fingerprints.iter().map(|file| (file.path.as_path(), file.hash)),
+    ))
+}
+
+fn source_fingerprint_from_pairs<'a>(
+    root: &Path,
+    pairs: impl IntoIterator<Item = (&'a Path, u64)>,
+) -> ExportCacheContentFingerprint {
+    let stable_root = stable_root_path(root);
+    let entries = pairs
+        .into_iter()
+        .map(|(path, hash)| (stable_relative_path(&stable_root, root, path), hash));
+    content_fingerprint_from_entries(entries)
+}
+
+fn rulepack_content_fingerprint(root: &Path) -> Result<ExportCacheContentFingerprint> {
+    let stable_root = stable_root_path(root);
+    let mut entries = Vec::new();
+    collect_regular_file_fingerprints(&stable_root, &stable_root, &mut entries, rulepack_dir_skipped)?;
+    Ok(content_fingerprint_from_entries(entries))
+}
+
+fn dependency_metadata_fingerprint(root: &Path) -> Result<ExportCacheContentFingerprint> {
+    let entries = collect_dependency_metadata_fingerprints(root)
+        .with_context(|| format!("fingerprinting dependency metadata under {}", root.display()))?;
+    Ok(content_fingerprint_from_entries(
+        entries
+            .into_iter()
+            .map(|entry| (entry.relative_path, entry.content_hash)),
+    ))
+}
+
+fn collect_regular_file_fingerprints(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, u64)>,
+    skip_dir: fn(&str) -> bool,
+) -> Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(())
+        }
+        Err(err) => return Err(err.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                if skip_dir(name) {
+                    continue;
+                }
+            }
+            collect_regular_file_fingerprints(root, &path, out, skip_dir)?;
+        } else if file_type.is_file() {
+            let digest = file_content_digest(&path)?;
+            out.push((stable_relative_path(root, root, &path), digest));
+        }
+    }
     Ok(())
 }
 
-/// Validate the freshness of an already-opened export cache file.
-/// Reading metadata from the open `fd` (instead of re-stat'ing the
-/// path) closes the TOCTOU window between check and read.
-///
-/// Inputs that invalidate the cache, in order:
-/// 1. Any workspace source file newer than the cache.
-/// 2. Any rulepack file newer than the cache (an edit to a
-///    `security-patterns/*.yml` rule changes finding shape, so
-///    cached export bytes are wrong even when sources didn't move).
-/// 3. The bonsai-ninja binary itself being newer than the cache
-///    (engine upgrades change finding shape too).
-fn export_cache_is_fresh_via_fd(root: &Path, rulepack_root: Option<&Path>, cache: &fs::File) -> Result<bool> {
-    let Ok(cache_meta) = cache.metadata() else {
-        return Ok(false);
-    };
-    let Ok(cache_modified) = cache_meta.modified() else {
-        return Ok(false);
-    };
-    let Some(newest_source) = newest_workspace_mtime(root)? else {
-        return Ok(false);
-    };
-    if cache_modified < newest_source {
-        return Ok(false);
+fn content_fingerprint_from_entries(
+    entries: impl IntoIterator<Item = (String, u64)>,
+) -> ExportCacheContentFingerprint {
+    let mut entries: Vec<(String, u64)> = entries.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = bonsai_hash::Hasher::new();
+    for (path, digest) in &entries {
+        hasher.absorb(path.as_bytes());
+        hasher.absorb_separator();
+        hasher.absorb(&digest.to_le_bytes());
+        hasher.absorb_separator();
     }
-    if let Some(rulepack) = rulepack_root {
-        if let Some(newest_rule) = newest_rulepack_mtime(rulepack)? {
-            if cache_modified < newest_rule {
-                return Ok(false);
-            }
-        }
+    ExportCacheContentFingerprint {
+        files: entries.len(),
+        digest: hasher.finish(),
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return Ok(true);
-    };
-    let Ok(exe_meta) = fs::metadata(exe) else {
-        return Ok(true);
-    };
-    let Ok(exe_modified) = exe_meta.modified() else {
-        return Ok(true);
-    };
-    Ok(cache_modified >= exe_modified)
 }
 
-/// Most recent `mtime` over every file under `root`. Used for export
-/// cache freshness — a rulepack edit must invalidate cached findings.
-fn newest_rulepack_mtime(root: &Path) -> Result<Option<std::time::SystemTime>> {
-    let mut newest: Option<std::time::SystemTime> = None;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                continue
-            }
-            Err(err) => return Err(err.into()),
-        };
-        for entry in entries {
-            let Ok(entry) = entry else { continue };
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else { continue };
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() {
-                if let Ok(modified) = meta.modified() {
-                    newest = Some(newest.map_or(modified, |prev| prev.max(modified)));
-                }
-            }
-        }
-    }
-    Ok(newest)
+fn file_content_digest(path: &Path) -> Result<u64> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(bonsai_hash::fnv1a_bytes64(&bytes))
 }
 
-/// Most recent `mtime` over the workspace's source tree, skipping
-/// `.bonsai/` (our own cache) and `.git/` (history mtimes shouldn't
-/// invalidate analysis).
-fn newest_workspace_mtime(root: &Path) -> Result<Option<std::time::SystemTime>> {
-    let mut newest: Option<std::time::SystemTime> = None;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                continue
+fn stable_root_path(root: &Path) -> PathBuf {
+    root.canonicalize()
+        .ok()
+        .or_else(|| {
+            if root.is_absolute() {
+                Some(root.to_path_buf())
+            } else {
+                std::env::current_dir().ok().map(|cwd| cwd.join(root))
             }
-            Err(err) => return Err(err.into()),
-        };
-        for entry in entries {
-            let Ok(entry) = entry else { continue };
-            let path = entry.path();
-            let name = entry.file_name();
-            if name == ".bonsai" || name == ".git" {
-                continue;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() {
-                if let Ok(modified) = meta.modified() {
-                    newest = Some(newest.map_or(modified, |prev| prev.max(modified)));
-                }
-            }
-        }
-    }
-    Ok(newest)
+        })
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+fn stable_relative_path(stable_root: &Path, original_root: &Path, path: &Path) -> String {
+    path.strip_prefix(stable_root)
+        .or_else(|_| path.strip_prefix(original_root))
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn rulepack_dir_skipped(name: &str) -> bool {
+    matches!(name, ".git" | ".bonsai" | "target")
 }
 
 /// Browse facts facade.
@@ -1045,14 +1311,18 @@ pub struct Dump<'a> {
 }
 
 impl Dump<'_> {
-    #[must_use]
-    pub fn hir(&self, symbol: &str) -> Option<bonsai_browse::HirDump> {
+    pub fn hir(
+        &self,
+        symbol: &str,
+    ) -> std::result::Result<Option<bonsai_browse::HirDump>, bonsai_browse::DumpLookupError> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_hir(&self.project.workspace, symbol)
     }
 
-    #[must_use]
-    pub fn cfg(&self, symbol: &str) -> Option<bonsai_cfg::Cfg> {
+    pub fn cfg(
+        &self,
+        symbol: &str,
+    ) -> std::result::Result<Option<bonsai_cfg::Cfg>, bonsai_browse::DumpLookupError> {
         self.project.refresh_from_disk_best_effort();
         bonsai_browse::dump_cfg(&self.project.workspace, symbol)
     }
@@ -1109,25 +1379,60 @@ pub struct Export<'a> {
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct NativeExportOptions {
+    /// Materialize exhaustive interprocedural propagation records.
+    /// Defaults to false because propagation records can be much
+    /// larger than the structural taint graph; omitted exports carry
+    /// `analysis_complete=false`, `propagations_complete=false`, and
+    /// omission reasons.
     pub full_propagations: bool,
+    /// Request complete semantic chain and flow-id-label evidence for
+    /// native JSON export. Defaults to false so the warmed default
+    /// export cache remains compact and predictable; dense graphs can
+    /// have exponentially many exact paths, so complete mode may use the
+    /// `compressed_callgraph` representation instead of materializing
+    /// every path row.
+    pub complete_chains: bool,
 }
 
 impl Export<'_> {
     pub fn native_json(&self, options: NativeExportOptions) -> serde_json::Result<serde_json::Value> {
         self.project.refresh_from_disk_best_effort();
-        bonsai_browse::native_export_json(
+        bonsai_browse::native_export_json_with_config(
             &self.project.workspace,
             &self.project.root,
-            options.full_propagations,
+            bonsai_browse::NativeExportConfig {
+                full_propagations: options.full_propagations,
+                complete_chains: options.complete_chains,
+            },
         )
     }
 
     pub fn native_json_string(&self, options: NativeExportOptions) -> serde_json::Result<String> {
         self.project.refresh_from_disk_best_effort();
-        bonsai_browse::render_native_export_json(
+        bonsai_browse::render_native_export_json_with_config(
             &self.project.workspace,
             &self.project.root,
-            options.full_propagations,
+            bonsai_browse::NativeExportConfig {
+                full_propagations: options.full_propagations,
+                complete_chains: options.complete_chains,
+            },
+        )
+    }
+
+    pub fn write_native_json<W: Write + ?Sized>(
+        &self,
+        options: NativeExportOptions,
+        writer: &mut W,
+    ) -> serde_json::Result<()> {
+        self.project.refresh_from_disk_best_effort();
+        bonsai_browse::write_native_export_json_with_config(
+            &self.project.workspace,
+            &self.project.root,
+            bonsai_browse::NativeExportConfig {
+                full_propagations: options.full_propagations,
+                complete_chains: options.complete_chains,
+            },
+            writer,
         )
     }
 
@@ -1140,6 +1445,8 @@ impl Export<'_> {
         let mut cache = WorkspaceCache::new(&self.project.root);
         if let Some(rulepack_root) = self.project.rulepack_root.as_deref() {
             cache = cache.with_rulepack_root(rulepack_root);
+        } else {
+            cache = cache.with_discovered_rulepack_root();
         }
         cache
     }
@@ -1154,7 +1461,40 @@ impl Export<'_> {
     }
 
     pub fn write_default_json_cache(&self, out: &str) -> Result<()> {
-        write_default_export_cache(&self.default_json_cache_path(), out)
+        let rulepack_root = self
+            .project
+            .rulepack_root
+            .clone()
+            .or_else(|| Bonsai::discover_rulepack_root(&self.project.root));
+        write_default_export_cache(
+            &self.default_json_cache_path(),
+            &self.project.root,
+            rulepack_root.as_deref(),
+            self.project.current_source_fingerprint(),
+            out,
+        )
+    }
+
+    pub fn write_default_json_cache_streaming(&self, options: NativeExportOptions) -> Result<()> {
+        anyhow::ensure!(
+            !options.complete_chains && !options.full_propagations,
+            "default export cache can only store default native export scope"
+        );
+        let rulepack_root = self
+            .project
+            .rulepack_root
+            .clone()
+            .or_else(|| Bonsai::discover_rulepack_root(&self.project.root));
+        write_default_export_cache_with(
+            &self.default_json_cache_path(),
+            &self.project.root,
+            rulepack_root.as_deref(),
+            self.project.current_source_fingerprint(),
+            |writer| {
+                self.write_native_json(options, writer)
+                    .map_err(|err| anyhow!("serializing native export JSON: {err}"))
+            },
+        )
     }
 
     pub fn warm_default_json_cache(&self) -> Result<()> {
@@ -1162,10 +1502,10 @@ impl Export<'_> {
         if self.default_json_cache_is_fresh()? {
             return Ok(());
         }
-        let rendered = self.native_json_string(NativeExportOptions {
+        self.write_default_json_cache_streaming(NativeExportOptions {
             full_propagations: false,
-        })?;
-        self.write_default_json_cache(&rendered)
+            complete_chains: false,
+        })
     }
 
     #[must_use]
@@ -1580,159 +1920,9 @@ impl Inspect<'_> {
 }
 
 #[cfg(test)]
-mod rulepack_discovery_tests {
-    use super::Bonsai;
-    use std::fs;
-    use std::path::PathBuf;
-
-    fn fresh_tempdir(prefix: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "bonsai-rulepack-{prefix}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
-        base
-    }
-
-    #[test]
-    fn env_var_overrides_workspace_local_rulepack() {
-        let workspace = fresh_tempdir("ws");
-        let workspace_local = workspace.join("security-patterns");
-        fs::create_dir_all(&workspace_local).unwrap();
-
-        let env_pack = fresh_tempdir("env");
-
-        let env_path = env_pack.clone();
-        let resolved = Bonsai::discover_rulepack_root_with(&workspace, |key| {
-            if key == "BONSAI_RULES_DIR" {
-                Some(env_path.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap();
-        assert_eq!(
-            resolved.canonicalize().unwrap(),
-            env_pack.canonicalize().unwrap(),
-            "BONSAI_RULES_DIR should win over workspace-local security-patterns/"
-        );
-
-        fs::remove_dir_all(&workspace).ok();
-        fs::remove_dir_all(&env_pack).ok();
-    }
-
-    #[test]
-    fn env_var_falls_back_when_path_missing() {
-        let workspace = fresh_tempdir("ws-fallback");
-        let workspace_local = workspace.join("security-patterns");
-        fs::create_dir_all(&workspace_local).unwrap();
-
-        let resolved = Bonsai::discover_rulepack_root_with(&workspace, |key| {
-            if key == "BONSAI_RULES_DIR" {
-                Some(PathBuf::from("/nonexistent/path/does/not/exist"))
-            } else {
-                None
-            }
-        })
-        .unwrap();
-        assert_eq!(
-            resolved.canonicalize().unwrap(),
-            workspace_local.canonicalize().unwrap(),
-            "missing BONSAI_RULES_DIR path should fall back to workspace-local security-patterns/"
-        );
-
-        fs::remove_dir_all(&workspace).ok();
-    }
-
-    #[test]
-    fn workspace_local_wins_when_env_unset() {
-        let workspace = fresh_tempdir("ws-local");
-        let workspace_local = workspace.join("security-patterns");
-        fs::create_dir_all(&workspace_local).unwrap();
-
-        let resolved = Bonsai::discover_rulepack_root_with(&workspace, |_| None).unwrap();
-        assert_eq!(
-            resolved.canonicalize().unwrap(),
-            workspace_local.canonicalize().unwrap(),
-            "workspace-local security-patterns should be picked when no env var is set"
-        );
-
-        fs::remove_dir_all(&workspace).ok();
-    }
-
-    #[test]
-    fn no_env_no_local_doesnt_panic_or_invent_path() {
-        let workspace = fresh_tempdir("ws-empty");
-        // No security-patterns/ inside the workspace, no env override.
-        // Discovery may still hit the cwd-relative `./security-patterns/`
-        // candidate when the test runs from a directory that contains
-        // one (the bonsai-ninja repo root does). Either outcome is
-        // valid — assert the function never invents a non-existent path.
-        if let Some(found) = Bonsai::discover_rulepack_root_with(&workspace, |_| None) {
-            assert!(
-                found.exists(),
-                "discover_rulepack_root returned a non-existent path: {}",
-                found.display()
-            );
-        }
-
-        fs::remove_dir_all(&workspace).ok();
-    }
-}
+#[path = "rulepack_discovery_tests.rs"]
+mod rulepack_discovery_tests;
 
 #[cfg(test)]
-mod export_cache_tests {
-    use super::{newest_workspace_mtime, unique_default_export_tmp_path};
-    use std::path::Path;
-
-    #[test]
-    fn default_export_tmp_paths_are_unique_per_write() {
-        let path = Path::new("/tmp/.bonsai/export.default.v4.json");
-        let first = unique_default_export_tmp_path(path);
-        let second = unique_default_export_tmp_path(path);
-
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), path.parent());
-        assert!(first
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("export.default.v4.json.tmp.")));
-    }
-
-    fn tempdir(name: &str) -> std::path::PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("bonsai-sdk-{name}-{}-{stamp}", std::process::id()));
-        std::fs::create_dir(&path).expect("create temp dir");
-        path
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn export_freshness_skips_symlinked_directories() {
-        let root = tempdir("export-root");
-        let outside = tempdir("export-outside");
-        std::fs::write(root.join("app.py"), "print('root')\n").expect("write root app");
-        std::fs::write(outside.join("external.py"), "print('outside')\n").expect("write outside app");
-        std::os::unix::fs::symlink(&outside, root.join("linked")).expect("create symlink dir");
-
-        let before = newest_workspace_mtime(&root)
-            .expect("mtime before")
-            .expect("root file mtime");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        std::fs::write(outside.join("external.py"), "print('changed')\n").expect("rewrite outside app");
-        let after = newest_workspace_mtime(&root)
-            .expect("mtime after")
-            .expect("root file mtime");
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&outside).ok();
-
-        assert_eq!(before, after);
-    }
-}
+#[path = "export_cache_tests.rs"]
+mod export_cache_tests;

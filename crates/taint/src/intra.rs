@@ -266,7 +266,7 @@ fn entry_predecessor_diagnostics(
 /// handled at the CFG level, not here.
 #[allow(clippy::single_match)] // preserved as `match` for parity with sibling event-walks
 fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintConfig) {
-    for event in events {
+    for (event_index, event) in events.iter().enumerate() {
         match event {
             FlowEvent::Assign {
                 target,
@@ -277,6 +277,10 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                 ..
             } => {
                 if target.is_empty() {
+                    continue;
+                }
+                if assignment_has_precise_field_projection(events, event_index, event) {
+                    remove_target_and_descendant_taint(state, target);
                     continue;
                 }
                 if let Some(callee) = source_call.as_deref() {
@@ -318,7 +322,7 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                         // spurious matches against `obj` in `obj.field`.
                         !name.is_empty()
                             && !qualified_bases.contains(&canonical_bare_name(name))
-                            && text_is_tainted(name, state)
+                            && strict_operand_is_tainted(name, state)
                     });
                     if any_tainted {
                         insert_target_taint(state, target);
@@ -329,7 +333,8 @@ fn transfer_events(events: &[FlowEvent], state: &mut TokenSet, _config: &TaintCo
                     }
                 }
                 match source_name.as_deref() {
-                    Some(src) if text_is_tainted(src, state) => insert_target_taint(state, target),
+                    Some(src) if strict_operand_is_tainted(src, state) => insert_target_taint(state, target),
+                    Some(src) if copy_mapped_descendant_taint(state, target, src) => {}
                     Some(_) | None => {
                         // Semantic overwrite: assigning a value with
                         // no tainted operands kills the target's
@@ -372,6 +377,118 @@ fn insert_descendant_target_taint(state: &mut TokenSet, target: &str) {
         return;
     }
     state.insert(format!("{target}.*"));
+}
+
+fn strict_operand_is_tainted(text: &str, state: &TokenSet) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || is_quoted_literal(trimmed) {
+        return false;
+    }
+    if state.contains(trimmed) {
+        return true;
+    }
+    let sigil_stripped = trimmed.trim_start_matches(&['$', '@', '%'][..]);
+    if sigil_stripped != trimmed && state.contains(sigil_stripped) {
+        return true;
+    }
+    if receiver_method_projection_is_tainted(trimmed, state) {
+        return true;
+    }
+    let normalised = normalise_qualified_text(trimmed);
+    let collapsed_to_base = text_looks_qualified(trimmed) && !text_looks_qualified(&normalised);
+    if normalised != trimmed && !collapsed_to_base && state.contains(&normalised) {
+        return true;
+    }
+    text_looks_qualified(trimmed) && qualified_wildcard_seed_matches(&normalised, state)
+}
+
+fn assignment_has_precise_field_projection(
+    events: &[FlowEvent],
+    event_index: usize,
+    event: &FlowEvent,
+) -> bool {
+    let FlowEvent::Assign { target, span, .. } = event else {
+        return false;
+    };
+    let base = normalise_target_text(target);
+    if base.is_empty() || text_looks_qualified(&base) {
+        return false;
+    }
+    let prefix = format!("{base}.");
+    events.iter().enumerate().any(|(idx, candidate)| {
+        if idx == event_index {
+            return false;
+        }
+        let FlowEvent::Assign {
+            target: candidate_target,
+            span: candidate_span,
+            ..
+        } = candidate
+        else {
+            return false;
+        };
+        if candidate_span != span {
+            return false;
+        }
+        normalise_target_text(candidate_target).starts_with(&prefix)
+    })
+}
+
+fn copy_mapped_descendant_taint(state: &mut TokenSet, target: &str, actual_text: &str) -> bool {
+    let target = normalise_target_text(target);
+    let actual = normalise_target_text(actual_text);
+    if target.is_empty()
+        || actual.is_empty()
+        || text_looks_qualified(&target)
+        || text_looks_qualified(&actual)
+        || !is_bare_identifier_text(&actual)
+    {
+        return false;
+    }
+    let mut changed = false;
+    let wildcard = format!("{actual}.*");
+    for seed in state.clone() {
+        let seed = normalise_qualified_text(&seed);
+        if seed == wildcard {
+            let before = state.len();
+            insert_descendant_target_taint(state, &target);
+            changed |= state.len() != before;
+            continue;
+        }
+        let Some(tail) = seed.strip_prefix(actual.as_str()) else {
+            continue;
+        };
+        if !tail.starts_with('.') {
+            continue;
+        }
+        let before = state.len();
+        insert_target_taint(state, &format!("{target}{tail}"));
+        changed |= state.len() != before;
+    }
+    changed
+}
+
+fn remove_target_and_descendant_taint(state: &mut TokenSet, target: &str) {
+    let target = normalise_target_text(target);
+    if target.is_empty() {
+        return;
+    }
+    state.remove(&target);
+    state.remove(&format!("{target}.*"));
+    let prefix = format!("{target}.");
+    state.retain(|seed| {
+        let normalised = normalise_qualified_text(seed);
+        !seed.starts_with(&prefix) && !normalised.starts_with(&prefix)
+    });
+}
+
+fn is_bare_identifier_text(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && text.chars().all(is_identifier_byteish)
+}
+
+fn is_identifier_byteish(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch == '@' || ch == '%' || ch.is_ascii_alphanumeric()
 }
 
 /// True when the RHS surface contains at least two distinct bare
@@ -622,379 +739,5 @@ fn push_identifier_token(tokens: &mut Vec<String>, current: &mut String) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai_cfg::build_cfg_from_flow;
-    use bonsai_common::{FileId, Span};
-    use bonsai_lang_api::{CallArg, CallKind, LoopKind};
-
-    fn span() -> Span {
-        Span::new(FileId::INVALID, 0, 0)
-    }
-
-    fn assign(target: &str, source: Option<&str>) -> FlowEvent {
-        FlowEvent::Assign {
-            span: span(),
-            target: target.to_string(),
-            source_name: source.map(str::to_string),
-            source_call: None,
-            source_call_args: Vec::new(),
-            source_names: Vec::new(),
-            declares_new_binding: false,
-            value_kind: None,
-        }
-    }
-
-    fn assign_call(target: &str, callee: &str, args: &[&str]) -> FlowEvent {
-        FlowEvent::Assign {
-            span: span(),
-            target: target.to_string(),
-            source_name: None,
-            source_call: Some(callee.to_string()),
-            source_call_args: args.iter().map(|a| (*a).to_string()).collect(),
-            source_names: Vec::new(),
-            declares_new_binding: false,
-            value_kind: None,
-        }
-    }
-
-    fn call(name: &str, args: &[&str]) -> FlowEvent {
-        FlowEvent::Call {
-            span: span(),
-            name: name.to_string(),
-            receiver: None,
-            call_kind: CallKind::Function,
-            args: args
-                .iter()
-                .map(|text| CallArg {
-                    span: span(),
-                    name: None,
-                    place: None,
-                    source_names: Vec::new(),
-                    value_text: (*text).to_string(),
-                })
-                .collect(),
-            receiver_types: Vec::new(),
-        }
-    }
-
-    fn branch(then_events: Vec<FlowEvent>, else_events: Vec<FlowEvent>) -> FlowEvent {
-        FlowEvent::Branch {
-            span: span(),
-            condition: None,
-            then_events,
-            else_events,
-        }
-    }
-
-    fn loop_body(body: Vec<FlowEvent>) -> FlowEvent {
-        FlowEvent::Loop {
-            span: span(),
-            loop_kind: LoopKind::While,
-            body,
-        }
-    }
-
-    fn seed(names: &[&str]) -> TokenSet {
-        names.iter().map(|n| (*n).to_string()).collect()
-    }
-
-    fn config(sources: &[&str], sanitizers: &[&str]) -> TaintConfig {
-        TaintConfig {
-            sources: seed(sources),
-            sanitizers: seed(sanitizers),
-            worklist_cap: None,
-        }
-    }
-
-    fn run(events: Vec<FlowEvent>, cfg: &TaintConfig) -> (IntraTaintResult, Cfg) {
-        let cfg_built = build_cfg_from_flow("test_fn", &events);
-        let result = intraprocedural_taint(&cfg_built, cfg);
-        (result, cfg_built)
-    }
-
-    #[test]
-    fn simple_source_to_sink_taints_target() {
-        // x = recv(); sink(x) — at the exit block x is tainted.
-        let events = vec![assign("x", Some("recv"))];
-        let (result, cfg) = run(events, &config(&["recv"], &[]));
-        assert!(!result.saturated);
-        assert!(result.diagnostics.is_empty());
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn entry_predecessor_edge_emits_diagnostic() {
-        let entry = BasicBlockId::new(0);
-        let body = BasicBlockId::new(1);
-        let exit = BasicBlockId::new(2);
-        let span = Span::new(bonsai_common::FileId::new(1), 0, 1);
-        let cfg = Cfg {
-            function: "entry_back_edge".to_string(),
-            entry,
-            exit,
-            blocks: vec![
-                bonsai_cfg::BasicBlock {
-                    id: entry,
-                    label: "entry".to_string(),
-                    synthetic_kind: Some(bonsai_cfg::SyntheticBlockKind::Entry),
-                    events: Vec::new(),
-                    successors: vec![body, exit],
-                    terminator: bonsai_cfg::Terminator::Fallthrough,
-                    span,
-                },
-                bonsai_cfg::BasicBlock {
-                    id: body,
-                    label: "body".to_string(),
-                    synthetic_kind: None,
-                    events: vec![assign("x", Some("recv"))],
-                    successors: vec![entry],
-                    terminator: bonsai_cfg::Terminator::Fallthrough,
-                    span,
-                },
-                bonsai_cfg::BasicBlock {
-                    id: exit,
-                    label: "exit".to_string(),
-                    synthetic_kind: Some(bonsai_cfg::SyntheticBlockKind::Exit),
-                    events: Vec::new(),
-                    successors: Vec::new(),
-                    terminator: bonsai_cfg::Terminator::Fallthrough,
-                    span,
-                },
-            ],
-        };
-        let result = intraprocedural_taint(&cfg, &config(&["recv"], &[]));
-
-        assert_eq!(result.diagnostics.len(), 1);
-        let diagnostic = &result.diagnostics[0];
-        assert_eq!(diagnostic.code.as_deref(), Some("taint-entry-predecessor"));
-        assert_eq!(diagnostic.severity, bonsai_diagnostics::Severity::Warning);
-        assert!(diagnostic.message.contains("entry block"));
-    }
-
-    #[test]
-    fn tainted_carrier_field_read_taints_target() {
-        let events = vec![assign("cmd", Some("env->cmd"))];
-        let (result, cfg) = run(events, &config(&["env.*"], &[]));
-        assert!(
-            result.is_tainted_at_exit(cfg.exit, "cmd"),
-            "field reads from an explicitly tainted descendant object must be tainted"
-        );
-    }
-
-    #[test]
-    fn tainted_carrier_subscript_read_taints_target() {
-        let events = vec![assign("cmd", Some("env['cmd']"))];
-        let (result, cfg) = run(events, &config(&["env.*"], &[]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "cmd"));
-    }
-
-    #[test]
-    fn source_unavailable_call_does_not_invent_destination_taint() {
-        let events = vec![call("strncpy", &["env.cmd", "raw", "sizeof(env.cmd) - 1"])];
-        let (result, cfg) = run(events, &config(&["raw"], &[]));
-        assert!(
-            !result.is_tainted_at_exit(cfg.exit, "env.cmd"),
-            "opaque external calls must not create hidden arg-to-arg propagation"
-        );
-        assert!(!result.is_tainted_at_exit(cfg.exit, "env"));
-    }
-
-    #[test]
-    fn pointer_declarator_target_aliases_to_identifier() {
-        let events = vec![assign("*raw", Some("argv"))];
-        let (result, cfg) = run(events, &config(&["argv"], &[]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "raw"));
-    }
-
-    #[test]
-    fn seed_itself_is_tainted_at_entry() {
-        let (result, cfg) = run(vec![], &config(&["recv"], &[]));
-        assert!(result.is_tainted_at_entry(cfg.entry, "recv"));
-    }
-
-    #[test]
-    fn receiver_seed_does_not_taint_unrelated_assignment() {
-        let events = vec![assign("tag", Some("constant_name"))];
-        let (result, cfg) = run(events, &config(&["recv"], &[]));
-        assert!(
-            !result.is_tainted_at_exit(cfg.exit, "tag"),
-            "receiver taint must not contaminate arbitrary clean assignments"
-        );
-    }
-
-    #[test]
-    fn receiver_seed_does_not_taint_zero_arg_static_helper_return() {
-        let events = vec![assign_call("runner", "Repository._new_runner", &[])];
-        let (result, cfg) = run(events, &config(&["recv"], &[]));
-        assert!(
-            !result.is_tainted_at_exit(cfg.exit, "runner"),
-            "zero-arg class/static helper returns are not tainted object data"
-        );
-    }
-
-    #[test]
-    fn receiver_seed_taints_explicit_receiver_field_read() {
-        let events = vec![assign("cmd", Some("recv.data['cmd']"))];
-        let (result, cfg) = run(events, &config(&["recv.*"], &[]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "cmd"));
-    }
-
-    #[test]
-    fn reassignment_from_clean_source_clears_taint() {
-        // x = recv(); x = unrelated. A semantic overwrite with a
-        // clean RHS must clear x; otherwise a later sink(x) reports a
-        // stale value that no longer exists at runtime.
-        let events = vec![assign("x", Some("recv")), assign("x", Some("unrelated"))];
-        let (result, cfg) = run(events, &config(&["recv"], &[]));
-        assert!(
-            !result.is_tainted_at_exit(cfg.exit, "x"),
-            "clean reassignment must overwrite and clear target taint"
-        );
-    }
-
-    #[test]
-    fn reassignment_from_none_rhs_clears_taint() {
-        // x = recv(); x = literal/opaque. Without any surfaced
-        // tainted RHS operand, the assignment is an overwrite and x
-        // becomes clean.
-        let events = vec![assign("x", Some("recv")), assign("x", None)];
-        let (result, cfg) = run(events, &config(&["recv"], &[]));
-        assert!(!result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn configured_sanitizer_call_return_still_propagates_taint() {
-        // y = shlex_quote(x) where x is tainted. The configured
-        // sanitizer name is metadata only; propagation still reaches y.
-        let events = vec![assign("x", Some("recv")), assign_call("y", "shlex_quote", &["x"])];
-        let (result, cfg) = run(events, &config(&["recv"], &["shlex_quote"]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-        assert!(result.is_tainted_at_exit(cfg.exit, "y"));
-    }
-
-    #[test]
-    fn configured_sanitizer_call_does_not_clear_arg_taint() {
-        // validate(x) where validate is listed as a sanitizer. The
-        // end user decides what that means; taint still propagates.
-        let events = vec![assign("x", Some("recv")), call("validate", &["x"])];
-        let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn configured_sanitizer_after_sink_does_not_change_propagation() {
-        let events = vec![
-            assign("x", Some("recv")),
-            call("sink", &["x"]),
-            call("validate", &["x"]),
-        ];
-        let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn configured_sanitizer_in_one_branch_arm_preserves_taint_at_join() {
-        // x = recv(); if c: validate(x); else: (nothing). Sanitizer
-        // calls are evidence only, so the join preserves x's taint.
-        let events = vec![
-            assign("x", Some("recv")),
-            branch(vec![call("validate", &["x"])], vec![]),
-        ];
-        let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
-        assert!(
-            result.is_tainted_at_exit(cfg.exit, "x"),
-            "union of then/else must preserve taint"
-        );
-    }
-
-    #[test]
-    fn configured_sanitizer_in_both_branch_arms_preserves_taint_at_join() {
-        // x = recv(); if c: validate(x); else: validate(x). Sanitizer
-        // calls are evidence only, so both arms preserve x's taint.
-        let events = vec![
-            assign("x", Some("recv")),
-            branch(vec![call("validate", &["x"])], vec![call("validate", &["x"])]),
-        ];
-        let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn loop_body_taint_propagates_after_fixed_point() {
-        // for i in items: x = recv() — x tainted after the loop.
-        let events = vec![loop_body(vec![assign("x", Some("recv"))])];
-        let (result, cfg) = run(events, &config(&["recv"], &[]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn configured_sanitizer_inside_loop_preserves_taint() {
-        // for i: x = recv(); validate(x). The call does not kill
-        // taint, so the fixed point keeps x tainted after the loop.
-        let events = vec![loop_body(vec![
-            assign("x", Some("recv")),
-            call("validate", &["x"]),
-        ])];
-        let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn convergence_is_bounded_by_safety_cap() {
-        // Large CFG should converge in a reasonable number of
-        // worklist iterations, never hit the safety cap.
-        let mut events = Vec::new();
-        for i in 0..50 {
-            let target = format!("v{i}");
-            let source = if i == 0 {
-                "recv".to_string()
-            } else {
-                format!("v{}", i - 1)
-            };
-            events.push(assign(&target, Some(&source)));
-        }
-        let (result, _) = run(events, &config(&["recv"], &[]));
-        assert!(!result.saturated, "50 sequential assigns must converge");
-    }
-
-    #[test]
-    fn multiple_independent_sources_propagate_separately() {
-        let events = vec![
-            assign("a", Some("src1")),
-            assign("b", Some("src2")),
-            assign("c", Some("unrelated")),
-        ];
-        let (result, cfg) = run(events, &config(&["src1", "src2"], &[]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "a"));
-        assert!(result.is_tainted_at_exit(cfg.exit, "b"));
-        assert!(!result.is_tainted_at_exit(cfg.exit, "c"));
-    }
-
-    #[test]
-    fn configured_sanitizer_inside_loop_then_reassigned_in_body_keeps_taint() {
-        // for i: validate(x); x = recv() — at loop exit, x is tainted.
-        let events = vec![loop_body(vec![
-            call("validate", &["x"]),
-            assign("x", Some("recv")),
-        ])];
-        let (result, cfg) = run(events, &config(&["recv"], &["validate"]));
-        assert!(result.is_tainted_at_exit(cfg.exit, "x"));
-    }
-
-    #[test]
-    fn receiver_method_projection_handles_unicode_boundaries() {
-        let state = seed(&["schema"]);
-        assert!(
-            !receiver_method_projection_is_tainted(
-                r#"expect(result.error.issues[0].message).toBe("קטן מדי: הקבוצה")"#,
-                &state
-            ),
-            "unicode string text before a call must not panic or invent receiver taint"
-        );
-        assert!(
-            !receiver_method_projection_is_tainted(r#"requests.Request("PUT", data="ööö".encode())"#, &state),
-            "multibyte text inside call expressions must keep byte slicing on char boundaries"
-        );
-    }
-}
+#[path = "intra_tests.rs"]
+mod tests;

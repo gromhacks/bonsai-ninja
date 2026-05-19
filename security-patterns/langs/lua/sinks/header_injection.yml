@@ -9,14 +9,25 @@
   match:
     kind: write
     target:
-      name: header
+      regex: ^ngx\.header(?:\.|$)
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: lua.header.ngx_header_assign example
+  - name: lua ngx header table assignment
     code: |
       local _openresty = require("openresty")
       function example(input, url, id, payload, request, params, user)
-        header = false
+        ngx.header["X-User"] = input
       end
+    expect_match_text: [ngx.header.X-User]
+  - name: lua local header variable negative
+    code: |
+      local _openresty = require("openresty")
+      function example(input, url, id, payload, request, params, user)
+        local header = input
+      end
+    expect_no_match: true
   description: "ngx.header[name] = tainted — pre-nginx-1.0 CRLF injection; modern nginx strips \\r\\n but cookie/location splitting still possible."
 
 - id: lua.header.ngx_req_set_header

@@ -3,6 +3,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -21,6 +22,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -39,6 +41,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe: [CWE-327]
   match:
@@ -57,6 +60,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [lua-resty-md5]
   cwe: [CWE-327]
@@ -77,6 +81,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [lua-resty-string]
   cwe: [CWE-327]
@@ -97,6 +102,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [luacrypto, lua-openssl]
   cwe: [CWE-327]
@@ -117,6 +123,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [lua-openssl]
   cwe: [CWE-327]
@@ -137,6 +144,7 @@
   enabled: true
   language: lua
   tag: weak-crypto
+  category: source-independent
   severity: high
   packages: [lua-openssl]
   cwe: [CWE-327]
@@ -172,6 +180,7 @@
   enabled: true
   language: lua
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:
@@ -190,6 +199,7 @@
   enabled: true
   language: lua
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:

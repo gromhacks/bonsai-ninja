@@ -12,6 +12,8 @@
     kind: call
     callee:
       attribute: [Object, assign]
+  constraints:
+  - arg_tainted: {index: 1}
   match_examples:
   - name: object assign request body
     code: |
@@ -25,6 +27,12 @@
         return Object.assign(target, { "__proto__": value });
       }
     expect_match_text: [Object.assign]
+  - name: object assign literal source negative
+    code: |
+      function apply(target: any) {
+        return Object.assign(target, { safe: true });
+      }
+    expect_no_match: true
   description: "Object.assign(target, source) — shallow merge can still pollute when a tainted source object carries special keys. JS Object global has no canonical ecosystem package, so strict `['Object', 'assign']` match only."
 
 - id: typescript.proto_pollution.lodash_merge
@@ -53,6 +61,8 @@
     kind: call
     callee:
       attribute: [_, set]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: lodash set
     code: |
@@ -75,6 +85,13 @@
         return _.set(target, "constructor.prototype.admin", value);
       }
     expect_match_text: [_.set]
+  - name: lodash set literal negative
+    code: |
+      const _u = require("lodash");
+      function apply(_: any) {
+        return _.set({}, "safe.path", "safe");
+      }
+    expect_no_match: true
   description: "_.set(obj, attacker_path, value) — path-based set with `__proto__.x` or `constructor.prototype.x` slips into Object.prototype."
 
 - id: typescript.proto_pollution.lodash_setwith
@@ -88,6 +105,8 @@
     kind: call
     callee:
       attribute: [_, setWith]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: lodash setwith
     code: |
@@ -96,6 +115,13 @@
         return _.setWith(target, path, value);
       }
     expect_match_text: [_.setWith]
+  - name: lodash setwith literal negative
+    code: |
+      const _u = require("lodash");
+      function demo(_: any) {
+        return _.setWith({}, "safe.path", "safe");
+      }
+    expect_no_match: true
   description: "_.setWith(obj, attacker_path, value) — customizer variant of lodash path-based prototype pollution."
 
 # Hand-rolled recursive merge `target[key] = source[key]` — the
@@ -113,6 +139,8 @@
     kind: write
     target:
       regex: "(\\[|\\.key$)"
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: recursive merge
     code: |
@@ -131,6 +159,12 @@
         });
       }
     expect_match_text: [dst.key]
+  - name: recursive merge literal value negative
+    code: |
+      function merge(target: any, source: any) {
+        target.safe = "safe";
+      }
+    expect_no_match: true
   description: "Recursive merge `target[key] = source[key]` — homemade deep-merge vector. Without `__proto__` / `constructor` / `prototype` filtering, attacker-controlled source object pollutes Object.prototype."
 
 - id: typescript.proto_pollution.recursive_deep_merge
@@ -144,6 +178,8 @@
     kind: call
     callee:
       name: recursiveDeepMerge
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: recursive deep merge exported function
     code: |
@@ -152,6 +188,13 @@
         return recursiveDeepMerge({}, input);
       }
     expect_match_text: [recursiveDeepMerge]
+  - name: recursive deep merge literal negative
+    code: |
+      import recursiveDeepMerge from "recursive-deep-merge";
+      function applyConfig() {
+        return recursiveDeepMerge({}, {});
+      }
+    expect_no_match: true
   description: "recursive-deep-merge(target, attacker_obj) — recursive merge APIs can honor __proto__/constructor.prototype keys and pollute Object.prototype."
 
 - id: typescript.proto_pollution.recursive_deep_merge_method
@@ -181,6 +224,8 @@
     kind: call
     callee:
       regex: "^(deepmerge|mergeDeep|deepExtend)$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: deepmerge function
     code: |
@@ -196,6 +241,13 @@
         return mergeDeep({}, input);
       }
     expect_match_text: [mergeDeep]
+  - name: deepmerge literal negative
+    code: |
+      import deepmerge from "deepmerge";
+      function applyConfig() {
+        return deepmerge({}, {});
+      }
+    expect_no_match: true
   description: "Deep recursive merge package calls — audit tainted objects for __proto__/constructor/prototype keys before merging."
 
 - id: typescript.proto_pollution.lodash_namespace_merge_variants
@@ -209,6 +261,8 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(merge|defaultsDeep)$|^merge$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: lodash namespace merge
     code: |
@@ -224,4 +278,11 @@
         return merge({}, input);
       }
     expect_match_text: [merge]
+  - name: lodash merge literal negative
+    code: |
+      const _u = require("lodash");
+      function applyConfig(lodash: any) {
+        return lodash.merge({}, {});
+      }
+    expect_no_match: true
   description: "lodash merge/defaultsDeep variants and lodash.merge package default export — recursive merge prototype-pollution sinks."

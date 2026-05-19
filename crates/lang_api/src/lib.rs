@@ -17,6 +17,7 @@ pub use kit::{
     collect_param_type_aliases, decl_index_with_handler, extend_alias_map_with_flow_events,
     extract_imports_via, inject_lifecycle_events, populate_decl_return_types, with_fn_kinds, AliasTarget,
     GrammarHandler, LifecycleTransition, ModifierVocabulary, TypeAliasVocabulary, GENERIC_HANDLER,
+    WILDCARD_IMPORT_ALIAS_PREFIX,
 };
 pub use registry::{AdapterArc, LanguageRegistry};
 pub use types::{

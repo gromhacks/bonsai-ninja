@@ -3,6 +3,7 @@
   enabled: true
   language: swift
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe: [CWE-295]
   match:
@@ -19,6 +20,7 @@
   enabled: true
   language: swift
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [Alamofire]
   cwe: [CWE-295]
@@ -52,6 +54,7 @@
   enabled: true
   language: swift
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -68,6 +71,7 @@
   enabled: true
   language: swift
   tag: weak-tls
+  category: source-independent
   severity: medium
   packages: [Alamofire]
   cwe: [CWE-295]

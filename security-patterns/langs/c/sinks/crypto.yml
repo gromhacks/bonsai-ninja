@@ -2,6 +2,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [openssl]
   cwe: [CWE-327]
@@ -23,6 +24,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [openssl]
   cwe: [CWE-327]
@@ -44,6 +46,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: medium
   cwe: [CWE-327]
   match:
@@ -63,6 +66,7 @@
   enabled: true
   language: c
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:
@@ -82,6 +86,7 @@
   enabled: true
   language: c
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:
@@ -101,6 +106,7 @@
   enabled: true
   language: c
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:
@@ -120,6 +126,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [openssl]
   cwe: [CWE-327]
@@ -141,6 +148,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: low
   packages: [openssl]
   cwe: [CWE-327]
@@ -162,6 +170,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: [openssl]
   cwe: [CWE-327]
@@ -183,6 +192,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: [openssl]
   cwe: [CWE-327]
@@ -204,6 +214,7 @@
   enabled: true
   language: c
   tag: weak-crypto
+  category: source-independent
   severity: medium
   packages: [openssl]
   cwe: [CWE-327]

@@ -6,6 +6,7 @@
   enabled: true
   language: rust
   tag: race
+  category: source-independent
   severity: medium
   packages: [std]
   cwe: [CWE-367]

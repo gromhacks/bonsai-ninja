@@ -120,9 +120,19 @@ class App {
         "weak-randomness",
         &["Random", "nextFloat"],
     );
+    let mut sink = sink;
+    sink.category = Some("source-independent".to_string());
     let pack = pack_for("java", vec![sink]);
 
-    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("analysis");
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_pattern_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
     assert!(
         report
             .findings
@@ -134,7 +144,7 @@ class App {
 }
 
 #[test]
-fn pattern_only_sink_reports_without_sources() {
+fn pattern_only_sink_is_hidden_by_default_and_explicit_when_requested() {
     let ws = workspace(
         "App.java",
         r"
@@ -145,17 +155,31 @@ class App {
 }
 ",
     );
-    let pack = pack_for(
+    let mut sink = call_attr_rule(
         "java",
-        vec![call_attr_rule(
-            "java",
-            "java.test.math_random",
-            "weak-randomness",
-            &["Math", "random"],
-        )],
+        "java.test.math_random",
+        "weak-randomness",
+        &["Math", "random"],
+    );
+    sink.category = Some("source-independent".to_string());
+    let pack = pack_for("java", vec![sink]);
+
+    let default_report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "default taint-analysis must stay source-to-sink only: {:#?}",
+        default_report.findings
     );
 
-    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("analysis");
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_pattern_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
     let finding = report
         .findings
         .iter()
@@ -175,6 +199,70 @@ class App {
     assert!(
         flow_id.starts_with("F:") && flow_id.len() == 18,
         "pattern-only representative_flow_id malformed: {flow_id}"
+    );
+}
+
+#[test]
+fn source_independent_sink_does_not_fabricate_taint_flow() {
+    let ws = workspace(
+        "app.py",
+        r#"
+def handler(user_input):
+    dangerous(user_input)
+"#,
+    );
+    let mut sink = call_name_rule(
+        "python",
+        "python.test.source_independent_config",
+        "command-injection",
+        "dangerous",
+    );
+    sink.category = Some("source-independent".to_string());
+    let pack = pack_for("python", vec![sink]);
+
+    let default_report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
+    assert!(
+        default_report.findings.is_empty(),
+        "source-independent rules must not participate in source-to-sink taint matching: {:#?}",
+        default_report.findings
+    );
+
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            include_pattern_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "python.test.source_independent_config")
+        .unwrap_or_else(|| {
+            panic!(
+                "source-independent rule should emit only as pattern evidence when requested: {:#?}",
+                report.findings
+            )
+        });
+    assert_eq!(
+        finding.finding.source.rule_id,
+        "pattern:python.test.source_independent_config"
+    );
+    assert!(
+        finding.finding.taint_path.is_empty(),
+        "source-independent finding must not carry a fabricated taint path: {:#?}",
+        finding.finding
     );
 }
 
@@ -201,7 +289,15 @@ def handler():
     }]);
     let pack = pack_for("python", vec![sink]);
 
-    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("analysis");
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_pattern_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
     assert!(report.findings.is_empty(), "{:#?}", report.findings);
 }
 
@@ -226,6 +322,7 @@ class App {
         "weak-crypto",
         &["Cipher", "getInstance"],
     );
+    sink.category = Some("source-independent".to_string());
     sink.constraints = RuleConstraint(vec![ConstraintKind::ArgMatchesRegex {
         arg_matches_regex: ArgRegexSpec {
             index: 0,
@@ -234,7 +331,15 @@ class App {
     }]);
     let pack = pack_for("java", vec![sink]);
 
-    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("analysis");
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_pattern_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
     let hits: Vec<_> = report
         .findings
         .iter()
@@ -267,6 +372,7 @@ def handler(user_input):
         &pack,
         TaintAnalysisOptions {
             include_inferred_sources: true,
+            include_pattern_only: true,
             ..Default::default()
         },
     )
@@ -312,6 +418,9 @@ class App {
     list_add.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: Vec::new(),
+        call_result_passthrough_args: Vec::new(),
+        call_result_passthrough_receiver: false,
+        output_arg_flows: Vec::new(),
         taint_receiver_from_args: true,
     });
     let mut command = call_attr_rule(
@@ -329,6 +438,9 @@ class App {
     command.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: Vec::new(),
+        call_result_passthrough_args: Vec::new(),
+        call_result_passthrough_receiver: false,
+        output_arg_flows: Vec::new(),
         taint_receiver_from_args: true,
     });
     let mut start = call_attr_rule(

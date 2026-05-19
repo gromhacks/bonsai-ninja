@@ -10,6 +10,7 @@
     kind: call
     callee:
       regex: ^(conn|cur|cursor|stmt|db|env|database|connection|sql)[.:]execute$
+      base_name_in: [conn, cur, cursor, stmt, db, env, database, connection, sql]
   constraints:
   - arg_tainted:
       index: 0

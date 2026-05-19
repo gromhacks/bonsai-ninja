@@ -1,15 +1,19 @@
 //! `bonsai-ninja calls` data layer.
 //!
-//! Returns every call site in the workspace, filtered by callee /
-//! caller / file / call-kind. Combines two passes — flow-event
-//! calls (carry the enclosing function and call kind) and ref-table
-//! calls (catches module-level / non-decl calls the flow-event
-//! walker doesn't reach).
+//! Returns every syntactic call site in the workspace, filtered by
+//! callee text / caller / file / call-kind. This is not a resolved
+//! callgraph edge surface; semantic caller→callee edges live in
+//! `dump-edges` and exports. Combines two passes — flow-event calls
+//! (carry the enclosing function and call kind) and ref-table calls
+//! (catches module-level / non-decl calls the flow-event walker
+//! doesn't reach).
 
 use crate::common::{format_span, make_name_filter};
 use bonsai_lang_api::{FlowEvent, RefKind};
 use bonsai_workspace::Workspace;
 use serde::Serialize;
+
+pub(crate) const CALLSITE_RESOLUTION_SCOPE: &str = "syntactic-call-site";
 
 /// Filter bundle for [`calls`]. All fields optional; `None` skips
 /// that filter. `regex` controls how `callee` and `caller` are
@@ -37,6 +41,9 @@ pub struct CallsFilters<'a> {
 /// the CLI emits.
 #[derive(Serialize, Clone, Debug)]
 pub struct CallOut {
+    /// Explicitly declares that this row is a call-site inventory fact,
+    /// not a resolved semantic caller→callee edge.
+    pub resolution_scope: &'static str,
     /// Callee text as written at the call site (`os.system`,
     /// `self.execute`).
     pub callee: String,
@@ -107,6 +114,7 @@ pub fn calls(ws: &Workspace, f: &CallsFilters<'_>) -> Result<Vec<CallOut>, regex
                     {
                         let (path, line, column) = format_span(&reference.span, ws);
                         acc.push(CallOut {
+                            resolution_scope: CALLSITE_RESOLUTION_SCOPE,
                             callee: normalize_whitespace(&reference.name),
                             file: path,
                             line,
@@ -288,6 +296,7 @@ fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out:
             } => {
                 let (path, line, column) = format_span(span, ws);
                 out.push(CallOut {
+                    resolution_scope: CALLSITE_RESOLUTION_SCOPE,
                     callee: normalize_whitespace(name),
                     file: path,
                     line,
@@ -307,6 +316,7 @@ fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out:
                 // call site.
                 let (path, line, column) = format_span(span, ws);
                 out.push(CallOut {
+                    resolution_scope: CALLSITE_RESOLUTION_SCOPE,
                     callee: normalize_whitespace(name),
                     file: path,
                     line,
@@ -343,40 +353,5 @@ fn walk_calls(events: &[FlowEvent], caller: Option<String>, ws: &Workspace, out:
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn call(callee: &str, column: u32, caller: Option<&str>, call_kind: Option<&str>) -> CallOut {
-        CallOut {
-            callee: callee.to_string(),
-            file: "fixture.py".to_string(),
-            line: 7,
-            column,
-            caller: caller.map(str::to_string),
-            call_kind: call_kind.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn assignment_source_call_rows_do_not_double_count_explicit_calls() {
-        let mut rows = vec![
-            call("verify_token", 5, Some("get_user"), None),
-            call("verify_token", 15, Some("get_user"), Some("function")),
-        ];
-
-        drop_assignment_call_rows_shadowed_by_explicit_calls(&mut rows);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].column, 15);
-    }
-
-    #[test]
-    fn assignment_source_call_rows_remain_when_no_explicit_call_exists() {
-        let mut rows = vec![call("factory", 5, Some("build"), None)];
-
-        drop_assignment_call_rows_shadowed_by_explicit_calls(&mut rows);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].callee, "factory");
-    }
-}
+#[path = "calls_tests.rs"]
+mod tests;

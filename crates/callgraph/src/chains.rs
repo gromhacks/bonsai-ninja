@@ -3,10 +3,9 @@
 //! `enumerate_chains_resolved` is the workhorse — DFS from a target
 //! `FuncId` to its roots over [`super::ResolvedCallGraph`]. Each
 //! emitted chain carries the worst-case [`bonsai_common::Precision`]
-//! seen along the way (Direct < Narrowed < OverApproximate < Unknown,
-//! folded with `meet`). Callers that don't need precision (browse-row
-//! F: ids) discard the tag; consumers that do (inspect renderer)
-//! show "(over-approximate)" badges.
+//! seen along the way. Public chain enumeration is semantic by default:
+//! it traverses only `Exact` / `Narrowed` edges. Broader edges may still
+//! exist in the resolved graph for explicit diagnostics.
 //!
 //! This module lives in `bonsai_callgraph` so both `bonsai_inspect`
 //! and `bonsai_workspace` can consume the same primitive without a
@@ -38,7 +37,8 @@ pub enum ChainTruncation {
     /// was not enumerated. Re-run with a larger `max_chains` to see
     /// them.
     MaxChains,
-    /// We hit the probe budget (`max_probes * 16` visits). Some
+    /// We hit the probe budget (`max_probes * 16` visits, saturating).
+    /// Passing `usize::MAX` disables this budget. Some
     /// chains in deeper branches of the DFS were never explored.
     /// Re-run with a larger `max_probes` to push the budget out.
     ProbeBudget,
@@ -71,8 +71,7 @@ impl ChainTruncation {
 /// termination are exact: two distinct functions with the same short
 /// name are different graph nodes here. Every emitted chain carries
 /// its accumulated [`Precision`] (the `meet` of every traversed
-/// edge's precision) so the renderer can flag over-approximate flows
-/// without re-walking the graph.
+/// semantic edge's precision) without re-walking the graph.
 #[must_use]
 pub fn enumerate_chains_resolved(
     cg: &ResolvedCallGraph,
@@ -93,15 +92,15 @@ pub fn enumerate_chains_resolved(
             truncation = ChainTruncation::MaxChains;
             break;
         }
-        visited_budget += 1;
-        if visited_budget > max_probes * 16 {
+        visited_budget = visited_budget.saturating_add(1);
+        if visited_budget > max_probes.saturating_mul(16) {
             truncation = ChainTruncation::ProbeBudget;
             break;
         }
         let head = *path_rev.last().expect("non-empty path");
         let mut pushed_any_parent = false;
         let mut pushed_precise_parent = false;
-        for edge in cg.callers_of(head) {
+        for edge in cg.callers_of(head).filter(|edge| edge.precision.is_semantic()) {
             let parent = edge.from;
             if path_set.contains(&parent) {
                 continue; // cycle — skip the edge but treat the path as terminal
@@ -119,12 +118,10 @@ pub fn enumerate_chains_resolved(
         }
         if !pushed_any_parent || (!pushed_precise_parent && is_precise_chain(path_prec)) {
             // No more callers (entry point reached) OR all callers
-            // already on the path (recursion). Also emit the precise
-            // suffix when every non-cyclic incoming edge would degrade
-            // it to over-approximate/unknown. Without this cut, a
-            // virtual framework/dispatcher caller can hide an otherwise
-            // exact entry-to-sink path from inspect's default
-            // exact/narrowed view.
+            // already on the path (recursion). The precision suffix
+            // guard is retained for callers that pre-filter graph
+            // inputs differently, but the default iterator above only
+            // traverses semantic exact/narrowed edges.
             let mut chain = path_rev.clone();
             chain.reverse();
             let should_record = emitted_chains
@@ -145,9 +142,7 @@ pub fn enumerate_chains_resolved(
     }
     // Sort + dedup so the cache key is deterministic. When two
     // resolution routes produce the same FuncId path, keep the
-    // most precise copy; otherwise a duplicate over-approximate
-    // edge can hide an exact/narrowed chain from inspect's default
-    // view.
+    // most precise copy.
     results.sort_by(|a, b| a.funcs.cmp(&b.funcs).then_with(|| a.precision.cmp(&b.precision)));
     let mut deduped = Vec::with_capacity(results.len());
     for chain in results {
@@ -199,7 +194,10 @@ pub fn downstream_funcs_set(
         if depth >= max_depth || downstream.len() >= max_funcs {
             return;
         }
-        for edge in call_graph.callees_of(from_func) {
+        for edge in call_graph
+            .callees_of(from_func)
+            .filter(|edge| edge.precision.is_semantic())
+        {
             let callee = edge.to;
             if !visited.insert(callee) {
                 continue;

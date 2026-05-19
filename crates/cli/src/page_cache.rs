@@ -3,15 +3,15 @@
 //! Pagination cursors are useful only if turning the page is cheap. The
 //! row/flow analysis has already happened on page 1, so page 2 should
 //! not reopen a large workspace and recompute the same report. This
-//! module stores fully rendered pages under `.bonsai/page-cache.v2`
+//! module stores fully rendered pages under `.bonsai/page-cache.v3`
 //! keyed by the normalized command line (with `--page` removed) and a
 //! cheap workspace freshness fingerprint.
 
 use crate::{out_count, paging};
+use bonsai_common::dependency_metadata::collect_dependency_metadata_fingerprints;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, BTreeSet};
-use std::hash::{Hash, Hasher};
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +23,7 @@ thread_local! {
 }
 
 const EAGER_PAGE_LIMIT: u64 = 32;
-const RENDER_CACHE_VERSION: u32 = 2;
+const RENDER_CACHE_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CachedPage {
@@ -36,7 +36,10 @@ pub(crate) struct CachedPage {
 struct PageCacheFile {
     version: u32,
     binary_version: String,
+    matcher_policy_fingerprint: u128,
     workspace_fingerprint: u64,
+    dependency_metadata_fingerprint: u64,
+    rulepack_fingerprint: Option<u64>,
     normalized_argv_hash: u64,
     pages: Vec<CachedPage>,
 }
@@ -102,7 +105,10 @@ pub(crate) fn save_pages(workspace: &Path, pages: Vec<CachedPage>) -> anyhow::Re
     let cache = PageCacheFile {
         version: RENDER_CACHE_VERSION,
         binary_version: binary_cache_fingerprint().to_string(),
+        matcher_policy_fingerprint: bonsai_common::MATCHER_POLICY_FINGERPRINT,
         workspace_fingerprint: workspace_fingerprint(workspace)?,
+        dependency_metadata_fingerprint: dependency_metadata_fingerprint(workspace)?,
+        rulepack_fingerprint: rulepack_fingerprint_for_command(workspace)?,
         normalized_argv_hash: normalized_argv_hash(),
         pages,
     };
@@ -230,6 +236,12 @@ fn parse_page_number(raw: &str) -> Option<u64> {
 
 fn read_cache(workspace: &Path) -> anyhow::Result<Option<PageCacheFile>> {
     let path = cache_path(workspace);
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return Ok(None);
+    };
+    if current_exe_is_newer_than_cache(&metadata) {
+        return Ok(None);
+    }
     let Ok(bytes) = std::fs::read(path) else {
         return Ok(None);
     };
@@ -238,6 +250,7 @@ fn read_cache(workspace: &Path) -> anyhow::Result<Option<PageCacheFile>> {
     };
     if cache.version != RENDER_CACHE_VERSION
         || cache.binary_version != binary_cache_fingerprint()
+        || cache.matcher_policy_fingerprint != bonsai_common::MATCHER_POLICY_FINGERPRINT
         || cache.normalized_argv_hash != normalized_argv_hash()
     {
         return Ok(None);
@@ -249,12 +262,30 @@ fn binary_cache_fingerprint() -> &'static str {
     option_env!("BONSAI_BUILD_FINGERPRINT").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+fn current_exe_is_newer_than_cache(cache_metadata: &std::fs::Metadata) -> bool {
+    let Ok(cache_modified) = cache_metadata.modified() else {
+        return false;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Ok(exe_meta) = std::fs::metadata(exe) else {
+        return false;
+    };
+    let Ok(exe_modified) = exe_meta.modified() else {
+        return false;
+    };
+    exe_modified > cache_modified
+}
+
 fn cache_is_fresh(workspace: &Path, cache: &PageCacheFile) -> anyhow::Result<bool> {
-    Ok(cache.workspace_fingerprint == workspace_fingerprint(workspace)?)
+    Ok(cache.workspace_fingerprint == workspace_fingerprint(workspace)?
+        && cache.dependency_metadata_fingerprint == dependency_metadata_fingerprint(workspace)?
+        && cache.rulepack_fingerprint == rulepack_fingerprint_for_command(workspace)?)
 }
 
 fn cache_dir(workspace: &Path) -> PathBuf {
-    bonsai_common::workspace_bonsai_dir(workspace).join("page-cache.v2")
+    bonsai_common::workspace_bonsai_dir(workspace).join("page-cache.v3")
 }
 
 fn cache_path(workspace: &Path) -> PathBuf {
@@ -262,8 +293,11 @@ fn cache_path(workspace: &Path) -> PathBuf {
 }
 
 fn normalized_argv_hash() -> u64 {
-    let mut h = DefaultHasher::new();
-    normalized_argv_without_page().hash(&mut h);
+    let mut h = bonsai_hash::Hasher::new();
+    for arg in normalized_argv_without_page() {
+        h.absorb(arg.as_bytes());
+        h.absorb_separator();
+    }
     h.finish()
 }
 
@@ -293,12 +327,12 @@ fn workspace_fingerprint(root: &Path) -> anyhow::Result<u64> {
     let mut entries = Vec::new();
     collect_file_fingerprints(root, root, &mut entries)?;
     entries.sort();
-    let mut h = DefaultHasher::new();
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .hash(&mut h);
+    let mut h = bonsai_hash::Hasher::new();
+    h.absorb(stable_root_path(root).to_string_lossy().as_bytes());
+    h.absorb_separator();
     for item in entries {
-        item.hash(&mut h);
+        h.absorb(item.as_bytes());
+        h.absorb_separator();
     }
     Ok(h.finish())
 }
@@ -366,50 +400,132 @@ fn page_cache_content_hash(bytes: &[u8]) -> u64 {
     bonsai_hash::fnv1a_bytes64(bytes)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::workspace_fingerprint;
-    use std::path::PathBuf;
-
-    fn tempdir(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("bonsai-page-cache-{name}-{}-{stamp}", std::process::id()));
-        std::fs::create_dir(&path).expect("create temp dir");
-        path
-    }
-
-    #[test]
-    fn workspace_fingerprint_changes_when_indexed_file_changes() {
-        let root = tempdir("content-change");
-        let file = root.join("app.py");
-        std::fs::write(&file, "print('a')\n").expect("write app");
-        let before = workspace_fingerprint(&root).expect("fingerprint before");
-        std::fs::write(&file, "print('b')\n").expect("rewrite app");
-        let after = workspace_fingerprint(&root).expect("fingerprint after");
-        std::fs::remove_dir_all(&root).ok();
-
-        assert_ne!(before, after);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn workspace_fingerprint_skips_symlinked_directories() {
-        let root = tempdir("symlink-root");
-        let outside = tempdir("symlink-outside");
-        std::fs::write(root.join("app.py"), "print('root')\n").expect("write root app");
-        std::fs::write(outside.join("external.py"), "print('outside')\n").expect("write outside app");
-        std::os::unix::fs::symlink(&outside, root.join("linked")).expect("create symlink dir");
-
-        let before = workspace_fingerprint(&root).expect("fingerprint before");
-        std::fs::write(outside.join("external.py"), "print('changed')\n").expect("rewrite outside app");
-        let after = workspace_fingerprint(&root).expect("fingerprint after");
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&outside).ok();
-
-        assert_eq!(before, after);
-    }
+fn rulepack_fingerprint_for_command(workspace: &Path) -> anyhow::Result<Option<u64>> {
+    let root = explicit_rules_dir_arg().or_else(|| bonsai_sdk::Bonsai::discover_rulepack_root(workspace));
+    root.map(|path| content_tree_fingerprint(&path, rulepack_dir_skipped))
+        .transpose()
 }
+
+fn explicit_rules_dir_arg() -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        if arg == "--rules-dir" {
+            return args.next().map(PathBuf::from);
+        }
+        if let Some(value) = arg.strip_prefix("--rules-dir=") {
+            return Some(PathBuf::from(value));
+        }
+    }
+    None
+}
+
+fn dependency_metadata_fingerprint(root: &Path) -> anyhow::Result<u64> {
+    let entries = collect_dependency_metadata_fingerprints(root)?;
+    Ok(fingerprint_entries(
+        entries
+            .into_iter()
+            .map(|entry| format!("{}\0{:016x}", entry.relative_path, entry.content_hash))
+            .collect(),
+    ))
+}
+
+fn content_tree_fingerprint(root: &Path, skip_dir: fn(&str) -> bool) -> anyhow::Result<u64> {
+    let stable_root = stable_root_path(root);
+    let mut entries = Vec::new();
+    collect_regular_file_fingerprints(&stable_root, &stable_root, &mut entries, skip_dir)?;
+    let mut h = bonsai_hash::Hasher::new();
+    h.absorb(if stable_root.is_dir() {
+        b"dir-exists"
+    } else {
+        b"dir-missing"
+    });
+    h.absorb_separator();
+    let entries_digest = fingerprint_entries(entries);
+    h.absorb(&entries_digest.to_le_bytes());
+    Ok(h.finish())
+}
+
+fn collect_regular_file_fingerprints(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+    skip_dir: fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                if skip_dir(name) {
+                    continue;
+                }
+            }
+            collect_regular_file_fingerprints(root, &path, out, skip_dir)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let rel = stable_relative_path(root, &path);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        out.push(format!("{rel}\0{:016x}", page_cache_content_hash(&bytes)));
+    }
+    Ok(())
+}
+
+fn fingerprint_entries(mut entries: Vec<String>) -> u64 {
+    entries.sort();
+    let mut h = bonsai_hash::Hasher::new();
+    for entry in entries {
+        h.absorb(entry.as_bytes());
+        h.absorb_separator();
+    }
+    h.finish()
+}
+
+fn stable_root_path(root: &Path) -> PathBuf {
+    root.canonicalize()
+        .ok()
+        .or_else(|| {
+            if root.is_absolute() {
+                Some(root.to_path_buf())
+            } else {
+                std::env::current_dir().ok().map(|cwd| cwd.join(root))
+            }
+        })
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+fn stable_relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn rulepack_dir_skipped(name: &str) -> bool {
+    matches!(name, ".git" | ".bonsai" | "target")
+}
+
+#[cfg(test)]
+#[path = "page_cache_tests.rs"]
+mod tests;

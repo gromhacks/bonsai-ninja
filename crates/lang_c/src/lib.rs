@@ -94,10 +94,26 @@ impl LanguageAdapter for CAdapter {
         // docs/contributing/design-patterns.mdx::Semantic Resolution Always.
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            let valid_function_names = collect_function_definition_names_with_body(file, &tree, src);
+            decl_index.defs.retain(|decl| {
+                if !matches!(
+                    decl.kind,
+                    bonsai_lang_api::DeclKind::Function
+                        | bonsai_lang_api::DeclKind::Method
+                        | bonsai_lang_api::DeclKind::Constructor
+                ) {
+                    return true;
+                }
+                !is_c_reserved_decl_name(&decl.name)
+                    && valid_function_names
+                        .get(&decl.span)
+                        .is_some_and(|name| name == &decl.name)
+            });
             // Phase-6 return-type extraction: `T foo() {}` populates
             // `Decl.return_type` for `apply_assign_call_result_types`.
             // C's `function_definition` uses the `type` field for return type.
             bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);
+            bonsai_lang_api::kit::inject_c_family_function_pointer_aliases(&mut decl_index, &tree, src, file);
             let alias_map = collect_param_type_aliases(&tree, file, src, &C_TYPE_ALIASES);
             for decl in &mut decl_index.defs {
                 if let Some(aliases) = alias_map.get(&decl.span) {
@@ -113,6 +129,78 @@ impl LanguageAdapter for CAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+/// Tree-sitter can recover from macro-heavy C headers by stretching a
+/// declaration sequence into a bogus `function_definition`. Keep only
+/// nodes with an actual compound-statement body; C declarations and
+/// function-pointer API tables are not callable definitions.
+fn collect_function_definition_names_with_body(
+    file: FileId,
+    tree: &Tree,
+    src: &[u8],
+) -> std::collections::HashMap<bonsai_common::Span, String> {
+    collect_kinds(tree, &["function_definition"])
+        .into_iter()
+        .filter(function_definition_has_body)
+        .filter_map(|node| function_name(&node, src).map(|name| (span_of(file, &node), name)))
+        .collect()
+}
+
+fn function_definition_has_body(node: &Node<'_>) -> bool {
+    node.child_by_field_name("body")
+        .is_some_and(|body| body.kind() == "compound_statement")
+        || first_named_child_of_kind(node, "compound_statement").is_some()
+}
+
+fn is_c_reserved_decl_name(name: &str) -> bool {
+    matches!(
+        name,
+        "auto"
+            | "break"
+            | "case"
+            | "char"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extern"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "register"
+            | "restrict"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "struct"
+            | "switch"
+            | "typedef"
+            | "union"
+            | "unsigned"
+            | "void"
+            | "volatile"
+            | "while"
+            | "_Alignas"
+            | "_Alignof"
+            | "_Atomic"
+            | "_Bool"
+            | "_Complex"
+            | "_Generic"
+            | "_Imaginary"
+            | "_Noreturn"
+            | "_Static_assert"
+            | "_Thread_local"
+    )
 }
 
 /// Walk the C tree and collect every function name whose definition
@@ -149,8 +237,6 @@ fn collect_static_function_names(
             static_names.insert(name);
         }
     }
-    let _ = file; // FileId currently unused — span_of takes &Node, but
-                  // patching by name is sufficient here.
     static_names
 }
 

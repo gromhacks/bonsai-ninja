@@ -39,6 +39,7 @@
   enabled: true
   language: csharp
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-326]
   match:
@@ -69,6 +70,7 @@
   enabled: true
   language: csharp
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-326]
   match:
@@ -85,6 +87,7 @@
   enabled: true
   language: csharp
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe: [CWE-295]
   match:
@@ -101,6 +104,7 @@
   enabled: true
   language: csharp
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe: [CWE-295]
   match:
@@ -120,6 +124,7 @@
   enabled: true
   language: csharp
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [System.Net]
   cwe: [CWE-295]
@@ -137,6 +142,7 @@
   enabled: true
   language: csharp
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [System.Net.Http]
   cwe: [CWE-295]

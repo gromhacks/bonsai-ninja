@@ -16,7 +16,9 @@
   description: "Disabled duplicate — typescript.upload.multer_destination_filename_callbacks covers the same multer.diskStorage site with callback-specific examples."
 
 - id: typescript.upload.formidable_incomingform
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   tag: file-upload
   severity: high
@@ -33,7 +35,7 @@
       function demo(input, req, obj) {
         return new formidable.IncomingForm(input);
       }
-  description: "new formidable.IncomingForm() — check keepExtensions / uploadDir."
+  description: "Disabled — new formidable.IncomingForm() is parser setup, not a vulnerability by itself. Flag downstream writes using multipart filename sources."
 
 - id: typescript.upload.express_fileupload_mv
   enabled: false
@@ -76,23 +78,34 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.mv$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: uploadedFile mv
+  - name: uploadedFile mv tainted destination
     code: |
       const { UploadedFile } = require("express-fileupload");
-      function save(dest: string) {
+      function save(input: string) {
         const uploadedFile = new UploadedFile();
-        return uploadedFile.mv(dest);
+        return uploadedFile.mv(input);
       }
     expect_match_text: [uploadedFile.mv]
-  - name: file mv
+  - name: file mv tainted destination
     code: |
       const { UploadedFile } = require("express-fileupload");
-      function save(dest: string) {
+      function save(input: string) {
         const file = new UploadedFile();
-        return file.mv(dest);
+        return file.mv(input);
       }
     expect_match_text: [file.mv]
+  - name: file mv literal destination negative
+    code: |
+      const { UploadedFile } = require("express-fileupload");
+      function save() {
+        const file = new UploadedFile();
+        return file.mv("/srv/uploads/avatar.png");
+      }
+    expect_no_match: true
   description: "express-fileupload .mv(dest) — writing uploaded content to attacker-influenced destination paths. Receiver-agnostic; package context gate on express-fileupload narrows to that ecosystem."
 
 - id: typescript.upload.path_join_original_filename
@@ -106,6 +119,8 @@
     kind: call
     callee:
       attribute: [path, join]
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: multer originalname path join
     code: |
@@ -114,6 +129,13 @@
         return path.join(uploadDir, file.originalname);
       }
     expect_match_text: [path.join]
+  - name: literal upload path join negative
+    code: |
+      const _u = require("multer");
+      function dest(path: any) {
+        return path.join("/srv/uploads", "avatar.png");
+      }
+    expect_no_match: true
   - name: busboy filename path join
     code: |
       const _u = require("multer");
@@ -124,7 +146,9 @@
   description: "Joining upload directories with client-controlled filenames — filename traversal/overwrite sink before file write or mv."
 
 - id: typescript.upload.multer_destination_filename_callbacks
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   tag: file-upload
   severity: medium
@@ -153,4 +177,4 @@
         }
       });
     expect_match_text: [multer.diskStorage]
-  description: "multer.diskStorage filename/destination callbacks — audit use of request fields or file.originalname in upload paths."
+  description: "Disabled — multer.diskStorage itself is normal upload configuration. Flag path.join/file-write flows fed by file.originalname or request fields instead."

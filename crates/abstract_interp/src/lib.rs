@@ -71,12 +71,36 @@ pub struct RawStep {
     pub message: String,
 }
 
-/// Linear list of interpreter steps plus a `truncated` flag set when any
-/// budget in [`TraceLimits`] was exhausted.
+/// Linear list of interpreter steps plus explicit completion metadata.
+/// `truncated` is reserved for exhausted [`TraceLimits`] budgets;
+/// `incomplete_reasons` records semantic gaps such as unresolved calls.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RawTrace {
     pub steps: Vec<RawStep>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub truncation_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incomplete_reasons: Vec<String>,
+}
+
+impl RawTrace {
+    pub fn mark_truncated(&mut self, reason: &'static str) {
+        self.truncated = true;
+        if !self.truncation_reasons.iter().any(|existing| existing == reason) {
+            self.truncation_reasons.push(reason.to_string());
+        }
+    }
+
+    pub fn mark_incomplete(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        if reason.is_empty() {
+            return;
+        }
+        if !self.incomplete_reasons.iter().any(|existing| existing == &reason) {
+            self.incomplete_reasons.push(reason);
+        }
+    }
 }
 
 /// Enqueue every successor of a branch / try-fork onto the DFS worklist
@@ -101,7 +125,7 @@ fn push_branch_successors(
             parent_path
         } else {
             let Some(new_id) = next_path.checked_add(1) else {
-                trace.truncated = true;
+                trace.mark_truncated("path-id-overflow");
                 return false;
             };
             *next_path = new_id;
@@ -136,7 +160,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
                 trace: &mut RawTrace,
                 next_step: &mut u32| {
         if *next_step >= limits.max_steps {
-            trace.truncated = true;
+            trace.mark_truncated("max-steps");
             return false;
         }
         trace.steps.push(RawStep {
@@ -174,7 +198,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
     while let Some((block_id, path_id, mut state)) = worklist.pop() {
         let visit_count = visits.entry((block_id, path_id)).or_insert(0);
         if *visit_count >= limits.max_loop_iters {
-            trace.truncated = true;
+            trace.mark_truncated("max-loop-iters");
             continue;
         }
         *visit_count += 1;
@@ -189,7 +213,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
                     StepKind::Merge,
                     path_id,
                     block.span,
-                    Precision::OverApproximate,
+                    Precision::Narrowed,
                     "merge abstract state".into(),
                     &mut trace,
                     &mut next_step,
@@ -232,7 +256,7 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
             Terminator::TryFork => {
                 branches_emitted += 1;
                 if branches_emitted > limits.max_branches {
-                    trace.truncated = true;
+                    trace.mark_truncated("max-branches");
                     break;
                 }
                 // Try/catch counts against the same branch budget as
@@ -252,14 +276,14 @@ pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
             Terminator::Branch => {
                 branches_emitted += 1;
                 if branches_emitted > limits.max_branches {
-                    trace.truncated = true;
+                    trace.mark_truncated("max-branches");
                     break;
                 }
                 if !emit(
                     StepKind::BranchSplit,
                     path_id,
                     block.span,
-                    Precision::OverApproximate,
+                    Precision::Exact,
                     "branch".into(),
                     &mut trace,
                     &mut next_step,
@@ -399,8 +423,9 @@ fn value_from_text(state: &ExecState, raw: &str) -> AbstractValue {
 
 /// Map a [`FlowEvent`] variant onto the interpreter's step vocabulary.
 ///
-/// Precision defaults to `Exact` for concrete facts and
-/// `OverApproximate` for events that represent non-determinism.
+/// Precision defaults to semantic facts only. Concrete events are
+/// `Exact`; CFG-level joins that merge multiple feasible states are
+/// `Narrowed`.
 /// Branch / Loop / Try events are handled by the CFG builder and
 /// never appear in a block's `events`; the catch-all renders them as
 /// a `Diagnostic` so the interpreter still advances if one slips
@@ -410,7 +435,7 @@ fn classify_event(event: &FlowEvent) -> (StepKind, Precision, String) {
         FlowEvent::Call { name, .. } => (StepKind::Call, Precision::Exact, format!("call {name}")),
         FlowEvent::Assign { target, .. } => (StepKind::Assign, Precision::Exact, format!("assign {target}")),
         FlowEvent::Return { .. } => (StepKind::Return, Precision::Exact, "return".into()),
-        FlowEvent::Throw { .. } => (StepKind::Throw, Precision::OverApproximate, "throw".into()),
+        FlowEvent::Throw { .. } => (StepKind::Throw, Precision::Exact, "throw".into()),
         FlowEvent::Await { .. } => (StepKind::Await, Precision::Exact, "await".into()),
         FlowEvent::Yield { value_text, .. } => (
             StepKind::Yield,
@@ -447,109 +472,5 @@ fn flow_event_span(event: &FlowEvent) -> Span {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai_cfg::{BasicBlock, Cfg, Terminator};
-    use bonsai_common::{BasicBlockId, FileId};
-
-    fn span(start: u64, end: u64) -> Span {
-        Span::new(FileId::new(1), start, end)
-    }
-
-    fn assign(span: Span, target: &str, source_name: &str) -> FlowEvent {
-        FlowEvent::Assign {
-            span,
-            target: target.to_string(),
-            source_name: Some(source_name.to_string()),
-            source_call: None,
-            source_call_args: Vec::new(),
-            source_names: Vec::new(),
-            declares_new_binding: false,
-            value_kind: None,
-        }
-    }
-
-    fn block(
-        id: u32,
-        label: &str,
-        events: Vec<FlowEvent>,
-        successors: Vec<u32>,
-        terminator: Terminator,
-    ) -> BasicBlock {
-        BasicBlock {
-            id: BasicBlockId::new(id),
-            label: label.to_string(),
-            synthetic_kind: None,
-            events,
-            successors: successors.into_iter().map(BasicBlockId::new).collect(),
-            terminator,
-            span: span(u64::from(id), u64::from(id + 1)),
-        }
-    }
-
-    #[test]
-    fn run_entry_merges_branch_states_at_join_blocks() {
-        let cfg = Cfg {
-            function: "handle".to_string(),
-            entry: BasicBlockId::new(0),
-            exit: BasicBlockId::new(3),
-            blocks: vec![
-                block(0, "entry", Vec::new(), vec![1, 2], Terminator::Branch),
-                block(
-                    1,
-                    "then",
-                    vec![assign(span(10, 11), "x", "1")],
-                    vec![3],
-                    Terminator::Fallthrough,
-                ),
-                block(
-                    2,
-                    "else",
-                    vec![assign(span(20, 21), "x", "2")],
-                    vec![3],
-                    Terminator::Fallthrough,
-                ),
-                block(
-                    3,
-                    "join",
-                    vec![assign(span(30, 31), "y", "x")],
-                    Vec::new(),
-                    Terminator::Fallthrough,
-                ),
-            ],
-        };
-
-        let trace = run_entry(FuncId::new(7), &cfg, TraceLimits::default());
-
-        assert!(
-            trace.steps.iter().any(|step| step.kind == StepKind::Merge),
-            "abstract interpretation must join incoming branch states instead of dropping the second path"
-        );
-        assert!(
-            trace
-                .steps
-                .iter()
-                .filter(|step| step.kind == StepKind::Assign && step.message == "assign y")
-                .count()
-                >= 1,
-            "join block should still execute after state merge"
-        );
-    }
-
-    #[test]
-    fn exec_state_merge_uses_abstract_value_join() {
-        let mut left = ExecState::new(FuncId::new(1), BasicBlockId::new(0));
-        left.locals.insert("x".to_string(), AbstractValue::ConstInt(1));
-        let mut right = ExecState::new(FuncId::new(1), BasicBlockId::new(0));
-        right.locals.insert("x".to_string(), AbstractValue::ConstInt(2));
-
-        assert!(left.merge_from(&right));
-        assert_eq!(
-            left.locals.get("x"),
-            Some(&AbstractValue::Set(vec![
-                AbstractValue::ConstInt(1),
-                AbstractValue::ConstInt(2)
-            ]))
-        );
-    }
-}
+#[path = "tests.rs"]
+mod tests;

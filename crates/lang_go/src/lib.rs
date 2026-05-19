@@ -3,7 +3,7 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
 };
 use tree_sitter::Node;
@@ -96,14 +96,16 @@ impl LanguageAdapter for GoAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut idx = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
-        // Go module_path = the file's `package <name>;` declaration.
-        // All files in the same package share the segment so
-        // unexported (lowercase-first) names cross-link only within
-        // the package. Falls back to file-stem when the package
+        // Go module_path = workspace-relative package directory plus
+        // the file's `package <name>` declaration. The package name
+        // alone is not semantic identity: unrelated command packages
+        // are often all named `main`, and must not resolve into one
+        // another. Falls back to file-stem when the package
         // declaration isn't present.
         let parsed = parse_with(PACK_NAME, file, ctx);
         let package_segment = parsed.as_ref().and_then(|(snapshot, tree)| {
-            extract_go_package(tree.root_node(), snapshot.text.as_bytes()).map(|name| vec![name])
+            extract_go_package(tree.root_node(), snapshot.text.as_bytes())
+                .map(|name| go_module_segments(file, ctx, &name))
         });
         if let Some(segments) = package_segment {
             bonsai_lang_api::apply_module_path_semantic_identity(&mut idx, segments);
@@ -138,6 +140,7 @@ impl LanguageAdapter for GoAdapter {
             let aliases_by_span = collect_go_method_type_aliases(&tree, file, src);
             let method_receivers_by_span = collect_go_method_receiver_types(&tree, file, src);
             let bases_by_span = collect_go_class_bases(&tree, file, src);
+            let range_assignments_by_span = collect_go_range_assignments_by_decl(&tree, file, src);
             let class_symbols: Vec<(String, SymbolId)> = idx
                 .defs
                 .iter()
@@ -168,6 +171,12 @@ impl LanguageAdapter for GoAdapter {
                 {
                     decl.bases = bases.clone();
                 }
+                if let Some(range_assignments) = range_assignments_by_span
+                    .iter()
+                    .find_map(|(span, assignments)| (*span == decl.span).then_some(assignments.as_slice()))
+                {
+                    augment_go_range_assignments(&mut decl.flow_events, range_assignments);
+                }
             }
         }
         // Append `FlowEvent::Lifecycle` for recognised Go
@@ -176,6 +185,7 @@ impl LanguageAdapter for GoAdapter {
         // `name = "Close"` and `args[0] = "f"`, so arg_index 0
         // points at the receiver text.
         for decl in &mut idx.defs {
+            augment_go_composite_literal_field_assignments(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, GO_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -184,6 +194,7 @@ impl LanguageAdapter for GoAdapter {
         // lookup against the method's `type_aliases` instead of a
         // per-call walk over sibling decls.
         bonsai_lang_api::apply_class_field_type_aliases(&mut idx);
+        apply_go_projected_receiver_aliases(&mut idx);
         idx
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
@@ -369,6 +380,241 @@ fn collect_go_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, V
     out
 }
 
+fn collect_go_range_assignments_by_decl(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<(Span, Vec<FlowEvent>)>)> {
+    let channel_returns = collect_go_channel_return_functions(tree, src);
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(tree, &["function_declaration", "method_declaration"]) {
+        let mut loop_assignments = Vec::new();
+        for for_stmt in collect_kinds_under(&fn_node, &["for_statement"]) {
+            let Some(range_clause) = direct_go_range_clause(for_stmt) else {
+                continue;
+            };
+            let assignments = go_range_clause_assignments(range_clause, file, src, &channel_returns);
+            if !assignments.is_empty() {
+                loop_assignments.push((span_of(file, &for_stmt), assignments));
+            }
+        }
+        if !loop_assignments.is_empty() {
+            out.push((span_of(file, &fn_node), loop_assignments));
+        }
+    }
+    out
+}
+
+fn collect_go_channel_return_functions(tree: &Tree, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(tree, &["function_declaration", "method_declaration"]) {
+        let Some(result) = fn_node.child_by_field_name("result") else {
+            continue;
+        };
+        if !go_type_text_is_channel(node_text(&result, src)) {
+            continue;
+        }
+        if let Some(name_node) = fn_node.child_by_field_name("name") {
+            push_unique_string(&mut out, node_text(&name_node, src).trim().to_string());
+        }
+    }
+    out
+}
+
+fn direct_go_range_clause(for_stmt: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = for_stmt.walk();
+    for child in for_stmt.named_children(&mut cursor) {
+        if child.kind() == "range_clause" {
+            return Some(child);
+        }
+    }
+    None
+}
+
+fn go_range_clause_assignments(
+    range_clause: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    channel_returns: &[String],
+) -> Vec<FlowEvent> {
+    let Some(left) = range_clause.child_by_field_name("left") else {
+        return Vec::new();
+    };
+    let Some(right) = range_clause.child_by_field_name("right") else {
+        return Vec::new();
+    };
+    let targets = direct_go_range_targets(left, src);
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let span = span_of(file, &range_clause);
+    let right_text = node_text(&right, src).trim();
+    let mut out = Vec::new();
+
+    if targets.len() >= 2 {
+        if let Some(target) = targets.get(1).filter(|target| target.as_str() != "_") {
+            out.push(go_range_value_assignment(span, target, right, right_text, src));
+        }
+        return out;
+    }
+
+    let target = &targets[0];
+    if target == "_" || !go_range_single_target_is_value(right, src, channel_returns) {
+        return Vec::new();
+    }
+    out.push(go_range_value_assignment(span, target, right, right_text, src));
+    out
+}
+
+fn direct_go_range_targets(left: Node<'_>, src: &[u8]) -> Vec<String> {
+    if left.kind() == "identifier" {
+        return vec![node_text(&left, src).trim().to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cursor = left.walk();
+    for child in left.named_children(&mut cursor) {
+        if child.kind() == "identifier" {
+            out.push(node_text(&child, src).trim().to_string());
+        }
+    }
+    out
+}
+
+fn go_range_value_assignment(
+    span: Span,
+    target: &str,
+    right: Node<'_>,
+    right_text: &str,
+    src: &[u8],
+) -> FlowEvent {
+    let call = go_call_expression_parts(right, src);
+    let source_call = call.as_ref().map(|(name, _)| name.clone());
+    let source_call_args = if source_call.is_some() {
+        call.map(|(_, args)| args).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let source_name = if source_call.is_none() {
+        go_bare_value_name(right_text)
+    } else {
+        None
+    };
+    let source_names = if source_call.is_none() {
+        go_range_value_source_names(right_text, source_name.as_deref())
+    } else {
+        Vec::new()
+    };
+    FlowEvent::Assign {
+        span,
+        target: target.to_string(),
+        source_name,
+        source_call,
+        source_call_args,
+        source_names,
+        declares_new_binding: true,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    }
+}
+
+fn go_range_single_target_is_value(right: Node<'_>, src: &[u8], channel_returns: &[String]) -> bool {
+    if right.kind() == "channel_type" || go_type_text_is_channel(node_text(&right, src)) {
+        return true;
+    }
+    if let Some((callee, _)) = go_call_expression_parts(right, src) {
+        return channel_returns.iter().any(|return_name| return_name == &callee);
+    }
+    false
+}
+
+fn go_call_expression_parts(node: Node<'_>, src: &[u8]) -> Option<(String, Vec<String>)> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+    let callee = node
+        .child_by_field_name("function")
+        .map(|function| node_text(&function, src).trim().to_string())
+        .filter(|name| !name.is_empty())?;
+    let args = node
+        .child_by_field_name("arguments")
+        .map(|arguments| {
+            let mut out = Vec::new();
+            let mut cursor = arguments.walk();
+            for child in arguments.named_children(&mut cursor) {
+                let text = node_text(&child, src).trim();
+                if !text.is_empty() {
+                    out.push(text.to_string());
+                }
+            }
+            out
+        })
+        .unwrap_or_default();
+    Some((callee, args))
+}
+
+fn go_range_value_source_names(right_text: &str, source_name: Option<&str>) -> Vec<String> {
+    let mut names = go_value_source_names(right_text);
+    if let Some(source_name) = source_name {
+        names.retain(|name| name != source_name);
+    }
+    names
+}
+
+fn go_type_text_is_channel(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("<-chan ")
+        || trimmed.starts_with("chan<- ")
+        || trimmed.starts_with("chan ")
+        || trimmed == "chan"
+}
+
+fn augment_go_range_assignments(events: &mut Vec<FlowEvent>, range_assignments: &[(Span, Vec<FlowEvent>)]) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_go_range_assignments(then_events, range_assignments);
+                augment_go_range_assignments(else_events, range_assignments);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_go_range_assignments(body, range_assignments);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_go_range_assignments(body, range_assignments);
+                augment_go_range_assignments(catch_events, range_assignments);
+                augment_go_range_assignments(finally_events, range_assignments);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        if let FlowEvent::Assign { span, .. } = &event {
+            if range_assignments.iter().any(|(loop_span, _)| loop_span == span) {
+                continue;
+            }
+        }
+        if let FlowEvent::Loop { span, .. } = &event {
+            if let Some(assignments) = range_assignments
+                .iter()
+                .find_map(|(loop_span, assignments)| (loop_span == span).then_some(assignments))
+            {
+                rewritten.extend(assignments.iter().cloned());
+            }
+        }
+        rewritten.push(event);
+    }
+    *events = rewritten;
+}
+
 fn collect_go_embedded_type_names(node: Node<'_>, src: &[u8], bases: &mut Vec<String>) {
     let mut stack = vec![node];
     while let Some(current) = stack.pop() {
@@ -414,6 +660,99 @@ fn collect_go_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<T
     }
 }
 
+fn apply_go_projected_receiver_aliases(idx: &mut DeclIndex) {
+    for decl in &mut idx.defs {
+        if decl.type_aliases.is_empty() {
+            continue;
+        }
+        let base_aliases = decl.type_aliases.clone();
+        let mut projected = Vec::new();
+        collect_go_projected_receiver_aliases(&decl.flow_events, &base_aliases, &mut projected);
+        for alias in projected {
+            if !decl.type_aliases.contains(&alias) {
+                decl.type_aliases.push(alias);
+            }
+        }
+    }
+}
+
+fn collect_go_projected_receiver_aliases(
+    events: &[FlowEvent],
+    base_aliases: &[TypeAliasBinding],
+    out: &mut Vec<TypeAliasBinding>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                receiver: Some(receiver),
+                ..
+            } => {
+                if let Some(root) = go_projected_receiver_root(receiver) {
+                    for alias in base_aliases.iter().filter(|alias| alias.name == root) {
+                        let projected = TypeAliasBinding {
+                            name: receiver.clone(),
+                            type_name: alias.type_name.clone(),
+                        };
+                        if !out.contains(&projected) {
+                            out.push(projected);
+                        }
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_go_projected_receiver_aliases(then_events, base_aliases, out);
+                collect_go_projected_receiver_aliases(else_events, base_aliases, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_go_projected_receiver_aliases(body, base_aliases, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_go_projected_receiver_aliases(body, base_aliases, out);
+                collect_go_projected_receiver_aliases(catch_events, base_aliases, out);
+                collect_go_projected_receiver_aliases(finally_events, base_aliases, out);
+            }
+            FlowEvent::Call { receiver: None, .. }
+            | FlowEvent::Assign { .. }
+            | FlowEvent::Return { .. }
+            | FlowEvent::Throw { .. }
+            | FlowEvent::Break { .. }
+            | FlowEvent::Continue { .. }
+            | FlowEvent::Yield { .. }
+            | FlowEvent::Await { .. }
+            | FlowEvent::Lifecycle { .. } => {}
+        }
+    }
+}
+
+fn go_projected_receiver_root(receiver: &str) -> Option<&str> {
+    if receiver.contains('(') || receiver.contains(')') {
+        return None;
+    }
+    let (root, rest) = receiver.split_once('.')?;
+    if !go_identifier_like(root) {
+        return None;
+    }
+    let first_projection = rest.split('.').next().unwrap_or(rest);
+    go_identifier_like(first_projection).then_some(root)
+}
+
+fn go_identifier_like(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 fn go_var_spec_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
     let type_start = node
         .child_by_field_name("type")
@@ -433,6 +772,324 @@ fn go_var_spec_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
         }
     }
     names
+}
+
+fn augment_go_composite_literal_field_assignments(events: &mut Vec<FlowEvent>) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_go_composite_literal_field_assignments(then_events);
+                augment_go_composite_literal_field_assignments(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_go_composite_literal_field_assignments(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_go_composite_literal_field_assignments(body);
+                augment_go_composite_literal_field_assignments(catch_events);
+                augment_go_composite_literal_field_assignments(finally_events);
+            }
+            _ => {}
+        }
+    }
+
+    let snapshot = events.clone();
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let mut synthetic = Vec::new();
+        let mut carrier_span = None;
+        if let FlowEvent::Assign { span, target, .. } = &event {
+            if !target.trim().is_empty() && !target.contains('.') {
+                carrier_span = Some(*span);
+                for candidate in &snapshot {
+                    let FlowEvent::Call {
+                        span: call_span,
+                        args,
+                        ..
+                    } = candidate
+                    else {
+                        continue;
+                    };
+                    if call_span.file != span.file || call_span.start < span.start || call_span.end > span.end
+                    {
+                        continue;
+                    }
+                    for arg in args {
+                        collect_go_composite_field_assignments(
+                            target,
+                            &arg.value_text,
+                            *span,
+                            &mut synthetic,
+                        );
+                    }
+                }
+            }
+        }
+        rewritten.push(event);
+        let Some(carrier_span) = carrier_span else {
+            continue;
+        };
+        let mut expanded = synthetic.clone();
+        for field_event in &synthetic {
+            let FlowEvent::Assign {
+                target: field_target,
+                source_name: Some(source_name),
+                ..
+            } = field_event
+            else {
+                continue;
+            };
+            let source_prefix = format!("{source_name}.");
+            for prior in &rewritten {
+                let FlowEvent::Assign {
+                    target: prior_target,
+                    source_name: prior_source_name,
+                    source_names: prior_source_names,
+                    ..
+                } = prior
+                else {
+                    continue;
+                };
+                let Some(tail) = prior_target.strip_prefix(&source_prefix) else {
+                    continue;
+                };
+                if tail.is_empty() {
+                    continue;
+                }
+                expanded.push(FlowEvent::Assign {
+                    span: carrier_span,
+                    target: format!("{field_target}.{tail}"),
+                    source_name: prior_source_name.clone(),
+                    source_call: None,
+                    source_call_args: Vec::new(),
+                    source_names: prior_source_names.clone(),
+                    declares_new_binding: false,
+                    value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+                });
+            }
+        }
+        for event in expanded {
+            if !rewritten
+                .iter()
+                .any(|existing| go_flow_event_same_assignment(existing, &event))
+            {
+                rewritten.push(event);
+            }
+        }
+    }
+    *events = rewritten;
+}
+
+fn go_flow_event_same_assignment(existing: &FlowEvent, candidate: &FlowEvent) -> bool {
+    matches!(
+        (existing, candidate),
+        (
+            FlowEvent::Assign {
+                span: existing_span,
+                target: existing_target,
+                source_names: existing_sources,
+                ..
+            },
+            FlowEvent::Assign {
+                span: candidate_span,
+                target: candidate_target,
+                source_names: candidate_sources,
+                ..
+            }
+        ) if existing_span == candidate_span
+            && existing_target == candidate_target
+            && existing_sources == candidate_sources
+    )
+}
+
+fn collect_go_composite_field_assignments(
+    base_target: &str,
+    field_expr: &str,
+    span: Span,
+    out: &mut Vec<FlowEvent>,
+) {
+    let Some((field, value)) = go_split_top_level_once(field_expr, ':') else {
+        return;
+    };
+    let field = field.trim();
+    if !go_identifier_like(field) {
+        return;
+    }
+    let value = value.trim();
+    let target = format!("{base_target}.{field}");
+    let source_names = go_value_source_names(value);
+    out.push(FlowEvent::Assign {
+        span,
+        target: target.clone(),
+        source_name: go_bare_value_name(value),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names,
+        declares_new_binding: false,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    });
+    for body in go_composite_literal_bodies(value) {
+        for part in go_split_top_level(&body, ',') {
+            collect_go_composite_field_assignments(&target, &part, span, out);
+        }
+    }
+}
+
+fn go_bare_value_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    go_identifier_like(value).then(|| value.to_string())
+}
+
+fn go_value_source_names(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in value.chars().chain(std::iter::once(' ')) {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            push_unique_string(&mut out, token.trim_matches('.').to_string());
+            token.clear();
+            quote = Some(ch);
+            continue;
+        }
+        if ch == '.' || ch == '_' || ch.is_ascii_alphanumeric() {
+            token.push(ch);
+            continue;
+        }
+        push_unique_string(&mut out, token.trim_matches('.').to_string());
+        token.clear();
+    }
+    out.retain(|name| !name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()));
+    out
+}
+
+fn go_composite_literal_bodies(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '{' => stack.push(idx),
+            '}' => {
+                if let Some(start) = stack.pop() {
+                    if start < idx {
+                        out.push(text[start + 1..idx].to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn go_split_top_level(text: &str, sep: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            c if c == sep && depth == 0 => {
+                let part = text[start..idx].trim();
+                if !part.is_empty() {
+                    parts.push(part.to_string());
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let part = text[start..].trim();
+    if !part.is_empty() {
+        parts.push(part.to_string());
+    }
+    parts
+}
+
+fn go_split_top_level_once(text: &str, sep: char) -> Option<(String, String)> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            c if c == sep && depth == 0 => {
+                return Some((
+                    text[..idx].trim().to_string(),
+                    text[idx + ch.len_utf8()..].trim().to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn first_go_composite_literal_type(node: Node<'_>, src: &[u8]) -> Option<String> {
@@ -646,4 +1303,29 @@ fn extract_go_package(root: Node<'_>, src: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+fn go_module_segments(file: FileId, ctx: &AdapterContext<'_>, package_name: &str) -> Vec<String> {
+    let mut segments: Vec<String> = ctx
+        .workspace_relative_path(file)
+        .and_then(|path| {
+            let parent = path.parent()?;
+            Some(
+                parent
+                    .components()
+                    .filter_map(|component| match component {
+                        std::path::Component::Normal(part) => {
+                            let text = part.to_string_lossy();
+                            (!text.is_empty()).then(|| text.into_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    if segments.last().is_none_or(|last| last != package_name) {
+        segments.push(package_name.to_string());
+    }
+    segments
 }

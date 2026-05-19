@@ -12,7 +12,8 @@ use bonsai_browse::Locator;
 use bonsai_common::{FuncId, SymbolId};
 use bonsai_security::rule::Severity;
 use bonsai_security::{
-    run_taint_analysis, Finding, FindingMatch, FindingStatus, Rulepack, TaintAnalysisOptions,
+    run_taint_analysis, CombinedFindingWithChain, Finding, FindingMatch, FindingStatus, Rulepack,
+    TaintAnalysisOptions,
 };
 use bonsai_workspace::Workspace;
 use serde::Serialize;
@@ -33,6 +34,8 @@ pub struct ReadFileOut {
     pub locator: Locator,
     pub lines_total: u32,
     pub indexed: IndexedStatus,
+    pub analysis_complete: bool,
+    pub analysis_incomplete_reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub finding_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -160,6 +163,8 @@ pub struct FindingDigest {
     pub tag: String,
     pub severity: Severity,
     pub status: FindingStatus,
+    pub analysis_complete: bool,
+    pub analysis_incomplete_reasons: Vec<String>,
     pub source: Locator,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_trust: Option<String>,
@@ -176,6 +181,20 @@ pub fn read_file(
     ws: &Workspace,
     rulepack: Option<&Rulepack>,
     filters: &ReadFileFilters<'_>,
+) -> anyhow::Result<ReadFileOut> {
+    read_file_with_taint_options(
+        ws,
+        rulepack,
+        filters,
+        semantic_read_file_taint_options(Default::default()),
+    )
+}
+
+fn read_file_with_taint_options(
+    ws: &Workspace,
+    rulepack: Option<&Rulepack>,
+    filters: &ReadFileFilters<'_>,
+    taint_options: TaintAnalysisOptions,
 ) -> anyhow::Result<ReadFileOut> {
     let path = filters.path;
     let file_id = ws
@@ -222,8 +241,9 @@ pub fn read_file(
         .collect::<Vec<_>>()
         .join("\n");
 
+    let taint_options = semantic_read_file_taint_options(taint_options);
     let report = match rulepack {
-        Some(pack) => run_taint_analysis(ws, pack, TaintAnalysisOptions::default()).ok(),
+        Some(pack) => Some(run_taint_analysis(ws, pack, taint_options)?),
         None => None,
     };
 
@@ -232,9 +252,13 @@ pub fn read_file(
     let mut marks: Vec<LineMark> = Vec::new();
     let mut flows_in_view: Vec<FlowEntryExit> = Vec::new();
     let mut findings_in_view: Vec<FindingDigest> = Vec::new();
+    let mut finding_incomplete_reasons: Vec<String> = Vec::new();
 
     if let Some(rep) = report.as_ref() {
         for cf in &rep.findings {
+            if !combined_finding_matches_filters(cf, filters.from, filters.to) {
+                continue;
+            }
             let f = &cf.finding;
             let in_source =
                 f.source.file == raw_path && f.source.line >= line_lo && f.source.line <= actual_hi;
@@ -242,6 +266,7 @@ pub fn read_file(
             if !in_source && !in_sink {
                 continue;
             }
+            finding_incomplete_reasons.extend(finding_analysis_incomplete_reasons(f));
             finding_ids.push(f.finding_id.clone());
             if let Some(fid) = &f.representative_flow_id {
                 flow_ids.push(fid.clone());
@@ -285,7 +310,10 @@ pub fn read_file(
     let mut callers_in: Vec<InlinedDecl> = Vec::new();
     let mut callees_out: Vec<InlinedDecl> = Vec::new();
     for func in &file_funcs {
-        for caller_edge in resolved.callers_of(*func) {
+        for caller_edge in resolved
+            .callers_of(*func)
+            .filter(|edge| edge.precision.is_semantic())
+        {
             let caller_loc = func_to_locator(caller_edge.from, ws);
             if caller_loc.file == raw_path {
                 continue;
@@ -300,7 +328,10 @@ pub fn read_file(
                 callees_out: Vec::new(),
             });
         }
-        for callee_edge in resolved.callees_of(*func) {
+        for callee_edge in resolved
+            .callees_of(*func)
+            .filter(|edge| edge.precision.is_semantic())
+        {
             let callee_loc = func_to_locator(callee_edge.to, ws);
             if callee_loc.file == raw_path {
                 continue;
@@ -319,7 +350,7 @@ pub fn read_file(
     dedupe_inlined_decls(&mut callers_in);
     dedupe_inlined_decls(&mut callees_out);
 
-    let max_bodies = filters.max_inlined_bodies.unwrap_or(8);
+    let max_bodies = effective_max_inlined_bodies(filters.max_inlined_bodies);
     let raw_callers = callers_in.len();
     let raw_callees = callees_out.len();
     callers_in.truncate(max_bodies);
@@ -328,12 +359,16 @@ pub fn read_file(
     // Body inlining: read the snapshot for the cross-file decl and
     // slice its body span. Best-effort; on failure we leave source
     // empty and the renderer falls back to header-only.
+    let mut bodies_dropped = 0usize;
     for decl in callers_in.iter_mut().chain(callees_out.iter_mut()) {
         if decl.locator.file == "external" {
+            bodies_dropped += 1;
             continue;
         }
         if let Some(text) = read_decl_body(&decl.locator, ws) {
             decl.source = text;
+        } else {
+            bodies_dropped += 1;
         }
     }
 
@@ -363,11 +398,24 @@ pub fn read_file(
         language,
         ..Locator::default()
     };
+    let truncated = ReadFileTruncation {
+        bodies_dropped,
+        marks_dropped: 0,
+        callers_dropped: raw_callers.saturating_sub(max_bodies),
+        callees_dropped: raw_callees.saturating_sub(max_bodies),
+    };
+    let mut analysis_incomplete_reasons = read_file_analysis_incomplete_reasons(&truncated);
+    analysis_incomplete_reasons.extend(finding_incomplete_reasons);
+    analysis_incomplete_reasons.sort();
+    analysis_incomplete_reasons.dedup();
+    let analysis_complete = analysis_incomplete_reasons.is_empty();
 
     Ok(ReadFileOut {
         locator: primary_locator,
         lines_total: total_lines,
         indexed: IndexedStatus::Complete,
+        analysis_complete,
+        analysis_incomplete_reasons,
         finding_ids,
         flow_ids,
         flows_in_view,
@@ -377,14 +425,143 @@ pub fn read_file(
         callers_in,
         callees_out,
         findings_in_view,
-        truncated: ReadFileTruncation {
-            bodies_dropped: 0,
-            marks_dropped: 0,
-            callers_dropped: raw_callers.saturating_sub(max_bodies),
-            callees_dropped: raw_callees.saturating_sub(max_bodies),
-        },
+        truncated,
         page_cursor: None,
     })
+}
+
+fn semantic_read_file_taint_options(options: TaintAnalysisOptions) -> TaintAnalysisOptions {
+    options.semantic_precision_only()
+}
+
+fn effective_max_inlined_bodies(max_inlined_bodies: Option<usize>) -> usize {
+    match max_inlined_bodies {
+        Some(0) => usize::MAX,
+        Some(limit) => limit,
+        None => 8,
+    }
+}
+
+fn read_file_analysis_incomplete_reasons(truncated: &ReadFileTruncation) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if truncated.callers_dropped > 0 || truncated.callees_dropped > 0 {
+        reasons.push(format!(
+            "inlined-bodies-truncated:callers_dropped={},callees_dropped={}",
+            truncated.callers_dropped, truncated.callees_dropped
+        ));
+    }
+    if truncated.bodies_dropped > 0 {
+        reasons.push(format!(
+            "inlined-bodies-unavailable:bodies_dropped={}",
+            truncated.bodies_dropped
+        ));
+    }
+    if truncated.marks_dropped > 0 {
+        reasons.push(format!(
+            "marks-truncated:marks_dropped={}",
+            truncated.marks_dropped
+        ));
+    }
+    reasons
+}
+
+fn finding_analysis_incomplete_reasons(finding: &Finding) -> Vec<String> {
+    if finding.analysis_complete {
+        return Vec::new();
+    }
+    if finding.analysis_incomplete_reasons.is_empty() {
+        return vec![format!("finding:{}:analysis-incomplete", finding.finding_id)];
+    }
+    finding
+        .analysis_incomplete_reasons
+        .iter()
+        .map(|reason| format!("finding:{}:{reason}", finding.finding_id))
+        .collect()
+}
+
+fn combined_finding_matches_filters(
+    finding: &CombinedFindingWithChain,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> bool {
+    from.is_none_or(|needle| finding_source_side_matches(finding, needle))
+        && to.is_none_or(|needle| finding_sink_side_matches(finding, needle))
+}
+
+fn finding_source_side_matches(finding: &CombinedFindingWithChain, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    match_site_matches_needle(&finding.finding.source, needle)
+        || finding
+            .additional_sources
+            .iter()
+            .any(|source| match_site_matches_needle(source, needle))
+        || finding
+            .finding
+            .chain_display
+            .first()
+            .is_some_and(|name| text_matches_needle(name, needle))
+        || finding
+            .finding
+            .taint_path
+            .iter()
+            .any(|step| text_matches_needle(&step.caller, needle))
+}
+
+fn finding_sink_side_matches(finding: &CombinedFindingWithChain, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    match_site_matches_needle(&finding.finding.sink, needle)
+        || finding
+            .additional_sinks
+            .iter()
+            .any(|sink| match_site_matches_needle(sink, needle))
+        || finding
+            .finding
+            .chain_display
+            .last()
+            .is_some_and(|name| text_matches_needle(name, needle))
+        || finding
+            .finding
+            .taint_path
+            .iter()
+            .any(|step| text_matches_needle(&step.callee, needle))
+}
+
+fn match_site_matches_needle(site: &FindingMatch, needle: &str) -> bool {
+    text_matches_needle(&site.rule_id, needle)
+        || text_matches_needle(&site.file, needle)
+        || text_matches_needle(&site.text, needle)
+        || site
+            .enclosing_fn
+            .as_deref()
+            .is_some_and(|value| text_matches_needle(value, needle))
+        || site
+            .tag
+            .as_deref()
+            .is_some_and(|value| text_matches_needle(value, needle))
+        || site
+            .category
+            .as_deref()
+            .is_some_and(|value| text_matches_needle(value, needle))
+        || site
+            .trust
+            .as_deref()
+            .is_some_and(|value| text_matches_needle(value, needle))
+        || site
+            .payload_types
+            .iter()
+            .any(|value| text_matches_needle(value, needle))
+        || site
+            .tainted_args
+            .iter()
+            .any(|arg| text_matches_needle(&arg.value_text, needle))
+}
+
+fn text_matches_needle(value: &str, needle: &str) -> bool {
+    value.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
 }
 
 fn dedupe_inlined_decls(decls: &mut Vec<InlinedDecl>) {
@@ -443,6 +620,8 @@ fn build_finding_digest(f: &Finding, file: &str, line_lo: u32, line_hi: u32) -> 
         tag: f.tag.clone().unwrap_or_default(),
         severity: f.severity.unwrap_or(Severity::Info),
         status: f.status,
+        analysis_complete: f.analysis_complete,
+        analysis_incomplete_reasons: f.analysis_incomplete_reasons.clone(),
         source: match_to_locator(&f.source),
         source_trust: f.source.trust.clone(),
         sink: match_to_locator(&f.sink),
@@ -469,6 +648,10 @@ fn func_to_locator(func: FuncId, ws: &Workspace) -> Locator {
     };
     Locator::from_span(decl.span, ws)
 }
+
+#[cfg(test)]
+#[path = "read_file_tests.rs"]
+mod tests;
 
 fn read_decl_body(loc: &Locator, ws: &Workspace) -> Option<String> {
     let global = ws.db().global_index();

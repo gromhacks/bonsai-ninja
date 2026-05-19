@@ -19,7 +19,7 @@ use crate::paging;
 use crate::progress;
 use crate::{cli_print, cli_println, ui};
 
-use super::{open_project_index_only as open_project, page_info_to_json};
+use super::{open_project_index_only as open_project, page_info_to_json, paged_json_incomplete_reasons};
 
 pub(crate) fn cmd_trace(
     root: &std::path::Path,
@@ -85,7 +85,19 @@ pub(crate) fn cmd_trace(
                     filters_hash,
                     trace_path_cost,
                     |slice, info, _cfg| {
+                        let mut analysis_incomplete_reasons =
+                            trace.summary.analysis_incomplete_reasons.clone();
+                        analysis_incomplete_reasons.extend(trace.summary.truncation_reasons.iter().cloned());
+                        if !trace.summary.analysis_complete && analysis_incomplete_reasons.is_empty() {
+                            analysis_incomplete_reasons
+                                .push("trace analysis incomplete: unknown reason".to_string());
+                        }
+                        analysis_incomplete_reasons.extend(paged_json_incomplete_reasons("trace", info));
+                        analysis_incomplete_reasons.sort();
+                        analysis_incomplete_reasons.dedup();
                         let wrapped = serde_json::json!({
+                            "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                            "analysis_incomplete_reasons": analysis_incomplete_reasons,
                             "summary": &trace.summary,
                             "paths": slice,
                             "page": page_info_to_json(info),
@@ -155,7 +167,7 @@ fn trace_path_cost(p: &PathSummary) -> u64 {
 /// CLI-themed text rendering for `trace`. Indents by call depth so the
 /// reader sees the call tree shape, prints workspace-relative paths, and
 /// uses the same `▸ flow` / `[module]` / source-snippet conventions as
-/// `inspect`. Closes with a precision-class summary.
+/// `inspect`. Closes with a semantic precision summary.
 ///
 /// `to_text` (in `bonsai_sdk::trace_render`) is still available for SDK
 /// consumers that want a plain transcript without ANSI; this CLI path
@@ -202,6 +214,22 @@ fn trace_text_lines(
             ui.warn(&trace.summary.truncated_paths.to_string()),
         ));
     }
+    if !trace.summary.analysis_complete {
+        let mut reasons = trace.summary.truncation_reasons.clone();
+        reasons.extend(trace.summary.analysis_incomplete_reasons.iter().cloned());
+        reasons.sort();
+        reasons.dedup();
+        let reasons = if reasons.is_empty() {
+            "unknown".to_string()
+        } else {
+            reasons.join(", ")
+        };
+        lines.push(format!(
+            "  {} {}",
+            ui.label("analysis incomplete"),
+            ui.warn(&reasons),
+        ));
+    }
     let ws_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
@@ -227,8 +255,15 @@ fn trace_text_lines(
                 depth -= 1;
             }
             let indent = "  ".repeat(depth + 1);
-            let kind_tag = format!("[{}]", short_step_kind(step.kind));
-            let label = step_label(step);
+            let (kind, label) = if step.precision.is_semantic() {
+                (step.kind, step_label(step))
+            } else {
+                (
+                    K::Diagnostic,
+                    "Suppressed diagnostic-precision trace step".to_string(),
+                )
+            };
+            let kind_tag = format!("[{}]", short_step_kind(kind));
             lines.push(format!(
                 "{}{} {}  {}",
                 indent,
@@ -257,14 +292,20 @@ fn trace_text_lines(
 
     let summary = summarize_precision(trace);
     lines.push(String::new());
-    lines.push(format!(
-        "{}  exact={}  narrowed={}  over-approx={}  unknown={}",
+    let non_semantic = summary.over_approximate.saturating_add(summary.unknown);
+    let mut tally = format!(
+        "{}  exact={}  narrowed={}",
         ui.label("precision tally"),
         ui.name(&summary.exact.to_string()),
         ui.name(&summary.narrowed.to_string()),
-        ui.name(&summary.over_approximate.to_string()),
-        ui.name(&summary.unknown.to_string()),
-    ));
+    );
+    if non_semantic > 0 {
+        tally.push_str(&format!(
+            "  diagnostic-precision-suppressed={}",
+            ui.warn(&non_semantic.to_string())
+        ));
+    }
+    lines.push(tally);
     lines.push(String::new());
     lines
 }
@@ -376,7 +417,7 @@ fn ambiguous_symbol_error(symbol: &str, count: usize, candidates: &[String]) -> 
         .join("\n  ");
     anyhow::anyhow!(
         "trace: symbol `{symbol}` is ambiguous ({count} callable decls). \
-         Use a more-qualified name.\n  {preview}"
+         Use path:name or path:line:name.\n  {preview}"
     )
 }
 
@@ -502,41 +543,5 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::load_trace_taint_graph;
-    use bonsai_sdk::Workspace;
-    use std::sync::Arc;
-
-    fn python_workspace(source: &str) -> Workspace {
-        let ws = Workspace::new(bonsai_adapters::all_languages_registry());
-        ws.vfs().write("fixture.py".to_string(), Arc::<str>::from(source));
-        for file in ws.vfs().all_files() {
-            let _ = ws.db().decl_index(file);
-        }
-        ws
-    }
-
-    #[test]
-    fn trace_preload_populates_seed_taint_graph() {
-        let ws = python_workspace(
-            r"
-def sink(payload):
-    os.system(payload)
-
-def entry(user_input):
-    sink(user_input)
-",
-        );
-        let before = ws.dataflow().pending_count(ws.db());
-        assert!(before >= 2, "fixture should expose at least two callables");
-
-        load_trace_taint_graph(&ws, Some("entry"));
-
-        let after = ws.dataflow().pending_count(ws.db());
-        assert_eq!(
-            after + 1,
-            before,
-            "trace must load the indexed taint graph for the trace seed"
-        );
-    }
-}
+#[path = "trace_tests.rs"]
+mod tests;

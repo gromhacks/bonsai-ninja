@@ -59,6 +59,10 @@ mod pseudo_call;
 mod qualified;
 mod return_extraction;
 
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
+
 pub use identifiers::{
     first_identifier_descendant, first_identifier_like_child, first_named_child, first_named_child_of_kind,
     looks_like_bare_identifier, looks_like_identifier,
@@ -2274,7 +2278,6 @@ fn build_call_event(
     // runs into single spaces so a multi-line method chain renders as
     //   `Command::new("sh") .arg("-c") .arg(&full_cmd) .output`.
     let name = normalize_call_name_whitespace(&full_text);
-    let _ = short;
 
     let mut args = Vec::new();
     // Find the argument-list child. Grammars disagree on the field name
@@ -2503,7 +2506,19 @@ fn extract_rhs_expr_operands(node: &Node<'_>, src: &[u8]) -> Vec<String> {
         out.extend(call_receiver_source_names(&n, src));
         // Avoid descending into nested CALL sites — those are handled
         // separately by `extract_direct_call_info` on the outer call.
+        // Constructor-style initializers can wrap a value-bearing call inside
+        // an argument-list RHS (`Repo repo(std::move(env))`). Keep the nested
+        // call's argument operands while still skipping the callee name.
         if COMMON_CALL_KINDS.contains(&n.kind()) && n.id() != node.id() {
+            if let Some(args_node) = n
+                .child_by_field_name("arguments")
+                .or_else(|| n.child_by_field_name("argument_list"))
+            {
+                let mut arg_cursor = args_node.walk();
+                for arg in args_node.named_children(&mut arg_cursor) {
+                    out.extend(extract_rhs_expr_operands(&arg, src));
+                }
+            }
             continue;
         }
         if MEMBER_EXPR_KINDS.contains(&n.kind()) {
@@ -2702,6 +2717,7 @@ fn operand_occurs_in_value_bearing_text(text: &str, operand: &str) -> bool {
         return false;
     }
     contains_identifier_operand(text, operand)
+        || contains_identifier_operand(&normalise_qualified_text(text), operand)
         || operand.trim_start_matches(['$', '@', '%']).ne(operand)
             && contains_identifier_operand(text, operand.trim_start_matches(['$', '@', '%']))
 }
@@ -2909,6 +2925,57 @@ fn qualified_accesses_from_text(text: &str) -> Vec<String> {
                 } else {
                     field_end
                 };
+                continue;
+            }
+            // Static subscript access — Python/JS/Ruby style. Treat
+            // string/symbol identifier keys as field projections:
+            // `env["cmd"]` / `env['cmd']` / `params[:token]` →
+            // `env.cmd` / `params.token`. Dynamic indexes are not
+            // field-precise and intentionally stop extension here.
+            if byte_idx < bytes.len() && bytes[byte_idx] == b'[' {
+                let mut cursor = byte_idx + 1;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor >= bytes.len() {
+                    break;
+                }
+                let mut symbol_key = false;
+                if bytes[cursor] == b':' {
+                    symbol_key = true;
+                    cursor += 1;
+                }
+                let quote = bytes.get(cursor).copied().filter(|b| matches!(b, b'\'' | b'"'));
+                if quote.is_some() {
+                    cursor += 1;
+                }
+                let field_start = cursor;
+                if field_start >= bytes.len() || !is_ident_start_byte(bytes[field_start]) {
+                    break;
+                }
+                cursor += 1;
+                while cursor < bytes.len() && is_ident_continue_byte(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let field_end = cursor;
+                if let Some(q) = quote {
+                    if cursor >= bytes.len() || bytes[cursor] != q {
+                        break;
+                    }
+                    cursor += 1;
+                } else if !symbol_key {
+                    break;
+                }
+                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if cursor >= bytes.len() || bytes[cursor] != b']' {
+                    break;
+                }
+                accumulated.push('.');
+                accumulated.push_str(&text[field_start..field_end]);
+                at_least_one_field_seen = true;
+                byte_idx = cursor + 1;
                 continue;
             }
             break;
@@ -4772,10 +4839,42 @@ fn normalised_place_base(place: &str) -> Option<String> {
 }
 
 fn call_receiver_from_name(name: &str) -> Option<String> {
+    if let Some(receiver) = rust_value_receiver_from_scoped_name(name) {
+        return Some(receiver);
+    }
     let normalised = normalise_qualified_text(&name.replace("->", "."));
     let (receiver, _) = normalised.rsplit_once('.')?;
     let receiver = receiver.trim();
     (!receiver.is_empty()).then(|| receiver.to_string())
+}
+
+fn rust_value_receiver_from_scoped_name(name: &str) -> Option<String> {
+    let (head, tail) = name.split_once("::")?;
+    if tail.contains("::") {
+        return None;
+    }
+    let head = head.trim();
+    let tail = tail.trim();
+    if head.is_empty() || tail.is_empty() {
+        return None;
+    }
+    let mut chars = head.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_lowercase()) {
+        return None;
+    }
+    if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let mut tail_chars = tail.chars();
+    let tail_first = tail_chars.next()?;
+    if !(tail_first == '_' || tail_first.is_ascii_lowercase()) {
+        return None;
+    }
+    if !tail_chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(head.to_string())
 }
 
 /// One row in a language's lifecycle-transition table.
@@ -5782,6 +5881,13 @@ pub enum AliasTarget {
     Type { type_name: String },
 }
 
+/// Synthetic alias-map key prefix for unprefixed wildcard imports.
+///
+/// Languages such as Dart and Python can import another module's public
+/// symbols directly into the local lexical scope. The resolver still keeps
+/// those lookups semantic by constraining matches to the imported module.
+pub const WILDCARD_IMPORT_ALIAS_PREFIX: &str = "__bonsai_wildcard_import__:";
+
 /// Build the canonical `local_name -> AliasTarget` map directly from
 /// an [`crate::ImportIndex`]. This is the ONE alias-resolution entry
 /// point — every consumer (resolver, security matcher, chain-filter
@@ -6016,7 +6122,10 @@ pub fn alias_map_from_import_specs(
         if spec.is_wildcard {
             // `import * as ns from "x"` / Python `from x import *`.
             // Namespace-bound if there's an alias; wildcard imports
-            // without an alias don't name a binding we can expand.
+            // without an alias import the module's public symbols
+            // unqualified; encode them under a synthetic key so
+            // resolvers can constrain bare lookups to this module
+            // without falling back to workspace-wide name matching.
             if let Some(alias) = spec.alias.clone() {
                 if !alias.is_empty() {
                     map.insert(
@@ -6026,6 +6135,13 @@ pub fn alias_map_from_import_specs(
                         },
                     );
                 }
+            } else if !spec.module.is_empty() {
+                map.insert(
+                    format!("{WILDCARD_IMPORT_ALIAS_PREFIX}{}", spec.module),
+                    AliasTarget::Namespace {
+                        module: spec.module.clone(),
+                    },
+                );
             }
             continue;
         }
@@ -6064,14 +6180,103 @@ pub fn alias_map_from_import_specs(
                     },
                 );
             }
-            // Module-only import with no local name — `import "x"`
-            // (side-effect) / `require("x")` without binding. No
-            // alias entry; the module's short tail stays matchable
-            // via the identifier path only.
+            // Unaliased module import. Derive a local module binding
+            // from the module path so qualified calls are gated by
+            // semantic alias-target resolution instead of bare-tail
+            // lookup. Side-effect-only imports that do not actually
+            // bind this name become harmless unresolved alias heads.
+            (None, None) => {
+                if let Some(local) = module_local_binding(&spec.module) {
+                    map.entry(local).or_insert_with(|| AliasTarget::Namespace {
+                        module: spec.module.clone(),
+                    });
+                }
+            }
             _ => {}
         }
     }
     map
+}
+
+fn module_local_binding(module: &str) -> Option<String> {
+    let trimmed = module
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
+        .trim_end_matches(['/', '\\'])
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path_like = trimmed.contains('/') || trimmed.contains('\\') || trimmed.starts_with('.');
+    let mut candidate = if path_like {
+        trimmed
+            .rsplit(['/', '\\'])
+            .next()
+            .and_then(strip_known_import_extension)
+            .or_else(|| trimmed.rsplit(['/', '\\']).next())
+            .unwrap_or(trimmed)
+    } else if let Some(stem) = strip_known_import_extension(trimmed) {
+        stem.rsplit(['.', ':']).next().unwrap_or(stem)
+    } else if let Some((_, tail)) = trimmed.rsplit_once("::") {
+        tail
+    } else if let Some((_, tail)) = trimmed.rsplit_once(':') {
+        tail
+    } else if let Some((_, tail)) = trimmed.rsplit_once('.') {
+        tail
+    } else {
+        trimmed
+    };
+    candidate = candidate.trim();
+    let mut chars = candidate.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+fn strip_known_import_extension(module: &str) -> Option<&str> {
+    let (stem, ext) = module.rsplit_once('.')?;
+    let ext = ext.trim();
+    if matches!(
+        ext,
+        "c" | "cc"
+            | "cpp"
+            | "cs"
+            | "cxx"
+            | "dart"
+            | "erl"
+            | "ex"
+            | "exs"
+            | "h"
+            | "hh"
+            | "hpp"
+            | "hrl"
+            | "java"
+            | "js"
+            | "kt"
+            | "kts"
+            | "lua"
+            | "m"
+            | "mm"
+            | "php"
+            | "pl"
+            | "pm"
+            | "py"
+            | "rb"
+            | "rs"
+            | "scala"
+            | "sol"
+            | "swift"
+            | "ts"
+    ) {
+        Some(stem)
+    } else {
+        None
+    }
 }
 
 // --- attribute-chain / subscript ref emission -------------------------------
@@ -7161,7 +7366,7 @@ fn erlang_remote_args_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
     call.child_by_field_name("args")
 }
 
-/// Apply file-stem-based qualified_name and module_path to every
+/// Apply file-path-based qualified_name and module_path to every
 /// Decl in `idx` that hasn't already had them populated. This is
 /// the simple form of the semantic-identity contract for languages
 /// without a real module / namespace boundary (C, C++ outside named
@@ -7172,29 +7377,49 @@ fn erlang_remote_args_node<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
 /// Go packages, Python modules) should compute qualified_name and
 /// module_path from real syntax instead of calling this helper.
 pub fn apply_file_stem_semantic_identity(idx: &mut crate::DeclIndex, ctx: &AdapterContext<'_>) {
-    // Prefer the workspace-relative path's stem so two files with
-    // the same basename in different directories don't collide.
-    // Fall back to the absolute path's stem for adapters running
-    // without a workspace root.
-    let path = ctx
-        .workspace_relative_path(idx.file)
-        .or_else(|| ctx.vfs.path(idx.file).ok().map(|p| (*p).clone()));
-    let stem = path
-        .as_ref()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_default();
-    if stem.is_empty() {
+    // Prefer the full workspace-relative path (extension stripped)
+    // so `a/executor.c` and `b/executor.c` remain different
+    // semantic modules. Fall back to the absolute path for adapter
+    // unit tests that do not provide a workspace root.
+    let Some(module_segments) = file_module_segments(idx.file, ctx) else {
         return;
-    }
-    let module_path = crate::ModulePath::from_segments([stem.clone()]);
+    };
+    let module_path = crate::ModulePath::from_segments(module_segments.iter().cloned());
+    let prefix = module_segments.join("::");
     for decl in &mut idx.defs {
         if decl.qualified_name.is_none() {
-            decl.qualified_name = Some(format!("{stem}::{}", decl.name));
+            decl.qualified_name = Some(format!("{prefix}::{}", decl.name));
         }
         if decl.module_path.is_empty() {
             decl.module_path = module_path.clone();
         }
     }
+}
+
+fn file_module_segments(file: FileId, ctx: &AdapterContext<'_>) -> Option<Vec<String>> {
+    let path = ctx
+        .workspace_relative_path(file)
+        .or_else(|| ctx.vfs.path(file).ok().map(|p| (*p).clone()))?;
+    let mut segments = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(part) = component else {
+            continue;
+        };
+        let text = part.to_string_lossy();
+        if text.is_empty() {
+            continue;
+        }
+        segments.push(text.into_owned());
+    }
+    let last = segments.last_mut()?;
+    let stripped = strip_extension(last);
+    *last = stripped.to_string();
+    segments.retain(|segment| !segment.is_empty());
+    (!segments.is_empty()).then_some(segments)
+}
+
+fn strip_extension(part: &str) -> &str {
+    part.rsplit_once('.').map_or(part, |(stem, _)| stem)
 }
 
 /// Apply dotted-segment qualified_name and module_path to every
@@ -7319,6 +7544,142 @@ pub fn apply_assign_value_kind(idx: &mut crate::DeclIndex) {
     for decl in &mut idx.defs {
         classify_assign_value_kinds(&mut decl.flow_events);
     }
+}
+
+/// Emit exact local callable-alias facts for C-family function-pointer
+/// declarations such as `void (*cb)(char*) = helper;`.
+///
+/// The generic assignment walker must stay conservative because
+/// declaration nodes often include type/declarator identifiers in
+/// `source_names`. Here the CST proves the LHS is a function-pointer
+/// declarator and the RHS is a bare identifier, so the alias fact is a
+/// precise callable binding rather than a name-only fallback.
+pub fn inject_c_family_function_pointer_aliases(
+    idx: &mut crate::DeclIndex,
+    tree: &tree_sitter::Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let aliases = collect_kinds(tree, &["init_declarator"])
+        .into_iter()
+        .filter_map(|node| c_family_function_pointer_alias(&node, src, file))
+        .collect::<Vec<_>>();
+    if aliases.is_empty() {
+        return;
+    }
+
+    for (span, target, source) in aliases {
+        for decl in &mut idx.defs {
+            let owner_span = decl.body_span.unwrap_or(decl.span);
+            if !span_contains(owner_span, span) && !span_contains(decl.span, span) {
+                continue;
+            }
+            if flow_events_contain_callable_alias(&decl.flow_events, span, &target, &source) {
+                break;
+            }
+            decl.flow_events.push(FlowEvent::Assign {
+                span,
+                target,
+                source_name: Some(source),
+                source_call: None,
+                source_call_args: Vec::new(),
+                source_names: Vec::new(),
+                declares_new_binding: true,
+                value_kind: Some(crate::AssignValueKind::Compound),
+            });
+            break;
+        }
+    }
+}
+
+fn c_family_function_pointer_alias(
+    node: &Node<'_>,
+    src: &[u8],
+    file: FileId,
+) -> Option<(Span, String, String)> {
+    let declarator = node.child_by_field_name("declarator")?;
+    if !c_family_declarator_is_function_pointer(&declarator) {
+        return None;
+    }
+    let target = first_identifier_descendant(declarator)
+        .map(|n| node_text(&n, src).trim().to_string())
+        .filter(|name| !name.is_empty())?;
+    let value = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("right"))?;
+    let source = node_text(&value, src).trim().to_string();
+    if !looks_like_bare_identifier(&source) || same_identifier_name(&target, &source) {
+        return None;
+    }
+    Some((span_of(file, node), target, source))
+}
+
+fn c_family_declarator_is_function_pointer(node: &Node<'_>) -> bool {
+    if node.kind() == "function_declarator" && subtree_has_kind(node, "pointer_declarator") {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| c_family_declarator_is_function_pointer(&child));
+    found
+}
+
+fn subtree_has_kind(node: &Node<'_>, kind: &str) -> bool {
+    if node.kind() == kind {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| subtree_has_kind(&child, kind));
+    found
+}
+
+fn flow_events_contain_callable_alias(events: &[FlowEvent], span: Span, target: &str, source: &str) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Assign {
+            span: existing_span,
+            target: existing_target,
+            source_name: Some(existing_source),
+            source_call,
+            source_names,
+            value_kind,
+            ..
+        } => {
+            *existing_span == span
+                && existing_target == target
+                && existing_source == source
+                && source_call.is_none()
+                && source_names.is_empty()
+                && !matches!(
+                    value_kind,
+                    Some(crate::AssignValueKind::Literal | crate::AssignValueKind::CallResult)
+                )
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            flow_events_contain_callable_alias(then_events, span, target, source)
+                || flow_events_contain_callable_alias(else_events, span, target, source)
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            flow_events_contain_callable_alias(body, span, target, source)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            flow_events_contain_callable_alias(body, span, target, source)
+                || flow_events_contain_callable_alias(catch_events, span, target, source)
+                || flow_events_contain_callable_alias(finally_events, span, target, source)
+        }
+        _ => false,
+    })
 }
 
 /// Populate `Decl.return_type` for function-shaped decls by reading
@@ -7709,7 +8070,6 @@ fn receiver_types_for_expr(
 ) -> Vec<String> {
     let normalized = normalize_receiver_type_expr(receiver);
     let tail = short_name_of(&normalized);
-    let root = receiver_root_name(&normalized);
     let mut out = Vec::new();
     if let Some(projected_type) = receiver_projected_type_name(&normalized, class_facts) {
         push_receiver_type_and_bases(&mut out, projected_type, class_facts);
@@ -7719,7 +8079,12 @@ fn receiver_types_for_expr(
         push_receiver_type_and_bases(&mut out, type_name, class_facts);
     }
     for alias in aliases {
-        if alias.name == normalized || alias.name == tail || root.as_deref() == Some(alias.name.as_str()) {
+        if alias.name == normalized || alias.name == tail {
+            push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
+        }
+    }
+    for alias in aliases {
+        if receiver_projected_alias_matches(&normalized, &alias.name) {
             push_receiver_type_and_bases(&mut out, alias.type_name.clone(), class_facts);
         }
     }
@@ -7737,6 +8102,22 @@ fn receiver_types_for_expr(
         }
     }
     out
+}
+
+fn receiver_projected_alias_matches(receiver: &str, alias_name: &str) -> bool {
+    let receiver = receiver.trim();
+    let alias_name = alias_name.trim();
+    if receiver.is_empty() || alias_name.is_empty() || receiver == alias_name {
+        return false;
+    }
+    let Some(tail) = receiver.strip_prefix(alias_name) else {
+        return false;
+    };
+    let Some(rest) = tail.strip_prefix('.') else {
+        return false;
+    };
+    let projection = rest.split('.').next().unwrap_or(rest);
+    !projection.is_empty() && projection.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn receiver_projected_type_name(receiver: &str, class_facts: &ClassFactsIndex<'_>) -> Option<String> {
@@ -7783,19 +8164,6 @@ fn push_receiver_type_and_bases_inner(
     for base in bases {
         push_receiver_type_and_bases_inner(out, base.clone(), class_facts, seen);
     }
-}
-
-fn receiver_root_name(receiver: &str) -> Option<String> {
-    let receiver = receiver.trim().trim_start_matches(['&', '*', '$', '@', '%']);
-    let root = receiver
-        .split(['.', ':', '\\', '[', '('])
-        .next()
-        .unwrap_or(receiver)
-        .trim();
-    if root.is_empty() || root == receiver {
-        return None;
-    }
-    Some(root.to_string())
 }
 
 fn receiver_type_from_constructor_expr(receiver: &str) -> Option<String> {

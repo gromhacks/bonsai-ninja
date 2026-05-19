@@ -181,6 +181,7 @@
   enabled: true
   language: php
   tag: auth-bypass
+  category: source-independent
   severity: medium
   cwe:
   - CWE-287

@@ -93,6 +93,7 @@
   enabled: true
   language: c
   tag: xxe
+  category: source-independent
   severity: high
   packages: [expat]
   cwe: [CWE-611]
@@ -115,6 +116,7 @@
   enabled: true
   language: c
   tag: xxe
+  category: source-independent
   severity: high
   packages: [expat]
   cwe: [CWE-611]

@@ -8,12 +8,20 @@
   match:
     kind: write
     target:
-      name: innerHtml
+      regex: ^[^\.\s]+\.innerHtml$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: 'void test() { var input = "x"; var amount = 1; innerHtml = input; }
+  - name: element innerhtml member write
+    code: 'void test(el, input) { el.innerHtml = input; }
 
       '
+  - name: local innerhtml variable negative
+    code: 'void test(input) { var innerHtml = input; }
+
+      '
+    expect_no_match: true
   description: dart:html element.innerHtml = tainted.
 - id: dart.xss.set_innerhtml
   enabled: true
@@ -77,12 +85,20 @@
   match:
     kind: write
     target:
-      name: srcdoc
+      regex: ^[^\.\s]+\.srcdoc$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: 'void test() { var input = "x"; var amount = 1; srcdoc = input; }
+  - name: iframe srcdoc member write
+    code: 'void test(frame, input) { frame.srcdoc = input; }
 
       '
+  - name: local srcdoc variable negative
+    code: 'void test(input) { var srcdoc = input; }
+
+      '
+    expect_no_match: true
   description: iframe.srcdoc = tainted.
 - id: dart.xss.flutter_html_widget
   enabled: false

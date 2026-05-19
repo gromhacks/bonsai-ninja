@@ -21,7 +21,9 @@ pub(crate) mod query;
 mod chain_cache_tests;
 
 pub use cache::BoundedCache;
-pub use call_edges::{find_call_span_by_name, find_call_span_to_func_uncached, CallEdgeResolver};
+pub use call_edges::{
+    find_call_span_by_name, find_call_span_to_func_uncached, CallEdgeResolver, CallPathTruncation,
+};
 pub use chain_cache::{find_enclosing_func, ChainCache};
 pub use chains::{downstream_funcs_set, enumerate_chains_resolved, ChainTruncation, ResolvedChain};
 pub use filter::{chain_matches_filters, name_token_match, FactKindFilter, InspectFilters, PrecisionFilter};

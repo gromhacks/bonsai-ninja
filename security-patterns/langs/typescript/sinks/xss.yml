@@ -8,10 +8,15 @@
   match:
     kind: write
     target:
-      name: innerHTML
+      regex: ^[^\.\s]+\.innerHTML$
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: innerhtml
-    code: "function demo(input, req, obj) {\n  innerHTML = input; return innerHTML;\n}\n"
+    code: "function demo(input, req, obj) {\n  obj.innerHTML = input; return obj.innerHTML;\n}\n"
+  - name: local innerhtml variable negative
+    code: "function demo(input) {\n  const innerHTML = input; return innerHTML;\n}\n"
+    expect_no_match: true
   description: Element.innerHTML = tainted.
 - id: typescript.xss.outerhtml
   enabled: true
@@ -23,10 +28,15 @@
   match:
     kind: write
     target:
-      name: outerHTML
+      regex: ^[^\.\s]+\.outerHTML$
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: outerhtml
-    code: "function demo(input, req, obj) {\n  outerHTML = input; return outerHTML;\n}\n"
+    code: "function demo(input, req, obj) {\n  obj.outerHTML = input; return obj.outerHTML;\n}\n"
+  - name: local outerhtml variable negative
+    code: "function demo(input) {\n  const outerHTML = input; return outerHTML;\n}\n"
+    expect_no_match: true
   description: Element.outerHTML = tainted.
 - id: typescript.xss.insertadjacenthtml
   enabled: false
@@ -161,14 +171,23 @@
   match:
     kind: write
     target:
-      name: dangerouslySetInnerHTML
+      regex: ^[^\.\s]+\.dangerouslySetInnerHTML$
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: dangerously set inner html
     code: |
       const _u = require("react");
       function demo(input, req, obj) {
-        dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;
+        obj.dangerouslySetInnerHTML = input; return obj.dangerouslySetInnerHTML;
       }
+  - name: local dangerously set inner html negative
+    code: |
+      const _u = require("react");
+      function demo(input) {
+        const dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;
+      }
+    expect_no_match: true
   description: "React/Solid dangerouslySetInnerHTML — renders raw HTML."
 - id: typescript.xss.vue_v_html
   enabled: false
@@ -395,6 +414,7 @@
   enabled: true
   language: typescript
   tag: xss
+  category: source-independent
   severity: medium
   packages:
   - angular
@@ -546,10 +566,15 @@
   match:
     kind: write
     target:
-      name: srcdoc
+      regex: ^[^\.\s]+\.srcdoc$
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: iframe srcdoc
-    code: "function demo(input, req, obj) {\n  srcdoc = input; return srcdoc;\n}\n"
+    code: "function demo(input, req, obj) {\n  obj.srcdoc = input; return obj.srcdoc;\n}\n"
+  - name: local srcdoc variable negative
+    code: "function demo(input) {\n  const srcdoc = input; return srcdoc;\n}\n"
+    expect_no_match: true
   description: iframe.srcdoc = tainted HTML.
 - id: typescript.xss.range_createcontextualfragment
   enabled: true
@@ -647,6 +672,8 @@
     kind: write
     target:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.body$
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: koa ctx body doctype concat
     code: |
@@ -664,4 +691,12 @@
       }
     expect_match_text:
     - ctx.body
+  - name: koa ctx body literal html negative
+    code: |
+      const _u = require("koa");
+      function demo(ctx: any) {
+        const body = "<!doctype html><p>safe</p>";
+        return body;
+      }
+    expect_no_match: true
   description: "Koa ctx.body = concatenated/template HTML — raw response body can reflect attacker-controlled markup."

@@ -323,6 +323,21 @@ fn class_name_routes_to_constructor_for_lookup() {
     );
 }
 
+#[test]
+fn class_name_lookup_rejects_duplicate_constructor_candidates() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_python::PythonAdapter::new()),
+        &[(
+            "/w/a.py",
+            "class Widget:\n    def __init__(self):\n        pass\n    def __init__(self, x):\n        self.x = x\n",
+        )],
+    );
+    assert!(
+        ws.lookup_function("Widget").is_none(),
+        "class-name constructor routing must not choose one duplicate/overloaded constructor arbitrarily"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Params are captured for callback resolution
 // ---------------------------------------------------------------------------
@@ -343,6 +358,29 @@ fn params_captured_for_higher_order_resolution() {
         .find_map(|s| global.decl_of(*s).cloned())
         .expect("driver found");
     assert_eq!(driver.params, vec!["cb".to_string()], "params captured");
+}
+
+#[test]
+fn go_repeated_parameter_names_share_type_but_not_slot() {
+    let ws = ws_with(
+        Arc::new(bonsai_lang_go::GoAdapter::new()),
+        &[(
+            "/w/a.go",
+            "package main\nfunc makeJoiner() func(string, string) string { return func(acc, tok string) string { return tok } }\n",
+        )],
+    );
+    let global = ws.db().global_index();
+    let lambda = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name.starts_with("<lambda@"))
+        .cloned()
+        .expect("go function literal should be indexed");
+    assert_eq!(
+        lambda.params,
+        vec!["acc".to_string(), "tok".to_string()],
+        "Go grouped params `acc, tok string` must produce one slot per name"
+    );
 }
 
 // ---------------------------------------------------------------------------

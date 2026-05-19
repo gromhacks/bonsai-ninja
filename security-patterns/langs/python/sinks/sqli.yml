@@ -124,6 +124,42 @@
     expect_no_match: true
   description: "Connection.execute — sqlite3/asyncpg/aiosqlite typed connection receivers. DB-API exempt from SQL-keyword arg shape (per PATTERN_GUIDE: `cursor.execute(query_var)` is canonical)."
 
+- id: python.sqli.named_connection_execute
+  enabled: true
+  language: python
+  tag: sql-injection
+  severity: critical
+  cwe: [CWE-89]
+  packages: [sqlite3, aiosqlite, asyncpg]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.execute$"
+      base_name_in: [conn, con, db, database, connection]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: sqlite named connection execute
+    code: |
+      import sqlite3
+      def example(conn, user_input):
+          return conn.execute(user_input)
+    expect_match_text: [conn.execute]
+  - name: sqlite named connection execute literal negative
+    code: |
+      import sqlite3
+      def example(conn, user_input):
+          return conn.execute("SELECT 1")
+    expect_no_match: true
+  - name: unrelated receiver negative
+    code: |
+      import sqlite3
+      def example(client, user_input):
+          return client.execute(user_input)
+    expect_no_match: true
+  description: "Untyped DB connection.execute on conventional connection variable names. This covers sqlite3.connect(...) assignments where the adapter has no receiver type while avoiding broad `.execute(...)` matches."
+
 - id: python.sqli.psycopg2_cursor_execute
   enabled: true
   language: python

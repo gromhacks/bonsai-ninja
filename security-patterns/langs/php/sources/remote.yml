@@ -1046,3 +1046,40 @@
       - Request
       - input
   description: Disabled — Lumen reuses Illuminate\Http\Request; same typed-receiver limitation as php.source.laravel_request_input. Tracked here so audits know Lumen is intentionally covered by the Laravel rules once the adapter resolves typed receivers.
+
+- id: php.source.graphql_resolver_args_param
+  enabled: true
+  language: php
+  trust: remote
+  tag: graphql-input
+  payload_types: [graphql]
+  packages:
+  - webonyx/graphql-php
+  imports:
+  - webonyx
+  - webonyx/graphqlphp
+  - webonyx\graphqlphp
+  match:
+    kind: param
+    target:
+      name: args
+      in_method: [resolve]
+  match_examples:
+  - name: webonyx resolver args param
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      class ProductResolver {
+        public function resolve($root, $args) {
+          return $args;
+        }
+      }
+  - name: unrelated args helper negative
+    code: |
+      <?php
+      use webonyx\graphqlphp;
+      function helper($args) {
+        return $args;
+      }
+    expect_no_match: true
+  description: "webonyx/graphql-php resolver resolve(..., $args) parameter — GraphQL caller-supplied arguments. Scoped to resolver method names to avoid tainting ordinary helpers named args."

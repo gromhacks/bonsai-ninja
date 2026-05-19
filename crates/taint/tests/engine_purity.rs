@@ -39,6 +39,10 @@ fn default_config_carries_zero_embedded_library_knowledge() {
         config.receiver_state_propagations.is_empty(),
         "default receiver_state_propagations must be empty; rulepack taint_semantics supplies receiver mutator shapes",
     );
+    assert!(
+        config.output_arg_flows.is_empty(),
+        "default output_arg_flows must be empty; rulepack taint_semantics supplies output-argument transfer shapes",
+    );
 }
 
 #[test]

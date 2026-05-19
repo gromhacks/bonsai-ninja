@@ -3,6 +3,7 @@
   enabled: true
   language: c
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [openssl]
   cwe: [CWE-295]
@@ -24,6 +25,7 @@
   enabled: true
   language: c
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [openssl]
   cwe: [CWE-295]
@@ -47,6 +49,7 @@
   enabled: true
   language: c
   tag: weak-tls
+  category: source-independent
   severity: medium
   packages: [openssl]
   cwe: [CWE-326]

@@ -76,7 +76,7 @@ impl LanguageAdapter for RubyAdapter {
                 // change the default visibility of subsequent method
                 // definitions. See `apply_ruby_scope_visibility` for
                 // the exact contract this implements.
-                apply_ruby_scope_visibility(&mut idx, snapshot.text.as_bytes(), file, ctx);
+                apply_ruby_scope_visibility(&mut idx, snapshot.text.as_bytes(), file);
             }
             // Per-class `bases`: `class Echo < Base` → ["Base"].
             // Ruby has only single-inheritance; mixins via `include`
@@ -277,8 +277,10 @@ fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
     }
     for decl in &mut idx.defs {
         if is_class_like(decl.kind) {
-            decl.module_path = ModulePath::from_segments([decl.name.clone()]);
-            decl.qualified_name = Some(decl.name.clone());
+            let mut segments = decl.module_path.segments.clone();
+            segments.push(decl.name.clone());
+            decl.module_path = ModulePath::from_segments(segments.iter().cloned());
+            decl.qualified_name = Some(segments.join("."));
             continue;
         }
         if !matches!(
@@ -295,8 +297,10 @@ fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
             continue;
         };
         decl.parent = Some(*class_symbol);
-        decl.module_path = ModulePath::from_segments([class_name.clone()]);
-        decl.qualified_name = Some(format!("{class_name}.{}", decl.name));
+        let mut segments = decl.module_path.segments.clone();
+        segments.push(class_name.clone());
+        decl.module_path = ModulePath::from_segments(segments.iter().cloned());
+        decl.qualified_name = Some(format!("{}.{}", segments.join("."), decl.name));
     }
 }
 
@@ -310,7 +314,7 @@ fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
 /// Visibility comes from real syntax. The kit's modifier-vocabulary
 /// path doesn't model line-scoped visibility, so this adapter walks
 /// the parsed tree directly.
-fn apply_ruby_scope_visibility(idx: &mut DeclIndex, src: &[u8], file: FileId, ctx: &AdapterContext<'_>) {
+fn apply_ruby_scope_visibility(idx: &mut DeclIndex, src: &[u8], file: FileId) {
     let Ok(lang) = language_from_pack(PACK_NAME) else {
         return;
     };
@@ -318,7 +322,6 @@ fn apply_ruby_scope_visibility(idx: &mut DeclIndex, src: &[u8], file: FileId, ct
     if parser.set_language(&lang).is_err() {
         return;
     }
-    let _ = ctx; // ctx unused for now; reserved for future error reporting.
     let Some(tree) = parser.parse(src, None) else {
         return;
     };
@@ -714,12 +717,22 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
         imports.push(ImportSpec {
             span: span_of(file, &call_node),
-            module,
+            module: module.clone(),
             alias: None,
             is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });
+        if matches!(method, "require" | "require_relative" | "load") {
+            imports.push(ImportSpec {
+                span: span_of(file, &call_node),
+                module,
+                alias: None,
+                is_wildcard: true,
+                original_name: None,
+                scope: ImportScope::Local,
+            });
+        }
     }
     for assignment in collect_kinds(tree, &["assignment"]) {
         if inside_ruby_executable_scope(assignment) {
@@ -771,3 +784,7 @@ fn inside_ruby_executable_scope(node: tree_sitter::Node<'_>) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

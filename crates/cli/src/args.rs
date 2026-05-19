@@ -128,19 +128,19 @@ impl FactKindFilter {
     }
 }
 
-/// CLI-surfaced precision classes. Mirrors `bonsai_common::Precision`
-/// with a hyphenated spelling clap will accept on the command line
-/// (`--precision over-approximate`). Used by `dump-edges --precision`
-/// and `security taint-analysis --precision`.
+/// CLI-surfaced precision classes. Mirrors `bonsai_common::Precision`.
+/// Analysis commands expose semantic classes (`exact` / `narrowed`);
+/// broad classes remain parseable for compatibility but are rejected
+/// before results render.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PrecisionFilter {
     /// `Precision::Exact` — structural facts; no approximation.
     Exact,
     /// `Precision::Narrowed` — single-candidate resolved call.
     Narrowed,
-    /// `Precision::OverApproximate` — multi-candidate / Virtual edges.
+    /// `Precision::OverApproximate` — diagnostic-only broad edges.
     OverApproximate,
-    /// `Precision::Unknown` — opaque; resolver has no guarantee.
+    /// `Precision::Unknown` — diagnostic-only opaque edges.
     Unknown,
 }
 
@@ -228,16 +228,23 @@ pub(crate) enum Cmd {
                       a summary (file count, decls, refs, module count) as \
                       JSON.\n\
                       \n\
-                      Builds the parsed/indexed workspace and eagerly warms \
-                      the persisted dataflow sidecar (`.bonsai/dataflow.v2.bin`) \
-                      for missing or changed function facts. Later browse, \
-                      inspect, trace, security, export, and debug commands \
-                      load that sidecar and compute only misses lazily.\n\
+                      By default this is a structural parse/index pass only: \
+                      it does not eagerly compute the exact dataflow graph for \
+                      every callable. Later browse, inspect, trace, security, \
+                      export, and debug commands compute the exact analysis \
+                      scope they need before rendering, reusing valid persisted \
+                      facts only as a performance optimization.\n\
+                      \n\
+                      Pass `--prewarm-dataflow` only when you explicitly want \
+                      the legacy full-workspace dataflow sidecar rebuild. That \
+                      computes every missing callable entry to completion, so it \
+                      can be intentionally expensive on large or dense workspaces.\n\
                       \n\
                       Pass `--watch` to keep the process alive as a workflow \
                       tool: bonsai polls the source tree, hot-reloads saved \
-                      changes into the live workspace, prewarms only missing \
-                      or invalidated dataflow facts, and rewrites the sidecar."),
+                      changes into the live workspace, and prints fresh structural \
+                      stats. Combine it with `--prewarm-dataflow` only when you \
+                      want save-time dataflow sidecar rebuilds."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Sanity-check a workspace\n  \
                       $ bonsai-ninja index ./src\n  \
@@ -247,11 +254,16 @@ pub(crate) enum Cmd {
                       \n  \
                       # Force a fresh taint sidecar before measuring\n  \
                       $ bonsai-ninja cache clear ./src --dataflow-only\n  \
-                      $ bonsai-ninja index ./src")
+                      $ bonsai-ninja index ./src --prewarm-dataflow")
     )]
     Index {
         /// Workspace root to analyze.
         workspace: PathBuf,
+        /// Compute and persist exact dataflow for every callable
+        /// during this index run. Disabled by default so `index`
+        /// remains a fast structural pass.
+        #[arg(long)]
+        prewarm_dataflow: bool,
         /// Keep running and refresh the live index when files change on disk.
         #[arg(long)]
         watch: bool,
@@ -363,6 +375,11 @@ pub(crate) enum Cmd {
                       pipeline — when HIR is empty, every downstream layer \
                       (CFG, call graph, taint) will also be missing it.\n\
                       \n\
+                      Bare symbols must identify exactly one callable. When \
+                      multiple files define the same name, pass \
+                      `path:name` or `path:line:name` from the ambiguity \
+                      candidate list.\n\
+                      \n\
                       Output is JSON-only — the HIR shape is structural, \
                       not tabular, so a rendered text view wouldn't add \
                       information. Pipe through `jq` to drill down."),
@@ -373,6 +390,9 @@ pub(crate) enum Cmd {
                       # Equivalent, via --symbol\n  \
                       $ bonsai-ninja dump-hir ./src --symbol run_admin_command\n  \
                       \n  \
+                      # Disambiguate a duplicate symbol\n  \
+                      $ bonsai-ninja dump-hir ./src auth/gateway.py:42:handle_request\n  \
+                      \n  \
                       # Just the call events inside a function\n  \
                       $ bonsai-ninja dump-hir ./src handle_request | jq '.flow_events[] | select(.Call)'")
     )]
@@ -381,7 +401,8 @@ pub(crate) enum Cmd {
         workspace: PathBuf,
         /// Positional symbol to dump (alternative to `--symbol`).
         symbol_pos: Option<String>,
-        /// Function name to dump. The positional symbol takes
+        /// Function name to dump. Use `path:name` or `path:line:name`
+        /// when a bare name is ambiguous. The positional symbol takes
         /// precedence when both are set.
         #[arg(long)]
         symbol: Option<String>,
@@ -400,6 +421,11 @@ pub(crate) enum Cmd {
                       adapter extracted, CFG tells you how they were \
                       linearized into blocks.\n\
                       \n\
+                      Bare symbols must identify exactly one callable. When \
+                      multiple files define the same name, pass \
+                      `path:name` or `path:line:name` from the ambiguity \
+                      candidate list.\n\
+                      \n\
                       Output is JSON-only — the CFG shape is structural, \
                       not tabular. Pipe through `jq` to inspect specific \
                       blocks / terminators."),
@@ -410,6 +436,9 @@ pub(crate) enum Cmd {
                       # Equivalent, via --symbol\n  \
                       $ bonsai-ninja dump-cfg ./src --symbol run_admin_command\n  \
                       \n  \
+                      # Disambiguate a duplicate symbol\n  \
+                      $ bonsai-ninja dump-cfg ./src auth/gateway.py:42:handle_request\n  \
+                      \n  \
                       # Just block terminators\n  \
                       $ bonsai-ninja dump-cfg ./src handle_request | jq '.blocks[] | {id, terminator}'")
     )]
@@ -418,7 +447,8 @@ pub(crate) enum Cmd {
         workspace: PathBuf,
         /// Positional symbol to dump (alternative to `--symbol`).
         symbol_pos: Option<String>,
-        /// Function name to dump. The positional symbol takes
+        /// Function name to dump. Use `path:name` or `path:line:name`
+        /// when a bare name is ambiguous. The positional symbol takes
         /// precedence when both are set.
         #[arg(long)]
         symbol: Option<String>,
@@ -464,15 +494,13 @@ pub(crate) enum Cmd {
         format: BrowseFormat,
     },
 
-    /// Dump every resolved call edge with `EdgeKind` + `Precision`.
+    /// Dump semantic resolved call edges with `EdgeKind` + `Precision`.
     #[command(
         display_order = 33,
         long_about = themed_subcommand_long_about("One record per resolved call edge: caller, callee, call-site \
-                      location, `EdgeKind` (Direct / Virtual), `Precision` \
-                      (Exact / Narrowed / OverApproximate / Unknown). The \
-                      place to look when `inspect` shows `[precision: \
-                      over-approximate]` and you want to know exactly which \
-                      edge dragged the chain's precision down.\n\
+                      location, `EdgeKind` (Direct / Virtual), and semantic \
+                      `Precision` (Exact / Narrowed). Broad resolver \
+                      diagnostics are kept out of analysis output.\n\
                       \n\
                       Every edge carries a stable `edge_id` (`E:` + 8 hex) \
                       — a FNV-1a content hash over (caller, callee, call \
@@ -480,11 +508,11 @@ pub(crate) enum Cmd {
                       mode. `--edge E:xxxxxxxx` re-renders just that one \
                       edge; scripts can cite an id across runs."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Every edge, full detail\n  \
+                      # Semantic edges, full detail\n  \
                       $ bonsai-ninja dump-edges ./src\n  \
                       \n  \
-                      # Only over-approximate edges (the weak-evidence ones)\n  \
-                      $ bonsai-ninja dump-edges ./src --precision over-approximate\n  \
+                      # Only narrowed semantic edges\n  \
+                      $ bonsai-ninja dump-edges ./src --precision narrowed\n  \
                       \n  \
                       # Edges into a specific callee (every caller of os.system)\n  \
                       $ bonsai-ninja dump-edges ./src --to os.system\n  \
@@ -627,8 +655,8 @@ pub(crate) enum Cmd {
         long_about = themed_subcommand_long_about("Feed a name token through the resolver and emit every \
                       stage's input and output: `short_callee` qualification \
                       trim, per-file import alias rewrite, \
-                      `collect_callable_targets` primary lookup, literal-name \
-                      fallback. Use to *verify* the resolver is sound — not \
+                      and semantic contextual lookup when `--in-file` is \
+                      supplied. Use to *verify* the resolver is sound — not \
                       just to observe its output (that's `dump-edges`) but to \
                       confirm it considered the inputs you expected, applied \
                       the aliases you expected, and rejected the names it \
@@ -706,11 +734,11 @@ pub(crate) enum Cmd {
                       with `--taint T:id`. Sanitizer names are accepted for \
                       compatibility but do not change propagation.\n\
                       \n\
-                      Every taint edge threads through `bonsai_resolve`'s \
-                      alias-aware call resolution — cross-module imports, \
-                      `from x import y as z` rewrites, and virtual / over-\
-                      approximate edges all flow taint with their precision \
-                      carried forward."),
+                      Every taint edge threads through semantic, alias-aware \
+                      call resolution — cross-module imports, `from x import y \
+                      as z` rewrites, and typed virtual dispatch. The dump \
+                      follows exact/narrowed dataflow by default; weaker \
+                      diagnostic edges stay out of propagated taint facts."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Start from update_user with `action` seeded as tainted\n  \
                       $ bonsai-ninja dump-taint ./src --source update_user --seed action\n  \
@@ -756,14 +784,16 @@ pub(crate) enum Cmd {
         /// taint still runs globally; only the render is narrowed.
         #[arg(long)]
         sink: Option<String>,
-        /// Override the interprocedural pass's `(FuncId, seed)`
-        /// chunk size. Default 512. This affects how often the
-        /// resumable worklist yields, not whether complete flows are
-        /// explored.
+        /// Compatibility knob for the legacy interprocedural
+        /// worklist. The IDG-backed dump-taint path computes the
+        /// requested closure exactly and does not cap evidence with
+        /// this value.
         #[arg(long)]
         budget: Option<u32>,
-        /// Override the intraprocedural CFG worklist iteration cap per
-        /// function. Default derives from CFG size.
+        /// Compatibility knob for the legacy intraprocedural CFG
+        /// worklist. The IDG-backed dump-taint path computes the
+        /// requested closure exactly and does not cap evidence with
+        /// this value.
         #[arg(long = "intra-worklist-cap")]
         intra_worklist_cap: Option<u32>,
         /// One-line-per-propagation render (the headline table).
@@ -1723,14 +1753,15 @@ pub(crate) enum Cmd {
         #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
         format: BrowseFormat,
     },
-    /// Export the complete analyzed workspace (index + taint graph).
+    /// Export a semantic analyzed workspace document (index + taint graph).
     #[command(
         display_order = 12,
-        long_about = themed_subcommand_long_about("Dump the full analyzed workspace as a single JSON document: \
+        long_about = themed_subcommand_long_about("Dump a semantic analyzed workspace as a single JSON document: \
                       every file's decls / refs / imports / strings / classes, \
-                      the per-function flow-event tree, the resolved call-graph \
-                      edge list, workspace-wide flow chains, and a complete \
-                      `taint_graph` section that materializes the analyzer's \
+                      the per-function flow-event tree, the resolved semantic \
+                      call-graph edge list, workspace-wide flow chains with \
+                      explicit completeness metadata, and a `taint_graph` \
+                      section that materializes the analyzer's \
                       engine state end-to-end.\n\
                       \n\
                       The `taint_graph` is the raw view both `inspect` and \
@@ -1739,10 +1770,25 @@ pub(crate) enum Cmd {
                       reachability facts kinded by (decl / call / read / \
                       write / arg / string / import / class), per-parameter \
                       assign-chain expansion, per-parameter CFG dataflow, \
-                      inferred entry-points, interprocedural propagation \
-                      records, resolved FuncId chains per target, and \
-                      stable `F:` / `G:` flow-id labels. Downstream tooling \
-                      can reconstruct every finding without re-running the \
+                      inferred entry-points, optional interprocedural \
+                      propagation records, resolved FuncId chains per target, and \
+                      stable `F:` / `G:` flow-id labels or the exact compressed \
+                      semantic callgraph needed to derive them. The export also emits \
+                      top-level `analysis_scope`, `analysis_complete`, and \
+                      `analysis_incomplete_reasons` fields so downstream tools \
+                      never need to infer whether a document is complete. Chain and label \
+                      sections are bounded by default and marked incomplete \
+                      when capped; pass `--complete-chains` or `--all` to \
+                      request complete semantic chain and flow-id-label evidence. \
+                      Dense call graphs can have exponentially many exact paths, \
+                      so complete mode may switch those sections to \
+                      `compressed_callgraph` instead of materializing path rows. \
+                      Propagation records are \
+                      omitted by default with explicit completeness metadata; \
+                      pass `--full-propagations` when downstream tooling needs \
+                      every interprocedural propagation edge. When \
+                      `analysis_complete=true`, downstream tooling can \
+                      reconstruct every exported finding without re-running the \
                       analyzer.\n\
                       \n\
                       Output defaults to compact JSON on stdout. `--format \
@@ -1750,8 +1796,11 @@ pub(crate) enum Cmd {
                       graphml` emits a directed GraphML property graph; \
                       `--format cypher` emits a Neo4j-compatible MERGE script."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Full export to a file\n  \
+                      # Native semantic export to a file\n  \
                       $ bonsai-ninja export ./src > index.json\n  \
+                      \n  \
+                      # Expanded semantic audit export scope\n  \
+                      $ bonsai-ninja export ./src --all > audit.json\n  \
                       \n  \
                       # NetworkX node-link graph\n  \
                       $ bonsai-ninja export ./src --format networkx > graph.node_link.json\n  \
@@ -1769,18 +1818,26 @@ pub(crate) enum Cmd {
                       $ bonsai-ninja export ./src | jq '.taint_graph | keys'\n  \
                       \n  \
                       # Every interprocedural propagation edge\n  \
-                      $ bonsai-ninja export ./src | jq '.taint_graph.propagations[].records[]'")
+                      $ bonsai-ninja export ./src --full-propagations | jq '.taint_graph.propagations[].records[]'")
     )]
     Export {
         /// Workspace root to analyze.
         workspace: PathBuf,
-        /// Force exhaustive interprocedural propagation records in the export.
-        /// Large workspaces skip this section by default because exact
-        /// propagation-record materialization is the expensive part of export;
-        /// `inspect`, `trace`, and `security taint-analysis` still query the
-        /// indexed taint graph and compute only missing facts lazily.
+        /// Materialize exhaustive interprocedural propagation records.
+        /// Omitted by default with explicit completeness metadata
+        /// because records can be much larger than the structural graph.
         #[arg(long)]
         full_propagations: bool,
+        /// Request complete semantic chain and flow-id-label evidence.
+        /// Dense call graphs can have exponentially many exact paths,
+        /// so complete mode may switch chain/label sections to
+        /// `compressed_callgraph` instead of materialized path rows.
+        #[arg(long)]
+        complete_chains: bool,
+        /// Request every expensive export evidence section. Currently equivalent to
+        /// `--full-propagations --complete-chains` for native JSON output.
+        #[arg(long)]
+        all: bool,
         /// Output shape. `json` is the full native export; `networkx`,
         /// `graphml`, and `cypher` project the same taint graph into
         /// graph-database-friendly node/edge formats.
@@ -1800,11 +1857,13 @@ pub(crate) enum Cmd {
                       command to bypass them for a single invocation.\n\
                       \n  - On-disk artifacts under `<workspace>/.bonsai/` — \
                       used for persisted sidecars, currently including the \
-                      dataflow taint graph at `dataflow.v2.bin` and the default \
-                      export JSON; paginated commands also write rendered page \
-                      windows under `page-cache.v2/`. `cache stats` reports \
+                      dataflow taint graph at `dataflow.v3.factstore` \
+                      (plus backward-compatible `dataflow.v2.bin` reads), \
+                      value-flow, flow-id, callgraph, IDG, and export \
+                      sidecars; paginated commands also write rendered page \
+                      windows under `page-cache.v3/`. `cache stats` reports \
                       the sidecar dir, `cache clear` removes it, and \
-                      `cache rebuild` refreshes the dataflow graph."),
+                      `cache rebuild` refreshes the reusable analysis facts."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       $ bonsai-ninja cache stats\n  \
                       $ bonsai-ninja cache clear ./src\n  \
@@ -2494,6 +2553,13 @@ pub(crate) enum SecurityAction {
         /// to view only the synthetic set.
         #[arg(long = "inferred-sources", default_value_t = false)]
         inferred_sources: bool,
+        /// Include exact local source-independent findings in
+        /// taint-analysis text/JSON output. SARIF enables this
+        /// automatically so code-scanning and benchmark consumers get
+        /// crypto, random, JWT, TLS, cookie, CORS, memory, and race API
+        /// misuse results even when no source-to-sink path is required.
+        #[arg(long = "include-pattern-only", default_value_t = false)]
+        include_pattern_only: bool,
         /// Drop findings whose source OR sink lives in a conventional
         /// test path (`test/`, `tests/`, `*_test.go`, `Tests/`, etc.).
         /// Use for "production review" reports — large projects with
@@ -2519,13 +2585,13 @@ pub(crate) enum SecurityAction {
         /// function. Default derives from CFG size.
         #[arg(long = "intra-worklist-cap")]
         intra_worklist_cap: Option<u32>,
-        /// Keep only findings at or below this flow precision. Values:
-        /// `exact`, `narrowed`, `over-approximate`, `unknown`.
+        /// Keep only findings at or below this flow precision. Default:
+        /// `narrowed` (semantic exact/narrowed flows). Analysis output
+        /// accepts `exact` or `narrowed`.
         #[arg(long, value_enum)]
         precision: Option<PrecisionFilter>,
-        /// High-confidence flow mode. Equivalent to
-        /// `--precision narrowed`, keeping exact/narrowed findings and
-        /// dropping over-approximate/unknown paths.
+        /// Compatibility alias for the default semantic flow mode.
+        /// Exact/narrowed findings are already the default.
         #[arg(long = "strict-flow", default_value_t = false)]
         strict_flow: bool,
         /// Token-budget ceiling for text output. Shorthand `4k` /
@@ -2651,7 +2717,8 @@ pub(crate) enum SecurityAction {
         /// `next`.
         #[arg(long)]
         page: Option<String>,
-        /// Show every source flow unconditionally — no paging, no cap.
+        /// Show every source flow unconditionally — no paging, no
+        /// row cap, and no source-lineage path cap.
         #[arg(long, default_value_t = false)]
         all: bool,
         /// Expand every flow body even when another rendered flow already
@@ -2755,38 +2822,45 @@ pub(crate) enum SecurityAction {
 #[command(disable_help_subcommand = true)]
 pub(crate) enum CacheAction {
     /// Print the in-process cache configuration (per-cache caps and
-    /// the on-disk artifact path that `clear` would touch). Shows
-    /// the dataflow sidecar's location + size + entry count when
-    /// present.
+    /// the on-disk artifact paths that `clear` would touch). Shows
+    /// persisted sidecar locations and byte sizes when present.
     #[command(
         long_about = themed_subcommand_long_about("Print the in-process cache configuration (per-cache caps and \
                       the on-disk artifact path that `cache clear` would \
-                      touch). Reports the dataflow sidecar's location, size, \
-                      and entry count when present so you can tell whether \
-                      the persisted taint graph is warm."),
+                      touch). Reports persisted sidecar locations and byte \
+                      sizes, including dataflow, value-flow, flow-id, \
+                      callgraph, IDG, taint-graph, and export artifacts, so \
+                      benchmark and CI jobs can tell which warm-cache inputs \
+                      were actually present."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
                       # Config only (no workspace context)\n  \
                       $ bonsai-ninja cache stats\n  \
                       \n  \
                       # Include the on-disk sidecar for a specific workspace\n  \
-                      $ bonsai-ninja cache stats ./src")
+                      $ bonsai-ninja cache stats ./src\n  \
+                      \n  \
+                      # Machine-readable sidecar inventory for benchmarks\n  \
+                      $ bonsai-ninja cache stats ./src --format json")
     )]
     Stats {
         /// Optional workspace root to report the on-disk cache path
         /// against. Defaults to the current directory.
         workspace: Option<PathBuf>,
+        /// Output shape. Use `json` for benchmark tooling.
+        #[arg(long, value_enum, default_value_t = BrowseFormat::Text)]
+        format: BrowseFormat,
     },
     /// Remove on-disk cache artifacts under `<workspace>/.bonsai/`.
-    /// Specifically deletes `dataflow.v2.bin` (the persisted
-    /// workspace taint graph) and any other sidecar files written
+    /// Specifically deletes the persisted analysis sidecars written
     /// by the engine. In-process caches don't need clearing — they
     /// drop at process exit; use `--no-cache` to bypass them within
     /// a single command.
     #[command(
         long_about = themed_subcommand_long_about("Remove on-disk cache artifacts under `<workspace>/.bonsai/`. \
-                      Specifically deletes `dataflow.v2.bin` (the persisted \
-                      workspace taint graph) and any other sidecar files \
-                      written by the engine.\n\
+                      Specifically deletes persisted analysis sidecars, \
+                      including `dataflow.v3.factstore`, value-flow, flow-id, \
+                      callgraph, IDG, export, and compatibility files written \
+                      by the engine.\n\
                       \n\
                       In-process caches don't need clearing — they drop at \
                       process exit; use `--no-cache` / `BONSAI_NO_CACHE=1` to \
@@ -2802,33 +2876,46 @@ pub(crate) enum CacheAction {
         /// Workspace root whose `.bonsai/` cache dir should be removed.
         /// Defaults to the current directory.
         workspace: Option<PathBuf>,
-        /// Only clear the dataflow sidecar (`dataflow.v2.bin`),
-        /// leaving other `.bonsai/` contents intact. Useful when
-        /// you want to force a taint-graph recompute without
-        /// touching unrelated sidecars.
+        /// Only clear dataflow sidecars (`dataflow.v3.factstore`
+        /// and compatibility `dataflow.v2.bin`), leaving other
+        /// `.bonsai/` contents intact. Useful when you want to force
+        /// a dataflow recompute without touching unrelated sidecars.
         #[arg(long)]
         dataflow_only: bool,
     },
-    /// Remove the persisted dataflow sidecar and rebuild it from
-    /// scratch. Equivalent to `cache clear --dataflow-only` followed
-    /// by a workspace open (which runs `prewarm_all` + writes the
-    /// sidecar back). Use after bulk edits, after upgrading to a
-    /// new cache version, or when you suspect the cache is stale.
+    /// Remove persisted analysis sidecars and rebuild bounded
+    /// structural artifacts from scratch. Refreshes callgraph and
+    /// IDG sidecars without running a legacy full-workspace
+    /// taint/dataflow prewarm. Exact taint/source commands still
+    /// compute their requested scope when invoked.
     #[command(
-        long_about = themed_subcommand_long_about("Remove the persisted dataflow sidecar and rebuild it from \
-                      scratch. Equivalent to `cache clear --dataflow-only` \
-                      followed by a workspace open (which runs `prewarm_all` \
-                      + writes the sidecar back).\n\
+        long_about = themed_subcommand_long_about("Remove persisted analysis sidecars and rebuild \
+                      bounded structural artifacts from scratch. Refreshes \
+                      callgraph and IDG sidecars without \
+                      running a legacy full-workspace taint/dataflow prewarm.\n\
+                      \n\
+                      Pass `--export` when you explicitly want to warm the \
+                      default export JSON cache too; that can be large because \
+                      it materializes the export document.\n\
                       \n\
                       Use after bulk edits, after upgrading to a new cache \
-                      version, or when you suspect the persisted taint graph \
-                      has drifted from the source."),
+                      version, or when you suspect persisted analysis facts \
+                      have drifted from the source. Exact taint/source \
+                      commands still compute their requested scope when \
+                      invoked."),
         after_help = themed_subcommand_after_help("EXAMPLES\n\n  \
-                      # Full rebuild of the taint sidecar\n  \
-                      $ bonsai-ninja cache rebuild ./src")
+                      # Rebuild reusable analysis sidecars\n  \
+                      $ bonsai-ninja cache rebuild ./src\n  \
+                      \n  \
+                      # Also warm the default export JSON cache\n  \
+                      $ bonsai-ninja cache rebuild ./src --export")
     )]
     Rebuild {
         /// Workspace root. Defaults to the current directory.
         workspace: Option<PathBuf>,
+        /// Also warm the default export JSON cache. This is explicit
+        /// because export materializes a large JSON document.
+        #[arg(long)]
+        export: bool,
     },
 }

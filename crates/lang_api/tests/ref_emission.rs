@@ -356,6 +356,23 @@ fn alias_map_module_only_alias_is_namespace() {
 }
 
 #[test]
+fn alias_map_unaliased_module_import_is_namespace() {
+    // `import os` / `use std::io` style module imports bind a local
+    // namespace name. Qualified calls through that name must not
+    // degrade to bare-tail lookup when the module target is external.
+    let idx = imports_with(&[("os", None, None, ImportScope::Module)]);
+    let map = alias_map_from_imports(&idx);
+    assert_eq!(map.get("os"), Some(&namespace("os")));
+}
+
+#[test]
+fn alias_map_unaliased_path_import_uses_stem() {
+    let idx = imports_with(&[("./storage.ts", None, None, ImportScope::Module)]);
+    let map = alias_map_from_imports(&idx);
+    assert_eq!(map.get("storage"), Some(&namespace("./storage.ts")));
+}
+
+#[test]
 fn alias_map_dotted_namespace_preserved() {
     // `import django.db.models as m` — namespace. `m.connect()` →
     // `django.db.models.connect()`.

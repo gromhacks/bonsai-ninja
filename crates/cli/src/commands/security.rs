@@ -15,7 +15,8 @@
 
 use crate::args::{BrowseFormat, PrecisionFilter, SecurityAction};
 use crate::commands::{
-    emit_json_paged_cached, open_project_index_only, page_info_to_json, paging_from_cli, short_file,
+    emit_json_paged_cached, open_project_index_only, page_info_to_json, paged_json_incomplete_reasons,
+    paging_from_cli, short_file,
 };
 use crate::footer::{render_paging_footer, render_truncation_notice};
 use crate::page_cache;
@@ -23,45 +24,61 @@ use crate::paging;
 use crate::ui::{extension_for, Ui};
 use crate::{cli_println, progress, ui};
 use anyhow::Result;
-use bonsai_common::{FuncId, Precision};
+use bonsai_common::{FuncId, Precision, Span};
 use bonsai_sdk::{
     load_rulepack, load_workspace_local_rules, parse_severity, security_match_rows, tree_file_rel,
     CombinedFindingWithChain, CombinedSourceAnalysisCandidate, DependencyInventoryOptions, DependencyRow,
     Finding, FindingMatch, FindingStatus, PackInventoryOptions, PackRuleRow, Rule, RuleKind, RuleMatch,
     Rulepack, SecurityInventoryOptions, SecurityMatchRow, SecurityReport, Severity, SourceAnalysisOptions,
-    TaintAnalysisOptions, TaintPropagationArg, TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES,
-    FAMILY_NOT_APPLICABLE,
+    SourceLineageStatus, SourceLineageSummary, TaintAnalysisOptions, TaintPropagationArg,
+    TaintPropagationStep, TrustClass, CANONICAL_SINK_FAMILIES, FAMILY_NOT_APPLICABLE,
 };
 use comfy_table::Cell;
 use indicatif::ProgressBar;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+fn source_analysis_json_incomplete_reasons(
+    command: &str,
+    info: &paging::PageInfo,
+    rows: &[CombinedSourceAnalysisFlow],
+) -> Vec<String> {
+    let mut reasons = paged_json_incomplete_reasons(command, info);
+    for row in rows {
+        if row.analysis_complete {
+            continue;
+        }
+        if row.analysis_incomplete_reasons.is_empty() {
+            reasons.push("source-analysis row incomplete: unknown reason".to_string());
+        } else {
+            reasons.extend(
+                row.analysis_incomplete_reasons
+                    .iter()
+                    .map(|reason| format!("source-analysis row incomplete: {reason}")),
+            );
+        }
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
 
 /// Open the workspace and attach the already-loaded rulepack so every
 /// security subcommand sees the same rules without reloading.
 ///
-/// Light subcommands (`sources`, `sinks`, `sanitizers`, `deps`) only
-/// need source/sink/sanitizer matching, which doesn't touch the
-/// per-function dataflow / value-flow caches. They skip prewarm via
-/// `OpenOptions::query_only()`.
-///
-/// Heavy subcommands (`taint-analysis`, `source-analysis`) drive the
-/// engine over thousands of source-seeded passes; lazy-faulting
-/// per-function dataflow under a single `RwLock` serialises that
-/// work behind the engine's per-source rayon loop. Pass
-/// `prewarm = true` so the workspace prewarms dataflow + value-flow
-/// + flow-ids in parallel during open instead.
+/// Security commands open with structural facts and valid sidecars
+/// loaded, but without eager whole-workspace taint/value-flow
+/// prewarm. The exact analysis phase owns its requested scope
+/// (`--file`, `--source`, profile filters, sinks, export mode, etc.)
+/// and computes that scope before rendering; opening the workspace
+/// must not silently perform a broader full-workspace solve.
 fn open_security_project(
     workspace: &Path,
     pack: &Rulepack,
     rules_dir: &Path,
-    prewarm: bool,
 ) -> Result<(bonsai_sdk::Project, crate::footer::WorkspaceFooter)> {
-    let (project, footer) = if prewarm {
-        crate::commands::open_project_full(workspace)?
-    } else {
-        open_project_index_only(workspace)?
-    };
+    let (project, footer) = open_project_index_only(workspace)?;
     Ok((project.with_loaded_rulepack(rules_dir, pack.clone()), footer))
 }
 
@@ -236,6 +253,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             files,
             mut exclude_files,
             inferred_sources,
+            include_pattern_only,
             exclude_tests,
             show_sanitized,
             taint_budget,
@@ -270,6 +288,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 files,
                 exclude_files,
                 inferred_sources,
+                include_pattern_only,
                 exclude_tests,
                 show_sanitized,
                 taint_budget,
@@ -540,7 +559,7 @@ fn cmd_sources(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let options = SecurityInventoryOptions {
         rule: rule.clone(),
         rule_regex: rule_regex.clone(),
@@ -589,7 +608,7 @@ fn cmd_sinks(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let matches = project.security().sinks(SecurityInventoryOptions {
         rule: rule.clone(),
@@ -638,7 +657,7 @@ fn cmd_sanitizers(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let sev_floor = parse_severity_flag(severity.as_deref())?;
     let matches = project.security().sanitizers(SecurityInventoryOptions {
         rule: rule.clone(),
@@ -684,7 +703,7 @@ fn cmd_deps(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir, false)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let inv = project.security().deps(DependencyInventoryOptions {
         framework: framework.clone(),
         severity: parse_severity_flag(severity.as_deref())?,
@@ -771,6 +790,7 @@ fn cmd_flows(
     files: Vec<String>,
     exclude_files: Vec<String>,
     inferred_sources: bool,
+    include_pattern_only: bool,
     exclude_tests: bool,
     show_sanitized: bool,
     taint_budget: Option<u32>,
@@ -781,10 +801,11 @@ fn cmd_flows(
     no_compact: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir, true)?;
-    let ws = project.workspace();
     let sev_floor = parse_severity_flag(severity.as_deref())?;
-    let max_precision = max_precision_from_cli(precision, strict_flow);
+    let max_precision = max_precision_from_cli(precision, strict_flow)?;
+    let include_pattern_only = include_pattern_only || matches!(format, BrowseFormat::Sarif);
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
+    let ws = project.workspace();
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let report = project.security().taint_analysis_with_phase_progress(
         TaintAnalysisOptions {
@@ -797,6 +818,7 @@ fn cmd_flows(
             files: files.clone(),
             exclude_files: exclude_files.clone(),
             include_inferred_sources: inferred_sources,
+            include_pattern_only,
             show_sanitized,
             interprocedural_budget: taint_budget,
             intra_worklist_cap,
@@ -830,6 +852,10 @@ fn cmd_flows(
             precision.map(precision_filter_label).unwrap_or_default(),
         ),
         ("strict_flow", if strict_flow { "1" } else { "0" }),
+        (
+            "include_pattern_only",
+            if include_pattern_only { "1" } else { "0" },
+        ),
     ]);
     // Cheap header/JSON cost for JSON pagination. Text path uses a
     // render-accurate per-finding cost built below.
@@ -1101,6 +1127,9 @@ struct CombinedSourceAnalysisFlow {
     source: FindingMatch,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     additional_sources: Vec<FindingMatch>,
+    analysis_complete: bool,
+    analysis_incomplete_reasons: Vec<String>,
+    lineage: SourceLineageStatus,
     flow: crate::commands::InspectFlowRendered,
 }
 
@@ -1120,7 +1149,7 @@ fn cmd_source_analysis(
     no_compact: bool,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_security_project(workspace, pack, rules_dir, true)?;
+    let (project, _footer) = open_security_project(workspace, pack, rules_dir)?;
     let ws = project.workspace();
     let mut analysis_progress = SecurityAnalysisProgress::new();
     let report = project.security().source_analysis_with_phase_progress(
@@ -1132,10 +1161,16 @@ fn cmd_source_analysis(
             files: files.clone(),
             exclude_files: exclude_files.clone(),
             include_inferred_sources: inferred_sources,
+            lineage_limits: if paging_cfg.all {
+                bonsai_sdk::SourceLineageLimits::unbounded()
+            } else {
+                bonsai_sdk::SourceLineageLimits::bounded_default()
+            },
         },
         |event| analysis_progress.handle(event),
     )?;
     let source_rule_count = report.source_rule_count;
+    let lineage_summary = report.lineage_summary;
     let candidates = report.candidates;
 
     let filters_hash = filter_signature(&[
@@ -1174,8 +1209,20 @@ fn cmd_source_analysis(
                     cost,
                     |paged, info, _cfg| {
                         let rendered = render_source_analysis_candidates(ws, paged);
+                        let analysis_incomplete_reasons = source_analysis_json_incomplete_reasons(
+                            "security/source-analysis",
+                            info,
+                            &rendered,
+                        );
                         let wrapped = serde_json::json!({
+                            "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                            "analysis_incomplete_reasons": analysis_incomplete_reasons,
                             "rows": rendered,
+                            "summary": {
+                                "source_flow_count": candidates.len(),
+                                "source_rule_count": source_rule_count,
+                                "lineage": lineage_summary,
+                            },
                             "page": page_info_to_json(info),
                         });
                         cli_println!("{}", serde_json::to_string_pretty(&wrapped)?);
@@ -1223,6 +1270,7 @@ fn cmd_source_analysis(
                         no_compact,
                         candidates.len(),
                         source_rule_count,
+                        lineage_summary,
                     )
                 })?;
                 cached_pages.push(page_cache::CachedPage {
@@ -1257,6 +1305,7 @@ fn render_source_analysis_text_page(
     no_compact: bool,
     total_candidates: usize,
     source_rule_count: usize,
+    lineage_summary: SourceLineageSummary,
 ) -> Result<()> {
     let rendered = render_source_analysis_candidates(ws, candidates);
     let u = ui();
@@ -1267,6 +1316,19 @@ fn render_source_analysis_text_page(
             total_candidates, source_rule_count,
         ))
     );
+    if !lineage_summary.is_complete() {
+        cli_println!(
+            "{}",
+            u.warn(&format!(
+                "lineage incomplete: {} representative flow(s); {} truncated by hop budget; {} additional path(s) omitted; max {} hop(s), {} path(s) rendered per flow",
+                lineage_summary.incomplete_flows,
+                lineage_summary.truncated_hop_flows,
+                lineage_summary.omitted_paths,
+                lineage_summary.max_hops,
+                lineage_summary.max_paths,
+            ))
+        );
+    }
     let render_opts = crate::commands::InspectRenderOptions {
         compact: false,
         flow_id_filter: None,
@@ -1318,21 +1380,18 @@ fn render_source_analysis_candidate(
     item: &CombinedSourceAnalysisCandidate,
 ) -> Option<CombinedSourceAnalysisFlow> {
     let label = (idx + 1).to_string();
-    let mut flow = crate::commands::render_flow_with_filters(
+    let call_spans = source_analysis_call_spans(ws, item);
+    let mut flow = crate::commands::render_flow_with_cached_call_spans(
         ws,
         &item.path,
+        &call_spans,
         (idx + 1) as u32,
         &label,
-        bonsai_common::Precision::Exact,
+        item.precision,
         None,
-        crate::commands::InspectFilters {
-            from: Some(&item.source.text),
-            from_kind: None,
-            to: None,
-            to_kind: None,
-            file: None,
-            in_fn: None,
-        },
+        crate::commands::InspectFilters::default(),
+        false,
+        false,
     )?;
     flow.flow_id.clone_from(&item.flow_id);
     annotate_taint_flow(
@@ -1346,8 +1405,98 @@ fn render_source_analysis_candidate(
     Some(CombinedSourceAnalysisFlow {
         source: item.source.clone(),
         additional_sources: item.additional_sources.clone(),
+        analysis_complete: item.lineage.is_complete_default(),
+        analysis_incomplete_reasons: source_lineage_incomplete_reasons(item.lineage),
+        lineage: item.lineage,
         flow,
     })
+}
+
+fn source_lineage_incomplete_reasons(lineage: SourceLineageStatus) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if lineage.truncated_hops {
+        reasons.push(format!("lineage truncated to {} hops", lineage.max_hops));
+    }
+    if lineage.omitted_paths > 0 {
+        reasons.push(format!(
+            "{} additional lineage path(s) omitted",
+            lineage.omitted_paths
+        ));
+    }
+    if !lineage.is_complete_default() && reasons.is_empty() {
+        reasons.push("lineage incomplete".to_string());
+    }
+    reasons
+}
+
+fn source_analysis_call_spans(
+    ws: &bonsai_sdk::Workspace,
+    item: &CombinedSourceAnalysisCandidate,
+) -> Vec<Option<Span>> {
+    if item.path.is_empty() {
+        return Vec::new();
+    }
+    let mut spans = vec![None; item.path.len()];
+    let mut step_cursor = 0usize;
+    for (edge_idx, span_slot) in spans
+        .iter_mut()
+        .enumerate()
+        .take(item.path.len().saturating_sub(1))
+    {
+        let Some(caller) = item.chain_names.get(edge_idx) else {
+            continue;
+        };
+        let Some(callee) = item.chain_names.get(edge_idx + 1) else {
+            continue;
+        };
+        let Some((step_idx, step)) = item
+            .taint_path
+            .iter()
+            .enumerate()
+            .skip(step_cursor)
+            .find(|(_, step)| &step.caller == caller && &step.callee == callee)
+        else {
+            continue;
+        };
+        *span_slot = span_for_render_location(ws, &step.file, step.line, step.column);
+        step_cursor = step_idx + 1;
+    }
+    spans
+}
+
+fn span_for_render_location(ws: &bonsai_sdk::Workspace, file: &str, line: u32, column: u32) -> Option<Span> {
+    let file_id = ws.vfs().lookup(Path::new(file)).or_else(|| {
+        ws.vfs().all_files().into_iter().find(|&candidate| {
+            ws.vfs()
+                .path(candidate)
+                .ok()
+                .is_some_and(|path| same_rendered_file(&path.display().to_string(), file))
+        })
+    })?;
+    let snapshot = ws.vfs().snapshot(file_id).ok()?;
+    let offset = byte_offset_for_line_col(snapshot.text.as_ref(), line, column)?;
+    Some(Span::empty(file_id, offset))
+}
+
+fn byte_offset_for_line_col(text: &str, line: u32, column: u32) -> Option<u64> {
+    if line == 0 || column == 0 {
+        return None;
+    }
+    let mut line_start = 0usize;
+    let mut current_line = 1u32;
+    while current_line < line {
+        let rel_newline = text.get(line_start..)?.find('\n')?;
+        line_start = line_start.saturating_add(rel_newline).saturating_add(1);
+        current_line += 1;
+    }
+    let line_end = text
+        .get(line_start..)
+        .and_then(|tail| tail.find('\n').map(|rel| line_start + rel))
+        .unwrap_or(text.len());
+    let wanted = line_start
+        .saturating_add(usize::try_from(column.saturating_sub(1)).ok()?)
+        .min(line_end);
+    Some(u64::try_from(wanted).unwrap_or(u64::MAX))
 }
 
 #[derive(Copy, Clone)]
@@ -1553,6 +1702,14 @@ fn render_source_analysis_header(u: &Ui, idx: usize, item: &CombinedSourceAnalys
             "  {}    {}",
             u.dim("sources:"),
             u.dim(&(1 + item.additional_sources.len()).to_string())
+        );
+    }
+    if !item.lineage.is_complete_default() {
+        let parts = source_lineage_incomplete_reasons(item.lineage);
+        cli_println!(
+            "  {}   {}",
+            u.dim("lineage:"),
+            u.warn(&format!("representative ({})", parts.join("; ")))
         );
     }
     render_source_analysis_source(u, source, pack);
@@ -1856,12 +2013,12 @@ fn synth_summary(combined: &CombinedFindingWithChain, pack: &Rulepack) -> Option
     Some(format!("{src_clean} → {sink_summary}."))
 }
 
-/// Fallback render when the finding has no resolved FuncId chain —
-/// a compact SOURCE / SANITIZER / SINK block list with the
+/// Compact render when the finding has no cross-function FuncId
+/// chain — a SOURCE / SANITIZER / SINK block list with the
 /// syntax-highlighted code line at each site, no source bodies.
 /// Same visual shape as the per-side blocks in the taint-analysis
-/// render, so same-file findings (which can't produce a cross-function
-/// chain) still read coherently.
+/// render, so same-file findings still read coherently without
+/// implying approximate analysis.
 fn render_finding_block_compact(
     u: &Ui,
     combined: &CombinedFindingWithChain,
@@ -1870,7 +2027,7 @@ fn render_finding_block_compact(
 ) {
     let f = &combined.finding;
     cli_println!();
-    cli_println!("{}", u.dim("(no cross-function chain — same-file fallback)"));
+    cli_println!("{}", u.dim("(same-file evidence — no cross-function chain)"));
     render_site_code(u, "SOURCE", &f.source, pack, ws);
     for source in &combined.additional_sources {
         render_site_code(u, "SOURCE", source, pack, ws);
@@ -2084,11 +2241,19 @@ fn source_analysis_text_cost_bytes(
 /// returns / errors that bypass the explicit `PhaseFinished`.
 struct SecurityAnalysisProgress {
     bar: Option<ProgressBar>,
+    phase_label: Option<&'static str>,
+    phase_started: Option<Instant>,
+    phase_ticks: u64,
 }
 
 impl SecurityAnalysisProgress {
     fn new() -> Self {
-        Self { bar: None }
+        Self {
+            bar: None,
+            phase_label: None,
+            phase_started: None,
+            phase_ticks: 0,
+        }
     }
 
     fn handle(&mut self, event: bonsai_sdk::AnalysisProgress) {
@@ -2102,27 +2267,58 @@ impl SecurityAnalysisProgress {
                 } else {
                     progress::progress_bar(label, total)
                 });
+                self.phase_label = Some(label);
+                self.phase_started = Some(Instant::now());
+                self.phase_ticks = 0;
             }
             bonsai_sdk::AnalysisProgress::PhaseTicked => {
+                self.phase_ticks = self.phase_ticks.saturating_add(1);
                 if let Some(bar) = &self.bar {
                     bar.inc(1);
                 }
             }
             bonsai_sdk::AnalysisProgress::PhaseFinished => {
+                self.log_phase_timing();
                 if let Some(bar) = self.bar.take() {
                     bar.finish_and_clear();
                 }
+                self.phase_label = None;
+                self.phase_started = None;
+                self.phase_ticks = 0;
             }
         }
+    }
+
+    fn log_phase_timing(&self) {
+        if !debug_category_enabled("security-phase") {
+            return;
+        }
+        let (Some(label), Some(started)) = (self.phase_label, self.phase_started) else {
+            return;
+        };
+        eprintln!(
+            "[security-phase] {label}: {:.3}s ticks={}",
+            started.elapsed().as_secs_f64(),
+            self.phase_ticks
+        );
     }
 }
 
 impl Drop for SecurityAnalysisProgress {
     fn drop(&mut self) {
+        self.log_phase_timing();
         if let Some(bar) = self.bar.take() {
             bar.finish_and_clear();
         }
     }
+}
+
+fn debug_category_enabled(category: &str) -> bool {
+    std::env::var("BONSAI_DEBUG").ok().is_some_and(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .any(|part| part == category || part == "*" || part == "all")
+    })
 }
 
 // Note: SDK severity parsing is case-insensitive. The previous
@@ -2144,19 +2340,24 @@ fn parse_severity_flag(flag: Option<&str>) -> Result<Option<Severity>> {
     }
 }
 
-fn max_precision_from_cli(precision: Option<PrecisionFilter>, strict_flow: bool) -> Option<Precision> {
-    precision
-        .map(precision_filter_to_common)
-        .or_else(|| strict_flow.then_some(Precision::Narrowed))
-}
-
-fn precision_filter_to_common(precision: PrecisionFilter) -> Precision {
-    match precision {
-        PrecisionFilter::Exact => Precision::Exact,
-        PrecisionFilter::Narrowed => Precision::Narrowed,
-        PrecisionFilter::OverApproximate => Precision::OverApproximate,
-        PrecisionFilter::Unknown => Precision::Unknown,
-    }
+fn max_precision_from_cli(
+    precision: Option<PrecisionFilter>,
+    strict_flow: bool,
+) -> Result<Option<Precision>> {
+    // Semantic flow is now the default. Keep accepting
+    // `--strict-flow` for compatibility; it no longer needs to opt
+    // into exact/narrowed traversal.
+    let _ = strict_flow;
+    let max_precision = match precision {
+        Some(PrecisionFilter::Exact) => Precision::Exact,
+        Some(PrecisionFilter::Narrowed) | None => Precision::Narrowed,
+        Some(PrecisionFilter::OverApproximate | PrecisionFilter::Unknown) => {
+            anyhow::bail!(
+                "`security taint-analysis` is semantic-only; use `--precision exact` or `--precision narrowed`"
+            );
+        }
+    };
+    Ok(Some(max_precision))
 }
 
 fn precision_from_finding_label(label: &str) -> Precision {
@@ -2249,7 +2450,10 @@ fn render_match_table(
                 filters_hash,
                 cost_row,
                 |paged, info, _cfg| {
+                    let analysis_incomplete_reasons = paged_json_incomplete_reasons(&command, info);
                     let payload = serde_json::json!({
+                        "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
                         "page": page_info_to_json(info),
                         "rows": paged,
                     });
@@ -2519,7 +2723,10 @@ fn cmd_pack(
                 filters_hash,
                 cost_row,
                 |paged, info, _cfg| {
+                    let analysis_incomplete_reasons = paged_json_incomplete_reasons("security/pack", info);
                     let payload = serde_json::json!({
+                        "analysis_complete": analysis_incomplete_reasons.is_empty(),
+                        "analysis_incomplete_reasons": analysis_incomplete_reasons,
                         "page": page_info_to_json(info),
                         "rows": paged,
                     });

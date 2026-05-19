@@ -46,11 +46,11 @@ pub(crate) fn cmd_tree(args: TreeArgs<'_>) -> Result<()> {
         file: args.file,
         exclude_files: args.exclude_file,
         severity,
-        limit: args.limit,
+        limit: if args.all { 0 } else { args.limit },
         follow: 0,
-        max_finding_ids_per_file: None,
-        max_flow_ids_per_file: None,
-        max_cross_file_edges_per_file: None,
+        max_finding_ids_per_file: args.all.then_some(0),
+        max_flow_ids_per_file: args.all.then_some(0),
+        max_cross_file_edges_per_file: args.all.then_some(0),
     };
     let spin = progress::spinner("building tree");
     let out = project.browse().tree(filters)?;
@@ -158,6 +158,21 @@ fn render_text_lines(out: &TreeOut, compact: bool) -> Vec<String> {
         if out.summary.total_findings == 1 { "" } else { "s" },
     );
     lines.push(u.heading(&header));
+    if !out.analysis_complete {
+        let reasons = if out.analysis_incomplete_reasons.is_empty() {
+            "analysis-incomplete".to_string()
+        } else {
+            out.analysis_incomplete_reasons.join("; ")
+        };
+        lines.push(format!(
+            "{} {}",
+            u.warn("semantic-only tree incomplete:"),
+            u.dim(&reasons)
+        ));
+        lines.push(
+            u.dim("rerun with --all and avoid restrictive --max-depth when you need every node/evidence id"),
+        );
+    }
     lines.push(String::new());
 
     let last = out.roots.len().saturating_sub(1);

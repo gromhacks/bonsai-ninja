@@ -519,6 +519,24 @@ func inner(filter: String) {
     );
 }
 
+#[test]
+fn over_taint_swift_typed_overload_does_not_follow_wrong_candidate() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_swift::SwiftAdapter::new());
+    let src = r#"
+func helper(p: String) {}
+func helper(p: Int) { sink(p) }
+func entry(args: String) { helper(p: args) }
+"#;
+    let db = build_db(adapter, &[("a.swift", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry decl");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &cfg(), &db);
+    assert!(
+        !sink_reached(&result, "sink"),
+        "swift: typed overload dispatch must not propagate String taint into Int overload; got {:?}",
+        result.tainted_calls,
+    );
+}
+
 // ===========================================================================
 // DART
 // ===========================================================================
@@ -605,6 +623,28 @@ end
     );
 }
 
+#[test]
+fn over_taint_elixir_tuple_return_second_element_does_not_taint_first_binding() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let src = r#"
+defmodule Demo do
+  def helper(p), do: {"ok", p}
+  def entry(args) do
+    {a, _b} = helper(args)
+    sink(a)
+  end
+end
+"#;
+    let db = build_db(adapter, &[("a.ex", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry decl");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &cfg(), &db);
+    assert!(
+        !sink_reached(&result, "sink"),
+        "elixir: tuple return element taint must stay positional; got {:?}",
+        result.tainted_calls,
+    );
+}
+
 // ===========================================================================
 // ERLANG
 // ===========================================================================
@@ -630,6 +670,26 @@ inner(Filter) ->
     assert!(
         !sink_reached(&result, "sink"),
         "erlang: hardcoded literal arg must not propagate taint; got {:?}",
+        result.tainted_calls,
+    );
+}
+
+#[test]
+fn over_taint_erlang_tuple_return_second_element_does_not_taint_first_binding() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_erlang::ErlangAdapter::new());
+    let src = r#"
+-module(demo).
+-export([entry/1, helper/1]).
+
+helper(P) -> {"ok", P}.
+entry(Args) -> {A, _B} = helper(Args), sink(A).
+"#;
+    let db = build_db(adapter, &[("demo.erl", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry decl");
+    let result = interprocedural_taint(entry, &seed(&["Args"]), &cfg(), &db);
+    assert!(
+        !sink_reached(&result, "sink"),
+        "erlang: tuple return element taint must stay positional; got {:?}",
         result.tainted_calls,
     );
 }

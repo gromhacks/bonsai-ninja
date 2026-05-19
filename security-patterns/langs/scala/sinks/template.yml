@@ -246,6 +246,7 @@
   enabled: true
   language: scala
   tag: ssti
+  category: source-independent
   severity: high
   packages:
   - freemarker

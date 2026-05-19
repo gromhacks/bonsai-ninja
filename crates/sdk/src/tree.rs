@@ -36,6 +36,8 @@ pub struct TreeFilters<'a> {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TreeOut {
+    pub analysis_complete: bool,
+    pub analysis_incomplete_reasons: Vec<String>,
     pub roots: Vec<TreeNode>,
     pub summary: TreeSummary,
 }
@@ -224,9 +226,9 @@ pub fn tree(
     rulepack: Option<&Rulepack>,
     filters: &TreeFilters<'_>,
 ) -> anyhow::Result<TreeOut> {
-    let max_findings_cap = filters.max_finding_ids_per_file.unwrap_or(3);
-    let max_flow_cap = filters.max_flow_ids_per_file.unwrap_or(5);
-    let max_edge_cap = filters.max_cross_file_edges_per_file.unwrap_or(3);
+    let max_findings_cap = effective_optional_cap(filters.max_finding_ids_per_file, 3);
+    let max_flow_cap = effective_optional_cap(filters.max_flow_ids_per_file, 5);
+    let max_edge_cap = effective_optional_cap(filters.max_cross_file_edges_per_file, 3);
     let limit = if filters.limit == 0 {
         usize::MAX
     } else {
@@ -234,7 +236,11 @@ pub fn tree(
     };
 
     let report = match rulepack {
-        Some(pack) => run_taint_analysis(ws, pack, TaintAnalysisOptions::default()).ok(),
+        Some(pack) => Some(run_taint_analysis(
+            ws,
+            pack,
+            TaintAnalysisOptions::default().semantic_precision_only(),
+        )?),
         None => None,
     };
 
@@ -277,6 +283,7 @@ pub fn tree(
     drop(global);
 
     let mut tree_root = DirBuilder::default();
+    let mut finding_incomplete_reasons: Vec<String> = Vec::new();
     for (rel, file_id) in &files {
         let segments: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
         if segments.is_empty() {
@@ -302,6 +309,9 @@ pub fn tree(
             if max_severity.is_none_or(|s| s < min_sev) {
                 continue;
             }
+        }
+        for finding in &file_findings {
+            finding_incomplete_reasons.extend(finding_analysis_incomplete_reasons(finding));
         }
 
         let mut flow_ids: Vec<String> = file_findings
@@ -389,8 +399,99 @@ pub fn tree(
     };
     let max_depth = filters.max_depth.unwrap_or(usize::MAX);
     let roots = tree_root.finalize("", 0, max_depth, limit, &mut summary);
+    let mut analysis_incomplete_reasons = tree_analysis_incomplete_reasons(&roots, &summary);
+    analysis_incomplete_reasons.extend(finding_incomplete_reasons);
+    analysis_incomplete_reasons.sort();
+    analysis_incomplete_reasons.dedup();
+    let analysis_complete = analysis_incomplete_reasons.is_empty();
 
-    Ok(TreeOut { roots, summary })
+    Ok(TreeOut {
+        analysis_complete,
+        analysis_incomplete_reasons,
+        roots,
+        summary,
+    })
+}
+
+fn effective_optional_cap(value: Option<usize>, default: usize) -> usize {
+    match value {
+        Some(0) => usize::MAX,
+        Some(limit) => limit,
+        None => default,
+    }
+}
+
+#[derive(Default)]
+#[allow(clippy::struct_field_names)] // Names line up with TreeSummary truncation counters.
+struct TreeTruncationTotals {
+    children_dropped: usize,
+    finding_ids_dropped: usize,
+    flow_ids_dropped: usize,
+    callers_in_dropped: usize,
+    callees_out_dropped: usize,
+}
+
+fn tree_analysis_incomplete_reasons(roots: &[TreeNode], summary: &TreeSummary) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if summary.total_files_scanned > summary.total_files {
+        reasons.push(format!(
+            "tree-files-truncated:rendered_files={},scanned_files={}",
+            summary.total_files, summary.total_files_scanned
+        ));
+    }
+
+    let mut totals = TreeTruncationTotals::default();
+    collect_tree_truncation_totals(roots, &mut totals);
+    if totals.children_dropped > 0 {
+        reasons.push(format!(
+            "tree-children-truncated:children_dropped={}",
+            totals.children_dropped
+        ));
+    }
+    if totals.finding_ids_dropped > 0 {
+        reasons.push(format!(
+            "tree-finding-ids-truncated:finding_ids_dropped={}",
+            totals.finding_ids_dropped
+        ));
+    }
+    if totals.flow_ids_dropped > 0 {
+        reasons.push(format!(
+            "tree-flow-ids-truncated:flow_ids_dropped={}",
+            totals.flow_ids_dropped
+        ));
+    }
+    if totals.callers_in_dropped > 0 || totals.callees_out_dropped > 0 {
+        reasons.push(format!(
+            "tree-cross-file-edges-truncated:callers_in_dropped={},callees_out_dropped={}",
+            totals.callers_in_dropped, totals.callees_out_dropped
+        ));
+    }
+    reasons
+}
+
+fn collect_tree_truncation_totals(nodes: &[TreeNode], totals: &mut TreeTruncationTotals) {
+    for node in nodes {
+        totals.children_dropped += node.truncated.children_dropped;
+        totals.finding_ids_dropped += node.truncated.finding_ids_dropped;
+        totals.flow_ids_dropped += node.truncated.flow_ids_dropped;
+        totals.callers_in_dropped += node.truncated.callers_in_dropped;
+        totals.callees_out_dropped += node.truncated.callees_out_dropped;
+        collect_tree_truncation_totals(&node.children, totals);
+    }
+}
+
+fn finding_analysis_incomplete_reasons(finding: &Finding) -> Vec<String> {
+    if finding.analysis_complete {
+        return Vec::new();
+    }
+    if finding.analysis_incomplete_reasons.is_empty() {
+        return vec![format!("finding:{}:analysis-incomplete", finding.finding_id)];
+    }
+    finding
+        .analysis_incomplete_reasons
+        .iter()
+        .map(|reason| format!("finding:{}:{reason}", finding.finding_id))
+        .collect()
 }
 
 #[derive(Default)]
@@ -402,7 +503,12 @@ struct CrossEdgeIndex {
 fn build_cross_edges(graph: &bonsai_callgraph::ResolvedCallGraph, ws: &Workspace) -> CrossEdgeIndex {
     let mut index = CrossEdgeIndex::default();
     let global = ws.db().global_index();
-    for edge in &graph.inner().edges {
+    for edge in graph
+        .inner()
+        .edges
+        .iter()
+        .filter(|edge| edge.precision.is_semantic())
+    {
         let caller_file = global
             .declaring_file(SymbolId::new(edge.from.raw()))
             .and_then(|fid| ws.vfs().path(fid).ok().map(|p| p.display().to_string()));
@@ -601,3 +707,7 @@ impl DirBuilder {
         out
     }
 }
+
+#[cfg(test)]
+#[path = "tree_tests.rs"]
+mod tests;

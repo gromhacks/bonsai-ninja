@@ -26,16 +26,25 @@
   enabled: true
   language: swift
   tag: xxe
+  category: source-independent
   severity: high
   cwe: [CWE-611]
   match:
     kind: write
     target:
-      name: shouldResolveExternalEntities
+      regex: ^[^\.\s]+\.shouldResolveExternalEntities$
   match_examples:
-    - name: declared shape
+    - name: XMLParser external entities member write
       code: |
-        func test() { let input = "x"; let amount = 1; shouldResolveExternalEntities = input }
+        func test(input: Bool) {
+          let parser = XMLParser(data: Data())
+          parser.shouldResolveExternalEntities = input
+        }
+      expect_match_text: [parser.shouldResolveExternalEntities]
+    - name: local shouldResolveExternalEntities variable negative
+      code: |
+        func test(input: Bool) { let shouldResolveExternalEntities = input }
+      expect_no_match: true
   description: "XMLParser.shouldResolveExternalEntities = true — enables XXE."
 
 - id: swift.xxe.xmldocument_init

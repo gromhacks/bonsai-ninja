@@ -16,6 +16,8 @@
   - arg_matches_regex:
       index: 0
       regex: '(\\n|\\r|format!\(|\+)'
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |

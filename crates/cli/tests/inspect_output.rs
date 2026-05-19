@@ -226,6 +226,60 @@ fn inspect_call_hit_surfaces_full_upstream_chain() {
 }
 
 #[test]
+fn inspect_call_hit_does_not_expand_unresolved_qualified_call_to_sibling_short_name() {
+    if require_binary_built().is_none() {
+        return;
+    }
+    let td = tempdir_for_test("inspect-semantic-call-hit");
+    std::fs::write(
+        td.join("app.py"),
+        r#"def caller():
+    helper("safe")
+    external.helper("user")
+
+def helper(value):
+    return value
+"#,
+    )
+    .expect("write fixture");
+
+    let out = run(&[
+        "inspect",
+        td.to_str().unwrap(),
+        "--query",
+        "external.helper",
+        "--kind",
+        "call",
+        "--format",
+        "json",
+        "--no-progress",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid inspect JSON");
+    let hit = v["hits"]
+        .as_array()
+        .and_then(|hits| hits.first())
+        .expect("call hit");
+    let chains: Vec<Vec<String>> = hit["flows"]
+        .as_array()
+        .expect("flows array")
+        .iter()
+        .map(|flow| {
+            flow["chain"]
+                .as_array()
+                .expect("chain array")
+                .iter()
+                .map(|name| name.as_str().expect("chain entry").to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        chains,
+        vec![vec!["caller".to_string()]],
+        "unresolved external.helper() must not bind to the sibling helper() call:\n{out}"
+    );
+}
+
+#[test]
 fn inspect_flow_bodies_show_class_owner_context() {
     if require_binary_built().is_none() {
         return;

@@ -99,11 +99,18 @@
     kind: call
     callee:
       regex: "^(mongoc_collection_find_with_opts|mongoc_collection_find)$"
+  constraints:
+  - any_arg_tainted: true
   match_examples:
   - name: declared shape
     code: |
       #import <mongoc/mongoc.h>
       void test(id input) { id target = input; int amount = 1; mongoc_collection_find_with_opts(input); }
+  - name: literal mongoc query negative
+    code: |
+      #import <mongoc/mongoc.h>
+      void test(void) { mongoc_collection_find_with_opts("{\"name\":\"safe\"}"); }
+    expect_no_match: true
   description: "libmongoc mongoc_collection_find(_with_opts) — tainted BSON filter permits NoSQL injection."
 
 - id: objc.nosql.couchbase_query

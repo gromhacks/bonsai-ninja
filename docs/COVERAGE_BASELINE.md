@@ -2,8 +2,8 @@
 
 Per-language modeling levels for the constructs the security engine
 cares about. **The headline:** every supported language gets the
-common case modeled precisely; rare grammar shapes are flagged with
-reduced precision in the output rather than silently mis-handled.
+common case modeled semantically; rare grammar shapes are surfaced as
+unsupported or incomplete rather than widened into guessed findings.
 
 Most cells in the table below say `Partial` because **`Partial` is
 the engine's healthy default**, not a gap. See [What the levels
@@ -15,17 +15,15 @@ of `Partial`s.
 > per-scenario behavioural truth (1365 tests run the real engine on
 > each scenario × language and assert the right answer). This doc is
 > the *modeling-level declaration* — `Partial` here means "common
-> case is precise, rare shapes get `Precision::OverApproximate`," not
+> case is semantic, rare shapes are marked incomplete/unsupported," not
 > "the test fails." Both views are correct simultaneously.
 >
 > **Should everything here be `Exact`?** No — and that is principled,
-> not a gap. `Exact` requires a closed-form analysis with no
-> over-approximation possible (think: pure functional languages, no
-> reflection, no aliasing). Real-world languages don't admit that for
-> most constructs; static analysis at scale has approximation. The
-> production-correct stance is to model the common case precisely and
-> *flag* the remaining cases with `Precision::OverApproximate` so
-> consumers can filter them — exactly what `Partial` denotes.
+> not a gap. `Exact` requires a closed-form analysis with no dynamic
+> uncertainty. Real-world languages don't admit that for most constructs.
+> The production-correct stance is to model the common case semantically
+> and surface the remaining cases as incompleteness/debug metadata —
+> exactly what `Partial` denotes.
 >
 > **Should everything here be supported (no `Unsupported` cells)?**
 > The remaining `Unsupported` cells are deliberate engineering
@@ -51,9 +49,9 @@ of `Partial`s.
 
 - The engine runs taint analysis successfully on every language in
   the table.
-- A `Partial` cell means *"common case is modeled; rare forms emit
-  `Precision::OverApproximate` so users can filter them out"*. It does
-  NOT mean broken or unimplemented.
+- A `Partial` cell means *"common case is modeled semantically; rare forms
+  are marked incomplete/unsupported instead of reported as guessed flows"*.
+  It does NOT mean broken or unimplemented.
 - An `Unsupported` cell means *"rules anchored on this construct are
   rejected at rulepack load time"* — a deliberate choice that prevents
   rules from firing on shapes the engine wouldn't analyse precisely.
@@ -69,7 +67,7 @@ of `Partial`s.
 | Level | Engine behaviour | Effect on rules | When you'd see it |
 |---|---|---|---|
 | `Exact` | Construct modeled precisely. Findings get `Precision::Exact`. | Rule fires whenever it matches. | Only set when an adapter has a closed-form analysis for this category (rare today; see [backlog](#backlog) below). |
-| `Partial` | Common case modeled precisely; rare forms emit `Precision::OverApproximate`. | Rule fires; users can filter out OverApproximate findings via `--precision exact,narrowed`. | The conservative default. Most cells. Means "the engine works here, with honest precision flagging." |
+| `Partial` | Common case modeled semantically; rare forms are marked incomplete/unsupported. | Rule fires only when semantic evidence exists. | The conservative default. Most cells. Means "the engine works here, with honest completion metadata." |
 | `Unsupported` | Construct ignored. | **Rules requiring this category are rejected at rulepack load time.** | A deliberate gate: prevents false-precision findings on shapes the engine wouldn't analyse correctly. |
 | `n/a` | Construct doesn't exist in this language. | No rule could target it anyway. | E.g. macros in JS, exceptions in Rust, generics in Lua. |
 
@@ -160,8 +158,8 @@ of scope.
 
 These don't gate rule loading; they affect how the resolver narrows
 candidate edges. `Unsupported` here means findings that go through
-this construct degrade to `OverApproximate` precision instead of being
-narrowed; `Partial` means they're handled in the common case.
+this construct are not emitted as semantic evidence; `Partial` means
+they're handled in the common case.
 
 | Language | Macros | Reflection | FFI |
 |---|---|---|---|
@@ -192,8 +190,8 @@ narrowed; `Partial` means they're handled in the common case.
 A plain-English read of where each language stands today:
 
 - **C / C++** — Core analysis works. C++ templates handled as a single
-  decl with type parameters; per-instantiation specialisation degrades
-  to `OverApproximate`. Macro expansion is not performed; rules
+  decl with type parameters; unsupported per-instantiation specialisation
+  is treated as incomplete. Macro expansion is not performed; rules
   anchored on macro-defined names won't fire. Smart-pointer move/copy
   isn't distinguished beyond the standard Assign event.
 - **C#** — Standard async/await flows analysed; reflection (`Type`
@@ -229,7 +227,7 @@ A plain-English read of where each language stands today:
   visibility) feed the resolver. Dynamic dispatch (Python `getattr`,
   Ruby `send`) is opaque when the method name is computed.
 - **Rust** — Trait-based dispatch analysis. `Box<dyn Trait>` calls
-  emit `EdgeKind::Virtual` at `Precision::OverApproximate`. No
+  emit semantic virtual edges only when the receiver set is proven. No
   exception model (Rust uses `Result`); macro expansion is partial
   (we recognise common shapes like `println!`, but `macro_rules!`
   and proc-macros aren't expanded).
@@ -308,10 +306,10 @@ Things that aren't visible in this matrix:
   `Partial` capabilities will surface fewer findings than one with a
   fat rulepack and identical capabilities. That's about rule writing,
   not engine support.
-- **Real-world precision distribution.** What fraction of findings on
-  a typical workspace land at `Exact` / `Narrowed` /
-  `OverApproximate` / `Unknown`. That's measurable by running the
-  engine on a corpus and tallying `precision` on the findings.
+- **Real-world completion distribution.** What fraction of findings on
+  a typical workspace land at `Exact` / `Narrowed` and what fraction of
+  sections are marked incomplete. That's measurable by running the engine
+  on a corpus and tallying `precision` plus completion metadata.
 - **CFG completeness.** Whether each adapter emits Call / Assign /
   Param / Return for every grammar shape. That's the actual taint-
   coverage question, and it's tested by the per-language matrix

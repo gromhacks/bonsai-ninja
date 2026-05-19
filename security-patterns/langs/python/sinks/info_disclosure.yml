@@ -51,6 +51,8 @@
     kind: call
     callee:
       name: jsonify
+  constraints:
+  - any_arg_matches_regex: "(?i)(traceback|format_exc|exc\\b|exception|sys\\.exc_info|TracebackException)"
   match_examples:
   - name: flask jsonify exception
     code: |
@@ -59,6 +61,18 @@
           return jsonify({"error": str(exc), "traceback": traceback.format_exc()})
     expect_match_text:
     - jsonify
+  - name: flask jsonify ordinary response negative
+    code: |
+      import flask
+      def handler(result):
+          return jsonify({"ok": True, "result": result})
+    expect_no_match: true
+  - name: flask jsonify constant error negative
+    code: |
+      import flask
+      def handler():
+          return jsonify({"error": "empty"}), 400
+    expect_no_match: true
   description: "Flask jsonify(exception/traceback) — returns internal exception details to the client."
 - id: python.info_disclosure.django_technical_500_response
   enabled: true

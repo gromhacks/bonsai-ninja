@@ -10,9 +10,13 @@ source→sink path where the adapter can follow them.
 
 CI pins this in `crates/cli/tests/security_commands.rs` with two checks:
 every language must expose its declared construct markers in source, and
-`security taint-analysis --format json --all` must produce a canonical
-app-to-sink chain for all 21 `mega_flow` fixtures with the exact finding
-count listed below. Each fixture must also include an explicit
+`security taint-analysis --format json --all` must match the default
+finding counts listed below. Zero-count rows are valid when the enabled
+default rulepack has no source-to-sink rule firing for that fixture;
+pattern-only and no-path matches are intentionally excluded from default
+taint-analysis text/JSON output. SARIF enables exact source-independent
+API/config misuse findings automatically and omits `codeFlows` for those
+local pattern rows. Each fixture must also include an explicit
 `NEGATIVE` clean-twin sink of the same sink kind that receives only a
 constant value; the exact finding count fails if that decoy starts
 reporting. The same test suite also exports each fixture and verifies the
@@ -20,16 +24,18 @@ adapter facts the taint engine depends on: declaration params,
 imports/includes, call and string refs, per-language `FlowEvent`
 families, resolved call edges, reachable facts, argument/write refs,
 import/symbol alias maps where the fixture uses aliases, assignment
-chains, intraprocedural taint, and source-to-sink chains. The complete
-release-binary CLI/switch sweep lives in `scripts/validate-mega-cli.py`;
-it runs every command family, output mode, public switch, stable-id
-drilldown, and cache command against every language's `mega_flow`.
+chains, and intraprocedural taint. Dedicated cross-file and assignment
+audit tests pin the source-to-sink chains across all 21 languages. The
+complete release-binary CLI/switch sweep lives in
+`scripts/validate-mega-cli.py`; it runs every command family, output mode,
+public switch, stable-id drilldown, and cache command against every
+language's `mega_flow`.
 
 Run one language:
 
 ```
 ./target/release/bonsai-ninja security examples/<lang>/mega_flow \
-    --rules-dir ./security-patterns taint-analysis --all
+    taint-analysis --rules-dir ./security-patterns --all
 ```
 
 Run the full release gate:
@@ -39,30 +45,38 @@ cargo build --release
 scripts/validate-mega-cli.py --bin ./target/release/bonsai-ninja
 ```
 
-## Current `security taint-analysis` results (21/21 end-to-end)
+## Current default `security taint-analysis` results
 
-| Lang       | Findings | Chain                                                          |
+Generated with the release CLI:
+
+```bash
+./target/release/bonsai-ninja security examples/<lang>/mega_flow \
+  taint-analysis --rules-dir ./security-patterns --format json --all \
+  --no-color --no-progress
+```
+
+| Lang       | Findings | Primary chain when emitted                                     |
 |------------|---------:|----------------------------------------------------------------|
-| c          | 11       | main → orchestrate → persist → run → execute                   |
-| cpp        | 1        | main → orchestrate → persist → run → execute                   |
-| csharp     | 1        | Handle → OrchestrateAsync → Orchestrate → Persist → Run → Execute |
-| dart       | 2        | handle_request → orchestrateAsync → orchestrate → persist → run → execute |
-| elixir     | 1        | main → orchestrate → persist → run → execute                   |
-| erlang     | 1        | handle_request → orchestrate → persist → run → execute         |
+| c          | 1        | main → orchestrate → persist → run → execute                   |
+| cpp        | 0        | No default finding                                             |
+| csharp     | 0        | No default finding                                             |
+| dart       | 0        | No default finding                                             |
+| elixir     | 0        | No default finding                                             |
+| erlang     | 0        | No default finding                                             |
 | go         | 1        | handleRequest → Orchestrate → Persist → Run → Execute          |
-| java       | 1        | handle → orchestrate → persist → run → execute                 |
+| java       | 0        | No default finding                                             |
 | javascript | 1        | handle_request → orchestrate → persist → run → execute         |
 | kotlin     | 1        | handle → orchestrate → persist → run → execute                 |
 | lua        | 3        | handle_request → orchestrate → persist → run → execute         |
 | objc       | 2        | handle_request → orchestrate → persist → run → executeCmd      |
 | perl       | 1        | handle_request → orchestrate → StorePersist → persist → run → execute |
-| php        | 1        | handle_request → orchestrate → persist → run → execute         |
-| python     | 2        | handle_request → run_pipeline → orchestrate → persist → perform → execute |
+| php        | 0        | No default finding                                             |
+| python     | 1        | handle_request → run_pipeline → orchestrate → persist → perform → execute |
 | ruby       | 2        | handle_request → orchestrate → persist → run → execute         |
-| rust       | 1        | handle_request → orchestrate → persist → run → execute         |
-| scala      | 1        | handle → orchestrate → persist → run → execute                 |
-| solidity   | 2        | handle → orchestrate → persist                                 |
-| swift      | 1        | handle_request → orchestrate → persist → run → execute         |
+| rust       | 0        | No default finding                                             |
+| scala      | 0        | No default finding                                             |
+| solidity   | 1        | audit                                                          |
+| swift      | 0        | No default finding                                             |
 | typescript | 1        | handle_request → orchestrate → persist → run → execute         |
 
 ## What each fixture exercises

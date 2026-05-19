@@ -2,7 +2,9 @@
 //! `dump-resolve`, `dump-taint`. Structural introspection views of
 //! the workspace — each picks one plane of the analysis (call graph,
 //! AST, symbol resolution, taint flows) and renders it verbatim.
-//! JSON output is always uncapped; text output honors `--context`.
+//! JSON output is uncapped by default; when a dump command accepts
+//! `--context` / `--page`, the explicit page wrapper carries
+//! completeness metadata. Text output honors `--context`.
 
 use crate::args::{BrowseFormat, PrecisionFilter};
 use crate::footer::{render_paging_footer, render_truncation_notice};
@@ -77,6 +79,12 @@ pub(crate) fn cmd_dump_edges(
     paging_cfg: paging::PagingConfig,
     format: BrowseFormat,
 ) -> Result<()> {
+    if matches!(
+        precision_filter,
+        Some(PrecisionFilter::OverApproximate | PrecisionFilter::Unknown)
+    ) {
+        anyhow::bail!("`dump-edges` is semantic-only; use `--precision exact` or `--precision narrowed`");
+    }
     let (project, _footer) = open_project(root)?;
     let filters = bonsai_sdk::EdgesFilters {
         from: from_filter,
@@ -228,10 +236,9 @@ fn render_edge_records_text(records: &[bonsai_sdk::EdgeRecord], compact: bool, t
     cli_println!("{}", u.dim(&format!("({} edges)", records.len())));
 }
 
-/// Colorize the precision tag the same way `precision_header_suffix`
-/// does for `inspect` FLOW headers — `exact` / `narrowed` stay dim
-/// (rock-solid evidence; no visual shout), `over-approximate` and
-/// `unknown` get the palette's `warn` color.
+/// Colorize precision/outcome tags. `exact` / `narrowed` stay dim;
+/// diagnostic-only states such as `ambiguous`, `over-approximate`,
+/// `unknown`, and `unresolved` get the palette's warning color.
 fn precision_tag(u: &Ui, precision: &str) -> String {
     match precision {
         "exact" | "narrowed" => u.dim(precision),
@@ -405,6 +412,11 @@ pub(crate) fn cmd_dump_resolve(
         .resolve_with_suggestions(query, filters, |ws, q| nearest_names(ws, q, 5))
     {
         bonsai_sdk::ResolveOutcome::Trace(t) => t,
+        bonsai_sdk::ResolveOutcome::FileContextNotFound { needle } => anyhow::bail!(
+            "dump-resolve: --in-file `{needle}` did not match any indexed file. \
+             File context is required for semantic narrowing; rerun with a path \
+             substring from `bonsai-ninja tree` or omit --in-file for a name inventory."
+        ),
         bonsai_sdk::ResolveOutcome::CandidateNotFound => anyhow::bail!(
             "no candidate matching `{}` for query `{query}`. \
              Candidate ids are printed next to every row in `dump-resolve` \
@@ -453,6 +465,7 @@ fn render_resolve_compact(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
         u.name(&trace.candidates.len().to_string()),
         precision_tag(u, &trace.outcome),
     );
+    render_resolve_incomplete_note(u, trace);
     if trace.candidates.is_empty() {
         if !trace.suggestions.is_empty() {
             cli_println!("  {} {}", u.dim("did you mean:"), trace.suggestions.join(", "));
@@ -487,6 +500,7 @@ fn render_resolve_full(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
             None => u.dim("(global — no file context)"),
         }
     );
+    render_resolve_incomplete_note(u, trace);
 
     // Stage 1: short_callee. `u.heading` already prepends a
     // leading `\n` so section separation comes for free — no manual
@@ -529,7 +543,7 @@ fn render_resolve_full(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
         }
     }
     // Stage 3: primary lookup.
-    cli_println!("{}", u.heading("  stage 3 — collect_callable_targets"));
+    cli_println!("{}", u.heading("  stage 3 — semantic resolver"));
     cli_println!(
         "    {} {}",
         u.dim("lookup name:"),
@@ -542,14 +556,14 @@ fn render_resolve_full(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
         u.dim(candidate_count_note(trace.primary_candidate_count)),
     );
     // Stage 4: fallback.
-    cli_println!("{}", u.heading("  stage 4 — literal-name fallback"));
+    cli_println!("{}", u.heading("  stage 4 — broad fallback guard"));
     if !trace.fallback_applied {
         cli_println!(
             "    {}",
             u.dim(if trace.primary_candidate_count > 0 {
                 "skipped — primary lookup succeeded"
             } else {
-                "skipped — no alias rewrite to retry"
+                "skipped — semantic mode does not broaden unresolved names"
             }),
         );
     } else {
@@ -599,13 +613,29 @@ fn render_resolve_full(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
     }
 }
 
+fn render_resolve_incomplete_note(u: &Ui, trace: &bonsai_sdk::ResolveTrace) {
+    if trace.analysis_complete {
+        return;
+    }
+    let reasons = if trace.analysis_incomplete_reasons.is_empty() {
+        "analysis-incomplete".to_string()
+    } else {
+        trace.analysis_incomplete_reasons.join("; ")
+    };
+    cli_println!(
+        "  {} {}",
+        u.warn("semantic resolution incomplete:"),
+        u.dim(&reasons),
+    );
+}
+
 /// Human-readable note for the candidate count column. Surfaces the
 /// outcome that count implies so users don't have to re-interpret.
 fn candidate_count_note(count: usize) -> &'static str {
     match count {
         0 => "(unresolved — no matching decls in workspace)",
         1 => "(single candidate — direct / narrowed edge)",
-        _ => "(multi-candidate — virtual / over-approximate edge)",
+        _ => "(multi-candidate — ambiguous without call-site context)",
     }
 }
 
@@ -710,6 +740,14 @@ fn render_taint_report_text(report: &bonsai_sdk::TaintReport, compact: bool) {
             String::new()
         },
     );
+    if !report.analysis_complete {
+        let reasons = if report.analysis_incomplete_reasons.is_empty() {
+            "unknown reason".to_string()
+        } else {
+            report.analysis_incomplete_reasons.join("; ")
+        };
+        cli_println!("  {} {}", u.warn("analysis incomplete:"), u.dim(&reasons));
+    }
     if report.records.is_empty() {
         cli_println!();
         cli_println!(

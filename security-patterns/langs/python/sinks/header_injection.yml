@@ -197,6 +197,9 @@
     kind: write
     target:
       regex: headers|Location
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: response headers location assignment
     code: |
@@ -204,7 +207,14 @@
       def redirect(response, user_input):
           response.headers["Location"] = user_input
     expect_match_text:
-    - response.headers
+    - response.headers.Location
+  - name: literal response location negative
+    code: |
+      import flask
+      def redirect(response):
+          location = "/home"
+          return location
+    expect_no_match: true
   description: "response.headers['Location'] = tainted — manual redirect/header assignment can produce response splitting or tainted Location redirects. Merged collision aliases: python.smuggle.set_dual_cl_te_headers."
   aliases:
   - python.smuggle.set_dual_cl_te_headers

@@ -76,13 +76,21 @@
   match:
     kind: write
     target:
-      name: Arguments
+      regex: ^(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+Arguments$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; Arguments = input; } }
+  - name: process start info arguments property
+    code: 'class App { void Test(string input) { var psi = new ProcessStartInfo();
+      psi.Arguments = input; } }
 
       '
+  - name: local arguments variable negative
+    code: 'class App { void Test(string input) { var Arguments = input; } }
+
+      '
+    expect_no_match: true
   description: "ProcessStartInfo.Arguments = tainted \u2014 argv passed verbatim."
 - id: csharp.cmdi.process_start_info_filename
   enabled: true
@@ -95,13 +103,21 @@
   match:
     kind: write
     target:
-      name: FileName
+      regex: ^(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+FileName$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
-    code: 'class App { void Test() { dynamic input = "x"; dynamic target = input;
-      dynamic amount = 1; FileName = input; } }
+  - name: process start info filename property
+    code: 'class App { void Test(string input) { var psi = new ProcessStartInfo();
+      psi.FileName = input; } }
 
       '
+  - name: local filename variable negative
+    code: 'class App { void Test(string input) { var FileName = input; } }
+
+      '
+    expect_no_match: true
   description: ProcessStartInfo.FileName = tainted.
 - id: csharp.cmdi.process_start_use_shell
   enabled: false

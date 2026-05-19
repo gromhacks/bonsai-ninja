@@ -13,6 +13,9 @@
     kind: call
     callee:
       regex: \.Search$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -25,6 +28,15 @@
         value := "value"
         conn.Search(target)
       }
+  - name: literal ldap search request negative
+    code: |
+      import "github.com/go-ldap/ldap"
+      package main
+
+      func example() {
+        conn.Search("constantRequest")
+      }
+    expect_no_match: true
   description: "go-ldap Conn.Search(req) — tainted Filter = LDAP injection; escape with ldap.EscapeFilter."
 - id: go.ldap.conn_searchwithpaging
   enabled: true
@@ -41,6 +53,9 @@
     kind: call
     callee:
       regex: \.SearchWithPaging$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -53,6 +68,15 @@
         value := "value"
         conn.SearchWithPaging(target)
       }
+  - name: literal ldap search with paging request negative
+    code: |
+      import "github.com/go-ldap/ldap"
+      package main
+
+      func example() {
+        conn.SearchWithPaging("constantRequest")
+      }
+    expect_no_match: true
   description: "go-ldap Conn.SearchWithPaging — tainted filter search variant."
 - id: go.ldap.conn_modify
   enabled: true
@@ -69,6 +93,9 @@
     kind: call
     callee:
       regex: \.Modify$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -81,6 +108,15 @@
         value := "value"
         conn.Modify(target)
       }
+  - name: literal ldap modify request negative
+    code: |
+      import "github.com/go-ldap/ldap"
+      package main
+
+      func example() {
+        conn.Modify("constantRequest")
+      }
+    expect_no_match: true
   description: "go-ldap Conn.Modify — tainted DN / attribute values mutate directory entries."
 - id: go.ldap.conn_del
   enabled: true
@@ -97,6 +133,9 @@
     kind: call
     callee:
       regex: \.Del$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
@@ -109,6 +148,15 @@
         value := "value"
         conn.Del(target)
       }
+  - name: literal ldap delete request negative
+    code: |
+      import "github.com/go-ldap/ldap"
+      package main
+
+      func example() {
+        conn.Del("constantRequest")
+      }
+    expect_no_match: true
   description: "go-ldap Conn.Del — tainted DN deletes attacker-chosen entries."
 - id: go.ldap.newsearchrequest
   enabled: true
@@ -127,6 +175,9 @@
       attribute:
       - ldap
       - NewSearchRequest
+  constraints:
+  - arg_tainted:
+      index: 6
   match_examples:
   - name: gin query into ldap search filter
     code: "package main\nimport (\n  \"fmt\"\n  \"github.com/gin-gonic/gin\"\n  \"github.com/go-ldap/ldap/v3\"\n)\nfunc handler(c *gin.Context) {\n  user := c.Query(\"user\")\n  filter := fmt.Sprintf(\"(uid=%s)\", user)\n  _ = ldap.NewSearchRequest(\"dc=example,dc=com\", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, filter, nil, nil)\n}\n"
@@ -136,4 +187,13 @@
     code: "package main\nimport (\n  \"fmt\"\n  \"github.com/go-ldap/ldap/v3\"\n)\ntype Controller struct{}\nfunc (c *Controller) GetString(name string) string { return \"\" }\nfunc handler(c *Controller) {\n  user := c.GetString(\"user\")\n  filter := fmt.Sprintf(\"(uid=%s)\", user)\n  _ = ldap.NewSearchRequest(\"dc=example,dc=com\", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, filter, []string{\"cn\", \"mail\"}, nil)\n}\n"
     expect_match_text:
     - ldap.NewSearchRequest
+  - name: literal ldap search filter negative
+    code: |
+      package main
+      import "github.com/go-ldap/ldap/v3"
+      func handler() {
+        attrs := []string{"cn", "mail"}
+        _ = ldap.NewSearchRequest("dc=example,dc=com", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, "(uid=alice)", attrs, nil)
+      }
+    expect_no_match: true
   description: "ldap.NewSearchRequest — tainted Filter string argument; constant filter strings are excluded so tainted attribute-name arrays do not masquerade as LDAP filter injection."

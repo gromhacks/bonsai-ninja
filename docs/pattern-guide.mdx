@@ -94,6 +94,21 @@ Receiver-agnostic regexes **must** declare `packages:`, `imports:`, or
 `modules:` so the matcher can require adapter-visible file context before
 the regex is considered.
 
+When a receiver-agnostic regex still needs exact local receiver names,
+add `base_name_in` instead of hardcoding the receiver into the regex:
+
+```yaml
+match:
+  kind: read
+  target:
+    regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.[A-Za-z_$][A-Za-z0-9_$]*$"
+    base_name_in: [args, variables]
+```
+
+This is the preferred shape for contextual resolver maps such as GraphQL
+`args.<field>`: it allows arbitrary field names while keeping sibling
+objects like `user.id` clean.
+
 **Annotation / decorator** — Spring `@RequestParam`, FastAPI binders,
 etc.:
 
@@ -130,10 +145,19 @@ constraints:
   - arg_tainted: { kw: data }     # keyword
 ```
 
-Defers to the engine's per-call-span taint verdict, but only for syntactic
-call-site arguments. Sink rules anchored on `arg_tainted` only fire when
-the engine can prove the named/positional argument itself flows from a
-source.
+Defers to the engine's per-site taint verdict for the vulnerable operand.
+For `match.kind: call` and `new`, `index` is the syntactic call argument
+index. For `match.kind: write`, `index: 0` is the assignment RHS, so write
+sinks such as `obj.innerHTML = value` or `settings.CommandText = value`
+can stay declarative in YAML without engine hardcoding. Sink rules anchored
+on `arg_tainted` only fire when the engine can prove that selected operand
+flows from a source.
+
+Do not use `arg_tainted` for source-independent configuration findings
+such as template autoescape disabled, Angular resource whitelist wildcards,
+or parser entity-processing flags. Those rules are local API/config misuse
+patterns, not source-to-sink claims. `match.kind: return` rules also do not
+have call arguments; their taint gate is return-expression reachability.
 
 ### `receiver_tainted`
 
@@ -163,6 +187,11 @@ operand has a specific security meaning (`eval(expr, globals)`,
 arguments, and similar fixed-slot shapes). `any_arg_tainted` still
 requires a real taint verdict on at least one call argument; literal-only
 calls and zero-argument calls do not match.
+
+For write rules, prefer `arg_tainted: { index: 0 }` when the assignment is
+only dangerous with attacker-controlled data. This prevents sibling taint in
+the same function from turning literal/config writes into false source-to-
+sink flows.
 
 For bounded-copy rules, constrain the *bound* argument, not just the
 pointers. C/C++ `memcpy(dst, src, n)` uses `index: 2`. A fixed constant
@@ -213,7 +242,7 @@ Treats arg N as a format string — for `printf`-shaped sinks.
 
 The match must (or must not) be at module top-level.
 
-### `in_class` / `in_method`
+### `in_class` / `in_method` / `decl_kind_in` / `visibility_in`
 
 ```yaml
 match:
@@ -221,10 +250,16 @@ match:
   target:
     name: payload
     in_class: WebSocketHandler
+    decl_kind_in: [method]
+    visibility_in: [public]
 ```
 
 `in_class` consults `Decl.parent` and `Decl.bases`, so subclasses match
-their declared parent.
+their declared parent. `decl_kind_in` and `visibility_in` use
+adapter-emitted declaration metadata, which lets param rules distinguish
+public entrypoint methods from internal helpers, constructors, modifiers,
+or other function-shaped declarations without hardcoding language APIs in
+the engine.
 
 ### `max_args` / `min_args`
 
@@ -317,10 +352,121 @@ the untrusted value.
   description: "recv(fd, buf, len, flags) — remote bytes taint buf."
 ```
 
-This is the right model for `recv`, `recvfrom`, `SSL_read`, FreeRTOS
-receive APIs, serial/SPI reads, and similar C/C++ out-buffer calls. Do
-not model these as ordinary call sources without `source_output_args`;
-that would also taint descriptors, lengths, flags, and handles.
+This is the right model for `recv`, `recvfrom`, `SSL_read`, `fgets`,
+FreeRTOS receive APIs, serial/SPI reads, and similar out-buffer calls.
+Do not model these as ordinary call sources without
+`source_output_args`; that would also taint descriptors, lengths, flags,
+and handles.
+
+## Output Argument Flows
+
+Use `taint_semantics.output_arg_flows` for APIs that copy or format
+value-bearing inputs into a caller-owned output argument. This is a
+transfer fact, not a source by itself: it only fires when one of the
+configured value inputs is already tainted.
+
+```yaml
+- id: c.format.sprintf_tainted
+  enabled: true
+  language: c
+  tag: format-string
+  match:
+    kind: call
+    callee:
+      name: sprintf
+  constraints:
+  - arg_tainted:
+      index: 1
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_start_arg_index: 1
+  description: "sprintf(buf, fmt, ...) writes formatted tainted data into buf."
+```
+
+Use `value_start_arg_index` for varargs shapes where every argument from
+that index can contribute to the output, and `value_arg_indices` for
+fixed input positions. Do not add formatter/copy behavior to engine code:
+different libraries use different argument order and overwrite semantics,
+so those facts belong in editable rules.
+
+## Clean Output Overwrites
+
+Use `taint_semantics.clean_output_overwrite` for APIs that overwrite an
+output argument with freshly produced data. Clean configured inputs kill
+stale taint on the output; tainted configured inputs still flow into the
+output. This models calls like bounded formatters without making them
+global sanitizers for every use.
+
+```yaml
+- id: c.sanitizer.snprintf_bounded
+  enabled: true
+  language: c
+  tag: validation
+  match:
+    kind: call
+    callee:
+      name: snprintf
+  taint_semantics:
+    clean_output_overwrite:
+      output_arg_index: 0
+      value_start_arg_index: 2
+  description: "snprintf overwrites buf with formatted value inputs."
+```
+
+Keep overwrite argument order in YAML. Do not special-case formatter or
+buffer APIs in the engine; the graph only applies the generic transfer
+primitive declared by the rule.
+
+## Call-Result Passthroughs
+
+Use `taint_semantics.call_result_passthrough_args` for APIs that change
+representation but do not remove attacker control. This is common for URL
+decoders, HTML entity decoders, base64 decoders, string/byte splitting,
+and similar helpers: `decoded = decode(input)` or
+`parts = strings.Fields(input)` should preserve taint from `input`, but
+the engine must not hardcode every library method.
+
+```yaml
+- id: java.passthrough.urldecoder_decode
+  enabled: true
+  language: java
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      attribute: [URLDecoder, decode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  description: "URLDecoder.decode(s, charset) preserves taint from s."
+```
+
+Keep these as sanitizer/passthrough rules with a non-crediting tag such
+as `passthrough-decode` or `passthrough-transform`; they are transfer
+facts, not evidence that a sink has been sanitized. Do not replace this
+with a generic engine heuristic, because unrelated application methods
+with similar names may validate, ignore, or transform different operands.
+The matcher normalizes common qualified-name separators (`.`, `::`, `->`,
+and Erlang `:`), so structured callee attributes can represent language
+surface syntax without hardcoding that API in Rust code.
+
+For receiver-return transforms, use
+`taint_semantics.call_result_passthrough_receiver: true` instead of a
+sentinel argument index:
+
+```yaml
+- id: swift.passthrough.removing_percent_encoding
+  enabled: true
+  language: swift
+  tag: passthrough-decode
+  match:
+    kind: call
+    callee:
+      name: removingPercentEncoding
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  description: "value.removingPercentEncoding preserves taint from value."
+```
 
 ## Receiver-State Mutators
 

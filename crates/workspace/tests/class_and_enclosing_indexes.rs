@@ -110,7 +110,7 @@ fn decl_name_index_lowercases_for_contains_matches() {
 }
 
 #[test]
-fn decl_name_index_is_built_lazily() {
+fn decl_name_index_is_built_on_demand() {
     let ws = ws_with("app.py", "def alpha():\n    pass\n");
     assert!(
         !ws.decl_name_index().is_built(),
@@ -131,7 +131,7 @@ fn enclosing_index_invalidates_when_workspace_clears_file() {
 }
 
 #[test]
-fn class_member_index_is_lazy() {
+fn class_member_index_is_built_on_demand() {
     let ws = ws_with("app.py", "class Foo:\n    def m(self): pass\n");
     assert!(!ws.class_members().is_built());
     let global = ws.db().global_index();

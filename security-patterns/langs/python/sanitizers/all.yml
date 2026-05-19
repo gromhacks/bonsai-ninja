@@ -193,10 +193,10 @@
   match_examples:
   - name: sanitizer shlex split
     code: |
-      import shlex
+      from shlex import split
       def example(user_input):
-          return shlex.split(user_input)
-    expect_match_text: [shlex.split]
+          return split(user_input)
+    expect_match_text: [split]
   description: shlex.split — produces an argv list suitable for subprocess.run([...], shell=False).
 
 # -- SQL -------------------------------------------------------------
@@ -1337,6 +1337,80 @@
   description: "itsdangerous Serializer/URLSafeSerializer/TimedSerializer.loads - signature-verifying deserialization (NOT
     pickle - safe by default)."
 
+# Representation-transform passthroughs. These are not sanitizer
+# credit; they declare value-preserving container/string transforms
+# so the exact IDG can carry taint through common Python pipelines
+# without hardcoding API names in the engine.
+- id: python.passthrough.builtin_list
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: list
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: list materializes tainted iterable
+    code: |
+      def example(items):
+          return list(items)
+    expect_match_text: [list]
+  description: "list(iterable) — materializes iterable elements; preserves taint from the iterable value."
+- id: python.passthrough.functools_reduce_iterable
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: reduce
+  taint_semantics:
+    call_result_passthrough_args: [1]
+  match_examples:
+  - name: reduce folds tainted iterable
+    code: |
+      from functools import reduce
+      def example(items):
+          return reduce(lambda a, b: a + b, items, "")
+    expect_match_text: [reduce]
+  description: "functools.reduce(func, iterable, initial) — folded value derives from iterable elements; preserves taint from the iterable argument."
+- id: python.passthrough.str_split_receiver
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$\\.]*\\.split$"
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: split preserves receiver taint
+    code: |
+      def example(value):
+          return value.split(" ")
+    expect_match_text: [value.split]
+  description: "str.split(...) — returned parts derive from the receiver string; preserves receiver taint."
+- id: python.passthrough.str_strip_receiver
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$\\.]*\\.strip$"
+  taint_semantics:
+    call_result_passthrough_receiver: true
+  match_examples:
+  - name: strip preserves receiver taint
+    code: |
+      def example(value):
+          return value.strip()
+    expect_match_text: [value.strip]
+  description: "str.strip(...) — trims characters but preserves taint from the receiver string."
+
 # URL decode passthrough sanitizers (T301). Tagged
 # `passthrough-decode` so the engine treats the call as an
 # identity edge (T104) — taint propagates THROUGH instead of
@@ -1350,6 +1424,8 @@
     kind: call
     callee:
       attribute: [parse, unquote]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: passthrough urllib unquote
     code: |
@@ -1365,6 +1441,8 @@
     kind: call
     callee:
       attribute: [parse, unquote_plus]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: passthrough urllib unquote plus
     code: |
@@ -1380,6 +1458,8 @@
     kind: call
     callee:
       attribute: [parse, unquote_to_bytes]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: passthrough urllib unquote to bytes
     code: |

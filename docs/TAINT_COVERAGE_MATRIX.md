@@ -7,7 +7,7 @@ scenario / applicability tables there, then rebless via:
 BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint --test matrix_coverage_report -- --nocapture
 ```
 
-**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1365
+**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1357
 
 ## What this matrix actually measures
 
@@ -74,7 +74,7 @@ lives in this matrix.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `R_01` | Direct call with tainted arg | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_02` | Tainted return value to caller LHS | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_03` | Method receiver taint propagates | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `R_03` | Method receiver taint propagates | n/a | pass | pass | pass | pass | n/a | pass | pass | deferred | pass | pass | pass | deferred | deferred | deferred | deferred | pass | pass | pass | pass | pass |
 | `R_04` | Method tainted arg propagates | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_05` | Constructor / new with taint | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
 | `R_06` | Static / class method propagates | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass |
@@ -97,9 +97,9 @@ lives in this matrix.
 
 | Scenario | Description | c | cpp | csharp | dart | elixir | erlang | go | java | javascript | kotlin | lua | objc | perl | php | python | ruby | rust | scala | solidity | swift | typescript |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `X_01` | Direct import + call | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `X_02` | Aliased import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `X_03` | From-import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `X_01` | Direct import + call | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | deferred | pass |
+| `X_02` | Aliased import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | deferred | pass |
+| `X_03` | From-import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | deferred | pass |
 | `X_04` | Re-export chain A→B→C | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
 | `X_05` | Default export (JS/TS) | n/a | pass | pass | pass | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
 | `X_06` | Namespace import (import * as X) | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
@@ -151,16 +151,16 @@ lives in this matrix.
 | erlang | 49 | 49 | 0 |
 | go | 65 | 65 | 0 |
 | java | 70 | 70 | 0 |
-| javascript | 72 | 72 | 0 |
+| javascript | 71 | 71 | 1 |
 | kotlin | 72 | 72 | 0 |
 | lua | 55 | 55 | 0 |
 | objc | 69 | 69 | 0 |
-| perl | 57 | 57 | 0 |
-| php | 66 | 66 | 0 |
-| python | 70 | 70 | 0 |
-| ruby | 68 | 68 | 0 |
+| perl | 56 | 56 | 1 |
+| php | 65 | 65 | 1 |
+| python | 69 | 69 | 1 |
+| ruby | 67 | 67 | 1 |
 | rust | 68 | 68 | 0 |
 | scala | 72 | 72 | 0 |
 | solidity | 48 | 48 | 0 |
-| swift | 72 | 72 | 0 |
+| swift | 69 | 69 | 3 |
 | typescript | 73 | 73 | 0 |

@@ -2,6 +2,7 @@
   enabled: true
   language: java
   tag: weak-crypto
+  category: source-independent
   severity: low
   cwe:
   - CWE-328
@@ -38,6 +39,7 @@
   enabled: true
   language: java
   tag: weak-crypto
+  category: source-independent
   severity: medium
   cwe:
   - CWE-328

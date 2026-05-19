@@ -511,6 +511,7 @@
   enabled: true
   language: typescript
   tag: xss
+  category: source-independent
   severity: high
   packages:
   - swig
@@ -534,6 +535,7 @@
   enabled: true
   language: typescript
   tag: xss
+  category: source-independent
   severity: high
   packages:
   - nunjucks

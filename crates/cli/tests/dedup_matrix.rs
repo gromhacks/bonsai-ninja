@@ -66,7 +66,7 @@ fn ws(lang: &str, fixture: &str) -> String {
         .join(fixture)
         .to_string_lossy()
         .into_owned()
-    }
+}
 
 fn run_json(args: &[&str]) -> Option<Value> {
     let bin = bin_path()?;
@@ -116,8 +116,7 @@ where
         let k = key_of(row);
         *seen.entry(k).or_default() += 1;
     }
-    let dupes: Vec<(String, usize)> =
-        seen.into_iter().filter(|(_, n)| *n > 1).collect();
+    let dupes: Vec<(String, usize)> = seen.into_iter().filter(|(_, n)| *n > 1).collect();
     if !dupes.is_empty() {
         let mut summary = format!("{label}: {} duplicate group(s)\n", dupes.len());
         for (k, n) in dupes.iter().take(5) {
@@ -401,19 +400,15 @@ fn dedup_security_sanitizers(lang: &str, fixture: &str) {
         return;
     };
     let rows = rows_of(&v);
-    assert_unique(
-        &format!("security sanitizers {lang}/{fixture}"),
-        &rows,
-        |r| {
-            format!(
-                "{}|{}:{}:{}",
-                s(r, "rule_id"),
-                s(r, "file"),
-                n(r, "line"),
-                n(r, "column"),
-            )
-        },
-    );
+    assert_unique(&format!("security sanitizers {lang}/{fixture}"), &rows, |r| {
+        format!(
+            "{}|{}:{}:{}",
+            s(r, "rule_id"),
+            s(r, "file"),
+            n(r, "line"),
+            n(r, "column"),
+        )
+    });
 }
 
 fn dedup_taint_analysis(lang: &str, fixture: &str) {
@@ -421,36 +416,27 @@ fn dedup_taint_analysis(lang: &str, fixture: &str) {
         return;
     };
     let rows = rows_of(&v);
-    assert_unique(
-        &format!("security taint-analysis {lang}/{fixture}"),
-        &rows,
-        |r| {
-            let src = r.get("source").cloned().unwrap_or(Value::Null);
-            let sink = r.get("sink").cloned().unwrap_or(Value::Null);
-            let chain = r
-                .get("chain_display")
-                .and_then(|x| x.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join("→")
-                })
-                .unwrap_or_default();
-            format!(
-                "{}|{}:{}:{}|{}|{}|{}:{}:{}",
-                s(&src, "rule_id"),
-                s(&src, "file"),
-                n(&src, "line"),
-                n(&src, "column"),
-                chain,
-                s(&sink, "rule_id"),
-                s(&sink, "file"),
-                n(&sink, "line"),
-                n(&sink, "column"),
-            )
-        },
-    );
+    assert_unique(&format!("security taint-analysis {lang}/{fixture}"), &rows, |r| {
+        let src = r.get("source").cloned().unwrap_or(Value::Null);
+        let sink = r.get("sink").cloned().unwrap_or(Value::Null);
+        let chain = r
+            .get("chain_display")
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("→"))
+            .unwrap_or_default();
+        format!(
+            "{}|{}:{}:{}|{}|{}|{}:{}:{}",
+            s(&src, "rule_id"),
+            s(&src, "file"),
+            n(&src, "line"),
+            n(&src, "column"),
+            chain,
+            s(&sink, "rule_id"),
+            s(&sink, "file"),
+            n(&sink, "line"),
+            n(&sink, "column"),
+        )
+    });
 }
 
 fn dedup_source_analysis(lang: &str, fixture: &str) {
@@ -467,12 +453,7 @@ fn dedup_source_analysis(lang: &str, fixture: &str) {
             let chain = flow
                 .get("chain")
                 .and_then(|x| x.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join("→")
-                })
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("→"))
                 .unwrap_or_default();
             format!(
                 "{}|{}:{}:{}|{}",
@@ -517,9 +498,6 @@ per_command_dedup!(dedup_search_all_langs, dedup_search);
 per_command_dedup!(dedup_inspect_all_langs, dedup_inspect);
 per_command_dedup!(dedup_security_sources_all_langs, dedup_security_sources);
 per_command_dedup!(dedup_security_sinks_all_langs, dedup_security_sinks);
-per_command_dedup!(
-    dedup_security_sanitizers_all_langs,
-    dedup_security_sanitizers
-);
+per_command_dedup!(dedup_security_sanitizers_all_langs, dedup_security_sanitizers);
 per_command_dedup!(dedup_taint_analysis_all_langs, dedup_taint_analysis);
 per_command_dedup!(dedup_source_analysis_all_langs, dedup_source_analysis);

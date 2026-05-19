@@ -24,15 +24,38 @@ use bonsai_common::{BasicBlockId, Span};
 use bonsai_lang_api::FlowEvent;
 use serde::{Deserialize, Serialize};
 
+fn analysis_complete_default() -> bool {
+    false
+}
+
 /// One function's control-flow graph.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cfg {
+    /// CFG construction is exact for the emitted HIR. This mirrors the
+    /// completeness contract exposed by other debug and export commands.
+    #[serde(default = "analysis_complete_default")]
+    pub analysis_complete: bool,
+    #[serde(default)]
+    pub analysis_incomplete_reasons: Vec<String>,
     /// The decl this CFG was built for — carried for rendering / debug
     /// output. `""` for synthetic / empty CFGs.
     pub function: String,
     pub entry: BasicBlockId,
     pub exit: BasicBlockId,
     pub blocks: Vec<BasicBlock>,
+}
+
+impl Default for Cfg {
+    fn default() -> Self {
+        Self {
+            analysis_complete: false,
+            analysis_incomplete_reasons: vec!["cfg unavailable: empty default graph".to_string()],
+            function: String::new(),
+            entry: BasicBlockId::default(),
+            exit: BasicBlockId::default(),
+            blocks: Vec::new(),
+        }
+    }
 }
 
 impl Cfg {

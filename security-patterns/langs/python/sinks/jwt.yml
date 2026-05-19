@@ -179,6 +179,7 @@
   enabled: true
   language: python
   tag: jwt
+  category: source-independent
   severity: critical
   packages: [pyjwt]
   imports: [jwt]

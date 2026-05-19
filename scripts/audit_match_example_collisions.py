@@ -21,6 +21,12 @@ match in this audit even when the example syntactically nails the
 rule's shape. The taint-aware validator and `rulepack_conformance`
 tests are the right place to verify those examples; flagging them as
 owner-misses here would be a false positive.
+
+Rules tagged `passthrough-transform` are also excluded when they overlap a
+non-passthrough sanitizer/source/sink example. Those rules encode taint
+propagation semantics for otherwise safe transformations, not separate
+security boundaries. A function can legitimately be both a category-specific
+sanitizer and a taint-preserving transform for other categories.
 """
 
 from __future__ import annotations
@@ -118,6 +124,23 @@ def arg_tainted_rule_ids(rules_root: Path) -> set[str]:
             if isinstance(rule_id, str) and rule_uses_arg_tainted(rule):
                 ids.add(rule_id)
     return ids
+
+
+def rule_tags(rules_root: Path) -> dict[str, str]:
+    tags: dict[str, str] = {}
+    for path in sorted((rules_root / "langs").rglob("*.yml")):
+        for rule in load_yaml_rules(path):
+            rule_id = rule.get("id")
+            tag = rule.get("tag")
+            if isinstance(rule_id, str) and isinstance(tag, str):
+                tags[rule_id] = tag
+    return tags
+
+
+def is_passthrough_sidecar_overlap(hit: Finding, tags: dict[str, str]) -> bool:
+    owner_tag = tags.get(hit.owner_rule)
+    matched_tag = tags.get(hit.matched_rule)
+    return (owner_tag == "passthrough-transform") ^ (matched_tag == "passthrough-transform")
 
 
 def safe_rel_path(raw: str | None, language: str) -> Path:
@@ -305,6 +328,7 @@ def main() -> int:
     langs = set(args.lang) if args.lang else None
     kinds = set(args.kind) if args.kind else None
     arg_tainted_rules = arg_tainted_rule_ids(rules_root)
+    tags_by_rule = rule_tags(rules_root)
 
     cases_with_code = list(iter_cases(rules_root, langs, kinds, args.include_disabled))
     if args.limit is not None:
@@ -389,6 +413,7 @@ def main() -> int:
         if hit.matched_rule and hit.matched_rule != hit.owner_rule
         and hit.owner_rule not in arg_tainted_rules
         and hit.matched_rule not in arg_tainted_rules
+        and not is_passthrough_sidecar_overlap(hit, tags_by_rule)
     ]
     collision_pairs = Counter((hit.owner_rule, hit.matched_rule, hit.command_kind) for hit in collisions)
     merge_candidates = [

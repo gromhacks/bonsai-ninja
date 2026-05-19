@@ -1,17 +1,47 @@
-use bonsai_common::{FuncId, Span, SymbolId};
-use bonsai_lang_api::{AliasTarget, Decl, FlowEvent};
+use bonsai_common::{FuncId, Span};
+use bonsai_lang_api::{Decl, FlowEvent};
 use bonsai_workspace::Workspace;
+
+/// Why downstream call-path expansion returned fewer paths than the
+/// resolved call graph may contain.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CallPathTruncation {
+    /// Every resolvable downstream path in the requested scope was
+    /// emitted.
+    None,
+    /// Expansion stopped at the requested downstream depth while at
+    /// least one resolvable callee still existed.
+    MaxExtraDepth,
+    /// Expansion stopped because the path-count cap was reached while
+    /// there was still work left on the DFS stack.
+    MaxPaths,
+}
+
+impl CallPathTruncation {
+    #[must_use]
+    pub fn is_truncated(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    #[must_use]
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::MaxExtraDepth => Some("downstream-depth cap"),
+            Self::MaxPaths => Some("downstream-path cap"),
+        }
+    }
+}
 
 /// Cached call-edge source-span resolver used by inspect renderers.
 ///
-/// This lives in `bonsai_inspect` rather than the CLI because resolving
-/// a rendered chain edge back to a concrete source call site depends on
-/// resolver aliases, local callable bindings, and global symbol lookup.
-/// The CLI should only consume the resulting spans.
+/// This lives in `bonsai_inspect` rather than the CLI so every flow
+/// renderer consumes the same semantic callgraph edge spans. It never
+/// re-resolves by callee name: if the resolved callgraph did not emit
+/// an exact/narrowed edge, there is no public call-site evidence to
+/// render for that hop.
 pub struct CallEdgeResolver<'a> {
     workspace: &'a Workspace,
-    aliases_by_file: ahash::AHashMap<bonsai_common::FileId, ahash::AHashMap<String, AliasTarget>>,
-    local_bindings_by_func: ahash::AHashMap<FuncId, ahash::AHashMap<String, FuncId>>,
     edge_spans: ahash::AHashMap<(FuncId, FuncId), Option<Span>>,
 }
 
@@ -20,74 +50,34 @@ impl<'a> CallEdgeResolver<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
         Self {
             workspace,
-            aliases_by_file: ahash::AHashMap::new(),
-            local_bindings_by_func: ahash::AHashMap::new(),
             edge_spans: ahash::AHashMap::new(),
         }
     }
 
-    fn aliases_for_file(&mut self, file: bonsai_common::FileId) -> &ahash::AHashMap<String, AliasTarget> {
-        self.aliases_by_file.entry(file).or_insert_with(|| {
-            bonsai_lang_api::alias_map_from_import_specs(&self.workspace.db().imports_for(file))
-                .into_iter()
-                .collect()
-        })
-    }
-
-    fn local_bindings_for_func(
-        &mut self,
-        caller_func: FuncId,
-        caller_decl: &Decl,
-    ) -> &ahash::AHashMap<String, FuncId> {
-        self.local_bindings_by_func.entry(caller_func).or_insert_with(|| {
-            let global = self.workspace.db().global_index();
-            bonsai_callgraph::collect_local_callable_bindings(&caller_decl.flow_events, &global, caller_decl)
-        })
-    }
-
-    fn find_call_span_to_func(
-        &mut self,
-        caller_func: FuncId,
-        caller_decl: &Decl,
-        target_func: FuncId,
-        target_name: &str,
-    ) -> Option<Span> {
+    fn find_call_span_to_func(&mut self, caller_func: FuncId, target_func: FuncId) -> Option<Span> {
         if let Some(hit) = self.edge_spans.get(&(caller_func, target_func)) {
             return *hit;
         }
-        let mut aliases = self.aliases_for_file(caller_decl.span.file).clone();
-        bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &caller_decl.flow_events);
-        let local_bindings = self.local_bindings_for_func(caller_func, caller_decl).clone();
-        let global = self.workspace.db().global_index();
-        // Single canonical edge predicate — same primitive
-        // `bonsai_workspace::flow_ids` consumes, so inspect's
-        // chain renderer and the browse-row F: id hash agree
-        // on the resolvable edge set.
-        let span = bonsai_callgraph::find_call_span_resolved(
-            &caller_decl.flow_events,
-            target_func,
-            target_name,
-            &global,
-            &aliases,
-            &local_bindings,
-            caller_decl,
-        );
-        self.edge_spans.insert((caller_func, target_func), span);
-        span
+        if let Some(span) = self
+            .workspace
+            .cached_resolved_call_graph()
+            .callees_of(caller_func)
+            .find(|edge| edge.to == target_func && edge.precision.is_semantic())
+            .map(|edge| edge.span)
+        {
+            self.edge_spans.insert((caller_func, target_func), Some(span));
+            return Some(span);
+        }
+        self.edge_spans.insert((caller_func, target_func), None);
+        None
     }
 
     #[must_use]
     pub fn call_spans_for_chain(&mut self, chain: &[FuncId]) -> Vec<Option<Span>> {
-        let global = self.workspace.db().global_index();
         let mut spans = Vec::with_capacity(chain.len());
         for pair in chain.windows(2) {
             let (caller_id, callee_id) = (pair[0], pair[1]);
-            let span = global
-                .decl_of(SymbolId::new(caller_id.raw()))
-                .zip(global.decl_of(SymbolId::new(callee_id.raw())))
-                .and_then(|(caller_decl, callee_decl)| {
-                    self.find_call_span_to_func(caller_id, caller_decl, callee_id, &callee_decl.name)
-                });
+            let span = self.find_call_span_to_func(caller_id, callee_id);
             spans.push(span);
         }
         spans.push(None);
@@ -104,25 +94,33 @@ impl<'a> CallEdgeResolver<'a> {
         max_extra: usize,
         max_paths: usize,
     ) -> Vec<Vec<FuncId>> {
+        self.enumerate_call_paths_from_with_truncation(chain_cache, base, max_extra, max_paths)
+            .0
+    }
+
+    /// DFS-enumerate every resolvable call path starting from `base`'s
+    /// tail, appending each to the return vector and reporting whether
+    /// a depth/path cap made the returned paths only a prefix.
+    #[must_use]
+    pub fn enumerate_call_paths_from_with_truncation(
+        &mut self,
+        chain_cache: &crate::ChainCache<'_>,
+        base: &[FuncId],
+        max_extra: usize,
+        max_paths: usize,
+    ) -> (Vec<Vec<FuncId>>, CallPathTruncation) {
         if base.is_empty() {
-            return Vec::new();
+            return (Vec::new(), CallPathTruncation::None);
         }
-        let global = self.workspace.db().global_index();
         let mut out: Vec<Vec<FuncId>> = Vec::new();
         let mut stack: Vec<(Vec<FuncId>, usize)> = vec![(base.to_vec(), 0)];
+        let mut truncation = CallPathTruncation::None;
         while let Some((path, extra)) = stack.pop() {
             if out.len() >= max_paths {
+                truncation = CallPathTruncation::MaxPaths;
                 break;
             }
             let tail = *path.last().expect("non-empty path");
-            let Some(tail_decl) = global.decl_of(SymbolId::new(tail.raw())) else {
-                out.push(path);
-                continue;
-            };
-            if extra >= max_extra {
-                out.push(path);
-                continue;
-            }
             let callees = chain_cache.callees_of_resolved(tail);
             let mut resolvable: Vec<FuncId> = callees
                 .into_iter()
@@ -130,13 +128,16 @@ impl<'a> CallEdgeResolver<'a> {
                     if path.contains(callee) {
                         return false;
                     }
-                    let Some(callee_decl) = global.decl_of(SymbolId::new(callee.raw())) else {
-                        return false;
-                    };
-                    self.find_call_span_to_func(tail, tail_decl, *callee, &callee_decl.name)
-                        .is_some()
+                    self.find_call_span_to_func(tail, *callee).is_some()
                 })
                 .collect();
+            if extra >= max_extra {
+                if !resolvable.is_empty() {
+                    truncation = CallPathTruncation::MaxExtraDepth;
+                }
+                out.push(path);
+                continue;
+            }
             if resolvable.is_empty() {
                 out.push(path);
                 continue;
@@ -151,7 +152,7 @@ impl<'a> CallEdgeResolver<'a> {
         if out.is_empty() {
             out.push(base.to_vec());
         }
-        out
+        (out, truncation)
     }
 
     /// True when every consecutive pair in the chain represents a call
@@ -160,19 +161,9 @@ impl<'a> CallEdgeResolver<'a> {
         if chain.len() < 2 {
             return true;
         }
-        let global = self.workspace.db().global_index();
         for pair in chain.windows(2) {
             let (caller_id, callee_id) = (pair[0], pair[1]);
-            let Some(caller_decl) = global.decl_of(SymbolId::new(caller_id.raw())) else {
-                return false;
-            };
-            let Some(callee_decl) = global.decl_of(SymbolId::new(callee_id.raw())) else {
-                return false;
-            };
-            if self
-                .find_call_span_to_func(caller_id, caller_decl, callee_id, &callee_decl.name)
-                .is_none()
-            {
+            if self.find_call_span_to_func(caller_id, callee_id).is_none() {
                 return false;
             }
         }
@@ -185,33 +176,22 @@ pub fn find_call_span_to_func_uncached(
     workspace: &Workspace,
     caller_decl: &Decl,
     target_func: FuncId,
-    target_name: &str,
+    _target_name: &str,
 ) -> Option<Span> {
-    let global = workspace.db().global_index();
-    let mut aliases: ahash::AHashMap<String, AliasTarget> =
-        bonsai_lang_api::alias_map_from_import_specs(&workspace.db().imports_for(caller_decl.span.file))
-            .into_iter()
-            .collect();
-    bonsai_lang_api::extend_alias_map_with_flow_events(&mut aliases, &caller_decl.flow_events);
-    let local_bindings =
-        bonsai_callgraph::collect_local_callable_bindings(&caller_decl.flow_events, &global, caller_decl);
-    bonsai_callgraph::find_call_span_resolved(
-        &caller_decl.flow_events,
-        target_func,
-        target_name,
-        &global,
-        &aliases,
-        &local_bindings,
-        caller_decl,
-    )
+    let caller_func = FuncId::new(caller_decl.symbol.raw());
+    workspace
+        .cached_resolved_call_graph()
+        .callees_of(caller_func)
+        .find(|edge| edge.to == target_func && edge.precision.is_semantic())
+        .map(|edge| edge.span)
 }
 
 /// Syntactic-only edge predicate. Returns the span of the first
 /// `Call` whose name string-matches `target` (or `*.target`) or
 /// whose receiver-arg short-name matches. Used by display-only
-/// paths that don't have a FuncId in hand;
-/// [`bonsai_callgraph::find_call_span_resolved`] is the canonical
-/// alias-aware version every chain-edge consumer should prefer.
+/// paths that don't have a FuncId in hand. Public chain-edge
+/// evidence must use the resolved callgraph span APIs above instead
+/// of this syntactic helper.
 #[must_use]
 pub fn find_call_span_by_name(events: &[FlowEvent], target: &str) -> Option<Span> {
     for event in events {

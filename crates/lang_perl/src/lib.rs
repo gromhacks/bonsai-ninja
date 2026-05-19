@@ -147,6 +147,7 @@ impl LanguageAdapter for PerlAdapter {
             rewrite_perl_call_arg_texts(&mut decl.flow_events, &source);
             normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source);
             augment_perl_collection_flow_events(&mut decl.flow_events, &source);
+            inject_perl_coderef_aliases(&mut decl.flow_events, &source);
         }
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         apply_perl_package_semantic_identity(&mut idx);
@@ -303,6 +304,106 @@ fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str
         }
     }
     *events = rewritten;
+}
+
+/// Add exact callable-alias facts for Perl coderef assignments such
+/// as `my $cb = \&helper;`.
+///
+/// The generic assignment walker sees the same statement, but the
+/// declaration wrapper can add unrelated operands to `source_names`.
+/// A clean synthetic alias keeps callback resolution semantic: it is
+/// emitted only when the RHS is Perl's explicit subroutine-reference
+/// syntax and the LHS contains one scalar binding.
+fn inject_perl_coderef_aliases(events: &mut Vec<FlowEvent>, source: &str) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_perl_coderef_aliases(then_events, source);
+                inject_perl_coderef_aliases(else_events, source);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_perl_coderef_aliases(body, source);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_perl_coderef_aliases(body, source);
+                inject_perl_coderef_aliases(catch_events, source);
+                inject_perl_coderef_aliases(finally_events, source);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let alias = perl_coderef_alias_assignment(&event, source);
+        rewritten.push(event);
+        if let Some(alias) = alias {
+            rewritten.push(alias);
+        }
+    }
+    *events = rewritten;
+}
+
+fn perl_coderef_alias_assignment(event: &FlowEvent, source: &str) -> Option<FlowEvent> {
+    let FlowEvent::Assign { span, target, .. } = event else {
+        return None;
+    };
+    let (lhs, rhs) = assignment_lhs_rhs_text(source, *span)?;
+    let target = perl_coderef_lhs_target(&lhs)
+        .or_else(|| target.trim().starts_with('$').then(|| target.trim().to_string()))?;
+    let source_name = perl_coderef_rhs_source(&rhs)?;
+    Some(FlowEvent::Assign {
+        span: *span,
+        target,
+        source_name: Some(source_name),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: true,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    })
+}
+
+fn perl_coderef_lhs_target(lhs: &str) -> Option<String> {
+    let vars = perl_sigiled_identifiers(lhs, ['$']);
+    if vars.len() != 1 {
+        return None;
+    }
+    vars.into_iter().next()
+}
+
+fn perl_coderef_rhs_source(rhs: &str) -> Option<String> {
+    let trimmed = rhs.trim().trim_end_matches(';').trim();
+    let rest = trimmed.strip_prefix("\\&")?.trim_start();
+    let mut end = 0usize;
+    for (idx, ch) in rest.char_indices() {
+        if ch == '_' || ch == ':' || ch.is_ascii_alphanumeric() {
+            end = idx + ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    if end == 0 {
+        return None;
+    }
+    let name = rest[..end].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let suffix = rest[end..].trim();
+    if !suffix.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 /// Rewrite Perl hash-deref expressions like `$h->{k}` into the
@@ -1190,8 +1291,9 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
     //   `use Foo qw(a b);`      → module + quoted_word_list (export list)
     //   `use Foo ();`           → module + stub_expression (no exports)
     //   `use parent 'Bar';`     → module: parent + bareword string
-    // Per-symbol import lists (qw(a b)) aren't represented in ImportSpec;
-    // they're captured implicitly by the fact that the module is in scope.
+    // Per-symbol import lists (`qw(a b)`) are resolver-local bindings:
+    // `a()` should resolve to `Foo::a` without making every bare `a`
+    // in the workspace eligible.
     for use_node in collect_kinds(tree, &["use_statement"]) {
         let Some(module_node) = use_node.child_by_field_name("module") else {
             continue;
@@ -1202,12 +1304,24 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         }
         imports.push(ImportSpec {
             span: span_of(file, &use_node),
-            module,
+            module: module.clone(),
             alias: None,
             is_wildcard: false,
             original_name: None,
             scope: ImportScope::Module,
         });
+        if !is_perl_inheritance_pragma(&module) {
+            for exported in perl_use_qw_imports(&use_node, src) {
+                imports.push(ImportSpec {
+                    span: span_of(file, &use_node),
+                    module: module.clone(),
+                    alias: None,
+                    is_wildcard: false,
+                    original_name: Some(exported),
+                    scope: ImportScope::Local,
+                });
+            }
+        }
     }
     // `require Some::Module;` is a dedicated `require_expression` wrapping
     // a `bareword`. Different from PHP's require — no string literal,
@@ -1239,6 +1353,42 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+fn perl_use_qw_imports(use_node: &tree_sitter::Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = use_node.walk();
+    for child in use_node.named_children(&mut cursor) {
+        if child.kind() != "quoted_word_list" {
+            continue;
+        }
+        collect_qw_words(child, src, &mut out);
+    }
+    out
+}
+
+fn is_perl_inheritance_pragma(module: &str) -> bool {
+    matches!(module, "base" | "parent" | "mro" | "parent::versioned")
+}
+
+fn collect_qw_words(node: tree_sitter::Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    if matches!(
+        node.kind(),
+        "string_content" | "bareword" | "interpolation_string_content"
+    ) {
+        for word in node_text(&node, src).split_whitespace() {
+            let word = word.trim();
+            if word.is_empty() || out.iter().any(|seen| seen == word) {
+                continue;
+            }
+            out.push(word.to_string());
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_qw_words(child, src, out);
+    }
 }
 
 /// Walk the parse tree for `command_string` nodes (the tree-sitter
@@ -1905,3 +2055,6 @@ fn canonical_perl_base_name(raw: &str) -> Option<String> {
     }
     Some(bare.to_string())
 }
+
+#[cfg(test)]
+mod tests;

@@ -12,7 +12,8 @@
     kind: call
     callee:
       attribute: [Jwts, parser]
-  description: "Disabled — Jwts.parser() is only dangerous without a later setSigningKey/verifyWith call; needs stateful check."
+  description: "Disabled — Jwts.parser() is only dangerous without a later setSigningKey/verifyWith
+    call; needs stateful check."
 
 - id: java.jwt.jjwt_parser_builder
   enabled: false
@@ -27,10 +28,13 @@
     kind: call
     callee:
       attribute: [Jwts, parserBuilder]
-  description: "Disabled — parserBuilder() alone is not a sink; the danger is parseClaimsJwt (unsigned) vs parseClaimsJws (signed)."
+  description: "Disabled — parserBuilder() alone is not a sink; the danger is parseClaimsJwt
+    (unsigned) vs parseClaimsJws (signed)."
 
 - id: java.jwt.jjwt_parse_claims_jws
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: java
   tag: jwt
   severity: medium
@@ -49,7 +53,9 @@
           JwtParser.parseClaimsJws(input);
         }
       }
-  description: "jjwt JwtParser.parseClaimsJws — safe IF a signing key was set on the builder; flag for review."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. jjwt JwtParser.parseClaimsJws — safe
+    IF a signing key was set on the builder; flag for review."
 
 - id: java.jwt.jjwt_parse_claims_jwt
   enabled: true
@@ -62,6 +68,9 @@
     kind: call
     callee:
       attribute: [JwtParser, parseClaimsJwt]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated shape example
     code: |
@@ -71,10 +80,16 @@
           JwtParser.parseClaimsJwt(input);
         }
       }
+  - name: literal jwt negative
+    code: "import io.jsonwebtoken.*;\nclass App {\n  void handle(String \"safe\")
+      throws Exception {\n    JwtParser.parseClaimsJwt(\"safe\");\n  }\n}\n"
+    expect_no_match: true
   description: "jjwt JwtParser.parseClaimsJwt — parses UNSIGNED JWT (alg=none style)."
 
 - id: java.jwt.jjwt_parse
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: java
   tag: jwt
   severity: high
@@ -93,10 +108,14 @@
           JwtParser.parse(input);
         }
       }
-  description: "jjwt JwtParser.parse — untyped; verify whether caller routes to signed or unsigned variant."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. jjwt JwtParser.parse — untyped; verify
+    whether caller routes to signed or unsigned variant."
 
 - id: java.jwt.nimbus_signed_jwt_parse
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: java
   tag: jwt
   severity: high
@@ -115,7 +134,9 @@
           SignedJWT.parse(input);
         }
       }
-  description: "Nimbus SignedJWT.parse — flag if no subsequent verify()."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Nimbus SignedJWT.parse — flag if
+    no subsequent verify()."
 
   imports:
   - com.nimbusds.jwt
@@ -130,6 +151,9 @@
     kind: call
     callee:
       attribute: [PlainJWT, parse]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated shape example
     code: |
@@ -139,6 +163,10 @@
           PlainJWT.parse(input);
         }
       }
+  - name: literal jwt negative
+    code: "import com.nimbusds.jwt.*;\nclass App {\n  void handle(String \"safe\"\
+      ) throws Exception {\n    PlainJWT.parse(\"safe\");\n  }\n}\n"
+    expect_no_match: true
   description: "Nimbus PlainJWT.parse — explicit unsigned token."
 
   imports:
@@ -154,6 +182,9 @@
     kind: call
     callee:
       attribute: [JWT, decode]
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated shape example
     code: |
@@ -163,12 +194,17 @@
           JWT.decode(input);
         }
       }
+  - name: literal jwt negative
+    code: "import com.auth0.jwt.*;\nclass App {\n  void handle(String \"safe\") throws
+      Exception {\n    JWT.decode(\"safe\");\n  }\n}\n"
+    expect_no_match: true
   description: "auth0 JWT.decode — does NOT verify signature."
 
 - id: java.jwt.auth0_jwt_require_alg_none
   enabled: true
   language: java
   tag: jwt
+  category: source-independent
   severity: critical
   packages: ["com.auth0.jwt"]
   cwe: [CWE-347]
@@ -208,7 +244,9 @@
 # token with the public key as the HMAC secret. Detect by
 # matching the algorithm-list shape at the verify call.
 - id: java.jwt.alg_confusion_jjwt
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: java
   tag: untrusted-token
   severity: high
@@ -227,12 +265,15 @@
           Jwts.parser("HS256 RS256");
         }
       }
-  description: "JJWT Jwts.parser() chain with mixed HMAC+RSA algorithms allowed — alg-confusion vector."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. JJWT Jwts.parser() chain with mixed
+    HMAC+RSA algorithms allowed — alg-confusion vector."
 
 - id: java.jwt.nimbus_alg_none
   enabled: true
   language: java
   tag: jwt
+  category: source-independent
   severity: critical
   packages: [com.nimbusds.jose, com.nimbusds.jwt]
   imports: [com.nimbusds.jose]
@@ -251,4 +292,5 @@
         }
       }
     expect_match_text: [JWSAlgorithm.NONE]
-  description: "JWSAlgorithm.NONE — explicitly accepts unsigned JWTs; classic alg-none token bypass when used at verification time."
+  description: "JWSAlgorithm.NONE — explicitly accepts unsigned JWTs; classic alg-none
+    token bypass when used at verification time."

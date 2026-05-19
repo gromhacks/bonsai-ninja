@@ -119,6 +119,7 @@
   enabled: true
   language: java
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   packages: ["com.fasterxml.jackson.core"]
   cwe: [CWE-502]
@@ -276,6 +277,7 @@
   enabled: true
   language: java
   tag: insecure-deserialization
+  category: source-independent
   severity: critical
   packages: ["com.fasterxml.jackson.databind"]
   cwe: [CWE-502]

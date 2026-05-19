@@ -2,6 +2,7 @@
   enabled: true
   language: python
   tag: weak-tls
+  category: source-independent
   severity: high
   packages:
   - requests
@@ -23,6 +24,7 @@
   enabled: true
   language: python
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -40,6 +42,7 @@
   enabled: true
   language: python
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -55,6 +58,7 @@
   enabled: true
   language: python
   tag: weak-tls
+  category: source-independent
   severity: high
   cwe:
   - CWE-295
@@ -70,6 +74,7 @@
   enabled: true
   language: python
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe:
   - CWE-295
@@ -103,6 +108,7 @@
   enabled: true
   language: python
   tag: weak-tls
+  category: source-independent
   severity: medium
   packages:
   - pyOpenSSL

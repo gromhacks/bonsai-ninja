@@ -2,6 +2,7 @@
   enabled: true
   language: python
   tag: cors
+  category: source-independent
   severity: medium
   cwe: [CWE-942, CWE-346]
   owasp: [A05-2021]
@@ -23,6 +24,7 @@
   enabled: true
   language: python
   tag: cors
+  category: source-independent
   severity: medium
   cwe: [CWE-942, CWE-346]
   owasp: [A05-2021]

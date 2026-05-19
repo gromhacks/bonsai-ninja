@@ -6,6 +6,7 @@
   enabled: true
   language: c
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:
@@ -25,6 +26,7 @@
   enabled: true
   language: c
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:
@@ -44,6 +46,7 @@
   enabled: true
   language: c
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-367]
   match:

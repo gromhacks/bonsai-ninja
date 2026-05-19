@@ -13,7 +13,13 @@
       },
       {
         "group": "Concepts",
-        "pages": ["docs/concepts", "docs/language-support"]
+        "pages": [
+          "docs/concepts",
+          "docs/language-support",
+          "docs/MEGA_FLOW_COVERAGE",
+          "docs/COVERAGE_BASELINE",
+          "docs/TAINT_COVERAGE_MATRIX"
+        ]
       },
       {
         "group": "CLI",

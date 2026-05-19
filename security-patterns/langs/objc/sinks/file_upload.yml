@@ -1,6 +1,8 @@
 # Objective-C file-upload sinks (NSURLSession upload, AFNetworking multipart).
 - id: objc.upload.nsurlsession_uploadtask
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: objc
   tag: file-upload
   severity: medium
@@ -13,7 +15,7 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; uploadTaskWithRequest(input); }
-  description: "NSURLSession -uploadTaskWithRequest:fromFile: / -uploadTaskWithStreamedRequest: — tainted file path permits upload of arbitrary local files."
+  description: "Disabled — Objective-C selector/argument facts need to distinguish uploadTaskWithRequest:fromFile: before this can model the local-file path sink accurately."
 
 - id: objc.upload.afnetworking_multipart
   enabled: true

@@ -4,6 +4,7 @@
   enabled: true
   language: php
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-662, CWE-367]
   match:
@@ -22,6 +23,7 @@
   enabled: true
   language: php
   tag: race
+  category: source-independent
   severity: medium
   cwe: [CWE-662, CWE-367]
   match:

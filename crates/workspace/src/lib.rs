@@ -10,6 +10,7 @@
 // consumers (sdk, integration tests) via path-style access; keep
 // `pub mod`. `cross_module` is internal — consumers go through the
 // `Workspace` facade.
+pub(crate) mod cache_fingerprint;
 pub mod callgraph_sidecar;
 pub mod class_index;
 pub(crate) mod cross_module;
@@ -51,6 +52,12 @@ use value_flow::ValueFlowCache;
 
 pub use cross_module::CrossModuleOptions;
 
+/// Conventional workspace IDG sidecar path under `<workspace>/.bonsai/`.
+#[must_use]
+pub fn idg_sidecar_path(workspace_root: &Path) -> std::path::PathBuf {
+    bonsai_idg::workspace::idg_sidecar_path(workspace_root)
+}
+
 #[derive(Debug, Error)]
 pub enum WorkspaceError {
     #[error("io: {0}")]
@@ -82,16 +89,17 @@ struct Inner {
     vfs: Arc<Vfs>,
     registry: Arc<LanguageRegistry>,
     db: AnalyzerDb,
-    /// Workspace-wide taint-connected data flow. The index path
-    /// prewarms it eagerly; query paths can load the persisted
-    /// sidecar and compute misses lazily through [`Workspace::dataflow`].
+    /// Workspace-wide taint-connected data flow. Full-open/prewarm
+    /// paths build it eagerly; query paths can load the persisted
+    /// sidecar and compute requested semantic facts on demand through
+    /// [`Workspace::dataflow`].
     dataflow: DataFlowCache,
-    /// Workspace-wide per-function flow-id cache. Populated lazily by
+    /// Workspace-wide per-function flow-id cache. Populated on demand by
     /// browse and inspect renderers because most one-shot commands
     /// need ids for only a small subset of functions.
     flow_ids: FlowIdCache,
     /// Workspace-wide cache of per-entry seed-free value-flow graphs.
-    /// Populated lazily on first `value_flow()` access. Security uses
+    /// Populated on first `value_flow()` access. Security uses
     /// it for source-node selection, while `dataflow` remains the
     /// persisted whole-workspace sidecar for fast navigation/export
     /// queries.
@@ -136,7 +144,7 @@ struct Inner {
     /// "what decl contains this position?" queries.
     enclosing: EnclosingIndex,
     /// Lowercased decl-name table for `inspect --query <pat>`
-    /// `Contains` matches. Built lazily on first inspect query.
+    /// `Contains` matches. Built on first inspect query.
     decl_names: DeclNameIndex,
     /// Workspace-wide memo of `name_reachable_through_func_kinded`
     /// per FuncId. browse-export and inspect both walk the same
@@ -145,8 +153,8 @@ struct Inner {
     reachable_kinded: parking_lot::RwLock<AHashMap<FuncId, Arc<KindedTokens>>>,
     reparse_counter: Mutex<u64>,
     root_label: Mutex<String>,
-    /// Workspace root recorded at open time so the lazy IDG-build
-    /// path can persist its sidecar at `<root>/.bonsai/idg.v1.factstore`
+    /// Workspace root recorded at open time so the on-demand IDG-build
+    /// path can persist its versioned sidecar under `<root>/.bonsai/`
     /// without re-threading the path through every call site.
     /// `None` for tests / synthetic workspaces that open without a
     /// real on-disk root; persistence is skipped silently in that case.
@@ -210,11 +218,11 @@ pub enum WorkspaceOpenEvent {
 /// Controls how [`Workspace::open_with_options`] interacts with the
 /// persisted dataflow sidecar.
 ///
-/// The default matches the CLI's `index` behavior: parse and index the
-/// workspace, load any still-fresh dataflow facts, compute only the
-/// missing/stale facts, and write the sidecar back. Use
-/// [`Self::query_only`] for SDK command handlers that want the fast
-/// "load indexed facts and compute misses lazily" path.
+/// The default is structural query behavior: parse and index the
+/// workspace, load still-fresh sidecars, and compute requested semantic
+/// facts on demand. Use [`Self::full_prewarm`] only for explicit
+/// audit/cache rebuild flows that intentionally compute reusable facts
+/// up front.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceOpenOptions {
     /// Load `<workspace>/.bonsai/dataflow.v2.bin` before queries run.
@@ -228,9 +236,10 @@ pub struct WorkspaceOpenOptions {
     /// Compute every missing value-flow entry during open. Mirrors
     /// `prewarm_dataflow` but for the seed-free per-entry value-flow
     /// graph that security source-analysis and source seeding consume.
-    /// Without this, the first security query lazily faults the
-    /// per-source value-flow graph one source at a time — a major
-    /// cliff on workspaces with thousands of source matches (OWASP).
+    /// Without this, the first security query computes the
+    /// per-source value-flow graph on demand one source at a time — a
+    /// major cliff on workspaces with thousands of source matches
+    /// (OWASP).
     pub prewarm_value_flow: bool,
     /// Persist the value-flow sidecar after prewarm.
     pub save_value_flow_sidecar: bool,
@@ -245,16 +254,7 @@ pub struct WorkspaceOpenOptions {
 
 impl Default for WorkspaceOpenOptions {
     fn default() -> Self {
-        Self {
-            load_dataflow_sidecar: true,
-            prewarm_dataflow: true,
-            save_dataflow_sidecar: true,
-            load_value_flow_sidecar: true,
-            prewarm_value_flow: true,
-            save_value_flow_sidecar: true,
-            prewarm_flow_ids: true,
-            parse_timeout_ms: None,
-        }
+        Self::query_only()
     }
 }
 
@@ -290,6 +290,26 @@ impl WorkspaceOpenOptions {
             prewarm_value_flow: false,
             save_value_flow_sidecar: false,
             prewarm_flow_ids: false,
+            parse_timeout_ms: None,
+        }
+    }
+
+    /// Explicit full-prewarm mode. Parses and indexes the workspace,
+    /// loads still-fresh sidecars, computes every missing reusable
+    /// dataflow/value-flow/flow-id entry, and writes sidecars back.
+    /// This is intentionally not the default: callers must opt in
+    /// when their command scope requires expensive whole-workspace
+    /// preparation.
+    #[must_use]
+    pub const fn full_prewarm() -> Self {
+        Self {
+            load_dataflow_sidecar: true,
+            prewarm_dataflow: true,
+            save_dataflow_sidecar: true,
+            load_value_flow_sidecar: true,
+            prewarm_value_flow: true,
+            save_value_flow_sidecar: true,
+            prewarm_flow_ids: true,
             parse_timeout_ms: None,
         }
     }
@@ -332,11 +352,10 @@ impl Workspace {
         }
     }
 
-    /// Workspace-wide taint-connected dataflow cache. Pre-warmed
-    /// during [`Workspace::open`]; queries (inspect filter, export
-    /// annotations, future `--source`/`--sink` chains) are hash
-    /// lookups into this cache rather than fresh interprocedural
-    /// passes.
+    /// Workspace-wide taint-connected dataflow cache. Explicit
+    /// full-prewarm opens populate it up front; scoped queries compute
+    /// requested semantic facts on demand and then reuse them through
+    /// this cache.
     pub fn dataflow(&self) -> &DataFlowCache {
         &self.inner.dataflow
     }
@@ -350,8 +369,8 @@ impl Workspace {
     }
 
     /// Workspace-wide per-function flow-id cache. Populated by the
-    /// index-time prewarm so every browse-row flow-id lookup is
-    /// O(1). See [`flow_ids::FlowIdCache`].
+    /// explicit full-open prewarm so every browse-row flow-id lookup
+    /// is O(1). See [`flow_ids::FlowIdCache`].
     pub fn flow_ids(&self) -> &FlowIdCache {
         &self.inner.flow_ids
     }
@@ -368,7 +387,7 @@ impl Workspace {
 
     /// Cloneable `Arc<InterTaintCaches>` for sub-caches that need
     /// sharing ownership (DataFlowCache seeds itself with this so
-    /// its prewarm + lazy-fault paths thread the workspace
+    /// its prewarm + on-demand paths thread the workspace
     /// singleton through the engine).
     pub fn shared_inter_taint_caches(&self) -> Arc<InterTaintCaches> {
         self.inner.inter_taint.clone()
@@ -396,7 +415,7 @@ impl Workspace {
 
     /// Workspace-level class/method/constructor index. Replaces
     /// per-resolution linear scans of `decls_in(class_file)` with
-    /// `(class_sym, method_name) → FuncId` lookups. Built lazily.
+    /// `(class_sym, method_name) → FuncId` lookups. Built on first lookup.
     pub fn class_members(&self) -> &ClassMemberIndex {
         &self.inner.class_members
     }
@@ -542,6 +561,7 @@ impl Workspace {
                     .map(|adapter| adapter.capabilities().module_export_aliases)
                     .unwrap_or(&[])
             },
+            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
         )
     }
 
@@ -567,7 +587,8 @@ impl Workspace {
         // header reject a sidecar whose source tree no longer
         // matches, even when no `refresh_file_from_disk` ran inside
         // bonsai-ninja (e.g. `git checkout` between two CLI calls).
-        let pipeline_hash = idg_pipeline_hash() ^ workspace_content_fingerprint(&self.inner.db);
+        let root_path = self.root_path();
+        let pipeline_hash = idg_workspace_pipeline_hash(&self.inner.db, root_path.as_deref());
         // Try to hydrate the workspace IDG from the on-disk sidecar
         // before paying for a fresh build. Cold rebuild on Redis `src/`
         // takes >1 minute and dominates `bonsai-ninja security ...`
@@ -592,9 +613,12 @@ impl Workspace {
         // reuses them to keep its name filter from rejecting
         // alias-rewritten call sites.
         let db = &self.inner.db;
-        let ws = bonsai_idg::workspace_adapter::build_with_aliases(global.as_ref(), cg.as_ref(), |file| {
-            bonsai_resolve::alias_map_for_file(&db.imports_for(file))
-        });
+        let ws = bonsai_idg::workspace_adapter::build_with_file_info(
+            global.as_ref(),
+            cg.as_ref(),
+            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        );
         // Persist before constructing the query service so a subsequent
         // open warm-starts. Failures (read-only filesystem, full disk)
         // are tracing-logged but not surfaced — the in-memory IDG is
@@ -609,6 +633,35 @@ impl Workspace {
                 );
             }
         }
+        let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
+        self.inner.db.set_idg_service(service.clone());
+        service
+    }
+
+    /// Build a workspace IDG with caller-supplied transfer options
+    /// and seed it onto [`AnalyzerDb`].
+    ///
+    /// Configured transfer options are intentionally not loaded from
+    /// or saved to the default IDG sidecar: the sidecar represents
+    /// source structure only, while these options come from the
+    /// editable security rulepack.
+    pub fn build_and_seed_idg_service_with_transfer_options(
+        &self,
+        transfer_options: &bonsai_idg::TransferOptions,
+    ) -> Arc<bonsai_idg::IdgQueryService> {
+        if transfer_options.is_empty() {
+            return self.build_and_seed_idg_service();
+        }
+        let global = self.inner.db.global_index();
+        let cg = self.cached_resolved_call_graph();
+        let db = &self.inner.db;
+        let ws = bonsai_idg::workspace_adapter::build_with_file_info_and_options(
+            global.as_ref(),
+            cg.as_ref(),
+            |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
+            |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            transfer_options,
+        );
         let service = Arc::new(bonsai_idg::IdgQueryService::new(Arc::new(ws), global));
         self.inner.db.set_idg_service(service.clone());
         service
@@ -639,28 +692,60 @@ impl Workspace {
         }
     }
 
-    /// Build a fully indexed workspace: ingest `root`, parallel-prewarm
-    /// each file's decl index, load the dataflow sidecar (if valid),
-    /// fill missing taint entries, and write the sidecar back. SDK
-    /// equivalent of `bonsai-ninja index`. Minified / bundled files
+    /// Drop every derived cache that can observe stale workspace
+    /// structure after a file edit, add, or removal. This is
+    /// intentionally centralized so watch/SDK refresh, bulk ingest,
+    /// and in-memory edits keep the same correctness contract.
+    fn invalidate_after_file_change(&self, file: FileId) {
+        self.inner.db.invalidate_file(file);
+        // Dataflow tracks per-entry transitive file dependencies, so
+        // retain unrelated in-memory facts while evicting entries that
+        // actually observed this file. The cache closes any disk
+        // sidecar reader internally because persisted stores are tied
+        // to the pre-edit workspace fingerprint.
+        self.inner.dataflow.invalidate_file(file);
+        self.inner.flow_ids.invalidate_all();
+        self.inner.value_flow.clear();
+        self.inner.db.invalidate_idg_service();
+        self.delete_idg_sidecar();
+        self.inner.inter_taint.clear();
+        *self.inner.resolved_call_graph.write() = None;
+        self.inner.taint_index.clear();
+        self.inner.transitive_callers.clear();
+        self.inner.class_members.clear();
+        self.inner.enclosing.invalidate_file(file);
+        self.inner.decl_names.clear();
+        self.inner.reachable_kinded.write().clear();
+    }
+
+    /// Open a structurally indexed workspace: ingest `root`, prewarm
+    /// each file's declaration index, and load reusable sidecars when
+    /// present. Missing analysis facts are computed on demand by the
+    /// exact query that needs them. Minified / bundled files
     /// (`*.min.js`, single lines > 5 KB) are skipped by default;
     /// set `BONSAI_INCLUDE_MINIFIED=1` to opt in.
     pub fn open(root: &Path, registry: Arc<LanguageRegistry>) -> Result<Self, WorkspaceError> {
         Self::open_with_options(root, registry, WorkspaceOpenOptions::default())
     }
 
-    /// Explicit `index` alias for SDK callers. Builds the reusable
-    /// analysis sidecar just like [`Self::open`], but reads more
-    /// clearly at call sites that are intentionally doing upfront
-    /// indexing work.
+    /// Structural index alias for SDK callers. This matches the CLI
+    /// `index <workspace>` default: parse/index only, no eager
+    /// full-workspace taint/value-flow solve.
     pub fn index(root: &Path, registry: Arc<LanguageRegistry>) -> Result<Self, WorkspaceError> {
-        Self::open(root, registry)
+        Self::open_with_options(root, registry, WorkspaceOpenOptions::parse_only())
+    }
+
+    /// Explicit full-prewarm SDK path for cache rebuilds and
+    /// benchmark/audit flows that intentionally compute reusable
+    /// analysis sidecars up front.
+    pub fn index_full_prewarm(root: &Path, registry: Arc<LanguageRegistry>) -> Result<Self, WorkspaceError> {
+        Self::open_with_options(root, registry, WorkspaceOpenOptions::full_prewarm())
     }
 
     /// Open a workspace for a query command: parse/index the current
     /// files, load the persisted dataflow sidecar when present, and
     /// skip eager dataflow prewarm. Missing facts are still computed
-    /// lazily through [`DataFlowCache::facts_for`].
+    /// on demand through [`DataFlowCache::facts_for`].
     pub fn open_query(root: &Path, registry: Arc<LanguageRegistry>) -> Result<Self, WorkspaceError> {
         Self::open_with_options(root, registry, WorkspaceOpenOptions::query_only())
     }
@@ -708,15 +793,13 @@ impl Workspace {
             on_event(WorkspaceOpenEvent::ParseFileIndexed);
         });
         on_event(WorkspaceOpenEvent::ParseFinished);
-        // Pass 2: eager workspace-wide taint-connected dataflow
-        // prewarm. Each function gets its per-entry interprocedural
-        // taint facts computed once here; every later `inspect` /
-        // `export` / `--from`/`--to` query hits the cache instead of
-        // paying the per-query cost. The heavy lifting is all inside
-        // `DataFlowCache::prewarm_all` — `par_iter` + the existing
-        // `bonsai_taint::taint_facts_for_entry`. Disable by setting
-        // `BONSAI_NO_DATAFLOW=1` (the per-query path still works; it
-        // just won't be pre-populated).
+        // Optional sidecar load / explicit workspace-wide prewarm.
+        // The default structural index path leaves all of these flags
+        // off; query commands may load fresh sidecars as performance
+        // artifacts, and explicit prewarm/cache flows compute missing
+        // per-entry facts up front. Disable even explicit dataflow
+        // prewarm with `BONSAI_NO_DATAFLOW=1` (the per-query path
+        // still works; it just won't be pre-populated).
         let skip_prewarm = std::env::var("BONSAI_NO_DATAFLOW")
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
@@ -731,7 +814,7 @@ impl Workspace {
             let loaded = ws
                 .inner
                 .dataflow
-                .load_factstore_sidecar(&factstore_sidecar)
+                .load_factstore_sidecar(&factstore_sidecar, ws.db())
                 .unwrap_or(0);
             if loaded == 0 {
                 let legacy_sidecar = DataFlowCache::sidecar_path(root);
@@ -741,7 +824,7 @@ impl Workspace {
         // Try to load the persisted call graph before any cache
         // that depends on it asks for one. Saves several seconds
         // on every CLI invocation against a workspace with a
-        // fresh `.bonsai/callgraph.v1.bin`.
+        // fresh `.bonsai/callgraph.v10.bin`.
         if options.load_dataflow_sidecar && !skip_prewarm {
             let _ = ws.load_callgraph_sidecar(root);
         }
@@ -809,15 +892,15 @@ impl Workspace {
         // graph that `security source-analysis`, the source-seed
         // selection in `build_findings_chain_aware`, and inspect's
         // value-flow renderers consume. Without this, every
-        // `taint-analysis` invocation lazily faults the per-source
-        // graph one source at a time — a major cliff on workspaces
+        // `taint-analysis` invocation computes the per-source graph on
+        // demand one source at a time — a major cliff on workspaces
         // with thousands of source matches.
         let skip_value_flow = std::env::var("BONSAI_NO_VALUE_FLOW")
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         if options.load_value_flow_sidecar && !skip_value_flow {
             let sidecar = ValueFlowCache::sidecar_path(root);
-            let _ = ws.inner.value_flow.load_from_disk(&sidecar);
+            let _ = ws.inner.value_flow.load_from_disk(&sidecar, ws.db());
         }
         if options.prewarm_value_flow && !skip_value_flow {
             on_event(WorkspaceOpenEvent::ValueFlowPrewarmStarted);
@@ -862,7 +945,7 @@ impl Workspace {
             // in-memory if disk write fails.
             let sidecar = FlowIdCache::sidecar_path(root);
             // Try to hydrate from any existing sidecar before recomputing.
-            let _ = ws.inner.flow_ids.load_from_disk(&sidecar);
+            let _ = ws.inner.flow_ids.load_from_disk(&sidecar, ws.db());
             if let Err(err) = ws
                 .inner
                 .flow_ids
@@ -902,7 +985,7 @@ impl Workspace {
     pub fn load_value_flow_sidecar(&self, root: &Path) -> std::io::Result<usize> {
         self.inner
             .value_flow
-            .load_from_disk(&ValueFlowCache::sidecar_path(root))
+            .load_from_disk(&ValueFlowCache::sidecar_path(root), self.db())
     }
 
     /// Save the current value-flow cache to the conventional sidecar
@@ -910,7 +993,7 @@ impl Workspace {
     pub fn save_value_flow_sidecar(&self, root: &Path) -> std::io::Result<()> {
         self.inner
             .value_flow
-            .save_to_disk(&ValueFlowCache::sidecar_path(root))
+            .save_to_disk(&ValueFlowCache::sidecar_path(root), self.db())
     }
 
     pub fn ingest_dir(&self, root: &Path) -> Result<Vec<FileId>, WorkspaceError> {
@@ -924,54 +1007,7 @@ impl Workspace {
             let old_id = self.inner.vfs.lookup(path);
             let id = self.inner.vfs.write(path.clone(), Arc::<str>::from(source.text));
             if let Some(prev) = old_id {
-                self.inner.db.invalidate_file(prev);
-                self.inner.dataflow.invalidate_file(prev);
-                self.inner.flow_ids.invalidate_all();
-                // Value-flow graphs are keyed by FuncId and contain
-                // calls into other functions; any source change can
-                // invalidate cross-file edges, so flush the whole
-                // cache on edit. Cheaper than per-graph dependency
-                // tracking and matches the FlowIdCache strategy.
-                self.inner.value_flow.clear();
-                // The IDG segments depend on per-file decl state; an
-                // edit can shift place ids, node ids, and cross-file
-                // edges. Coarse drop matches the dataflow / value-flow
-                // strategy. Phase 7 will refine this to per-file
-                // segment rebuild.
-                self.inner.db.invalidate_idg_service();
-                // File edits change segment contents and cross-file edges;
-                // the on-disk IDG sidecar must go with the in-memory slot
-                // so the next `build_and_seed_idg_service` rebuilds from
-                // scratch instead of restoring a stale snapshot.
-                self.delete_idg_sidecar();
-                // The workspace-wide inter-taint caches memoize
-                // resolver answers, alias maps, and function summaries
-                // — every entry is keyed off static AST state that
-                // an edit may have changed.
-                self.inner.inter_taint.clear();
-                // Drop the cached resolved call graph: an edit can
-                // add/remove/rename callees, which would silently
-                // poison every chain enumeration that consumed the
-                // stale graph.
-                *self.inner.resolved_call_graph.write() = None;
-                // Drop every source-seeded entry-taint graph for the
-                // same reason — call edges may have shifted.
-                self.inner.taint_index.clear();
-                // Transitive caller sets are derived from the call
-                // graph; same invalidation rule.
-                self.inner.transitive_callers.clear();
-                // Class member index keys on global decl state.
-                self.inner.class_members.clear();
-                // Per-file enclosing-decl index keys on the file's
-                // decls — drop just this file's entry to keep
-                // unrelated files warm.
-                self.inner.enclosing.invalidate_file(prev);
-                // Decl-name index is workspace-wide; coarsely drop
-                // it on edit and let the next query rebuild.
-                self.inner.decl_names.clear();
-                // Per-FuncId structural reachability depends on
-                // the edited file's flow events; coarse drop.
-                self.inner.reachable_kinded.write().clear();
+                self.invalidate_after_file_change(prev);
             }
             *self.inner.reparse_counter.lock() += 1;
             ingested.push(id);
@@ -1004,10 +1040,9 @@ impl Workspace {
     }
 
     /// Refresh one on-disk source file in place. Parser, decl/import,
-    /// CFG, flow-id, and dataflow caches are invalidated only for the
-    /// edited file and its known dataflow dependents. New files clear
-    /// the dataflow cache because they can introduce new resolution
-    /// candidates for calls in previously indexed files.
+    /// CFG, flow-id, dataflow, value-flow, callgraph, source-taint,
+    /// and other derived caches are invalidated through the same
+    /// workspace-wide edit path used by watch and SDK hot reload.
     pub fn refresh_file_from_disk(&self, path: &Path) -> Result<FileRefresh, WorkspaceError> {
         let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
             return Err(WorkspaceError::NoAdapter(path.display().to_string()));
@@ -1046,10 +1081,6 @@ impl Workspace {
         let id = self.apply_edit(path, text);
         let _ = self.inner.db.decl_index(id);
         let _ = self.inner.db.import_index(id);
-        if matches!(kind, FileRefreshKind::Added) {
-            self.inner.dataflow.clear();
-            self.inner.flow_ids.invalidate_all();
-        }
         Ok(FileRefresh {
             file: id,
             path: path.to_path_buf(),
@@ -1061,30 +1092,20 @@ impl Workspace {
     /// refresh paths after an on-disk delete.
     pub fn remove_file_from_index(&self, path: &Path) -> Option<FileId> {
         let file = self.inner.vfs.remove(path)?;
-        self.inner.db.invalidate_file(file);
-        self.inner.dataflow.invalidate_file(file);
-        self.inner.flow_ids.invalidate_all();
-        // Drop the IDG service so cross-file edges that originated
-        // from the removed file aren't queried out of stale state.
-        self.inner.db.invalidate_idg_service();
-        // File edits change segment contents and cross-file edges;
-        // the on-disk IDG sidecar must go with the in-memory slot so
-        // the next `build_and_seed_idg_service` rebuilds from scratch
-        // instead of restoring a stale snapshot.
-        self.delete_idg_sidecar();
+        self.invalidate_after_file_change(file);
         *self.inner.reparse_counter.lock() += 1;
         Some(file)
     }
 
-    /// Apply an in-memory edit to a workspace file and surgically
-    /// bump every downstream cache that observed the prior version.
+    /// Apply an in-memory edit to a workspace file and invalidate
+    /// every derived cache that observed the prior version.
     ///
     /// VFS bumps the file's version (FileId stays stable). The DB
     /// drops `decl_index`/`import_index`/`resolved`/global-index
     /// entries; CFGs auto-miss on their `(FuncId, file_version)` key.
-    /// The dataflow cache invalidates only entries whose declaring
-    /// file or transitive callee set touches the edit. Flow-id
-    /// labels and the reparse counter both bump.
+    /// Derived workspace-wide caches are dropped conservatively so
+    /// exact command scopes rebuild from the current source tree.
+    /// Flow-id labels and the reparse counter both bump.
     pub fn apply_edit(&self, path: &Path, new_text: String) -> FileId {
         let old_id = self.inner.vfs.lookup(path);
         let id = self
@@ -1092,23 +1113,10 @@ impl Workspace {
             .vfs
             .write(path.to_path_buf(), Arc::<str>::from(new_text));
         if let Some(prev) = old_id {
-            self.inner.db.invalidate_file(prev);
-            self.inner.dataflow.invalidate_file(prev);
-            self.inner.flow_ids.invalidate_all();
+            self.invalidate_after_file_change(prev);
         } else {
-            self.inner.dataflow.clear();
-            self.inner.flow_ids.invalidate_all();
+            self.invalidate_after_file_change(id);
         }
-        // The IDG segments depend on per-file decl state; an edit
-        // can shift place ids, node ids, and cross-file edges.
-        // Coarse drop matches the dataflow invalidation strategy —
-        // next query lazy-rebuilds via `build_and_seed_idg_service`.
-        self.inner.db.invalidate_idg_service();
-        // File edits change segment contents and cross-file edges;
-        // the on-disk IDG sidecar must go with the in-memory slot so
-        // the next `build_and_seed_idg_service` rebuilds from scratch
-        // instead of restoring a stale snapshot.
-        self.delete_idg_sidecar();
         *self.inner.reparse_counter.lock() += 1;
         id
     }
@@ -1156,21 +1164,27 @@ impl Workspace {
     }
 
     fn resolve_function_symbol(&self, qualified: &str) -> Result<SymbolId, WorkspaceError> {
+        let lookup = split_symbol_lookup_spec(qualified);
         // Bare-name lookups can match multiple symbols when names
         // collide across translation units (the canonical regression
         // is `static fn error()` defined in multiple files).
         // Collect every match in deterministic order, then require a
         // single semantic candidate. The caller must disambiguate
-        // instead of letting trace pick a workspace-order winner.
+        // instead of letting trace pick a workspace-order winner. A
+        // `path:name` or `path:line:name` query narrows that same
+        // inventory by declaration location; it never broadens lookup.
         let global = self.inner.db.global_index();
         let mut candidates: Vec<(SymbolId, Decl)> = global
-            // CONTEXTLESS_LOOKUP_JUSTIFICATION: CLI/user-supplied
-            // trace entry lookup only. The cross-module tracer starts
-            // from the resolved symbol and resolves subsequent edges
-            // with caller context.
-            .find_by_name(qualified)
+            // CLI/user-supplied trace entry lookup only.
+            // CONTEXTLESS_LOOKUP_JUSTIFICATION: This is an inventory step that
+            // either yields exactly one semantic target or reports
+            // ambiguity. The cross-module tracer starts from the
+            // resolved symbol and resolves subsequent edges with caller
+            // context.
+            .find_by_name(lookup.name)
             .iter()
             .filter_map(|sym| self.decl_for_symbol(*sym).map(|d| (*sym, d)))
+            .filter(|(_, decl)| self.decl_matches_lookup_spec(decl, &lookup))
             .collect();
         candidates.sort_by(|(a_sym, a), (b_sym, b)| {
             let a_path = self
@@ -1204,7 +1218,7 @@ impl Workspace {
             .collect();
         collect_unindexed_named_decls(
             self,
-            qualified,
+            lookup.name,
             |d| {
                 matches!(
                     d.kind,
@@ -1213,6 +1227,7 @@ impl Workspace {
             },
             &mut callable_hits,
         );
+        callable_hits.retain(|(_, decl)| self.decl_matches_lookup_spec(decl, &lookup));
         sort_symbol_decl_candidates(self, &mut callable_hits);
         dedup_symbol_decl_candidates(&mut callable_hits);
         match callable_hits.as_slice() {
@@ -1232,21 +1247,26 @@ impl Workspace {
         let mut ctor_hits: Vec<(SymbolId, Decl)> = candidates
             .iter()
             .filter(|(_, d)| matches!(d.kind, DeclKind::Class | DeclKind::Struct))
-            .filter_map(|(sym, _)| {
-                let ctor = self.find_constructor_symbol(*sym)?;
-                self.decl_for_symbol(ctor).map(|decl| (ctor, decl))
+            .flat_map(|(sym, _)| {
+                self.find_constructor_symbols(*sym)
+                    .into_iter()
+                    .filter_map(|ctor| self.decl_for_symbol(ctor).map(|decl| (ctor, decl)))
+                    .collect::<Vec<_>>()
             })
             .collect();
         let mut class_hits = Vec::new();
         collect_unindexed_named_decls(
             self,
-            qualified,
+            lookup.name,
             |d| matches!(d.kind, DeclKind::Class | DeclKind::Struct),
             &mut class_hits,
         );
-        ctor_hits.extend(class_hits.into_iter().filter_map(|(class_sym, _)| {
-            let ctor = self.find_constructor_symbol(class_sym)?;
-            self.decl_for_symbol(ctor).map(|decl| (ctor, decl))
+        class_hits.retain(|(_, decl)| self.decl_matches_lookup_spec(decl, &lookup));
+        ctor_hits.extend(class_hits.into_iter().flat_map(|(class_sym, _)| {
+            self.find_constructor_symbols(class_sym)
+                .into_iter()
+                .filter_map(|ctor| self.decl_for_symbol(ctor).map(|decl| (ctor, decl)))
+                .collect::<Vec<_>>()
         }));
         sort_symbol_decl_candidates(self, &mut ctor_hits);
         dedup_symbol_decl_candidates(&mut ctor_hits);
@@ -1264,7 +1284,28 @@ impl Workspace {
         }
     }
 
-    fn find_constructor_symbol(&self, class_sym: SymbolId) -> Option<SymbolId> {
+    fn decl_matches_lookup_spec(&self, decl: &Decl, spec: &SymbolLookupSpec<'_>) -> bool {
+        let file_matches = spec.file.is_none_or(|qualifier| {
+            self.inner
+                .db
+                .vfs()
+                .path(decl.span.file)
+                .is_ok_and(|path| file_matches_qualifier(path.as_ref(), qualifier))
+        });
+        let line_matches = spec
+            .line
+            .is_none_or(|wanted| self.decl_name_line(decl).is_some_and(|line| line == wanted));
+        file_matches && line_matches
+    }
+
+    fn decl_name_line(&self, decl: &Decl) -> Option<u32> {
+        let snapshot = self.inner.db.vfs().snapshot(decl.name_span.file).ok()?;
+        let map =
+            bonsai_common::cached_span_map(decl.name_span.file, snapshot.version, snapshot.text.as_ref());
+        Some(map.line_col(decl.name_span.start).line)
+    }
+
+    fn find_constructor_symbols(&self, class_sym: SymbolId) -> Vec<SymbolId> {
         // Workspace class-member index lookup — O(1) instead of the
         // prior linear scan of `decls_in(class_file)`. Constructors
         // must be owned by the class declaration through
@@ -1283,27 +1324,33 @@ impl Workspace {
             .inner
             .class_members
             .constructors_of(&self.inner.db, class_sym);
-        if let Some(first) = constructors.first().copied() {
-            return Some(SymbolId::new(first.raw()));
+        if !constructors.is_empty() {
+            return constructors
+                .into_iter()
+                .map(|func| SymbolId::new(func.raw()))
+                .collect();
         }
         let global = self.inner.db.global_index();
-        let class_file = global.declaring_file(class_sym)?;
+        let Some(class_file) = global.declaring_file(class_sym) else {
+            return Vec::new();
+        };
         let names = self
             .inner
             .db
             .adapter_for(class_file)
             .map(|adapter| adapter.capabilities().effective_constructor_method_names())
             .unwrap_or(bonsai_common::CONSTRUCTOR_METHOD_NAMES);
+        let mut out = Vec::new();
         for name in names {
             let candidates = self
                 .inner
                 .class_members
                 .methods_of(&self.inner.db, class_sym, name);
-            if let Some(first) = candidates.first().copied() {
-                return Some(SymbolId::new(first.raw()));
-            }
+            out.extend(candidates.into_iter().map(|func| SymbolId::new(func.raw())));
         }
-        None
+        out.sort_by_key(|sym| sym.raw());
+        out.dedup();
+        out
     }
 
     fn decl_for_symbol(&self, symbol: SymbolId) -> Option<Decl> {
@@ -1318,7 +1365,8 @@ impl Workspace {
             .path(decl.span.file)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        format!("{path}:{}:{}", decl.name_span.start, symbol.raw())
+        let line = self.decl_name_line(decl).unwrap_or(0);
+        format!("{path}:{line}:{} (FuncId:{})", decl.name, symbol.raw())
     }
 
     fn language_of(&self, symbol: SymbolId) -> String {
@@ -1342,7 +1390,8 @@ impl Workspace {
         opts: CrossModuleOptions,
     ) -> Result<TraceResult, WorkspaceError> {
         let symbol = self.resolve_function_symbol(qualified)?;
-        let raw = CrossModuleTracer::new(&self.inner.db, opts).trace(symbol);
+        let call_graph = self.cached_resolved_call_graph();
+        let raw = CrossModuleTracer::new(&self.inner.db, call_graph.as_ref(), opts).trace(symbol);
         Ok(self.finalize_trace(
             raw,
             TraceQuery {
@@ -1378,7 +1427,8 @@ impl Workspace {
         // declared function in the workspace. Only pre-compute a
         // `FuncId` for it when it IS a declared function; otherwise we'll
         // still truncate the trace by matching step messages below.
-        let raw = CrossModuleTracer::new(&self.inner.db, opts).trace(src);
+        let call_graph = self.cached_resolved_call_graph();
+        let raw = CrossModuleTracer::new(&self.inner.db, call_graph.as_ref(), opts).trace(src);
         let mut result = self.finalize_trace(
             raw,
             TraceQuery {
@@ -1395,12 +1445,14 @@ impl Workspace {
             opts,
         );
         if let Some(hit) = result.steps.iter().position(|s| s.function == sink) {
-            result.steps.truncate(hit + 1);
+            bonsai_trace::truncate_after_step(&mut result, hit);
         } else if !result.steps.iter().any(|s| s.function == sink) {
-            // Also match by step message prefix "Call <sink>" for when the
-            // sink isn't a separately declared function.
-            if let Some(hit) = result.steps.iter().position(|s| s.message.contains(sink)) {
-                result.steps.truncate(hit + 1);
+            // External/framework sinks are not workspace declarations, so
+            // match the finalized concrete call step. Keep this exact:
+            // substring scans can stop at unrelated calls such as
+            // `os.system_safe` for a requested sink of `os.system`.
+            if let Some(hit) = result.steps.iter().position(|s| trace_step_calls_symbol(s, sink)) {
+                bonsai_trace::truncate_after_step(&mut result, hit);
             } else {
                 result.diagnostics.push(bonsai_trace::TraceDiagnostic {
                     severity: "warning".into(),
@@ -1457,6 +1509,118 @@ impl Workspace {
         };
         finalize(raw, ctx, self.inner.vfs.as_ref())
     }
+}
+
+fn trace_step_calls_symbol(step: &bonsai_trace::TraceStep, sink: &str) -> bool {
+    if !matches!(
+        step.kind,
+        bonsai_trace::TraceStepKind::Call | bonsai_trace::TraceStepKind::Diagnostic
+    ) {
+        return false;
+    }
+    let Some(callee) = trace_step_callee_label(&step.message) else {
+        return false;
+    };
+    normalized_external_call_label(callee) == normalized_external_call_label(sink)
+}
+
+fn trace_step_callee_label(message: &str) -> Option<&str> {
+    [
+        "Method call ",
+        "Indirect call ",
+        "Call ",
+        "Macro ",
+        "New ",
+        "Unresolved call ",
+        "Ambiguous call ",
+    ]
+    .iter()
+    .find_map(|prefix| message.strip_prefix(prefix))
+    .map(str::trim)
+    .filter(|callee| !callee.is_empty())
+}
+
+fn normalized_external_call_label(label: &str) -> &str {
+    label
+        .trim()
+        .trim_start_matches(bonsai_common::REFERENCE_SIGILS)
+        .trim_start_matches('&')
+        .trim_start_matches('*')
+}
+
+#[derive(Debug, Default)]
+struct SymbolLookupSpec<'a> {
+    file: Option<&'a str>,
+    line: Option<u32>,
+    name: &'a str,
+}
+
+fn split_symbol_lookup_spec(spec: &str) -> SymbolLookupSpec<'_> {
+    let Some(name_idx) = spec.rfind(':') else {
+        return SymbolLookupSpec {
+            name: spec,
+            ..Default::default()
+        };
+    };
+    let (head, name) = (&spec[..name_idx], &spec[name_idx + 1..]);
+    if name.is_empty() || head.is_empty() || name.contains(['/', '\\']) {
+        return SymbolLookupSpec {
+            name: spec,
+            ..Default::default()
+        };
+    }
+    let path_like = |value: &str| value.contains(['/', '\\']);
+    if let Some((path, maybe_line)) = head.rsplit_once(':') {
+        if path_like(path) {
+            if let Ok(line) = maybe_line.parse::<u32>() {
+                return SymbolLookupSpec {
+                    file: Some(path),
+                    line: Some(line),
+                    name,
+                };
+            }
+        }
+    }
+    if path_like(head) {
+        return SymbolLookupSpec {
+            file: Some(head),
+            line: None,
+            name,
+        };
+    }
+    SymbolLookupSpec {
+        name: spec,
+        ..Default::default()
+    }
+}
+
+fn file_matches_qualifier(decl_file: &Path, qualifier: &str) -> bool {
+    if decl_file == Path::new(qualifier) {
+        return true;
+    }
+    let canonical_qualifier = Path::new(qualifier).canonicalize().ok();
+    if decl_file
+        .canonicalize()
+        .ok()
+        .as_deref()
+        .zip(canonical_qualifier.as_deref())
+        .is_some_and(|(decl, qual)| decl == qual)
+    {
+        return true;
+    }
+    let decl_text = decl_file.to_string_lossy();
+    if decl_text.ends_with(qualifier)
+        && decl_text
+            .as_bytes()
+            .get(decl_text.len().saturating_sub(qualifier.len()).saturating_sub(1))
+            .is_some_and(|b| *b == b'/' || *b == b'\\')
+    {
+        return true;
+    }
+    decl_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == qualifier)
 }
 
 fn collect_unindexed_named_decls<F>(
@@ -1518,44 +1682,29 @@ fn db_options_from_open_options(options: WorkspaceOpenOptions) -> AnalyzerDbOpti
 /// or engine-policy bump. XOR with a constant tag keeps the IDG hash
 /// space disjoint from the dataflow / value-flow sidecars'.
 fn idg_pipeline_hash() -> u64 {
+    // Bump when IDG construction, call-site stitching, resolver
+    // semantics, or side-effect propagation changes without an
+    // on-disk layout change. This rejects old `idg.v*.factstore`
+    // files whose shape can still decode but whose edges/lineage are
+    // no longer semantically equivalent.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 16;
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
-    lo ^ hi ^ 0xBEEF_C0DE_DEAD_FACE_u64
+    lo ^ hi ^ 0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
 }
 
-/// Hash of every (path, content) pair in the VFS, folded into a
-/// single u64. Used by [`Workspace::build_and_seed_idg_service`] to
-/// detect out-of-band file edits between two CLI invocations:
-/// `bonsai-ninja index` writes the IDG sidecar with content fingerprint
-/// X, then a `git checkout` swaps file contents, then
-/// `bonsai-ninja security ...` opens the workspace, computes content
-/// fingerprint Y, and rejects the sidecar because the global-index
-/// symbol ids it references no longer match the current file tree.
-///
-/// Path-keyed (not FileId-keyed) because FileIds are process-local
-/// and unstable across runs. Sorted before folding so the result is
-/// independent of VFS enumeration order.
-fn workspace_content_fingerprint(db: &AnalyzerDb) -> u64 {
-    let mut entries: Vec<(String, u64)> = db
-        .vfs()
-        .all_files()
-        .into_iter()
-        .filter_map(|file| {
-            let path = db.vfs().path(file).ok()?.display().to_string();
-            let snap = db.vfs().snapshot(file).ok()?;
-            Some((path, fnv1a_bytes64(snap.text.as_bytes())))
-        })
-        .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut buf = Vec::with_capacity(entries.len() * 32);
-    for (path, content) in &entries {
-        buf.extend_from_slice(path.as_bytes());
-        buf.push(0);
-        buf.extend_from_slice(&content.to_le_bytes());
+fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
+    let mut pipeline_hash = idg_pipeline_hash() ^ crate::cache_fingerprint::workspace_content_fingerprint(db);
+    if let Some(root) = root {
+        pipeline_hash ^= crate::cache_fingerprint::dependency_metadata_fingerprint(root);
     }
-    fnv1a_bytes64(&buf)
+    pipeline_hash
 }
+
+#[cfg(test)]
+#[path = "idg_pipeline_hash_tests.rs"]
+mod idg_pipeline_hash_tests;
 
 struct SourceFileContent {
     path: std::path::PathBuf,
@@ -1812,119 +1961,5 @@ pub fn content_looks_minified(text: &str) -> bool {
 }
 
 #[cfg(test)]
-mod minified_tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn path_suffix_min_js() {
-        assert!(path_looks_minified(&PathBuf::from("app.min.js")));
-        assert!(path_looks_minified(&PathBuf::from("jquery-3.6.0.min.js")));
-        assert!(path_looks_minified(&PathBuf::from("react.production.min.js")));
-    }
-
-    #[test]
-    fn path_suffix_min_ts_and_css() {
-        assert!(path_looks_minified(&PathBuf::from("lib.min.ts")));
-        assert!(path_looks_minified(&PathBuf::from("styles.min.css")));
-    }
-
-    #[test]
-    fn path_suffix_dash_min() {
-        assert!(path_looks_minified(&PathBuf::from("foo-min.js")));
-    }
-
-    #[test]
-    fn path_node_modules_segment() {
-        assert!(path_looks_minified(&PathBuf::from("node_modules/react/index.js")));
-        assert!(path_looks_minified(&PathBuf::from(
-            "src/node_modules/lodash/debounce.js"
-        )));
-    }
-
-    #[test]
-    fn path_vendor_segment() {
-        assert!(path_looks_minified(&PathBuf::from(
-            "third_party/vendor/jquery.js"
-        )));
-    }
-
-    #[test]
-    fn path_dist_segment() {
-        // The lodash failure mode: `dist/lodash.js` is byte-identical
-        // to top-level `lodash.js` (the build literally copies the
-        // source). Indexing both indexes the same code twice.
-        assert!(path_looks_minified(&PathBuf::from("dist/lodash.js")));
-        assert!(path_looks_minified(&PathBuf::from("project/dist/index.js")));
-    }
-
-    #[test]
-    fn path_build_output_segments() {
-        assert!(path_looks_minified(&PathBuf::from("build/output.js")));
-        assert!(path_looks_minified(&PathBuf::from("target/release/foo.rs")));
-        assert!(path_looks_minified(&PathBuf::from("out/main.js")));
-        assert!(path_looks_minified(&PathBuf::from(".next/static/chunk.js")));
-        assert!(path_looks_minified(&PathBuf::from(".nuxt/server/app.js")));
-    }
-
-    #[test]
-    fn path_workspace_state_dirs() {
-        assert!(path_looks_minified(&PathBuf::from(".bonsai/shadow.py")));
-        assert!(path_looks_minified(&PathBuf::from(".git/hooks/pre-commit.py")));
-    }
-
-    #[test]
-    fn path_python_caches() {
-        assert!(path_looks_minified(&PathBuf::from(
-            "src/pkg/__pycache__/module.cpython-310.pyc"
-        )));
-        assert!(path_looks_minified(&PathBuf::from(
-            ".venv/lib/site-packages/foo.py"
-        )));
-        assert!(path_looks_minified(&PathBuf::from("venv/lib/foo.py")));
-    }
-
-    #[test]
-    fn path_coverage_dirs() {
-        assert!(path_looks_minified(&PathBuf::from("coverage/index.html")));
-        assert!(path_looks_minified(&PathBuf::from(".coverage/lcov.info")));
-    }
-
-    #[test]
-    fn path_normal_source_not_minified() {
-        assert!(!path_looks_minified(&PathBuf::from("src/index.js")));
-        assert!(!path_looks_minified(&PathBuf::from("lib/util/parser.ts")));
-        assert!(!path_looks_minified(&PathBuf::from("minimum.js"))); // not `.min.`
-                                                                     // Substring matches must not false-positive: "build" inside a
-                                                                     // longer name is fine, only an exact path segment counts.
-        assert!(!path_looks_minified(&PathBuf::from("rebuild_index.rs")));
-        assert!(!path_looks_minified(&PathBuf::from("src/distance.rs")));
-        assert!(!path_looks_minified(&PathBuf::from("src/output.rs")));
-    }
-
-    #[test]
-    fn content_detects_long_line() {
-        let mut big = String::with_capacity(6_000);
-        for _ in 0..6_000 {
-            big.push('a');
-        }
-        assert!(content_looks_minified(&big));
-    }
-
-    #[test]
-    fn content_leaves_normal_source_alone() {
-        let source = "function greet(name) {\n    console.log(`hello ${name}`);\n}\n";
-        assert!(!content_looks_minified(source));
-    }
-
-    #[test]
-    fn content_leaves_multi_line_big_files_alone() {
-        // 5 MB of normal-length lines must NOT flag as minified — we only
-        // care about single-line size, not total size.
-        let mut big = String::with_capacity(5 * 1024 * 1024);
-        for _ in 0..50_000 {
-            big.push_str("function fn() { return 1; }\n");
-        }
-        assert!(!content_looks_minified(&big));
-    }
-}
+#[path = "minified_tests.rs"]
+mod minified_tests;

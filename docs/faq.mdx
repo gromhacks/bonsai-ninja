@@ -37,9 +37,9 @@ The rule loader denies unknown fields and validates constraints before scanning.
 
 </Accordion>
 
-<Accordion title="Why is a flow over-approximate?">
+<Accordion title="Why is a flow marked incomplete?">
 
-The resolver may have multiple call targets, unknown receiver type, dynamic dispatch, or missing adapter facts. Use `--strict-flow` or `--precision narrowed` when you need higher-confidence paths.
+The resolver could not prove a semantic target, the call had ambiguous semantic candidates, or a budgeted section was truncated. Public analysis does not widen those cases into guessed flows; use the debug commands such as `dump-resolve`, `dump-edges`, and `dump-taint` to inspect the missing fact.
 
 </Accordion>
 

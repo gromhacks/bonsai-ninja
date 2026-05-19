@@ -225,6 +225,7 @@ fn collect_java_type_aliases(root: Node<'_>, src: &[u8], kinds: &[&str]) -> Vec<
             work_stack.push(child);
         }
     }
+    expand_java_platform_supertypes(&mut aliases);
     dedup_type_aliases(&mut aliases);
     aliases
 }
@@ -292,6 +293,29 @@ fn push_type_alias(aliases: &mut Vec<TypeAliasBinding>, name: &str, type_name: &
         name: bare_name.to_string(),
         type_name: type_name.to_string(),
     });
+}
+
+fn expand_java_platform_supertypes(aliases: &mut Vec<TypeAliasBinding>) {
+    let original = aliases.clone();
+    for alias in original {
+        for supertype in java_platform_supertypes(&alias.type_name) {
+            push_type_alias(aliases, &alias.name, supertype);
+        }
+    }
+}
+
+fn java_platform_supertypes(type_name: &str) -> &'static [&'static str] {
+    match type_name {
+        "CallableStatement" => &["PreparedStatement", "Statement"],
+        "PreparedStatement" => &["Statement"],
+        "Statement" => &[],
+        "ArrayList" | "LinkedList" | "Vector" => &["List", "Collection", "Iterable"],
+        "HashSet" | "LinkedHashSet" | "TreeSet" => &["Set", "Collection", "Iterable"],
+        "HashMap" | "LinkedHashMap" | "TreeMap" => &["Map"],
+        "List" | "Set" => &["Collection", "Iterable"],
+        "Collection" => &["Iterable"],
+        _ => &[],
+    }
 }
 
 /// Drop duplicate `TypeAliasBinding` entries while preserving source-order.

@@ -229,6 +229,7 @@
   enabled: true
   language: scala
   tag: insecure-deserialization
+  category: source-independent
   severity: high
   packages: ["com.fasterxml.jackson"]
   cwe: [CWE-502]
@@ -285,6 +286,7 @@
   enabled: true
   language: scala
   tag: insecure-deserialization
+  category: source-independent
   severity: high
   packages: ["com.fasterxml.jackson"]
   cwe: [CWE-502]

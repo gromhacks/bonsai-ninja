@@ -80,6 +80,8 @@
     kind: param
     target:
       name: target
+      decl_kind_in: [method]
+      visibility_in: [public]
   match_examples:
     - name: declared shape
       code: |
@@ -100,6 +102,8 @@
     kind: param
     target:
       name: data
+      decl_kind_in: [method]
+      visibility_in: [public]
   match_examples:
     - name: declared shape
       code: |

@@ -45,20 +45,44 @@ fn write_fixture(root: &std::path::Path) {
 }
 
 #[test]
-fn sdk_index_writes_dataflow_sidecar() {
+fn sdk_index_is_structural_by_default() {
     let root = tempdir_for_test("bonsai-sdk-index");
     write_fixture(&root);
 
     let ws = Workspace::index(&root, python_registry()).expect("index workspace");
     assert!(
+        !ws.dataflow().is_prewarmed(),
+        "index should stay structural unless full prewarm is requested"
+    );
+    assert_eq!(
+        ws.dataflow().len(),
+        0,
+        "structural index should not eagerly compute dataflow facts"
+    );
+    let sidecar = DataFlowCache::factstore_sidecar_path(&root);
+    assert!(
+        !sidecar.exists(),
+        "structural index should not persist a dataflow sidecar"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn sdk_full_prewarm_writes_dataflow_sidecar() {
+    let root = tempdir_for_test("bonsai-sdk-full-prewarm");
+    write_fixture(&root);
+
+    let ws = Workspace::index_full_prewarm(&root, python_registry()).expect("full prewarm workspace");
+    assert!(
         ws.dataflow().is_prewarmed(),
-        "index should eagerly prewarm reusable taint facts"
+        "explicit full prewarm should compute reusable taint facts"
     );
     assert!(ws.dataflow().len() >= 2);
     let sidecar = DataFlowCache::factstore_sidecar_path(&root);
     assert!(
         sidecar.exists(),
-        "index should persist the reusable dataflow sidecar"
+        "explicit full prewarm should persist the reusable dataflow sidecar"
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -69,7 +93,7 @@ fn sdk_query_open_loads_sidecar_without_full_prewarm() {
     let root = tempdir_for_test("bonsai-sdk-query-open");
     write_fixture(&root);
 
-    Workspace::index(&root, python_registry()).expect("index workspace");
+    Workspace::index_full_prewarm(&root, python_registry()).expect("full prewarm workspace");
     let ws = Workspace::open_query(&root, python_registry()).expect("open query workspace");
     assert!(
         ws.dataflow().len() >= 2,
@@ -88,7 +112,7 @@ fn sdk_parse_only_skips_sidecar_load_and_prewarm() {
     let root = tempdir_for_test("bonsai-sdk-parse-only");
     write_fixture(&root);
 
-    Workspace::index(&root, python_registry()).expect("index workspace");
+    Workspace::index_full_prewarm(&root, python_registry()).expect("full prewarm workspace");
     let ws = Workspace::open_with_options(&root, python_registry(), WorkspaceOpenOptions::parse_only())
         .expect("open parse-only workspace");
     assert_eq!(

@@ -484,6 +484,8 @@
     kind: call
     callee:
       attribute: [Uri, decodeComponent]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -498,6 +500,8 @@
     kind: call
     callee:
       attribute: [Uri, decodeFull]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |

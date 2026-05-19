@@ -1395,6 +1395,8 @@
     kind: call
     callee:
       name: decodeURIComponent
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: decodeURIComponent passthrough
     code: |
@@ -1411,6 +1413,8 @@
     kind: call
     callee:
       name: decodeURI
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: decodeURI passthrough
     code: |
@@ -1427,6 +1431,8 @@
     kind: call
     callee:
       name: unescape
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: unescape passthrough
     code: |

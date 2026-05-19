@@ -9,6 +9,9 @@
     kind: new
     callee:
       name: GetObjectCommand
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: aws get object command
     code: |
@@ -16,6 +19,13 @@
       function demo(input, req, obj) {
         return new GetObjectCommand(input);
       }
+  - name: literal aws get object command negative
+    code: |
+      const { GetObjectCommand } = require("@aws-sdk/client-s3");
+      function demo() {
+        return new GetObjectCommand({ Bucket: "app", Key: "reports/fixed.csv" });
+      }
+    expect_no_match: true
   description: "new GetObjectCommand({Bucket, Key}) — tainted selector reads arbitrary S3 objects."
 
 - id: typescript.access.aws_put_object_command
@@ -29,6 +39,9 @@
     kind: new
     callee:
       name: PutObjectCommand
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: aws put object command
     code: |
@@ -36,6 +49,13 @@
       function demo(input, req, obj) {
         return new PutObjectCommand(input);
       }
+  - name: literal aws put object command negative
+    code: |
+      const { PutObjectCommand } = require("@aws-sdk/client-s3");
+      function demo() {
+        return new PutObjectCommand({ Bucket: "app", Key: "reports/fixed.csv" });
+      }
+    expect_no_match: true
   description: "new PutObjectCommand({Bucket, Key}) — tainted selector overwrites attacker-chosen S3 objects."
 
 - id: typescript.access.aws_get_secret_value_command
@@ -49,6 +69,9 @@
     kind: new
     callee:
       name: GetSecretValueCommand
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: aws get secret value command
     code: |
@@ -56,6 +79,13 @@
       function demo(input, req, obj) {
         return new GetSecretValueCommand(input);
       }
+  - name: literal aws get secret value command negative
+    code: |
+      const { GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+      function demo() {
+        return new GetSecretValueCommand({ SecretId: "app/prod/db" });
+      }
+    expect_no_match: true
   description: "new GetSecretValueCommand({SecretId}) — tainted secret id reads arbitrary secret material."
 
 - id: typescript.access.aws_invoke_command
@@ -69,6 +99,9 @@
     kind: new
     callee:
       name: InvokeCommand
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: aws invoke command
     code: |
@@ -76,10 +109,19 @@
       function demo(input, req, obj) {
         return new InvokeCommand(input);
       }
+  - name: literal aws invoke command negative
+    code: |
+      const { InvokeCommand } = require("@aws-sdk/client-lambda");
+      function demo() {
+        return new InvokeCommand({ FunctionName: "fixed-worker" });
+      }
+    expect_no_match: true
   description: "new InvokeCommand({FunctionName, Payload}) — tainted function selector invokes arbitrary Lambda targets."
 
 - id: typescript.access.azure_blob_download
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   tag: access-control
   severity: high
@@ -96,10 +138,12 @@
       function demo(input, req, obj) {
         return blobClient.downloadToBuffer(input);
       }
-  description: "BlobClient.downloadToBuffer — tainted blob selector reads arbitrary Azure blob data."
+  description: "Disabled — BlobClient.downloadToBuffer() reads from the receiver-selected blob; selector taint belongs on BlobClient construction."
 
 - id: typescript.access.azure_blob_upload
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: over-broad
   language: typescript
   tag: access-control
   severity: high
@@ -116,7 +160,7 @@
       function demo(input, req, obj) {
         return blobClient.uploadData(input);
       }
-  description: "BlobClient.uploadData — tainted container/blob selector writes attacker-chosen storage targets."
+  description: "Disabled — BlobClient.uploadData(data) uploads bytes to an already-selected blob client. The storage target is receiver construction, not this data argument."
 
 - id: typescript.access.gcp_secretmanager_access_secret_version
   enabled: true
@@ -129,6 +173,9 @@
     kind: call
     callee:
       regex: "\\.accessSecretVersion$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: gcp secretmanager access secret version
     code: |
@@ -136,4 +183,11 @@
       function demo(input, req, obj) {
         return secretClient.accessSecretVersion(input);
       }
+  - name: literal gcp secretmanager access secret version negative
+    code: |
+      const _u = require("@google-cloud/secret-manager");
+      function demo() {
+        return secretClient.accessSecretVersion({ name: "projects/app/secrets/db/versions/latest" });
+      }
+    expect_no_match: true
   description: "SecretManagerServiceClient.accessSecretVersion — tainted resource name reads arbitrary secret versions."

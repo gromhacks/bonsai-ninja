@@ -3,6 +3,7 @@
   enabled: true
   language: java
   tag: cors
+  category: source-independent
   severity: medium
   packages: [org.springframework.web.bind.annotation]
   cwe: [CWE-942]
@@ -25,6 +26,7 @@
   enabled: true
   language: java
   tag: cors
+  category: source-independent
   severity: medium
   packages: [org.springframework.web.cors]
   cwe: [CWE-942]

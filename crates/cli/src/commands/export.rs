@@ -1,9 +1,8 @@
-//! `bonsai-ninja export` — dump the complete analyzed workspace as one
-//! JSON document. Every file, every decl with its flow events and
-//! params, every import, ref, and string, plus a derived call-graph
-//! edge list. Downstream tooling (taint trackers, dashboards, IDE
-//! overlays) can reconstruct any view — including the per-flow
-//! source-annotated inspect output — from this document.
+//! `bonsai-ninja export` — dump a scope-declared analyzed workspace as
+//! one JSON document. Every analysis fact in the native export is
+//! semantic-only; sections that are intentionally omitted or bounded by
+//! the default export scope are marked incomplete at both the top level
+//! and the section level.
 
 use anyhow::Result;
 use bonsai_sdk::GraphExportFormat;
@@ -19,12 +18,17 @@ use crate::progress;
 pub(crate) fn cmd_export(
     root: &std::path::Path,
     full_propagations: bool,
+    complete_chains: bool,
     format: ExportFormat,
 ) -> Result<()> {
-    if format == ExportFormat::Json && !full_propagations {
+    let cacheable_default_json = format == ExportFormat::Json && !complete_chains && !full_propagations;
+    if cacheable_default_json {
         let stdout = std::io::stdout();
         let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        if bonsai_sdk::WorkspaceCache::new(root).stream_default_export_cache_if_fresh(&mut writer)? {
+        if bonsai_sdk::WorkspaceCache::new(root)
+            .with_discovered_rulepack_root()
+            .stream_default_export_cache_if_fresh(&mut writer)?
+        {
             return Ok(());
         }
     }
@@ -48,11 +52,19 @@ pub(crate) fn cmd_export(
     // string. On a 1 k-file workspace this is multi-second; spinner
     // signals progress while the renderer runs.
     let spin = progress::spinner("building export");
-    let rendered = project
-        .export()
-        .native_json_string(bonsai_sdk::NativeExportOptions { full_propagations })?;
+    let export = project.export();
+    let options = bonsai_sdk::NativeExportOptions {
+        full_propagations,
+        complete_chains,
+    };
+    if !cacheable_default_json {
+        write_native_json_stdout(&export, options)?;
+        spin.finish_and_clear();
+        return Ok(());
+    }
+    export.write_default_json_cache_streaming(options)?;
     spin.finish_and_clear();
-    write_export_json(&project, &rendered, !full_propagations)?;
+    stream_default_cache_or_render(&export, options)?;
     Ok(())
 }
 
@@ -69,28 +81,31 @@ fn graph_export_format(format: ExportFormat) -> Option<GraphExportFormat> {
     }
 }
 
-fn write_export_json(project: &bonsai_sdk::Project, out: &str, cacheable: bool) -> Result<()> {
-    if cacheable {
-        project.export().write_default_json_cache(out)?;
-        let stdout = std::io::stdout();
-        let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        // The cache file we just wrote should be fresh, so the
-        // streaming path is the expected branch. If it's NOT fresh
-        // (cache file disappeared between write and stream, or a
-        // racing writer overwrote it with a stale copy), fall back
-        // to streaming the freshly-rendered bytes directly so the
-        // user always gets exactly one valid JSON document on stdout
-        // — never empty output with exit 0.
-        if !project.export().stream_default_json_cache_if_fresh(&mut writer)? {
-            writer.write_all(out.as_bytes())?;
-            writeln!(writer)?;
-        }
-        writer.flush()?;
-        return Ok(());
-    }
+fn stream_default_cache_or_render(
+    export: &bonsai_sdk::Export<'_>,
+    options: bonsai_sdk::NativeExportOptions,
+) -> Result<()> {
     let stdout = std::io::stdout();
     let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
-    writer.write_all(out.as_bytes())?;
+    // The cache file we just wrote should be fresh, so the streaming
+    // path is the expected branch. If it is not fresh, fall back to
+    // rendering directly so the user always gets exactly one valid
+    // JSON document on stdout.
+    if !export.stream_default_json_cache_if_fresh(&mut writer)? {
+        export.write_native_json(options, &mut writer)?;
+        writeln!(writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_native_json_stdout(
+    export: &bonsai_sdk::Export<'_>,
+    options: bonsai_sdk::NativeExportOptions,
+) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut writer = std::io::BufWriter::with_capacity(1024 * 1024, stdout.lock());
+    export.write_native_json(options, &mut writer)?;
     writeln!(writer)?;
     writer.flush()?;
     Ok(())

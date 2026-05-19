@@ -644,6 +644,8 @@
     kind: call
     callee:
       name: uri_unescape
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: perl.passthrough.uri_unescape example
     code: |

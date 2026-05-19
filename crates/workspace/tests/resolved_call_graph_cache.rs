@@ -1,7 +1,7 @@
 //! Workspace-cached resolved call graph round-trip + invalidation.
 
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
-use bonsai_workspace::Workspace;
+use bonsai_workspace::{Workspace, WorkspaceOpenOptions};
 use std::sync::Arc;
 
 fn registry() -> Arc<LanguageRegistry> {
@@ -20,6 +20,19 @@ fn ws_with(file: &str, src: &str) -> Workspace {
     ws
 }
 
+fn tempdir(name: &str) -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "bonsai-callgraph-cache-{name}-{}-{stamp}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
 #[test]
 fn cached_graph_is_shared_arc_across_calls() {
     let ws = ws_with(
@@ -32,6 +45,46 @@ fn cached_graph_is_shared_arc_across_calls() {
         Arc::ptr_eq(&first, &second),
         "cached_resolved_call_graph must return the same Arc across calls"
     );
+}
+
+#[test]
+fn callgraph_sidecar_rejects_changed_dependency_metadata() {
+    let root = tempdir("dependency-metadata");
+    std::fs::write(
+        root.join("app.py"),
+        "def helper():\n    return 1\n\ndef main():\n    return helper()\n",
+    )
+    .expect("write app");
+    std::fs::write(root.join("poetry.lock"), "package = []\n").expect("write lockfile");
+
+    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::parse_only())
+        .expect("open workspace");
+    ws.save_callgraph_sidecar(&root).expect("save callgraph sidecar");
+    let sidecar = bonsai_workspace::callgraph_sidecar::callgraph_sidecar_path(&root);
+    assert!(sidecar.exists(), "callgraph sidecar should be written");
+    drop(ws);
+
+    let ws_same = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::parse_only())
+        .expect("reopen unchanged workspace");
+    assert!(
+        ws_same.load_callgraph_sidecar(&root),
+        "unchanged dependency metadata should allow callgraph sidecar reuse"
+    );
+    drop(ws_same);
+
+    std::fs::write(
+        root.join("poetry.lock"),
+        "package = []\n[[package]]\nname = \"requests\"\n",
+    )
+    .expect("rewrite lockfile");
+    let ws_changed = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::parse_only())
+        .expect("reopen changed workspace");
+    assert!(
+        !ws_changed.load_callgraph_sidecar(&root),
+        "dependency metadata changes must reject the callgraph sidecar"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
@@ -65,7 +118,7 @@ fn editing_a_file_drops_cached_graph() {
     // it isn't returning a graph snapshotted before the edit and
     // then frozen. Use forward edges from `main` as a stable probe.
     let global = ws.db().global_index();
-    let main_sym = global.find_by_name("main").into_iter().next().unwrap();
+    let main_sym = global.find_by_name("main").iter().next().unwrap();
     let main_func = bonsai_common::FuncId::new(main_sym.raw());
     let edges_before: Vec<_> = before.callees_of(main_func).map(|e| e.to.raw()).collect();
     let edges_after: Vec<_> = after.callees_of(main_func).map(|e| e.to.raw()).collect();

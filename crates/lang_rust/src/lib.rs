@@ -203,6 +203,7 @@ impl LanguageAdapter for RustAdapter {
                 bonsai_lang_api::kit::split_match_arms_in_branch_events(&mut decl.flow_events, &arm_spans);
                 isolate_rust_spawn_bodies(&mut decl.flow_events, &spawn_body_spans);
                 enrich_rust_format_macro_operands(&mut decl.flow_events);
+                enrich_rust_tail_return_sources(&mut decl.flow_events, &decl.params);
             }
         }
         // Rust module_path: relative file path under workspace root,
@@ -224,6 +225,7 @@ impl LanguageAdapter for RustAdapter {
             let visibility_by_span = collect_rust_visibility(tree.root_node(), file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &RUST_TYPE_ALIASES);
             let tuple_struct_bases = collect_rust_tuple_struct_bases(&tree, file, src);
+            let tuple_struct_field_aliases = collect_rust_tuple_struct_field_aliases(&tree, src);
             let impl_method_parents = collect_rust_impl_method_parents(&tree, file, src);
             let impl_method_parent_symbols = impl_method_parents
                 .iter()
@@ -264,6 +266,7 @@ impl LanguageAdapter for RustAdapter {
                     }
                 }
             }
+            apply_rust_tuple_struct_field_aliases(&mut idx, &tuple_struct_field_aliases);
         }
         // Append `FlowEvent::Lifecycle` for recognised Rust
         // resource transitions (`drop`, `Box::from_raw`,
@@ -333,6 +336,113 @@ fn enrich_rust_format_macro_operands(events: &mut [FlowEvent]) {
             _ => {}
         }
     }
+}
+
+fn enrich_rust_tail_return_sources(events: &mut [FlowEvent], params: &[String]) {
+    for event in events {
+        match event {
+            FlowEvent::Return {
+                value_name,
+                value_text,
+                ..
+            } => {
+                if value_name.is_none() {
+                    if let Some(text) = value_text.as_deref() {
+                        *value_name = rust_tail_return_source_name(text, params);
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_rust_tail_return_sources(then_events, params);
+                enrich_rust_tail_return_sources(else_events, params);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_rust_tail_return_sources(body, params);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_rust_tail_return_sources(body, params);
+                enrich_rust_tail_return_sources(catch_events, params);
+                enrich_rust_tail_return_sources(finally_events, params);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rust_tail_return_source_name(text: &str, params: &[String]) -> Option<String> {
+    let expr = strip_rust_reference_prefix(text.trim());
+    if rust_self_field_place(expr) {
+        return Some(expr.to_string());
+    }
+    rust_single_param_struct_literal_source(expr, params)
+}
+
+fn strip_rust_reference_prefix(mut expr: &str) -> &str {
+    loop {
+        let trimmed = expr.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('&') {
+            let rest = rest.trim_start();
+            expr = rest.strip_prefix("mut ").unwrap_or(rest);
+            continue;
+        }
+        return trimmed;
+    }
+}
+
+fn rust_self_field_place(expr: &str) -> bool {
+    let Some(rest) = expr.strip_prefix("self.") else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|ch| ch == '.' || ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn rust_single_param_struct_literal_source(expr: &str, params: &[String]) -> Option<String> {
+    let open = expr.find('{')?;
+    if !expr[..open]
+        .trim()
+        .chars()
+        .all(|ch| ch == ':' || ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let close = expr.rfind('}')?;
+    if close <= open || !expr[close + 1..].trim().is_empty() {
+        return None;
+    }
+    let fields = &expr[open + 1..close];
+    let mut sources = Vec::new();
+    for field in fields.split(',').map(str::trim).filter(|field| !field.is_empty()) {
+        let source = field
+            .split_once(':')
+            .map(|(_, value)| value.trim())
+            .unwrap_or(field);
+        if rust_bare_identifier(source) && params.iter().any(|param| param == source) {
+            sources.push(source.to_string());
+        }
+    }
+    sources.sort();
+    sources.dedup();
+    (sources.len() == 1).then(|| sources.remove(0))
+}
+
+fn rust_bare_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic()) && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn rust_format_named_captures(text: &str) -> Vec<String> {
@@ -720,6 +830,123 @@ fn collect_rust_tuple_struct_bases(
     out
 }
 
+fn collect_rust_tuple_struct_field_aliases(
+    tree: &Tree,
+    src: &[u8],
+) -> Vec<(String, Vec<bonsai_lang_api::TypeAliasBinding>)> {
+    let mut out = Vec::new();
+    for node in collect_kinds(tree, &["struct_item"]) {
+        let name = node
+            .child_by_field_name("name")
+            .map(|n| node_text(&n, src).to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let text = node_text(&node, src);
+        let Some(open) = text.find('(') else {
+            continue;
+        };
+        let Some(close) = text[open + 1..].find(')').map(|idx| open + 1 + idx) else {
+            continue;
+        };
+        if text[..open].contains('{') {
+            continue;
+        }
+        let mut aliases = Vec::new();
+        for (idx, field) in text[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .enumerate()
+        {
+            let Some(type_name) = rust_tuple_struct_field_type(field) else {
+                continue;
+            };
+            aliases.push(bonsai_lang_api::TypeAliasBinding {
+                name: format!("self.{idx}"),
+                type_name,
+            });
+        }
+        if !aliases.is_empty() {
+            out.push((name, aliases));
+        }
+    }
+    out
+}
+
+fn rust_tuple_struct_field_type(field: &str) -> Option<String> {
+    let ty = field
+        .split(':')
+        .next_back()
+        .unwrap_or(field)
+        .trim()
+        .trim_start_matches("pub ")
+        .trim();
+    let ty = ty
+        .split(|ch: char| !(ch == '_' || ch == ':' || ch.is_ascii_alphanumeric()))
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    ty.rsplit("::")
+        .next()
+        .filter(|base| {
+            base.chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+        })
+        .map(ToString::to_string)
+}
+
+fn apply_rust_tuple_struct_field_aliases(
+    idx: &mut DeclIndex,
+    tuple_struct_field_aliases: &[(String, Vec<bonsai_lang_api::TypeAliasBinding>)],
+) {
+    if tuple_struct_field_aliases.is_empty() {
+        return;
+    }
+    let aliases_by_class = tuple_struct_field_aliases
+        .iter()
+        .map(|(name, aliases)| (name.as_str(), aliases))
+        .collect::<std::collections::HashMap<_, _>>();
+    let class_name_by_symbol = idx
+        .defs
+        .iter()
+        .filter(|decl| {
+            matches!(
+                decl.kind,
+                bonsai_lang_api::DeclKind::Class
+                    | bonsai_lang_api::DeclKind::Struct
+                    | bonsai_lang_api::DeclKind::Trait
+                    | bonsai_lang_api::DeclKind::Interface
+            )
+        })
+        .map(|decl| (decl.symbol, decl.name.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for decl in &mut idx.defs {
+        if !matches!(
+            decl.kind,
+            bonsai_lang_api::DeclKind::Function
+                | bonsai_lang_api::DeclKind::Method
+                | bonsai_lang_api::DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let Some(parent) = decl.parent else { continue };
+        let Some(class_name) = class_name_by_symbol.get(&parent) else {
+            continue;
+        };
+        let Some(aliases) = aliases_by_class.get(class_name.as_str()) else {
+            continue;
+        };
+        for alias in *aliases {
+            if !decl.type_aliases.contains(alias) {
+                decl.type_aliases.push((*alias).clone());
+            }
+        }
+    }
+}
+
 fn collect_rust_impl_method_parents(
     tree: &Tree,
     file: FileId,
@@ -1010,7 +1237,7 @@ fn collect_use_tree_imports(body: &str, file: FileId, span: bonsai_common::Span,
 fn strip_use_tree_comments(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
+    while let Some((_, ch)) = chars.next() {
         if ch == '/' {
             match chars.peek().map(|&(_, c)| c) {
                 Some('/') => {
@@ -1027,10 +1254,8 @@ fn strip_use_tree_comments(input: &str) -> String {
                 Some('*') => {
                     chars.next(); // consume the '*'
                     let mut prev = '\0';
-                    let mut closed = false;
                     for (_, c) in chars.by_ref() {
                         if prev == '*' && c == '/' {
-                            closed = true;
                             break;
                         }
                         prev = c;
@@ -1040,7 +1265,6 @@ fn strip_use_tree_comments(input: &str) -> String {
                     // block comment was unterminated (tree-sitter
                     // would normally reject this), we still emit the
                     // space and exit naturally.
-                    let _ = closed;
                     out.push(' ');
                     continue;
                 }
@@ -1048,8 +1272,7 @@ fn strip_use_tree_comments(input: &str) -> String {
             }
         }
         // Avoid Unicode-corrupting `bytes[i] as char` — push the
-        // full char as-is. `idx` is unused but kept for clarity.
-        let _ = idx;
+        // full char as-is.
         out.push(ch);
     }
     out
@@ -1143,59 +1366,5 @@ fn rust_module_segments(path: &std::path::Path) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai_testkit::workspace_with;
-    use std::sync::Arc;
-
-    #[test]
-    fn extracts_top_level_function() {
-        let ws = workspace_with(
-            vec![Arc::new(RustAdapter::new())],
-            &[("a.rs", "fn hello() {}\nfn world() { hello(); }")],
-        );
-        let file = ws.vfs().all_files()[0];
-        let idx = ws.db().decl_index(file).unwrap();
-        let names: Vec<&str> = idx.defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"hello"));
-        assert!(names.contains(&"world"));
-    }
-
-    #[test]
-    fn cfg_not_empty_for_main() {
-        let ws = workspace_with(
-            vec![Arc::new(RustAdapter::new())],
-            &[("main.rs", "fn main() { let x = 1; }")],
-        );
-        let func = ws.lookup_function("main").expect("find main");
-        let cfg = ws.db().cfg(func);
-        assert!(!cfg.blocks.is_empty());
-    }
-
-    #[test]
-    fn format_macro_named_capture_becomes_call_arg_source_name() {
-        let ws = workspace_with(
-            vec![Arc::new(RustAdapter::new())],
-            &[(
-                "lib.rs",
-                r#"fn run(cmd: &str) {
-    sink(format!("ping {cmd}"));
-}"#,
-            )],
-        );
-        let file = ws.vfs().all_files()[0];
-        let idx = ws.db().decl_index(file).unwrap();
-        let run = idx.defs.iter().find(|decl| decl.name == "run").unwrap();
-        let mut found = false;
-        for event in &run.flow_events {
-            if let FlowEvent::Call { name, args, .. } = event {
-                if name == "sink" {
-                    found = args
-                        .first()
-                        .is_some_and(|arg| arg.source_names.iter().any(|source| source == "cmd"));
-                }
-            }
-        }
-        assert!(found, "format! named capture should be adapter-emitted operand");
-    }
-}
+#[path = "tests.rs"]
+mod tests;

@@ -1,5 +1,7 @@
 - id: kotlin.jwt.jjwt_parser_unsigned
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: kotlin
   tag: jwt
   severity: high
@@ -24,11 +26,15 @@
           Jwts.parser(input)
         }
       }
-  description: "jjwt Jwts.parser() without .setSigningKey() — unsigned decode. Merged aliases: kotlin.jwt.alg_confusion_jjwt."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. jjwt Jwts.parser() without .setSigningKey()
+    — unsigned decode. Merged aliases: kotlin.jwt.alg_confusion_jjwt."
   aliases:
   - kotlin.jwt.alg_confusion_jjwt
 - id: kotlin.jwt.jjwt_parser_builder
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: kotlin
   tag: jwt
   severity: high
@@ -51,9 +57,12 @@
           Jwts.parserBuilder(input)
         }
       }
-  description: jjwt Jwts.parserBuilder().
+  description: Disabled — requires a rulepack constraint that proves the unsafe
+    JWT configuration, not just the broad API shape. jjwt Jwts.parserBuilder().
 - id: kotlin.jwt.jjwt_parse_claims_jws
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: kotlin
   tag: jwt
   severity: high
@@ -76,9 +85,13 @@
           JwtParser.parseClaimsJws(input)
         }
       }
-  description: jjwt JwtParser.parseClaimsJws.
+  description: Disabled — requires a rulepack constraint that proves the unsafe
+    JWT configuration, not just the broad API shape. jjwt
+    JwtParser.parseClaimsJws.
 - id: kotlin.jwt.nimbus_signed_jwt_parse
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: kotlin
   tag: jwt
   severity: high
@@ -102,7 +115,9 @@
           SignedJWT.parse(input)
         }
       }
-  description: "Nimbus SignedJWT.parse — flag if no subsequent verify()."
+  description: "Disabled — requires a rulepack constraint that proves the unsafe JWT
+    configuration, not just the broad API shape. Nimbus SignedJWT.parse — flag if
+    no subsequent verify()."
   imports:
   - com.nimbusds.jose
 - id: kotlin.jwt.nimbus_plainjwt_parse
@@ -120,6 +135,9 @@
       attribute:
       - PlainJWT
       - parse
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated shape example
     code: |
@@ -130,6 +148,10 @@
           PlainJWT.parse(input)
         }
       }
+  - name: literal jwt negative
+    code: "import com.nimbusds.jose.*\n// uses com.nimbusds.jose\nclass App {\n  fun
+      handle(\"safe\": String) {\n    PlainJWT.parse(\"safe\")\n  }\n}\n"
+    expect_no_match: true
   description: "Nimbus PlainJWT.parse — explicit unsigned token."
   imports:
   - com.nimbusds.jose
@@ -148,6 +170,9 @@
       attribute:
       - JWT
       - decode
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated shape example
     code: |
@@ -158,11 +183,16 @@
           JWT.decode(input)
         }
       }
+  - name: literal jwt negative
+    code: "import com.auth0.jwt.*\n// uses com.auth0.jwt\nclass App {\n  fun handle(\"\
+      safe\": String) {\n    JWT.decode(\"safe\")\n  }\n}\n"
+    expect_no_match: true
   description: "auth0 JWT.decode — does NOT verify signature."
 - id: kotlin.jwt.auth0_jwt_require_alg_none
   enabled: true
   language: kotlin
   tag: jwt
+  category: source-independent
   severity: critical
   packages:
   - com.auth0.jwt

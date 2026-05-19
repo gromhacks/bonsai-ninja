@@ -743,6 +743,8 @@
     kind: call
     callee:
       attribute: [URI, decode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -753,6 +755,46 @@
       end
     expect_match_text: [URI.decode]
   description: "URI.decode(s) — preserves taint."
+- id: elixir.passthrough.string_upcase
+  enabled: true
+  language: elixir
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, upcase]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: String.upcase preserves taint
+    code: |
+      defmodule App do
+        def test(input) do
+          String.upcase(input)
+        end
+      end
+    expect_match_text: [String.upcase]
+  description: "String.upcase(s) — case-normalizes but preserves taint from s."
+- id: elixir.passthrough.string_downcase
+  enabled: true
+  language: elixir
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [String, downcase]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: String.downcase preserves taint
+    code: |
+      defmodule App do
+        def test(input) do
+          String.downcase(input)
+        end
+      end
+    expect_match_text: [String.downcase]
+  description: "String.downcase(s) — case-normalizes but preserves taint from s."
 - id: elixir.passthrough.uri_decode_www_form
   enabled: true
   language: elixir
@@ -761,6 +803,8 @@
     kind: call
     callee:
       attribute: [URI, decode_www_form]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |

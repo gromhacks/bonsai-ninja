@@ -21,6 +21,8 @@ use crate::inter::{
 use crate::reachable::collect_assign_targets;
 use crate::TokenSet;
 
+const SEMANTIC_FLOW_MAX_PRECISION: Precision = Precision::Narrowed;
+
 /// Which lattice the engine should track during a propagation run.
 ///
 /// `TokenSet` keeps today's flat identifier-set semantics — propagation
@@ -157,11 +159,19 @@ impl ValueFlowGraph {
         self.backward.entry(edge.to.clone()).or_default().insert(edge);
     }
 
-    /// Forward transitive closure from `node`. Visits every node
-    /// reachable via outgoing edges, depth-first; cycles terminate
-    /// via a visited set.
+    /// Semantic forward transitive closure from `node`. Visits every
+    /// node reachable via exact/narrowed outgoing edges; weaker
+    /// diagnostic edges are not evidence and are not traversed.
     #[must_use]
     pub fn forward_closure(&self, node: &ValueFlowNode) -> AHashSet<ValueFlowNode> {
+        self.forward_closure_with_max_precision(node, SEMANTIC_FLOW_MAX_PRECISION)
+    }
+
+    fn forward_closure_with_max_precision(
+        &self,
+        node: &ValueFlowNode,
+        max_precision: Precision,
+    ) -> AHashSet<ValueFlowNode> {
         let mut reached = AHashSet::default();
         let mut stack = vec![node.clone()];
         while let Some(current) = stack.pop() {
@@ -171,6 +181,9 @@ impl ValueFlowGraph {
             }
             if let Some(edges) = self.forward.get(&current) {
                 for edge in edges {
+                    if edge.precision > max_precision || !edge.precision.is_semantic() {
+                        continue;
+                    }
                     stack.push(edge.to.clone());
                 }
             }
@@ -180,10 +193,18 @@ impl ValueFlowGraph {
         reached
     }
 
-    /// Backward transitive closure from `node`. Mirror of
-    /// `forward_closure`.
+    /// Semantic backward transitive closure from `node`. Mirror of
+    /// [`Self::forward_closure`].
     #[must_use]
     pub fn backward_closure(&self, node: &ValueFlowNode) -> AHashSet<ValueFlowNode> {
+        self.backward_closure_with_max_precision(node, SEMANTIC_FLOW_MAX_PRECISION)
+    }
+
+    fn backward_closure_with_max_precision(
+        &self,
+        node: &ValueFlowNode,
+        max_precision: Precision,
+    ) -> AHashSet<ValueFlowNode> {
         let mut reached = AHashSet::default();
         let mut stack = vec![node.clone()];
         while let Some(current) = stack.pop() {
@@ -192,6 +213,9 @@ impl ValueFlowGraph {
             }
             if let Some(edges) = self.backward.get(&current) {
                 for edge in edges {
+                    if edge.precision > max_precision || !edge.precision.is_semantic() {
+                        continue;
+                    }
                     stack.push(edge.from.clone());
                 }
             }
@@ -306,7 +330,14 @@ fn build_graph_from_result(
     for propagation in &result.call_records {
         for tainted in &propagation.tainted_args {
             let from_key = (propagation.caller, tainted.value_text.clone());
-            let from_node = node_index.get(&from_key).cloned().unwrap_or_else(|| {
+            let from_node = find_call_arg_node(
+                &graph,
+                propagation.caller,
+                propagation.call_span,
+                &tainted.value_text,
+            )
+            .or_else(|| node_index.get(&from_key).cloned())
+            .unwrap_or_else(|| {
                 let synthesised = ValueFlowNode {
                     func: propagation.caller,
                     span: propagation.call_span,
@@ -345,10 +376,10 @@ fn build_graph_from_result(
 /// 1. Intra-entry decl walk emits Param / Assign / Return nodes (and
 ///    intra-entry edges) — shared with the legacy path via
 ///    [`build_intra_entry_graph`].
-/// 2. Cross-call edges are read from
-///    [`IdgQueryService::cross_call_edges_in_closure`]. Each row
-///    becomes one `ValueFlowEdge` from the caller's CallArg / origin
-///    node into the callee's Param node.
+/// 2. Cross-call edges are read from the semantic IDG closure
+///    (exact/narrowed edges only). Each row becomes one
+///    `ValueFlowEdge` from the caller's CallArg / origin node into
+///    the callee's Param node.
 fn build_graph_from_idg(
     entry_func: FuncId,
     entry_decl: &bonsai_lang_api::Decl,
@@ -366,7 +397,7 @@ fn build_graph_from_idg(
     if seeds.is_empty() {
         return graph;
     }
-    let cross_calls = idg.cross_call_edges_in_closure(&seeds);
+    let cross_calls = idg.cross_call_edges_in_closure_with_max_precision(&seeds, Some(Precision::Narrowed));
 
     // Pre-register every callee's `Param` node before we start
     // emitting edges. Without this, iteration order matters: if a
@@ -407,16 +438,18 @@ fn build_graph_from_idg(
         let value_text =
             caller_arg_value_text(global, ce.caller, ce.call_span, ce.arg_idx).unwrap_or_default();
         let from_key = (ce.caller, value_text.clone());
-        let from_node = node_index.get(&from_key).cloned().unwrap_or_else(|| {
-            let synthesised = ValueFlowNode {
-                func: ce.caller,
-                span: ce.call_span,
-                value_text: value_text.clone(),
-                kind: ValueFlowNodeKind::CallArg,
-            };
-            node_index.insert(from_key.clone(), synthesised.clone());
-            synthesised
-        });
+        let from_node = find_call_arg_node(&graph, ce.caller, ce.call_span, &value_text)
+            .or_else(|| node_index.get(&from_key).cloned())
+            .unwrap_or_else(|| {
+                let synthesised = ValueFlowNode {
+                    func: ce.caller,
+                    span: ce.call_span,
+                    value_text: value_text.clone(),
+                    kind: ValueFlowNodeKind::CallArg,
+                };
+                node_index.insert(from_key.clone(), synthesised.clone());
+                synthesised
+            });
         // Callee-side to node: param's name comes from callee_decl.params[param_idx].
         let param_name = callee_param_name(global, ce.callee, ce.param_idx).unwrap_or_default();
         let to_key = (ce.callee, param_name.clone());
@@ -439,6 +472,24 @@ fn build_graph_from_idg(
     }
     graph.precision = worst;
     graph
+}
+
+fn find_call_arg_node(
+    graph: &ValueFlowGraph,
+    func: FuncId,
+    call_span: Span,
+    value_text: &str,
+) -> Option<ValueFlowNode> {
+    graph
+        .nodes
+        .iter()
+        .find(|node| {
+            node.func == func
+                && node.span == call_span
+                && node.value_text == value_text
+                && matches!(node.kind, ValueFlowNodeKind::CallArg)
+        })
+        .cloned()
 }
 
 /// Look up the textual form of the `arg_idx`-th argument of the
@@ -546,165 +597,232 @@ fn build_intra_entry_graph(
         origin_by_name.entry(param.clone()).or_insert(param_node);
     }
 
-    // Walk the entry's flow events to capture intra-function assign
-    // edges (`x = args` → edge `args` → `x`). Without this, only the
-    // last hop (call-arg → callee-param) is captured; param→local
-    // bindings are invisible. The interprocedural engine has already
-    // done CFG-aware propagation; we're just lifting its conclusions
-    // into graph form.
-    //
-    // Walk a second time for `FlowEvent::Return` events and emit a
-    // `Return` node per return site, with edges from the
-    // corresponding source identifier(s). Without this pass, the
-    // value-flow graph never carries `Return` nodes, and consumers
-    // that ask "does this seed reach a Return?" (security analysis's
-    // `compute_returning_seed_names` fast path) silently always
-    // answer no.
     use bonsai_lang_api::FlowEvent;
-    for event in &entry_decl.flow_events {
-        if let FlowEvent::Assign {
-            span,
-            target,
-            source_name,
-            source_names,
-            ..
-        } = event
-        {
-            if target.is_empty() {
-                continue;
-            }
-            let target_node = ValueFlowNode {
-                func: entry_func,
-                span: *span,
-                value_text: target.clone(),
-                kind: ValueFlowNodeKind::AssignTarget,
-            };
-            graph.nodes.insert(target_node.clone());
-            // Single-source assign: `x = y`.
-            if let Some(source) = source_name.as_deref() {
-                if !source.is_empty() {
-                    // Prefer an existing origin node so lineage chains; otherwise synthesise a Read.
-                    let source_node = origin_by_name
-                        .get(source)
-                        .cloned()
-                        .unwrap_or_else(|| ValueFlowNode {
-                            func: entry_func,
-                            span: *span,
-                            value_text: source.to_string(),
-                            kind: ValueFlowNodeKind::Read,
-                        });
-                    graph.add_edge(ValueFlowEdge {
-                        from: source_node,
-                        to: target_node.clone(),
-                        precision: Precision::Exact,
-                        via_span: *span,
-                    });
-                }
-            }
-            // Multi-source assigns (e.g. `x = a + b`).
-            for source in source_names {
-                if source.is_empty() {
-                    continue;
-                }
-                let source_node = origin_by_name
-                    .get(source)
-                    .cloned()
-                    .unwrap_or_else(|| ValueFlowNode {
-                        func: entry_func,
-                        span: *span,
-                        value_text: source.clone(),
-                        kind: ValueFlowNodeKind::Read,
-                    });
-                graph.add_edge(ValueFlowEdge {
-                    from: source_node,
-                    to: target_node.clone(),
-                    precision: Precision::Exact,
-                    via_span: *span,
-                });
-            }
+    type FlowEnv = AHashMap<String, AHashSet<ValueFlowNode>>;
+
+    fn merge_env(mut left: FlowEnv, right: FlowEnv) -> FlowEnv {
+        for (name, nodes) in right {
+            left.entry(name).or_default().extend(nodes);
         }
+        left
     }
 
-    // Walk Return events: emit a `Return` node per return site,
-    // and an edge from the matching `value_name` origin (param or
-    // assign target) to the Return. Recurses into Branch / Try /
-    // Switch sub-events so nested returns are captured.
-    fn collect_return_events<'a>(events: &'a [FlowEvent], out: &mut Vec<(&'a Span, &'a str, &'a str)>) {
+    fn source_nodes(env: &FlowEnv, func: FuncId, span: Span, name: &str) -> Vec<ValueFlowNode> {
+        if name.is_empty() {
+            return Vec::new();
+        }
+        if let Some(nodes) = env.get(name) {
+            if !nodes.is_empty() {
+                return nodes.iter().cloned().collect();
+            }
+        }
+        vec![ValueFlowNode {
+            func,
+            span,
+            value_text: name.to_string(),
+            kind: ValueFlowNodeKind::Read,
+        }]
+    }
+
+    fn walk_events(
+        events: &[FlowEvent],
+        graph: &mut ValueFlowGraph,
+        func: FuncId,
+        mut env: FlowEnv,
+    ) -> FlowEnv {
         for event in events {
             match event {
+                FlowEvent::Assign {
+                    span,
+                    target,
+                    source_name,
+                    source_names,
+                    source_call_args,
+                    ..
+                } => {
+                    if target.is_empty() {
+                        continue;
+                    }
+                    let target_node = ValueFlowNode {
+                        func,
+                        span: *span,
+                        value_text: target.clone(),
+                        kind: ValueFlowNodeKind::AssignTarget,
+                    };
+                    graph.nodes.insert(target_node.clone());
+
+                    let mut sources: AHashSet<String> = AHashSet::default();
+                    if let Some(source) = source_name.as_deref() {
+                        if !source.is_empty() {
+                            sources.insert(source.to_string());
+                        }
+                    }
+                    for source in source_names {
+                        if !source.is_empty() {
+                            sources.insert(source.clone());
+                        }
+                    }
+                    for source in source_call_args {
+                        if !source.is_empty() {
+                            sources.insert(source.clone());
+                        }
+                    }
+                    for source in sources {
+                        for source_node in source_nodes(&env, func, *span, &source) {
+                            graph.add_edge(ValueFlowEdge {
+                                from: source_node,
+                                to: target_node.clone(),
+                                precision: Precision::Exact,
+                                via_span: *span,
+                            });
+                        }
+                    }
+
+                    let mut defs = AHashSet::default();
+                    defs.insert(target_node);
+                    env.insert(target.clone(), defs);
+                }
+                FlowEvent::Call { span, args, .. } => {
+                    for arg in args {
+                        let node_text = if !arg.value_text.is_empty() {
+                            arg.value_text.clone()
+                        } else {
+                            arg.place
+                                .clone()
+                                .or_else(|| arg.source_names.first().cloned())
+                                .unwrap_or_default()
+                        };
+                        if node_text.is_empty() {
+                            continue;
+                        }
+                        let arg_node = ValueFlowNode {
+                            func,
+                            span: *span,
+                            value_text: node_text.clone(),
+                            kind: ValueFlowNodeKind::CallArg,
+                        };
+                        graph.nodes.insert(arg_node.clone());
+
+                        let mut sources: AHashSet<String> = AHashSet::default();
+                        if let Some(place) = arg.place.as_deref() {
+                            if !place.is_empty() {
+                                sources.insert(place.to_string());
+                            }
+                        }
+                        for source in &arg.source_names {
+                            if !source.is_empty() {
+                                sources.insert(source.clone());
+                            }
+                        }
+                        if sources.is_empty() {
+                            sources.insert(node_text);
+                        }
+                        for source in sources {
+                            for source_node in source_nodes(&env, func, *span, &source) {
+                                graph.add_edge(ValueFlowEdge {
+                                    from: source_node,
+                                    to: arg_node.clone(),
+                                    precision: Precision::Exact,
+                                    via_span: *span,
+                                });
+                            }
+                        }
+                    }
+                }
                 FlowEvent::Return {
                     span,
                     value_name,
                     value_text,
                 } => {
-                    let name = value_name.as_deref().unwrap_or("");
-                    let text = value_text.as_deref().unwrap_or("");
-                    out.push((span, name, text));
+                    let value = value_name.as_deref().unwrap_or_default();
+                    let return_node = ValueFlowNode {
+                        func,
+                        span: *span,
+                        value_text: value_name
+                            .as_deref()
+                            .or(value_text.as_deref())
+                            .unwrap_or_default()
+                            .to_string(),
+                        kind: ValueFlowNodeKind::Return,
+                    };
+                    graph.nodes.insert(return_node.clone());
+                    for from_node in source_nodes(&env, func, *span, value) {
+                        graph.add_edge(ValueFlowEdge {
+                            from: from_node,
+                            to: return_node.clone(),
+                            precision: Precision::Exact,
+                            via_span: *span,
+                        });
+                    }
                 }
                 FlowEvent::Branch {
                     then_events,
                     else_events,
                     ..
                 } => {
-                    collect_return_events(then_events, out);
-                    collect_return_events(else_events, out);
+                    let before = env.clone();
+                    let then_env = walk_events(then_events, graph, func, before.clone());
+                    let else_env = if else_events.is_empty() {
+                        before
+                    } else {
+                        walk_events(else_events, graph, func, before)
+                    };
+                    env = merge_env(then_env, else_env);
+                }
+                FlowEvent::Loop { body, .. } => {
+                    let body_env = walk_events(body, graph, func, env.clone());
+                    env = merge_env(env, body_env);
                 }
                 FlowEvent::Try {
+                    span,
                     body,
                     catch_events,
                     finally_events,
+                    catch_param,
                     ..
                 } => {
-                    collect_return_events(body, out);
-                    collect_return_events(catch_events, out);
-                    collect_return_events(finally_events, out);
+                    let before = env.clone();
+                    let body_env = walk_events(body, graph, func, before.clone());
+                    let catch_env = if catch_events.is_empty() {
+                        before
+                    } else {
+                        let mut catch_start = before;
+                        if let Some(param) = catch_param.as_deref() {
+                            if !param.is_empty() {
+                                let catch_node = ValueFlowNode {
+                                    func,
+                                    span: *span,
+                                    value_text: param.to_string(),
+                                    kind: ValueFlowNodeKind::Catch,
+                                };
+                                graph.nodes.insert(catch_node.clone());
+                                catch_start
+                                    .entry(param.to_string())
+                                    .or_default()
+                                    .insert(catch_node);
+                            }
+                        }
+                        walk_events(catch_events, graph, func, catch_start)
+                    };
+                    env = walk_events(finally_events, graph, func, merge_env(body_env, catch_env));
                 }
-                FlowEvent::Loop { body, .. } => collect_return_events(body, out),
+                FlowEvent::Using { body, .. } => {
+                    env = walk_events(body, graph, func, env);
+                }
+                FlowEvent::Defer { body, .. } => {
+                    let _ = walk_events(body, graph, func, env.clone());
+                }
                 _ => {}
             }
         }
+        env
     }
-    let mut return_sites: Vec<(&Span, &str, &str)> = Vec::new();
-    collect_return_events(&entry_decl.flow_events, &mut return_sites);
-    for (span, value_name, _value_text) in return_sites {
-        let return_node = ValueFlowNode {
-            func: entry_func,
-            span: *span,
-            value_text: value_name.to_string(),
-            kind: ValueFlowNodeKind::Return,
-        };
-        graph.nodes.insert(return_node.clone());
-        if !value_name.is_empty() {
-            // Stitch from any existing origin / assign-target / call-arg
-            // node carrying the same identifier so forward closure from
-            // a seed reaches the Return when its value flows here.
-            let mut from_candidates: Vec<ValueFlowNode> = graph
-                .nodes
-                .iter()
-                .filter(|n| n.func == entry_func && n.value_text == value_name)
-                .filter(|n| !matches!(n.kind, ValueFlowNodeKind::Return))
-                .cloned()
-                .collect();
-            // Prefer the origin (Param / AssignTarget) over a synthesised
-            // CallArg / Read so the closure roots cleanly.
-            from_candidates.sort_by_key(|n| match n.kind {
-                ValueFlowNodeKind::Param => 0,
-                ValueFlowNodeKind::AssignTarget => 1,
-                ValueFlowNodeKind::CallArg => 2,
-                ValueFlowNodeKind::Read => 3,
-                ValueFlowNodeKind::Catch => 4,
-                ValueFlowNodeKind::Return => 5,
-            });
-            for from_node in from_candidates.into_iter().take(1) {
-                graph.add_edge(ValueFlowEdge {
-                    from: from_node,
-                    to: return_node.clone(),
-                    precision: Precision::Exact,
-                    via_span: *span,
-                });
-            }
-        }
+
+    let mut env: FlowEnv = AHashMap::default();
+    for (name, node) in &origin_by_name {
+        env.entry(name.clone()).or_default().insert(node.clone());
     }
+    let _ = walk_events(&entry_decl.flow_events, &mut graph, entry_func, env);
 
     // Index existing nodes by (func, value_text) so the call-edge
     // pass can stitch CallArgs back to prior origin / assign-target /
@@ -723,78 +841,5 @@ fn build_intra_entry_graph(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use bonsai_common::FileId;
-
-    fn span(file: FileId, start: u64, end: u64) -> Span {
-        Span { file, start, end }
-    }
-
-    fn node(func: u32, start: u64, text: &str, kind: ValueFlowNodeKind) -> ValueFlowNode {
-        ValueFlowNode {
-            func: FuncId::new(func),
-            span: span(FileId::new(0), start, start + text.len() as u64),
-            value_text: text.to_string(),
-            kind,
-        }
-    }
-
-    #[test]
-    fn forward_closure_reaches_descendants() {
-        let mut g = ValueFlowGraph::new();
-        let a = node(1, 0, "a", ValueFlowNodeKind::Param);
-        let b = node(1, 4, "b", ValueFlowNodeKind::AssignTarget);
-        let c = node(1, 8, "c", ValueFlowNodeKind::CallArg);
-        g.add_edge(ValueFlowEdge {
-            from: a.clone(),
-            to: b.clone(),
-            precision: Precision::Exact,
-            via_span: span(FileId::new(0), 0, 1),
-        });
-        g.add_edge(ValueFlowEdge {
-            from: b.clone(),
-            to: c.clone(),
-            precision: Precision::Exact,
-            via_span: span(FileId::new(0), 4, 5),
-        });
-        let reach = g.forward_closure(&a);
-        assert!(reach.contains(&b));
-        assert!(reach.contains(&c));
-        assert!(!reach.contains(&a));
-    }
-
-    #[test]
-    fn backward_closure_reaches_ancestors() {
-        let mut g = ValueFlowGraph::new();
-        let a = node(1, 0, "a", ValueFlowNodeKind::Param);
-        let b = node(1, 4, "b", ValueFlowNodeKind::AssignTarget);
-        g.add_edge(ValueFlowEdge {
-            from: a.clone(),
-            to: b.clone(),
-            precision: Precision::Exact,
-            via_span: span(FileId::new(0), 0, 1),
-        });
-        assert!(g.backward_closure(&b).contains(&a));
-        assert!(g.forward_closure(&a).contains(&b));
-    }
-
-    #[test]
-    fn add_edge_meets_precision_to_worst() {
-        let mut g = ValueFlowGraph::new();
-        let a = node(1, 0, "a", ValueFlowNodeKind::Param);
-        let b = node(1, 4, "b", ValueFlowNodeKind::AssignTarget);
-        g.add_edge(ValueFlowEdge {
-            from: a.clone(),
-            to: b.clone(),
-            precision: Precision::OverApproximate,
-            via_span: span(FileId::new(0), 0, 1),
-        });
-        assert_eq!(g.precision, Precision::OverApproximate);
-    }
-
-    #[test]
-    fn lattice_mode_default_is_token_set() {
-        assert_eq!(LatticeMode::default(), LatticeMode::TokenSet);
-    }
-}
+#[path = "value_flow_tests.rs"]
+mod tests;

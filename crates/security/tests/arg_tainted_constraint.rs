@@ -372,6 +372,96 @@ def handler(user_input):
 }
 
 #[test]
+fn write_arg_tainted_requires_tainted_assignment_rhs() {
+    let tmp = TempDir::new("write-index");
+    write(
+        &tmp.path().join("langs/python/sinks/cmdi.yml"),
+        r#"- id: python.test.write_arg_tainted
+  enabled: true
+  language: python
+  tag: command-injection
+  severity: high
+  cwe: [CWE-78]
+  match:
+    kind: write
+    target:
+      name: dangerous_slot
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: tainted write
+    code: |
+      def handler(user_input):
+          dangerous_slot = user_input
+  - name: clean write negative
+    code: |
+      def handler(user_input):
+          dangerous_slot = "safe"
+    expect_no_match: true
+  description: write sinks only fire when the assigned value is tainted.
+"#,
+    );
+    let pack = load_rulepack(tmp.path()).expect("rulepack loads");
+    let rule = pack
+        .find_rule_by_id("python.test.write_arg_tainted")
+        .expect("rule");
+
+    let tainted_write = python_ws(
+        r#"
+def handler(user_input):
+    dangerous_slot = user_input
+"#,
+    );
+    assert!(
+        match_rule_against_facts(&tainted_write, rule).is_empty(),
+        "pre-taint matcher must not fire arg_tainted write rules"
+    );
+    let report = run_taint_analysis(
+        &tainted_write,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.finding.sink.rule_id == rule.id),
+        "tainted write RHS must satisfy arg_tainted write sink; findings={:#?}",
+        report.findings
+    );
+
+    let clean_write_with_sibling_taint = python_ws(
+        r#"
+def handler(user_input):
+    marker = user_input
+    dangerous_slot = "safe"
+"#,
+    );
+    let report = run_taint_analysis(
+        &clean_write_with_sibling_taint,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("taint analysis");
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != rule.id),
+        "tainted sibling writes must not satisfy clean target write; findings={:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // Bumped 0x0011 → 0x0012 when the matcher gained
     // arg_lt/arg_le/arg_gt/arg_ge constraints (P3 — constants tracking).
@@ -412,9 +502,13 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // removed from the schema and receiver-state taint propagation
     // became rulepack-declared via taint_semantics instead of an
     // engine-owned method-tail list.
+    // Bumped 0x002b → 0x002c when `arg_tainted` and
+    // `any_arg_tainted` started accepting synthetic write evidence
+    // for `MatchKind::Write` rules while remaining call-only for
+    // call/new rules.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_001b_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_002c_u128
     );
 }
 

@@ -52,6 +52,18 @@ impl Precision {
     pub const fn is_exact(self) -> bool {
         matches!(self, Self::Exact)
     }
+
+    /// True iff this fact is semantic enough to expose by default.
+    ///
+    /// `Exact` facts are proven. `Narrowed` facts are still tied to a
+    /// concrete semantic constraint, such as a resolved receiver type or
+    /// build target. `OverApproximate` and `Unknown` facts may contain
+    /// invented alternatives and are only suitable for explicit
+    /// diagnostics.
+    #[must_use]
+    pub const fn is_semantic(self) -> bool {
+        matches!(self, Self::Exact | Self::Narrowed)
+    }
 }
 
 impl PartialOrd for Precision {
@@ -67,16 +79,5 @@ impl Ord for Precision {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn meet_picks_worse() {
-        assert_eq!(Precision::Exact.meet(Precision::Narrowed), Precision::Narrowed);
-        assert_eq!(
-            Precision::Narrowed.meet(Precision::OverApproximate),
-            Precision::OverApproximate
-        );
-        assert_eq!(Precision::Unknown.meet(Precision::Exact), Precision::Unknown);
-    }
-}
+#[path = "precision_tests.rs"]
+mod tests;

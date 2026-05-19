@@ -16,6 +16,7 @@
   enabled: true
   language: solidity
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:
@@ -37,6 +38,7 @@
   enabled: true
   language: solidity
   tag: weak-randomness
+  category: source-independent
   severity: medium
   cwe: [CWE-330]
   match:

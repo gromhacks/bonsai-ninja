@@ -3,6 +3,7 @@
   enabled: true
   language: objc
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe: [CWE-295]
   match:
@@ -19,6 +20,7 @@
   enabled: true
   language: objc
   tag: weak-tls
+  category: source-independent
   severity: critical
   cwe: [CWE-295]
   match:
@@ -35,6 +37,7 @@
   enabled: true
   language: objc
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [AFNetworking]
   cwe: [CWE-295]
@@ -53,6 +56,7 @@
   enabled: true
   language: objc
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [AFNetworking]
   cwe: [CWE-295]
@@ -71,6 +75,7 @@
   enabled: true
   language: objc
   tag: weak-tls
+  category: source-independent
   severity: high
   packages: [AFNetworking]
   cwe: [CWE-295]

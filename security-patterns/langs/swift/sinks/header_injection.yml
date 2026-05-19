@@ -168,9 +168,20 @@
   match:
     kind: write
     target:
-      name: allHTTPHeaderFields
+      regex: ^[^\.\s]+\.allHTTPHeaderFields$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: URLRequest allHTTPHeaderFields member write
     code: |
-      func test() { let input = "x"; let amount = 1; allHTTPHeaderFields = input }
+      func test(input: [String: String]) {
+        var request = URLRequest(url: URL(string: "https://example.com")!)
+        request.allHTTPHeaderFields = input
+      }
+    expect_match_text: [request.allHTTPHeaderFields]
+  - name: local allHTTPHeaderFields variable negative
+    code: |
+      func test(input: [String: String]) { let allHTTPHeaderFields = input }
+    expect_no_match: true
   description: "URLRequest.allHTTPHeaderFields = tainted dict."

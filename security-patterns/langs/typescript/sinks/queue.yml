@@ -9,6 +9,8 @@
     kind: new
     callee:
       name: SendMessageCommand
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: aws send message command
     code: |
@@ -16,6 +18,13 @@
       function demo(input, req, obj) {
         return new SendMessageCommand(input);
       }
+  - name: aws send message command literal negative
+    code: |
+      const { SendMessageCommand } = require("@aws-sdk/client-sqs");
+      function demo() {
+        return new SendMessageCommand({ MessageBody: "safe" });
+      }
+    expect_no_match: true
   description: "new SendMessageCommand({QueueUrl, MessageBody}) — tainted queue target/body injects arbitrary SQS messages."
 
 - id: typescript.queue.aws_publish_command
@@ -29,6 +38,8 @@
     kind: new
     callee:
       name: PublishCommand
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: aws publish command
     code: |
@@ -36,6 +47,13 @@
       function demo(input, req, obj) {
         return new PublishCommand(input);
       }
+  - name: aws publish command literal negative
+    code: |
+      const { PublishCommand } = require("@aws-sdk/client-sns");
+      function demo() {
+        return new PublishCommand({ Message: "safe" });
+      }
+    expect_no_match: true
   description: "new PublishCommand({TopicArn, Message}) — tainted topic/message injects arbitrary SNS fanout."
 
 - id: typescript.queue.azure_servicebus_send_messages
@@ -49,6 +67,8 @@
     kind: call
     callee:
       regex: "\\.sendMessages$"
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: azure servicebus send messages
     code: |
@@ -56,6 +76,13 @@
       function demo(input, req, obj) {
         return sender.sendMessages(input);
       }
+  - name: azure servicebus literal negative
+    code: |
+      const _u = require("@azure/service-bus");
+      function demo() {
+        return sender.sendMessages([{ body: "safe" }]);
+      }
+    expect_no_match: true
   description: "ServiceBusSender.sendMessages — tainted queue payload or entity path injects arbitrary Service Bus messages."
 
 - id: typescript.queue.gcp_pubsub_publish_message
@@ -69,6 +96,8 @@
     kind: call
     callee:
       regex: "\\.publishMessage$"
+  constraints:
+  - arg_tainted: {index: 0}
   match_examples:
   - name: gcp pubsub publish message
     code: |
@@ -76,4 +105,11 @@
       function demo(input, req, obj) {
         return topic.publishMessage(input);
       }
+  - name: gcp pubsub literal negative
+    code: |
+      const _u = require("@google-cloud/pubsub");
+      function demo() {
+        return topic.publishMessage({ data: Buffer.from("safe") });
+      }
+    expect_no_match: true
   description: "Pub/Sub topic.publishMessage — tainted topic payload injects arbitrary Pub/Sub messages."

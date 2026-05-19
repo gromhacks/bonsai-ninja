@@ -12,8 +12,9 @@
 //! [`bonsai_workspace::flow_ids::FlowIdCache::labels_for_func`],
 //! so this struct answers "which function is this location inside?"
 //! and then reads the shared cache. Hub functions may return a
-//! bounded prefix with a trailing ellipsis; `inspect --query` is the
-//! full expansion surface.
+//! bounded prefix with a trailing ellipsis. Renderers must surface
+//! that as incomplete flow-label evidence; `inspect --query ... --all`
+//! is the full expansion surface.
 
 use bonsai_common::{FileId, FuncId};
 use bonsai_workspace::Workspace;

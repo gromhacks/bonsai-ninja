@@ -63,6 +63,33 @@ const REQUIRED_MEGA_FLOW_EVENT_UNION: &[&str] = &[
     "Assign", "Await", "Branch", "Call", "Continue", "Defer", "Loop", "Return", "Try", "Using", "Yield",
 ];
 
+fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
+    match lang {
+        "c" => 1,
+        "cpp" => 0,
+        "csharp" => 0,
+        "dart" => 0,
+        "elixir" => 0,
+        "erlang" => 2,
+        "go" => 3,
+        "java" => 0,
+        "javascript" => 1,
+        "kotlin" => 1,
+        "lua" => 3,
+        "objc" => 2,
+        "perl" => 1,
+        "php" => 0,
+        "python" => 5,
+        "ruby" => 2,
+        "rust" => 1,
+        "scala" => 0,
+        "solidity" => 2,
+        "swift" => 0,
+        "typescript" => 1,
+        other => panic!("missing mega_flow expected finding count for {other}"),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Fixture {
     lang: &'static str,
@@ -323,6 +350,9 @@ fn c_recv_output_rulepack() -> Rulepack {
     source.taint_semantics = Some(TaintSemantics {
         clean_output_overwrite: None,
         source_output_args: vec![1],
+        call_result_passthrough_args: Vec::new(),
+        call_result_passthrough_receiver: false,
+        output_arg_flows: Vec::new(),
         taint_receiver_from_args: false,
     });
     let mut sink = rule(
@@ -485,6 +515,39 @@ void handle(int fd) {
 }
 
 #[test]
+fn taint_analysis_populates_bounded_workspace_graph_cache() {
+    let ws = workspace(&[(
+        "/w/app.py",
+        "def source():\n    return input()\n\ndef sink(value):\n    pass\n\ndef entry():\n    value = source()\n    sink(value)\n",
+    )]);
+    let pack = rulepack("python", "source", "sink");
+
+    assert_eq!(ws.taint_index().resident_len(), 0);
+    let first = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("first analysis");
+    assert!(
+        !first.findings.is_empty(),
+        "fixture should prove at least one source-to-sink flow"
+    );
+    let populated = ws.taint_index().resident_len();
+    assert!(
+        populated > 0,
+        "analysis should publish exact graphs to the workspace cache"
+    );
+    assert!(
+        populated <= ws.taint_index().resident_capacity(),
+        "workspace graph cache must stay within its resident cap"
+    );
+
+    let second = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("second analysis");
+    assert_eq!(second.findings.len(), first.findings.len());
+    assert_eq!(
+        ws.taint_index().resident_len(),
+        populated,
+        "repeat analysis with the same rule/config fingerprint should reuse existing graph keys"
+    );
+}
+
+#[test]
 fn benchmark_shaped_security_flows_reach_sink() {
     for fixture in fixtures() {
         assert_finding(fixture);
@@ -631,18 +694,23 @@ fn mega_flow_security_pipeline_covers_every_language_and_flow_event_kind() {
         )
         .unwrap_or_else(|err| panic!("{lang}: mega_flow taint analysis failed: {err}"));
 
-        assert!(
-            !report.findings.is_empty(),
-            "{lang}: mega_flow must produce at least one source-to-sink finding"
-        );
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|finding| finding.finding.chain_display.len() >= 2),
-            "{lang}: mega_flow must include at least one multi-hop source-to-sink chain; findings={:#?}",
+        let expected = expected_mega_flow_findings_with_inferred_sources(lang);
+        assert_eq!(
+            report.findings.len(),
+            expected,
+            "{lang}: mega_flow finding count drifted; findings={:#?}",
             report.findings
         );
+        if expected > 0 {
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.finding.chain_display.len() >= 2),
+                "{lang}: mega_flow must include at least one multi-hop source-to-sink chain; findings={:#?}",
+                report.findings
+            );
+        }
         assert!(
             report
                 .findings
@@ -659,6 +727,132 @@ fn mega_flow_security_pipeline_covers_every_language_and_flow_event_kind() {
             "mega_flow matrix must cover FlowEvent::{required}; union={union:?}"
         );
     }
+}
+
+#[test]
+fn mega_flow_taint_output_does_not_surface_known_overclaims() {
+    let pack = bonsai_security::load_rulepack(&rules_root()).expect("rulepack loads");
+
+    let c_report = run_taint_analysis(
+        &index_real_fixture("c", "mega_flow"),
+        &pack,
+        TaintAnalysisOptions::default(),
+    )
+    .expect("c taint analysis");
+    assert!(
+        c_report
+            .findings
+            .iter()
+            .all(|finding| !finding.finding.source.rule_id.starts_with("pattern:")),
+        "default taint-analysis must not emit pattern-only findings: {:#?}",
+        c_report.findings
+    );
+    assert!(
+        c_report.findings.iter().all(|finding| {
+            !matches!(
+                finding.finding.sink.rule_id.as_str(),
+                "c.memory.strncpy" | "c.memory.strncat"
+            )
+        }),
+        "disabled context-dependent C memory rules must not report as taint findings: {:#?}",
+        c_report.findings
+    );
+    let c_cmd = c_report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "c.cmdi.system")
+        .expect("c command-injection flow");
+    assert_eq!(c_cmd.finding.source.rule_id, "c.input.argv_param");
+    assert_eq!(
+        c_cmd.finding.chain_display,
+        ["main", "orchestrate", "persist", "run", "execute"],
+        "{c_cmd:#?}"
+    );
+    assert!(
+        c_cmd
+            .finding
+            .sanitizers_seen
+            .iter()
+            .all(|sanitizer| sanitizer.tag.as_deref() == Some("passthrough-transform")),
+        "C strncpy transfer is configured passthrough semantics, not sanitizer credit: {c_cmd:#?}"
+    );
+
+    let python_report = run_taint_analysis(
+        &index_real_fixture("python", "mega_flow"),
+        &pack,
+        TaintAnalysisOptions::default(),
+    )
+    .expect("python taint analysis");
+    assert!(
+        python_report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "python.info_disclosure.flask_jsonify_exception"),
+        "ordinary jsonify responses must not match the exception-disclosure sink: {:#?}",
+        python_report.findings
+    );
+    let py_cmd = python_report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "python.cmdi.os_system")
+        .expect("python command-injection flow");
+    assert_eq!(py_cmd.finding.source.line, 29, "{py_cmd:#?}");
+    assert!(
+        py_cmd.additional_sources.is_empty(),
+        "sibling request fields must not be rendered as proven additional sources: {py_cmd:#?}"
+    );
+    let python_header_report = run_taint_analysis(
+        &index_real_fixture("python", "mega_flow"),
+        &pack,
+        TaintAnalysisOptions {
+            source: Some("python.web.request_headers_get".to_string()),
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("python header-filtered taint analysis");
+    assert!(
+        python_header_report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "python.cmdi.os_system"),
+        "header/user taint must not be promoted into the command field: {:#?}",
+        python_header_report.findings
+    );
+
+    let go_report = run_taint_analysis(
+        &index_real_fixture("go", "mega_flow"),
+        &pack,
+        TaintAnalysisOptions::default(),
+    )
+    .expect("go taint analysis");
+    let go_cmd = go_report
+        .findings
+        .iter()
+        .find(|finding| finding.finding.sink.rule_id == "go.cmdi.exec_command_shell_wrapper")
+        .expect("go command-injection flow");
+    assert_eq!(go_cmd.finding.source.rule_id, "go.nethttp.query_value_get");
+    assert_eq!(go_cmd.finding.source.line, 33, "{go_cmd:#?}");
+    assert!(
+        go_cmd.additional_sources.is_empty(),
+        "header source must not be rendered as a proven source for env.Cmd flow: {go_cmd:#?}"
+    );
+    let go_header_report = run_taint_analysis(
+        &index_real_fixture("go", "mega_flow"),
+        &pack,
+        TaintAnalysisOptions {
+            source: Some("go.nethttp.header_get".to_string()),
+            ..TaintAnalysisOptions::default()
+        },
+    )
+    .expect("go header-filtered taint analysis");
+    assert!(
+        go_header_report
+            .findings
+            .iter()
+            .all(|finding| finding.finding.sink.rule_id != "go.cmdi.exec_command_shell_wrapper"),
+        "header source must not be promoted into env.Cmd command flow: {:#?}",
+        go_header_report.findings
+    );
 }
 
 #[test]

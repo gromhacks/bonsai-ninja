@@ -95,6 +95,11 @@ fn json_wrapped(args: &[&str]) -> Option<(Vec<serde_json::Value>, serde_json::Va
     Some((rows, page))
 }
 
+fn json_wrapped_value(args: &[&str]) -> Option<serde_json::Value> {
+    let out = run(args)?;
+    serde_json::from_str(&out).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Back-compat: JSON without paging flags is a bare array
 // ---------------------------------------------------------------------------
@@ -122,16 +127,21 @@ fn json_default_returns_bare_array() {
 #[test]
 fn json_opts_into_wrap_with_context() {
     let ws = ws();
-    let Some((rows, page)) = json_wrapped(&[
+    let Some(v) = json_wrapped_value(&[
         "calls",
         ws.to_str().unwrap(),
         "--format",
         "json",
         "--context",
-        "8k",
+        "1",
     ]) else {
         return;
     };
+    let rows = v
+        .get("rows")
+        .and_then(|rows| rows.as_array())
+        .expect("rows array");
+    let page = v.get("page").expect("page object");
     assert!(!rows.is_empty());
     // Every paged JSON response carries the full page metadata
     // so agents can drive a loop without parsing text.
@@ -146,6 +156,70 @@ fn json_opts_into_wrap_with_context() {
     ] {
         assert!(page.get(key).is_some(), "page object missing `{key}`: {page:?}");
     }
+    assert_eq!(
+        v.get("analysis_complete").and_then(|value| value.as_bool()),
+        Some(false),
+        "paged JSON must not claim complete analysis when more pages exist: {v:?}"
+    );
+    let incomplete_reasons = v
+        .get("analysis_incomplete_reasons")
+        .and_then(|value| value.as_array())
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        incomplete_reasons.iter().any(|reason| {
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("paged calls result incomplete"))
+        }),
+        "paged JSON must explain incomplete row coverage: {v:?}"
+    );
+}
+
+#[test]
+fn last_page_of_paged_json_is_still_incomplete() {
+    let ws = ws();
+    let ws_str = ws.to_str().unwrap();
+    let Some(first) = json_wrapped_value(&["calls", ws_str, "--format", "json", "--context", "256"]) else {
+        return;
+    };
+    let total_pages = first["page"]["total_pages"].as_u64().expect("total_pages");
+    assert!(
+        total_pages > 1,
+        "test fixture must produce multiple pages at tiny context: {first:?}"
+    );
+
+    let page_arg = total_pages.to_string();
+    let args = vec![
+        "calls",
+        ws_str,
+        "--format",
+        "json",
+        "--context",
+        "256",
+        "--page",
+        page_arg.as_str(),
+    ];
+    let Some(last) = json_wrapped_value(&args) else {
+        return;
+    };
+    assert_eq!(last["page"]["number"].as_u64(), Some(total_pages));
+    assert_eq!(last["page"]["is_last"].as_bool(), Some(true));
+    assert_eq!(
+        last["analysis_complete"].as_bool(),
+        Some(false),
+        "the last page is still a partial response unless it is page 1 of 1: {last:?}"
+    );
+    let reasons = last["analysis_incomplete_reasons"]
+        .as_array()
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        reasons.iter().any(|reason| {
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("paged calls result incomplete"))
+        }),
+        "last paged JSON response must explain partial row coverage: {last:?}"
+    );
 }
 
 #[test]
@@ -156,6 +230,75 @@ fn json_opts_into_wrap_with_page_flag() {
     let Some(_) = json_wrapped(&["calls", ws.to_str().unwrap(), "--format", "json", "--page", "1"]) else {
         return;
     };
+}
+
+#[test]
+fn inspect_paged_json_exposes_top_level_completeness() {
+    let ws = ws();
+    let Some(out) = run(&[
+        "inspect",
+        ws.to_str().unwrap(),
+        "--query",
+        "request",
+        "--kind",
+        "call",
+        "--max-hits",
+        "1",
+        "--format",
+        "json",
+        "--context",
+        "1",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("inspect JSON");
+    assert_eq!(
+        v.get("analysis_complete").and_then(|value| value.as_bool()),
+        Some(false),
+        "paged inspect JSON must expose top-level incomplete status: {v:?}"
+    );
+    let reasons = v
+        .get("analysis_incomplete_reasons")
+        .and_then(|value| value.as_array())
+        .expect("analysis_incomplete_reasons array");
+    assert!(
+        reasons.iter().any(|reason| {
+            reason
+                .as_str()
+                .is_some_and(|reason| reason.contains("inspect hit list capped by max-hits output cap"))
+        }),
+        "paged inspect JSON must carry inspect incompleteness reasons: {v:?}"
+    );
+}
+
+#[test]
+fn trace_paged_json_exposes_top_level_completeness() {
+    let ws = ws();
+    let Some(out) = run(&[
+        "trace",
+        ws.to_str().unwrap(),
+        "handle_request",
+        "--format",
+        "json",
+        "--context",
+        "1",
+        "--max-steps",
+        "1",
+    ]) else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("trace JSON");
+    assert_eq!(
+        v.get("analysis_complete").and_then(|value| value.as_bool()),
+        Some(false),
+        "paged trace JSON must expose top-level incomplete status: {v:?}"
+    );
+    assert!(
+        v.get("analysis_incomplete_reasons")
+            .and_then(|value| value.as_array())
+            .is_some_and(|reasons| !reasons.is_empty()),
+        "paged trace JSON must carry trace/page incompleteness reasons: {v:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -939,7 +1082,7 @@ fn security_page_turn_reuses_rendered_page_cache() {
     let _guard = page_cache_test_lock();
     let tmp = isolated_complex_ws("security-page-cache");
     let ws = tmp.path();
-    let cache_dir = ws.join(".bonsai/page-cache.v2");
+    let cache_dir = ws.join(".bonsai/page-cache.v3");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let ws_str = ws.to_str().unwrap();
     let Some(first) = run(&[
@@ -990,7 +1133,7 @@ fn security_page_turn_reuses_rendered_page_cache() {
 }
 
 fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option<bool> {
-    let cache_dir = ws.join(".bonsai/page-cache.v2");
+    let cache_dir = ws.join(".bonsai/page-cache.v3");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let first = run(args)?;
     if !first.contains("page 1 of") || first.contains("page 1 of 1") {
@@ -1026,7 +1169,7 @@ fn rendered_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option
 }
 
 fn rendered_json_page_cache_replay_for(ws: &std::path::Path, args: &[&str]) -> Option<bool> {
-    let cache_dir = ws.join(".bonsai/page-cache.v2");
+    let cache_dir = ws.join(".bonsai/page-cache.v3");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let first = run(args)?;
     let first_json: serde_json::Value =
@@ -1079,7 +1222,7 @@ fn corrupt_rendered_page_cache_is_a_miss_not_a_command_failure() {
     let _guard = page_cache_test_lock();
     let tmp = isolated_complex_ws("corrupt-page-cache");
     let ws = tmp.path();
-    let cache_dir = ws.join(".bonsai/page-cache.v2");
+    let cache_dir = ws.join(".bonsai/page-cache.v3");
     let _ = std::fs::remove_dir_all(&cache_dir);
     let ws_str = ws.to_str().unwrap();
     let args = ["calls", ws_str, "--context", "1k"];

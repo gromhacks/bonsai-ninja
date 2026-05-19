@@ -11,6 +11,9 @@
     kind: call
     callee:
       regex: ^http\.Get$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: net http get
     code: "package main\nimport \"net/http\"\nfunc fetch(target string) {\n  _, _\
@@ -23,6 +26,14 @@
       \ := \"https://example.test\"\n  _, _ = http.Get(target)\n}\n"
     expect_match_text:
     - http.Get
+  - name: literal http get url negative
+    code: |
+      package main
+      import "net/http"
+      func fetch() {
+        _, _ = http.Get("https://example.test/health")
+      }
+    expect_no_match: true
   description: "http.Get(tainted URL) \u2014 server-side fetch of attacker-chosen\
     \ URL."
 - id: go.ssrf.http_client_get
@@ -38,6 +49,9 @@
     kind: call
     callee:
       regex: ^(client|httpClient|hc|http\.DefaultClient)\.Get$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: net http client get
     code: "package main\nimport (\n  \"net/http\"\n)\nfunc fetch(r *http.Request)\
@@ -55,6 +69,14 @@
       \ {\n  target := \"https://example.test\"\n  _, _ = hc.Get(target)\n}\n"
     expect_match_text:
     - hc.Get
+  - name: literal http client get url negative
+    code: |
+      package main
+      import "net/http"
+      func fetch(client *http.Client) {
+        _, _ = client.Get("https://example.test/health")
+      }
+    expect_no_match: true
   description: "(*http.Client).Get(tainted URL), including http.DefaultClient.Get\
     \ \u2014 method form of net/http SSRF."
 - id: go.ssrf.http_client_post
@@ -70,6 +92,9 @@
     kind: call
     callee:
       regex: ^(client|httpClient|hc|http\.DefaultClient)\.Post$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: net http client post
     code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
@@ -77,6 +102,14 @@
       \ \"application/json\", nil)\n}\n"
     expect_match_text:
     - client.Post
+  - name: literal http client post url negative
+    code: |
+      package main
+      import "net/http"
+      func fetch(client *http.Client) {
+        _, _ = client.Post("https://example.test/upload", "application/json", nil)
+      }
+    expect_no_match: true
   description: "(*http.Client).Post(tainted URL, ...) \u2014 server-side POST to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_client_head
@@ -92,12 +125,23 @@
     kind: call
     callee:
       regex: ^(client|httpClient|hc|http\.DefaultClient)\.Head$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: net http client head
     code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
       \ := \"https://example.test\"\n  _, _ = http.DefaultClient.Head(url)\n}\n"
     expect_match_text:
     - http.DefaultClient.Head
+  - name: literal http client head url negative
+    code: |
+      package main
+      import "net/http"
+      func fetch() {
+        _, _ = http.DefaultClient.Head("https://example.test/health")
+      }
+    expect_no_match: true
   description: "(*http.Client).Head(tainted URL) \u2014 server-side HEAD to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_client_postform
@@ -113,6 +157,9 @@
     kind: call
     callee:
       regex: ^(client|httpClient|hc|http\.DefaultClient)\.PostForm$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: net http client post form
     code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
@@ -120,6 +167,14 @@
       \ nil)\n}\n"
     expect_match_text:
     - client.PostForm
+  - name: literal http client post form url negative
+    code: |
+      package main
+      import "net/http"
+      func fetch(client *http.Client) {
+        _, _ = client.PostForm("https://example.test/form", nil)
+      }
+    expect_no_match: true
   description: "(*http.Client).PostForm(tainted URL, form) \u2014 server-side form\
     \ POST to attacker-chosen URL."
 - id: go.ssrf.http_post
@@ -135,10 +190,22 @@
     kind: call
     callee:
       regex: ^http\.Post$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "import \"net/http\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
       \n  name := \"user\"\n  value := \"value\"\n  http.Post(target)\n}\n"
+  - name: literal http post url negative
+    code: |
+      import "net/http"
+      package main
+
+      func example() {
+        http.Post("https://example.test/upload", "application/json", nil)
+      }
+    expect_no_match: true
   description: "http.Post(tainted URL, \u2026) \u2014 server-side POST to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_head
@@ -154,10 +221,22 @@
     kind: call
     callee:
       regex: ^http\.Head$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "import \"net/http\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
       \n  name := \"user\"\n  value := \"value\"\n  http.Head(target)\n}\n"
+  - name: literal http head url negative
+    code: |
+      import "net/http"
+      package main
+
+      func example() {
+        http.Head("https://example.test/health")
+      }
+    expect_no_match: true
   description: "http.Head(tainted URL) \u2014 server-side HEAD to attacker-chosen\
     \ URL."
 - id: go.ssrf.http_postform
@@ -173,10 +252,22 @@
     kind: call
     callee:
       regex: ^http\.PostForm$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "import \"net/http\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
       \n  name := \"user\"\n  value := \"value\"\n  http.PostForm(target)\n}\n"
+  - name: literal http post form url negative
+    code: |
+      import "net/http"
+      package main
+
+      func example() {
+        http.PostForm("https://example.test/form", nil)
+      }
+    expect_no_match: true
   description: http.PostForm(tainted URL, form).
 - id: go.ssrf.http_newrequest
   enabled: true
@@ -193,6 +284,9 @@
       attribute:
       - http
       - NewRequest
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: net http new request
     code: "package main\nimport \"net/http\"\nfunc fetch(r *http.Request) {\n  url\
@@ -200,8 +294,15 @@
       }\n"
     expect_match_text:
     - http.NewRequest
-  description: "http.NewRequest(method, url, body) \u2014 only arg 1 is SSRF-relevant;\
-    \ kept medium until sink-arg-index taint is available."
+  - name: literal new request url with variable method negative
+    code: |
+      package main
+      import "net/http"
+      func fetch(method string) {
+        _, _ = http.NewRequest(method, "https://example.test/health", nil)
+      }
+    expect_no_match: true
+  description: "http.NewRequest(method, url, body) \u2014 only arg 1 is SSRF-relevant."
 - id: go.ssrf.http_newrequestwithcontext
   enabled: true
   language: go
@@ -217,6 +318,9 @@
       attribute:
       - http
       - NewRequestWithContext
+  constraints:
+  - arg_tainted:
+      index: 2
   match_examples:
   - name: net http new request with context
     code: "package main\nimport (\n  \"context\"\n  \"net/http\"\n)\nfunc fetch(ctx\
@@ -224,6 +328,17 @@
       \ _, _ = http.NewRequestWithContext(ctx, \"GET\", url, nil)\n}\n"
     expect_match_text:
     - http.NewRequestWithContext
+  - name: literal new request with context url negative
+    code: |
+      package main
+      import (
+        "context"
+        "net/http"
+      )
+      func fetch(ctx context.Context, method string) {
+        _, _ = http.NewRequestWithContext(ctx, method, "https://example.test/health", nil)
+      }
+    expect_no_match: true
   description: http.NewRequestWithContext(ctx, method, tainted URL, body).
 - id: go.ssrf.client_do
   enabled: true
@@ -238,6 +353,9 @@
     kind: call
     callee:
       regex: ^(client|httpClient|hc|http\.DefaultClient)\.Do$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: client do request
     code: "package main\nimport \"net/http\"\nfunc fetch(client *http.Client, req\
@@ -249,6 +367,15 @@
       \ {\n  _, _ = hc.Do(req)\n}\n"
     expect_match_text:
     - hc.Do
+  - name: literal request client do negative
+    code: |
+      package main
+      import "net/http"
+      func fetch(client *http.Client) {
+        req, _ := http.NewRequest("GET", "https://example.test/health", nil)
+        _, _ = client.Do(req)
+      }
+    expect_no_match: true
   description: "*http.Client.Do(req) \u2014 when req.URL came from user input this\
     \ fetches attacker-chosen URL."
 - id: go.ssrf.net_dial
@@ -266,10 +393,22 @@
       attribute:
       - net
       - Dial
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: generated direct match
     code: "import \"net\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
-      \n  name := \"user\"\n  value := \"value\"\n  net.Dial(target)\n}\n"
+      \n  name := \"user\"\n  value := \"value\"\n  net.Dial(\"tcp\", target)\n}\n"
+  - name: literal net dial address negative
+    code: |
+      import "net"
+      package main
+
+      func example(network string) {
+        net.Dial(network, "example.test:443")
+      }
+    expect_no_match: true
   description: "net.Dial(network, tainted addr) \u2014 raw TCP/UDP to attacker-chosen\
     \ host."
 - id: go.ssrf.resty_get
@@ -285,11 +424,23 @@
     kind: call
     callee:
       regex: \.R\(\)\.Get$|\.R\.Get$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "import \"github.com/go-resty/resty\"\npackage main\n\nfunc example() {\n\
       \  target := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  client.R().Get(target)\n\
       }\n"
+  - name: literal resty get url negative
+    code: |
+      import "github.com/go-resty/resty"
+      package main
+
+      func example(client *resty.Client) {
+        client.R().Get("https://example.test/health")
+      }
+    expect_no_match: true
   description: "resty client.R().Get(tainted URL) \u2014 fluent-client SSRF."
 - id: go.ssrf.req_get
   enabled: true
@@ -362,10 +513,22 @@
       attribute:
       - net
       - DialTCP
+  constraints:
+  - arg_tainted:
+      index: 2
   match_examples:
   - name: generated direct match
     code: "import \"net\"\npackage main\n\nfunc example() {\n  target := \"tainted\"\
-      \n  name := \"user\"\n  value := \"value\"\n  net.DialTCP(target)\n}\n"
+      \n  name := \"user\"\n  value := \"value\"\n  net.DialTCP(\"tcp\", nil, target)\n}\n"
+  - name: literal net dial tcp address negative
+    code: |
+      import "net"
+      package main
+
+      func example(network string) {
+        net.DialTCP(network, nil, nil)
+      }
+    expect_no_match: true
   description: "net.DialTCP(network, laddr, tainted raddr) \u2014 raw TCP to attacker-chosen\
     \ host:port."
 - id: go.ssrf.httputil_reverseproxy
@@ -383,10 +546,26 @@
       attribute:
       - httputil
       - NewSingleHostReverseProxy
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: "import \"net/http/httputil\"\npackage main\n\nfunc example() {\n  target\
       \ := \"tainted\"\n  name := \"user\"\n  value := \"value\"\n  httputil.NewSingleHostReverseProxy(target)\n\
       }\n"
+  - name: literal reverse proxy target negative
+    code: |
+      import (
+        "net/http/httputil"
+        "net/url"
+      )
+      package main
+
+      func example() {
+        target, _ := url.Parse("https://example.test")
+        httputil.NewSingleHostReverseProxy(target)
+      }
+    expect_no_match: true
   description: "httputil.NewSingleHostReverseProxy(tainted URL) \u2014 reverse-proxies\
     \ arbitrary upstream; request smuggling / SSRF when the target is user-controlled."

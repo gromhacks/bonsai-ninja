@@ -3,6 +3,7 @@
   enabled: true
   language: elixir
   tag: cors
+  category: source-independent
   severity: medium
   packages: [cors_plug]
   cwe: [CWE-942]

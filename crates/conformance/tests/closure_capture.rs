@@ -230,11 +230,10 @@ fn closure_capture_inlined_across_languages() {
             ));
         }
     }
-    if !failures.is_empty() {
-        panic!(
-            "closure capture gaps ({} total):\n{}",
-            failures.len(),
-            failures.join("\n")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "closure capture gaps ({} total):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

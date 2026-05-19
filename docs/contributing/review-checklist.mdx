@@ -12,10 +12,11 @@ class and verify each box.
 
 ## Engine change (`crates/taint/src/inter/`, `intra.rs`, `assignment.rs`, `reachable.rs`)
 
-- [ ] **Test pins the change.** A new test in `inter/tests.rs`,
-      `tests/over_taint_matrix.rs`, `tests/ten_concept_alignment.rs`, or
-      `tests/interprocedural_constructs.rs` reproduces the bug or
-      demonstrates the new behaviour.
+- [ ] **Test pins the change.** A focused test in the affected crate's
+      dedicated test file (`*_tests.rs`, `tests/over_taint_matrix.rs`,
+      `tests/semantic_container_fields.rs`, etc.) reproduces the bug or
+      demonstrates the new behaviour. Keep new regression suites outside
+      large implementation files.
 - [ ] **Empty seed invariant holds.** `interproc_false_path_clean_seed_
       does_not_propagate` and `concept_1_source_model_empty_seed_no_
       propagation` both pass.
@@ -57,8 +58,8 @@ class and verify each box.
 ## Rule pack change (`security-patterns/`)
 
 - [ ] **Validator passes.** `cargo run --bin bonsai-ninja -- security
-      ./security-patterns pack --validate` reports `valid: true` with
-      zero error- or warning-level issues.
+      . pack --validate --rules-dir ./security-patterns` reports
+      `valid: true` with zero error- or warning-level issues.
 - [ ] **Rulepack conformance passes.** `cargo test -p bonsai_security
       --test rulepack_conformance`.
 - [ ] **No FP audit passes.** `cargo test -p bonsai_security --test
@@ -101,6 +102,15 @@ class and verify each box.
 
 - [ ] **Command coverage test passes.** `cargo test -p bonsai_cli --test
       command_coverage`.
+- [ ] **Per-language command matrix passes.** `cargo test -p bonsai_cli
+      --test per_lang_cli_matrix` must pass. This is the semantic command
+      gate across all 21 supported languages: browse commands, navigation
+      commands, debug dumps, export, `comments`, `security sources`,
+      `security sinks`, `security sanitizers`, `security deps`,
+      `security source-analysis`, `security taint-analysis`, and SARIF
+      parity. Do not treat a command as covered by exit-code or JSON-shape
+      alone; each row must preserve the language-specific semantic hints
+      pinned in the matrix.
 - [ ] **All-flag test passes.** Every command accepts the relevant
       `--all` / `--page` / `--context` flags consistently.
 - [ ] **Theme / paging integration intact.** Output respects
@@ -146,6 +156,9 @@ class and verify each box.
 
 ## All changes
 
+- [ ] Unit-test bodies stay in separate sibling files (`*_tests.rs` or
+      crate-root `tests.rs`), leaving production modules with only the
+      `#[cfg(test)] mod ...;` declaration.
 - [ ] `cargo build --release` is warning-free.
 - [ ] `cargo test --workspace` passes (full sweep before merging).
 - [ ] No `panic!` / `unwrap()` introduced on user input.

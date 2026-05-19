@@ -2,6 +2,7 @@
   enabled: true
   language: typescript
   tag: jwt
+  category: source-independent
   severity: high
   packages:
   - jsonwebtoken
@@ -15,18 +16,30 @@
       attribute:
       - jwt
       - sign
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: "(?i)algorithm\\s*[:=]\\s*['\\\"]none['\\\"]"
   match_examples:
   - name: sign none
     code: |
       const _u = require("jsonwebtoken");
       function demo(input, req, obj) {
-        return jwt.sign(input, { algorithm: 'none' });
+        return jwt.sign(input, null, { algorithm: 'none' });
       }
+  - name: sign hmac negative
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.sign(input, "secret", { algorithm: "HS256" });
+      }
+    expect_no_match: true
   description: "jwt.sign(..., {algorithm: 'none'}) — produces unsigned tokens."
 - id: typescript.jwt.verify_ignore_expiration
   enabled: true
   language: typescript
   tag: jwt
+  category: source-independent
   severity: critical
   packages:
   - jsonwebtoken
@@ -39,13 +52,24 @@
       attribute:
       - jwt
       - verify
+  constraints:
+  - arg_matches_regex:
+      index: 2
+      regex: "(?i)(ignoreExpiration\\s*[:=]\\s*true|algorithms\\s*[:=]\\s*\\[[^\\]]*['\\\"]none['\\\"])"
   match_examples:
   - name: verify ignore expiration
     code: |
       const _u = require("jsonwebtoken");
       function demo(input, req, obj) {
-        return jwt.verify(input, { ignoreExpiration: true });
+        return jwt.verify(input, "secret", { ignoreExpiration: true });
       }
+  - name: verify expiration checked negative
+    code: |
+      const _u = require("jsonwebtoken");
+      function demo(input, req, obj) {
+        return jwt.verify(input, "secret", { ignoreExpiration: false });
+      }
+    expect_no_match: true
   description: "jwt.verify(..., {ignoreExpiration: true}) — accepts expired tokens. Merged aliases: typescript.jwt.verify_none_algorithm, typescript.jwt.alg_confusion."
   aliases:
   - typescript.jwt.verify_none_algorithm
@@ -153,6 +177,7 @@
   enabled: true
   language: typescript
   tag: jwt
+  category: source-independent
   severity: critical
   packages: [jose]
   imports: [jose]

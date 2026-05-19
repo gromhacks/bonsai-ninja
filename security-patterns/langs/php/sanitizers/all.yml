@@ -977,6 +977,8 @@
     kind: call
     callee:
       name: urldecode
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: php.passthrough.urldecode example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  urldecode($input);\n}\n"
@@ -992,12 +994,46 @@
     kind: call
     callee:
       name: rawurldecode
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: php.passthrough.rawurldecode example
     code: "<?php\nfunction example($input, $url, $id, $payload, $request) {\n  rawurldecode($input);\n}\n"
     expect_match_text:
     - rawurldecode
   description: PHP rawurldecode($x) — same identity-passthrough as urldecode.
+- id: php.passthrough.strtoupper
+  enabled: true
+  language: php
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: strtoupper
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: strtoupper preserves taint
+    code: "<?php\nfunction example($input) {\n  return strtoupper($input);\n}\n"
+    expect_match_text:
+    - strtoupper
+  description: PHP strtoupper($x) — case-normalizes but preserves taint from $x.
+- id: php.passthrough.strtolower
+  enabled: true
+  language: php
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: strtolower
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: strtolower preserves taint
+    code: "<?php\nfunction example($input) {\n  return strtolower($input);\n}\n"
+    expect_match_text:
+    - strtolower
+  description: PHP strtolower($x) — case-normalizes but preserves taint from $x.
 - id: php.csrf.laravel_verify_csrf_token
   enabled: true
   language: php

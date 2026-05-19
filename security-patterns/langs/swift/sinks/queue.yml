@@ -9,12 +9,20 @@
     kind: call
     callee:
       name: sendMessage
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
       import AWSCore // aws-sdk-swift
       import AWSCore // aws-sdk-swift
       func test() { let input = "x"; let amount = 1; sendMessage(input) }
+  - name: literal send message negative
+    code: |
+      import AWSCore // aws-sdk-swift
+      func test() { sendMessage("safe") }
+    expect_no_match: true
   description: "AWS SDK for Swift sendMessage — tainted queue target/body injects arbitrary broker payloads."
 
   imports:

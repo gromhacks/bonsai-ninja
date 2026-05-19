@@ -2,6 +2,32 @@
 # and, where needed, constrained by adapter-emitted receiver types so
 # real handlers match without broad tails.
 
+# --- Archive entry sources -------------------------------------------
+- id: go.archive.tar_reader_next_header
+  enabled: true
+  language: go
+  trust: remote
+  tag: archive-input
+  category: archive-input
+  payload_types: [path]
+  packages: [archive/tar]
+  cwe: [CWE-22]
+  match:
+    kind: call
+    callee:
+      regex: "\\.Next$"
+  match_examples:
+  - name: tar reader next header
+    code: |
+      package main
+      import "archive/tar"
+      func next(tr *tar.Reader) {
+        header, _ := tr.Next()
+        _ = header.Name
+      }
+    expect_match_text: [tr.Next]
+  description: "tar.Reader.Next() — returns archive-controlled header metadata. Taint the returned header so Zip Slip is reported only when header.Name reaches a path open/write sink."
+
 # --- net/http stdlib --------------------------------------------------
 - id: go.nethttp.request_param
   enabled: false
@@ -874,6 +900,39 @@
       }
     expect_match_text: [c.GetRawData]
   description: "gin c.GetRawData() — raw request body."
+- id: go.gin_echo.context_formfile
+  enabled: true
+  language: go
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [file, multipart]
+  frameworks: [gin, echo]
+  packages: ["github.com/gin-gonic/gin", "github.com/labstack/echo"]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.FormFile$"
+  constraints:
+  - receiver_type_in: [Context, Ctx]
+  match_examples:
+  - name: gin form file
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        _, _ = c.FormFile("file")
+      }
+    expect_match_text: [c.FormFile]
+  - name: echo form file
+    code: |
+      package main
+      import "github.com/labstack/echo"
+      func handler(c echo.Context) {
+        _, _ = c.FormFile("file")
+      }
+    expect_match_text: [c.FormFile]
+  description: "gin/echo Context.FormFile(name) — returned multipart FileHeader and filename metadata are controlled by the HTTP client."
 
 # --- echo -------------------------------------------------------------
 - id: go.echo.context_queryparam
@@ -1461,14 +1520,22 @@
   category: http-input
   payload_types: [form, file]
   frameworks: [fiber]
-  packages: ["github.com/gofiber/fiber"]
+  packages: ["github.com/gofiber/fiber", "github.com/gofiber/fiber/v2"]
   match:
     kind: call
     callee:
-      regex: "\\.(FormFile|MultipartForm|QueryParser)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(FormFile|MultipartForm|QueryParser)$"
   constraints:
   - receiver_type_in: [Context, Ctx]
   match_examples:
+  - name: fiber form file
+    code: |
+      package main
+      import "github.com/gofiber/fiber/v2"
+      func handler(c *fiber.Ctx) {
+        _, _ = c.FormFile("file")
+      }
+    expect_match_text: [c.FormFile]
   - name: fiber multipart form
     code: |
       import "github.com/gofiber/fiber"

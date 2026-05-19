@@ -336,6 +336,8 @@
     kind: call
     callee:
       attribute: [uri_string, percent_decode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -345,3 +347,41 @@
         uri_string:percent_decode(Input).
     expect_match_text: ["uri_string:percent_decode"]
   description: ":uri_string:percent_decode(s) — Erlang stdlib URL decode; preserves taint."
+- id: erlang.passthrough.string_to_upper
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, to_upper]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string:to_upper preserves taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        string:to_upper(Input).
+    expect_match_text: ["string:to_upper"]
+  description: "string:to_upper(s) — case-normalizes but preserves taint from s."
+- id: erlang.passthrough.string_to_lower
+  enabled: true
+  language: erlang
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      attribute: [string, to_lower]
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: string:to_lower preserves taint
+    code: |
+      -module(example).
+      -export([test/1]).
+      test(Input) ->
+        string:to_lower(Input).
+    expect_match_text: ["string:to_lower"]
+  description: "string:to_lower(s) — case-normalizes but preserves taint from s."

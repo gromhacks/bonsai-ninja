@@ -199,6 +199,7 @@
   enabled: true
   language: scala
   tag: xxe
+  category: source-independent
   severity: medium
   cwe: [CWE-611]
   match:

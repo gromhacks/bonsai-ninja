@@ -38,6 +38,7 @@
   enabled: true
   language: elixir
   tag: graphql-injection
+  category: source-independent
   severity: medium
   packages: [absinthe_plug]
   cwe: [CWE-943]

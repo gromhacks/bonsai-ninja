@@ -121,6 +121,11 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
         &["I_16", "OT_05", "OT_06", "OT_18"],
         Status::NotApplicable,
     ),
+    (
+        "javascript",
+        &["R_03"],
+        Status::AdapterDeferred, // untyped receiver dispatch needs concrete type evidence, not name fan-out
+    ),
     // --- Kotlin: like Java + suspend (coroutines). No macros.
     ("kotlin", &["X_05", "X_07", "X_08", "X_10"], Status::NotApplicable),
     // --- Lua: minimal language. No exceptions per se, no async, no generics.
@@ -147,6 +152,11 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
         ],
         Status::NotApplicable,
     ),
+    (
+        "perl",
+        &["R_03"],
+        Status::AdapterDeferred, // Perl5 method dispatch lacks semantic receiver class evidence in this fixture
+    ),
     // --- PHP: OO, traits. No async/await keyword (8+ Fibers but distinct). No generics.
     (
         "php",
@@ -155,17 +165,32 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
         ],
         Status::NotApplicable,
     ),
+    (
+        "php",
+        &["R_03"],
+        Status::AdapterDeferred, // requires typed receiver evidence; untyped $args->method must not fan out by name
+    ),
     // --- Python: OO, generators, async. PEP 634 match in 3.10+. No formal generics on funcs.
     (
         "python",
         &["X_05", "X_07", "X_08", "X_10", "OT_05", "OT_06"],
         Status::NotApplicable,
     ),
+    (
+        "python",
+        &["R_03"],
+        Status::AdapterDeferred, // unannotated receiver dispatch is dynamic; exact pass needs a type annotation
+    ),
     // --- Ruby: blocks, fibers (coroutines), no async/await, no generics.
     (
         "ruby",
         &["R_11", "X_05", "X_07", "X_08", "X_10", "OT_05", "OT_06", "OT_18"],
         Status::NotApplicable,
+    ),
+    (
+        "ruby",
+        &["R_03"],
+        Status::AdapterDeferred, // untyped receiver dispatch would otherwise require unsafe method-name fan-out
     ),
     // --- Rust: traits, generics, async. No exceptions (Result), no coroutines (unstable).
     (
@@ -187,6 +212,11 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     ),
     // --- Swift: full OO + protocols + async/await. No macros, no FFI on language level.
     ("swift", &["X_05", "X_07", "X_08", "X_10"], Status::NotApplicable),
+    (
+        "swift",
+        &["X_01", "X_02", "X_03"],
+        Status::AdapterDeferred, // needs Swift target/module identity instead of file-stem fallback
+    ),
     // --- TypeScript: like JS + generics + decorators. No macros, no pattern match.
     ("typescript", &["I_16", "OT_05", "OT_06"], Status::NotApplicable),
 ];
@@ -211,45 +241,5 @@ pub fn total_applicable_cells() -> usize {
 }
 
 #[cfg(test)]
-mod sanity {
-    use super::*;
-
-    #[test]
-    fn all_overrides_reference_real_scenarios() {
-        for (_lang, ids, _status) in OVERRIDES {
-            for id in *ids {
-                assert!(
-                    SCENARIOS.iter().any(|s| s.id == *id),
-                    "applicability override references unknown scenario id `{id}`"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn all_overrides_reference_real_languages() {
-        for (lang, _ids, _status) in OVERRIDES {
-            assert!(
-                LANGUAGES.contains(lang),
-                "applicability override references unknown language `{lang}`"
-            );
-        }
-    }
-
-    #[test]
-    fn applicable_count_per_language_matches_doc_estimate() {
-        // Lower bound — sanity check that we don't accidentally mark
-        // half the matrix as n/a. If a future edit drops a language's
-        // applicable count below 40, this test fires and we revisit.
-        for &lang in LANGUAGES {
-            let applicable = SCENARIOS
-                .iter()
-                .filter(|s| status(lang, s.id) == Status::Applicable)
-                .count();
-            assert!(
-                applicable >= 40,
-                "{lang}: applicable cell count {applicable} too low — applicability table likely overreached"
-            );
-        }
-    }
-}
+#[path = "applicability_sanity.rs"]
+mod sanity;

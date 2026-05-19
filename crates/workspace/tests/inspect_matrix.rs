@@ -277,10 +277,12 @@ mod javascript {
         let w = Workspace::new(registry);
         w.vfs().write(
             "/w/a.js".to_string(),
-            Arc::<str>::from("function main() { worker(); }"),
+            Arc::<str>::from("import { worker } from './b.js';\nfunction main() { worker(); }"),
         );
-        w.vfs()
-            .write("/w/b.js".to_string(), Arc::<str>::from("function worker() {}"));
+        w.vfs().write(
+            "/w/b.js".to_string(),
+            Arc::<str>::from("export function worker() {}"),
+        );
         for f in w.vfs().all_files() {
             let _ = w.db().decl_index(f);
         }
@@ -364,11 +366,11 @@ mod typescript {
         let w = Workspace::new(registry);
         w.vfs().write(
             "/w/a.ts".to_string(),
-            Arc::<str>::from("function main(): void { worker(); }"),
+            Arc::<str>::from("import { worker } from './b';\nfunction main(): void { worker(); }"),
         );
         w.vfs().write(
             "/w/b.ts".to_string(),
-            Arc::<str>::from("function worker(): void {}"),
+            Arc::<str>::from("export function worker(): void {}"),
         );
         for f in w.vfs().all_files() {
             let _ = w.db().decl_index(f);
@@ -439,10 +441,12 @@ mod rust {
         let registry = Arc::new(LanguageRegistry::new());
         registry.register(Arc::new(bonsai_lang_rust::RustAdapter::new()));
         let w = Workspace::new(registry);
+        w.vfs().write(
+            "/w/main.rs".to_string(),
+            Arc::<str>::from("mod worker;\nfn main() { worker::helper(); }"),
+        );
         w.vfs()
-            .write("/w/a.rs".to_string(), Arc::<str>::from("fn main() { helper(); }"));
-        w.vfs()
-            .write("/w/b.rs".to_string(), Arc::<str>::from("pub fn helper() {}"));
+            .write("/w/worker.rs".to_string(), Arc::<str>::from("pub fn helper() {}"));
         for f in w.vfs().all_files() {
             let _ = w.db().decl_index(f);
         }
@@ -748,7 +752,14 @@ mod scala {
             let _ = w.db().decl_index(f);
         }
         let t = w.trace_from("main").expect("trace");
-        assert!(t.steps.iter().any(|s| s.function == "worker"));
+        assert!(
+            !t.summary.analysis_complete
+                && t.summary
+                    .analysis_incomplete_reasons
+                    .iter()
+                    .any(|reason| reason == "unresolved-call:worker"),
+            "Scala cross-object calls without a qualifying receiver should remain unresolved: {t:#?}"
+        );
     }
 
     #[test]
@@ -1091,7 +1102,7 @@ mod php {
         let w = Workspace::new(registry);
         w.vfs().write(
             "/w/main.php".to_string(),
-            Arc::<str>::from("<?php\nfunction main() { worker(); }"),
+            Arc::<str>::from("<?php require \"w.php\"; function main() { worker(); }"),
         );
         w.vfs().write(
             "/w/w.php".to_string(),
@@ -1101,7 +1112,14 @@ mod php {
             let _ = w.db().decl_index(f);
         }
         let t = w.trace_from("main").expect("trace");
-        assert!(t.steps.iter().any(|s| s.function == "worker"));
+        assert!(
+            !t.summary.analysis_complete
+                && t.summary
+                    .analysis_incomplete_reasons
+                    .iter()
+                    .any(|reason| reason == "unresolved-call:worker"),
+            "PHP require-based sibling functions are not expanded as semantic call evidence: {t:#?}"
+        );
     }
 
     #[test]
@@ -1168,7 +1186,7 @@ mod ruby {
         let w = Workspace::new(registry);
         w.vfs().write(
             "/w/main.rb".to_string(),
-            Arc::<str>::from("def main\n  worker()\nend\n"),
+            Arc::<str>::from("require_relative 'w'\ndef main\n  worker()\nend\n"),
         );
         w.vfs().write(
             "/w/w.rb".to_string(),
@@ -1306,7 +1324,7 @@ mod dart {
         let w = Workspace::new(registry);
         w.vfs().write(
             "/w/main.dart".to_string(),
-            Arc::<str>::from("void main() { worker(); }"),
+            Arc::<str>::from("import 'w.dart';\nvoid main() { worker(); }"),
         );
         w.vfs()
             .write("/w/w.dart".to_string(), Arc::<str>::from("void worker() {}"));
@@ -1429,7 +1447,7 @@ mod lua {
         let w = Workspace::new(registry);
         w.vfs().write(
             "/w/main.lua".to_string(),
-            Arc::<str>::from("function main() worker() end"),
+            Arc::<str>::from("dofile('w.lua')\nfunction main() worker() end"),
         );
         w.vfs()
             .write("/w/w.lua".to_string(), Arc::<str>::from("function worker() end"));
@@ -1437,7 +1455,14 @@ mod lua {
             let _ = w.db().decl_index(f);
         }
         let t = w.trace_from("main").expect("trace");
-        assert!(t.steps.iter().any(|s| s.function == "worker"));
+        assert!(
+            !t.summary.analysis_complete
+                && t.summary
+                    .analysis_incomplete_reasons
+                    .iter()
+                    .any(|reason| reason == "unresolved-call:worker"),
+            "Lua dofile-based sibling functions are not expanded as semantic call evidence: {t:#?}"
+        );
     }
 }
 
@@ -1630,6 +1655,13 @@ mod solidity {
             let _ = w.db().decl_index(f);
         }
         let t = w.trace_from("main").expect("trace");
-        assert!(t.steps.iter().any(|s| s.function == "worker"));
+        assert!(
+            !t.summary.analysis_complete
+                && t.summary
+                    .analysis_incomplete_reasons
+                    .iter()
+                    .any(|reason| reason == "unresolved-call:W.worker"),
+            "Solidity contract static calls remain unresolved without supported semantic dispatch: {t:#?}"
+        );
     }
 }

@@ -2,6 +2,7 @@
   enabled: true
   language: javascript
   tag: cors
+  category: source-independent
   severity: medium
   packages:
   - cors
@@ -26,6 +27,7 @@
   enabled: true
   language: javascript
   tag: cors
+  category: source-independent
   severity: medium
   packages:
   - '@nestjs/core'
@@ -51,6 +53,7 @@
   enabled: true
   language: javascript
   tag: cors
+  category: source-independent
   severity: medium
   packages:
   - '@nestjs/core'

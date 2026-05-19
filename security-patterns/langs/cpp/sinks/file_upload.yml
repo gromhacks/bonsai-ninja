@@ -1,6 +1,9 @@
 # C++ file-upload sinks — client-controlled filenames reaching the filesystem.
 - id: cpp.upload.cpphttplib_multipart
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: cpp.source.cpphttplib_file_value
   language: cpp
   tag: file-upload
   severity: medium
@@ -21,13 +24,16 @@
         const char *query = arg;
         Request::get_file_value(arg);
       }
-  description: "cpp-httplib Request::get_file_value — returns MultipartFormData with client-controlled filename. Signature is `get_file_value(const std::string &name)` — exactly 1 arg; bounds reject same-name decoys."
+  description: "Disabled — get_file_value returns client-controlled multipart metadata and is modeled as cpp.source.cpphttplib_file_value. The sink is the later filesystem write."
 
   imports:
   - httplib.h
   - httplib
 - id: cpp.upload.drogon_uploaded_file
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: subsumed
+    subsumed_by: cpp.source.drogon_uploaded_filename
   language: cpp
   tag: file-upload
   severity: medium
@@ -47,7 +53,7 @@
         const char *query = arg;
         HttpFile::getFileName(arg);
       }
-  description: "Drogon HttpFile::getFileName — client-controlled; sanitize before use on disk."
+  description: "Disabled — HttpFile::getFileName is a client-controlled filename source, not a write sink. Downstream save/open rules carry the vulnerability."
 
 - id: cpp.upload.drogon_save
   enabled: true
@@ -114,7 +120,9 @@
   description: "Drogon HttpFile::saveAs(path) — tainted path writes arbitrary file."
 
 - id: cpp.upload.poco_partstore
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: pending-adapter-fact
   language: cpp
   tag: file-upload
   severity: medium
@@ -133,4 +141,4 @@
         const char *arg = "tainted";
         auto *x = new PartHandler(arg);
       }
-  description: "Poco::Net::PartHandler subclass — handles uploaded parts; flag when filename is used on disk."
+  description: "Disabled — PartHandler receives uploaded part metadata but is not a filesystem sink. Model its callback filename as a source once subclass/callback facts are available."

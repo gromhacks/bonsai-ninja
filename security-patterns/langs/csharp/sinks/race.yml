@@ -4,6 +4,7 @@
   enabled: true
   language: csharp
   tag: race
+  category: source-independent
   severity: medium
   packages: [System.IO]
   cwe: [CWE-367]
@@ -26,6 +27,7 @@
   enabled: true
   language: csharp
   tag: race
+  category: source-independent
   severity: medium
   packages: [System.Data, System.Data.SqlClient]
   cwe: [CWE-662, CWE-367]
@@ -48,6 +50,7 @@
   enabled: true
   language: csharp
   tag: race
+  category: source-independent
   severity: medium
   packages: [System.Data, System.Data.SqlClient]
   cwe: [CWE-662, CWE-367]

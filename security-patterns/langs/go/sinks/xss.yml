@@ -16,18 +16,28 @@
       attribute:
       - template
       - HTML
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "html/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
+      func example(target string) {
         template.HTML(target)
       }
+    expect_match_text: [template.HTML]
+  - name: literal html trust type negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        template.HTML("<strong>safe</strong>")
+      }
+    expect_no_match: true
   description: "template.HTML(tainted) — cast opts the string out of html/template auto-escape. Direct XSS (CWE-79); also CWE-94 since the cast lets attacker text inject template directives / scripts the engine would otherwise neutralize. Merged collision aliases: go.xss.echo_html."
   aliases:
   - go.xss.echo_html
@@ -50,18 +60,28 @@
       attribute:
       - template
       - JSStr
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "html/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
+      func example(target string) {
         template.JSStr(target)
       }
+    expect_match_text: [template.JSStr]
+  - name: literal js string trust type negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        template.JSStr("safe")
+      }
+    expect_no_match: true
   description: "template.JSStr(tainted) — marks string as safe inside a JS string literal context."
 - id: go.xss.template_js
   enabled: true
@@ -79,18 +99,28 @@
       attribute:
       - template
       - JS
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "html/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
+      func example(target string) {
         template.JS(target)
       }
+    expect_match_text: [template.JS]
+  - name: literal js trust type negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        template.JS("console.log('safe')")
+      }
+    expect_no_match: true
   description: "template.JS(tainted) — marks string as safe JavaScript; XSS if attacker-controlled."
 - id: go.xss.template_htmlattr
   enabled: true
@@ -108,18 +138,28 @@
       attribute:
       - template
       - HTMLAttr
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: generated direct match
     code: |
       import "html/template"
       package main
 
-      func example() {
-        target := "tainted"
-        name := "user"
-        value := "value"
+      func example(target string) {
         template.HTMLAttr(target)
       }
+    expect_match_text: [template.HTMLAttr]
+  - name: literal html attr trust type negative
+    code: |
+      import "html/template"
+      package main
+
+      func example() {
+        template.HTMLAttr(`class="safe"`)
+      }
+    expect_no_match: true
   description: "template.HTMLAttr(tainted) — marks string as a safe HTML attribute; enables attribute-break XSS."
 - id: go.xss.fmt_fprintf_w
   enabled: false
@@ -167,11 +207,26 @@
       attribute:
       - fmt
       - Fprint
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: stdlib html response fprint
-    code: "package main\nimport (\n  \"fmt\"\n  \"net/http\"\n)\nfunc handler(w http.ResponseWriter, r *http.Request) {\n  body := \"<h1>\" + input + \"</h1>\"\n  w.Header()[\"Content-Type\"] = []string{\"text/html; charset=utf-8\"}\n  fmt.Fprint(w, body)\n}\n"
+    code: "package main\nimport (\n  \"fmt\"\n  \"net/http\"\n)\nfunc handler(w http.ResponseWriter, r *http.Request, input string) {\n  body := \"<h1>\" + input + \"</h1>\"\n  w.Header()[\"Content-Type\"] = []string{\"text/html; charset=utf-8\"}\n  fmt.Fprint(w, body)\n}\n"
     expect_match_text:
     - fmt.Fprint
+  - name: stdlib html response fprint literal negative
+    code: |
+      package main
+      import (
+        "fmt"
+        "net/http"
+      )
+      func handler(w http.ResponseWriter, r *http.Request) {
+        w.Header()["Content-Type"] = []string{"text/html; charset=utf-8"}
+        fmt.Fprint(w, "<h1>safe</h1>")
+      }
+    expect_no_match: true
   description: "fmt.Fprint(w, taintedHTML) after a text/html response Content-Type — stdlib raw HTML response body without template escaping. The matcher anchors to common ResponseWriter variables; review surrounding headers for text/html."
 - id: go.xss.gin_data
   enabled: true
@@ -186,6 +241,9 @@
     kind: call
     callee:
       regex: \.Data$
+  constraints:
+  - arg_tainted:
+      index: 2
   match_examples:
   - name: gin raw html data
     code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc handler(c *gin.Context, body []byte) {\n  c.Data(200, \"text/html; charset=utf-8\", body)\n}\n"
@@ -195,6 +253,14 @@
     code: "package main\nimport \"github.com/gin-gonic/gin\"\nfunc handler(c *gin.Context, name string) {\n  c.Data(200, \"text/html\", []byte(\"<h1>\" + name + \"</h1>\"))\n}\n"
     expect_match_text:
     - c.Data
+  - name: gin raw html literal negative
+    code: |
+      package main
+      import "github.com/gin-gonic/gin"
+      func handler(c *gin.Context) {
+        c.Data(200, "text/html; charset=utf-8", []byte("<h1>safe</h1>"))
+      }
+    expect_no_match: true
   description: "gin Context.Data(status, \"text/html...\", tainted) — writes raw HTML bytes, including concatenated response fragments, without auto-escape."
 - id: go.xss.fiber_send_string
   enabled: false
@@ -213,7 +279,9 @@
       regex: \.SendString$
   description: "Disabled — fiber Ctx.SendString; enable when response Content-Type is text/html."
 - id: go.xss.buffalo_render_string
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: go
   tag: xss
   severity: high
@@ -228,9 +296,23 @@
     kind: call
     callee:
       regex: \.Render$
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: buffalo render raw string
     code: "package main\nimport (\n  \"github.com/gobuffalo/buffalo\"\n  \"github.com/gobuffalo/buffalo/render\"\n)\nfunc handler(c buffalo.Context, r *render.Engine, name string) error {\n  return c.Render(200, r.String(\"<h1>\" + name + \"</h1>\"))\n}\n"
     expect_match_text:
     - c.Render
-  description: "buffalo Context.Render(status, r.String(taintedHTML)) — renders raw string content as an HTTP response without template auto-escaping."
+  - name: buffalo render raw string literal negative
+    code: |
+      package main
+      import (
+        "github.com/gobuffalo/buffalo"
+        "github.com/gobuffalo/buffalo/render"
+      )
+      func handler(c buffalo.Context, r *render.Engine) error {
+        return c.Render(200, r.String("<h1>safe</h1>"))
+      }
+    expect_no_match: true
+  description: "Disabled — buffalo Context.Render(status, r.String(...)) needs nested-call taint correlation so literal render strings stay quiet while attacker-controlled render strings are reported."

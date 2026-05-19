@@ -128,7 +128,9 @@ Used by `taint` and by `dump-cfg`.
 
 **`crates/callgraph`** walks the resolved graph and surfaces
 `(caller, callee, precision)` edges, with virtual-dispatch expansion via
-the bases facts.
+the bases facts. It also binds local callable aliases and uniquely
+returned closure factories so indirect callback calls stay resolver-backed
+instead of becoming name-only fan-out.
 
 **`crates/abstract_interp`** is a tiny abstract-interpretation runtime
 the engine uses for constant propagation and a few narrowing tricks.
@@ -250,6 +252,11 @@ under `docs/`.
 
 **`crates/testkit`** is shared test helpers — workspace fixtures,
 result assertions, finding-shape matchers.
+
+Unit tests live beside the production module in separate files (`*_tests.rs`
+or crate-root `tests.rs`) and are included through `#[cfg(test)]` module
+declarations. This keeps long regression fixtures out of production modules
+while preserving access to private helpers through `use super::*;`.
 
 ## Dataflow at a glance
 

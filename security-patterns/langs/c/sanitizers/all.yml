@@ -9,6 +9,26 @@
     callee:
       name: strncpy
   description: "Disabled — strncpy does NOT NUL-terminate; it is a sink, not a sanitizer."
+- id: c.passthrough.strncpy_copy
+  enabled: true
+  language: c
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: strncpy
+  taint_semantics:
+    output_arg_flows:
+    - output_arg_index: 0
+      value_arg_indices: [1]
+  match_examples:
+  - name: source buffer copied into destination
+    code: |
+      void example(char *dst, const char *src, unsigned long n) {
+        strncpy(dst, src, n);
+      }
+    expect_match_text: [strncpy]
+  description: "strncpy(dst, src, n) — value-preserving copy from src to dst for taint transfer; not sanitizer credit and not a memory-safety finding by itself."
 - id: c.sanitizer.snprintf_bounded
   enabled: true
   language: c
@@ -662,6 +682,8 @@
     kind: call
     callee:
       name: curl_easy_unescape
+  taint_semantics:
+    call_result_passthrough_args: [1]
   match_examples:
   - name: generated direct match
     code: |

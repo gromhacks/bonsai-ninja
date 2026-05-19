@@ -103,14 +103,23 @@
     kind: call
     callee:
       regex: "^(launchedTaskWithLaunchPath|launchAndReturnError|runTaskWithLaunchPath)$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; launchedTaskWithLaunchPath(input); }
+  - name: literal launch path negative
+    code: |
+      void test(void) { launchedTaskWithLaunchPath(@"/bin/echo"); }
+    expect_no_match: true
   description: "NSTask +launchedTaskWithLaunchPath:arguments: / -launchAndReturnError: — spawns child process with tainted argv/path."
 
 - id: objc.cmdi.nstask_launch_bare
-  enabled: true
+  enabled: false
+  disabled_reason:
+    code: requires-constraint
   language: objc
   tag: command-injection
   severity: critical
@@ -123,22 +132,32 @@
   - name: declared shape
     code: |
       void test(id input) { id target = input; int amount = 1; [NSTask launch:input]; }
-  description: "NSTask -launch — fires the task with previously-set launchPath/arguments. Constrained to NSTask receivers; bare `launch` is too ubiquitous otherwise."
+  description: "Disabled — bare `launch` has no command argument and needs receiver-state evidence from prior NSTask setters before it can be reported semantically."
 
 - id: objc.cmdi.nstask_setters
   enabled: true
   language: objc
   tag: command-injection
   severity: high
+  packages: [Foundation]
   cwe: [CWE-78]
   match:
     kind: write
     target:
-      regex: "^(?:.*\\.)?(launchPath|arguments|executableURL)$"
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.(launchPath|arguments|executableURL)$"
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
-  - name: declared shape
+  - name: nstask member setter
     code: |
-      void test(id input) { id target = input; int amount = 1; NSTask.launchPath = @"/bin/sh"; }
+      #import <Foundation/Foundation.h>
+      void test(id input) { NSTask.launchPath = input; }
+  - name: local task property name negative
+    code: |
+      #import <Foundation/Foundation.h>
+      void test(id input) { id launchPath = input; }
+    expect_no_match: true
   description: "NSTask .launchPath / .arguments / .executableURL — tainted values feed subsequent -launch call. Constrained to NSTask receivers to avoid collisions."
 
 - id: objc.cmdi.posix_spawn

@@ -1,10 +1,10 @@
 //! `Workspace::open_with_options` prewarms the workspace-wide
 //! value-flow cache when `prewarm_value_flow` is on, and the same
 //! option turns it off for `query_only` callers. Sidecar round-trips
-//! via the conventional `.bonsai/value_flow.v3.factstore` path.
+//! via the conventional `ValueFlowCache::sidecar_path` path.
 
 use bonsai_lang_api::{AdapterArc, LanguageRegistry};
-use bonsai_workspace::{Workspace, WorkspaceOpenOptions};
+use bonsai_workspace::{value_flow::ValueFlowCache, Workspace, WorkspaceOpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,16 +42,16 @@ def main():\n    raw = get_input()\n    cleaned = process(raw)\n    emit(cleaned
 }
 
 #[test]
-fn full_open_prewarms_value_flow_cache() {
+fn full_prewarm_open_prewarms_value_flow_cache() {
     let root = tempdir_for_test("bonsai-vf-full");
     write_python_workspace(&root);
 
-    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
+    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("open succeeds");
 
     assert!(
         !ws.value_flow().is_empty(),
-        "default open should populate the value-flow cache"
+        "full-prewarm open should populate the value-flow cache"
     );
 }
 
@@ -64,7 +64,7 @@ fn query_only_skips_value_flow_prewarm() {
         .expect("open succeeds");
 
     // `query_only` opts out of every prewarm; with no sidecar on
-    // disk, the cache stays empty until the first lazy fault.
+    // disk, the cache stays empty until a query requests value flow.
     assert!(
         ws.value_flow().is_empty(),
         "query_only should skip value-flow prewarm"
@@ -81,7 +81,7 @@ fn returning_seed_names_populates_for_returned_param() {
     let root = tempdir_for_test("bonsai-vf-returning");
     std::fs::write(root.join("app.py"), "def echo(x):\n    return x\n").expect("write fixture");
 
-    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
+    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("open succeeds");
 
     let global = ws.db().global_index();
@@ -108,7 +108,7 @@ fn snapshot_rejects_stale_matcher_policy_fingerprint() {
     let root = tempdir_for_test("bonsai-vf-fingerprint");
     write_python_workspace(&root);
 
-    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
+    let ws = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("open succeeds");
     let mut snap = ws.value_flow().snapshot();
     assert!(
@@ -134,13 +134,13 @@ fn value_flow_sidecar_round_trips_via_query_only() {
     write_python_workspace(&root);
 
     // First open: prewarm + persist sidecar.
-    let _ = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::default())
+    let _ = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
         .expect("first open succeeds");
 
-    let sidecar = root.join(".bonsai").join("value_flow.v3.factstore");
+    let sidecar = ValueFlowCache::sidecar_path(&root);
     assert!(
         sidecar.exists(),
-        "default open should write the value-flow sidecar"
+        "full-prewarm open should write the value-flow sidecar"
     );
 
     // Second open in `query_only` mode hydrates from the sidecar.
@@ -150,5 +150,44 @@ fn value_flow_sidecar_round_trips_via_query_only() {
     assert!(
         !ws2.value_flow().is_empty(),
         "query_only with a fresh sidecar should hydrate the value-flow cache from disk"
+    );
+}
+
+#[test]
+fn value_flow_sidecar_rejects_changed_dependency_metadata() {
+    let root = tempdir_for_test("bonsai-vf-sidecar-deps");
+    write_python_workspace(&root);
+    std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"demo\"\n").expect("write pyproject");
+
+    let _ = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::full_prewarm())
+        .expect("first open succeeds");
+    let sidecar = ValueFlowCache::sidecar_path(&root);
+    assert!(
+        sidecar.exists(),
+        "full-prewarm open should write the value-flow sidecar"
+    );
+
+    let fresh = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::query_only())
+        .expect("fresh query-only open succeeds");
+    assert!(
+        !fresh.value_flow().is_empty(),
+        "unchanged dependency metadata should allow value-flow sidecar reuse"
+    );
+
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\ndependencies = [\"flask\"]\n",
+    )
+    .expect("rewrite pyproject");
+
+    let changed = Workspace::open_with_options(&root, registry(), WorkspaceOpenOptions::query_only())
+        .expect("changed query-only open succeeds");
+    assert!(
+        changed.value_flow().is_empty(),
+        "dependency metadata changes must reject the value-flow sidecar"
+    );
+    assert!(
+        !sidecar.exists(),
+        "stale value-flow sidecar should be removed after dependency metadata rejection"
     );
 }

@@ -8,10 +8,16 @@
   match:
     kind: write
     target:
-      name: innerHTML
+      regex: ^[^\.\s]+\.innerHTML$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: innerhtml
-    code: "function demo(input, req, obj) {\n  innerHTML = input; return innerHTML;\n}\n"
+    code: "function demo(input, req, obj) {\n  obj.innerHTML = input; return obj.innerHTML;\n}\n"
+  - name: local innerhtml variable negative
+    code: "function demo(input) {\n  const innerHTML = input; return innerHTML;\n}\n"
+    expect_no_match: true
   description: "Element.innerHTML = tainted \u2014 DOM XSS."
 - id: javascript.xss.outerhtml
   enabled: true
@@ -23,10 +29,16 @@
   match:
     kind: write
     target:
-      name: outerHTML
+      regex: ^[^\.\s]+\.outerHTML$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: outerhtml
-    code: "function demo(input, req, obj) {\n  outerHTML = input; return outerHTML;\n}\n"
+    code: "function demo(input, req, obj) {\n  obj.outerHTML = input; return obj.outerHTML;\n}\n"
+  - name: local outerhtml variable negative
+    code: "function demo(input) {\n  const outerHTML = input; return outerHTML;\n}\n"
+    expect_no_match: true
   description: "Element.outerHTML = tainted \u2014 DOM XSS."
 - id: javascript.xss.insertadjacenthtml
   enabled: false
@@ -124,6 +136,9 @@
     kind: call
     callee:
       regex: ^(serialize|serializeJavascript|serializeJavaScript)$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: serialize-javascript unsafe option
     code: "const serialize = require(\"serialize-javascript\");\nfunction embed(input) {\n  return serialize(input, { unsafe: true });\n}\n"
@@ -133,6 +148,13 @@
     code: "const _u = require(\"serialize-javascript\");\nfunction embed(serializeJavaScript, input) {\n  return serializeJavaScript(input, { unsafe: true });\n}\n"
     expect_match_text:
     - serializeJavaScript
+  - name: serialize-javascript literal negative
+    code: |
+      const serialize = require("serialize-javascript");
+      function embed() {
+        return serialize("safe", { unsafe: true });
+      }
+    expect_no_match: true
   description: serialize-javascript with unsafe embedding options can emit attacker-controlled script-context content.
 - id: javascript.xss.dangerously_set_inner_html
   enabled: true
@@ -146,10 +168,16 @@
   match:
     kind: write
     target:
-      name: dangerouslySetInnerHTML
+      regex: ^[^\.\s]+\.dangerouslySetInnerHTML$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: dangerously set inner html
-    code: "const _u = require(\"react\");\nfunction demo(input, req, obj) {\n  dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;\n}\n"
+    code: "const _u = require(\"react\");\nfunction demo(input, req, obj) {\n  obj.dangerouslySetInnerHTML = input; return obj.dangerouslySetInnerHTML;\n}\n"
+  - name: local dangerously set inner html negative
+    code: "const _u = require(\"react\");\nfunction demo(input) {\n  const dangerouslySetInnerHTML = input; return dangerouslySetInnerHTML;\n}\n"
+    expect_no_match: true
   description: "React dangerouslySetInnerHTML={{__html: tainted}} renders raw HTML \u2014 explicit XSS escape hatch."
 - id: javascript.xss.vue_v_html
   enabled: false
@@ -327,6 +355,7 @@
   enabled: true
   language: javascript
   tag: xss
+  category: source-independent
   severity: medium
   packages:
   - angular
@@ -469,10 +498,16 @@
   match:
     kind: write
     target:
-      name: srcdoc
+      regex: ^[^\.\s]+\.srcdoc$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: iframe srcdoc
-    code: "function demo(input, req, obj) {\n  srcdoc = input; return srcdoc;\n}\n"
+    code: "function demo(input, req, obj) {\n  obj.srcdoc = input; return obj.srcdoc;\n}\n"
+  - name: local srcdoc variable negative
+    code: "function demo(input) {\n  const srcdoc = input; return srcdoc;\n}\n"
+    expect_no_match: true
   description: "iframe.srcdoc = tainted HTML \u2014 renders attacker-controlled document inside an iframe."
 - id: javascript.xss.range_createcontextualfragment
   enabled: true
@@ -526,6 +561,9 @@
     kind: write
     target:
       regex: ^[A-Za-z_$][A-Za-z0-9_$]*\.body$
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: koa ctx body doctype concat
     code: "const _u = require(\"koa\");\nfunction demo(ctx, q) {\n  ctx.body = \"<!doctype html>\" + q;\n}\n"
@@ -535,6 +573,14 @@
     code: "const _u = require(\"koa\");\nfunction demo(ctx, q) {\n  ctx.body = `<!doctype html><section>${q}</section>`;\n}\n"
     expect_match_text:
     - ctx.body
+  - name: koa ctx body literal html negative
+    code: |
+      const _u = require("koa");
+      function demo(ctx) {
+        const body = "<!doctype html><p>safe</p>";
+        return body;
+      }
+    expect_no_match: true
   description: "Koa <ctx>.body = concatenated/template HTML \u2014 raw response body can reflect attacker-controlled markup. Receiver-agnostic; package gate keeps this from firing outside Koa workspaces."
 - id: javascript.xss.create_html_document_href_concat
   enabled: true
@@ -547,9 +593,18 @@
     kind: call
     callee:
       name: createHtmlDocument
+  constraints:
+  - arg_tainted:
+      index: 1
   match_examples:
   - name: create html document href concat
     code: "function demo(input, req, obj) {\n  return createHtmlDocument(input, \"<a href='\" + input + \"'>\");\n}\n"
+  - name: create html document literal negative
+    code: |
+      function demo() {
+        return createHtmlDocument("safe", "<a href='/safe'>");
+      }
+    expect_no_match: true
   description: "createHtmlDocument(...) with concatenated href-bearing HTML \u2014 flags the precise HTML construction site before it is sent/rendered."
 - id: javascript.xss.express_res_write
   enabled: true
@@ -593,6 +648,9 @@
       attribute:
       - res
       - end
+  constraints:
+  - arg_tainted:
+      index: 0
   match_examples:
   - name: response end html concat
     code: "const _u = require(\"express\");\nfunction demo(res, body) {\n  return res.end(\"<h1>\" + body + \"</h1>\");\n}\n"
@@ -602,4 +660,11 @@
     code: "const _u = require(\"express\");\nfunction demo(res, body) {\n  return res.end(`<p>${body}</p>`);\n}\n"
     expect_match_text:
     - res.end
+  - name: response end literal negative
+    code: |
+      const _u = require("express");
+      function demo(res) {
+        return res.end("<p>safe</p>");
+      }
+    expect_no_match: true
   description: "Express/Node res.end with concatenated or template HTML \u2014 raw HTTP response body can become reflected XSS."
