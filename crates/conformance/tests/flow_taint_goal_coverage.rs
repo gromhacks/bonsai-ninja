@@ -242,6 +242,29 @@ fn semantic_engine_suites_cover_positive_negative_and_wrong_flow_guards() {
         ],
     );
 
+    let taint_applicability_sanity = read("crates/taint/tests/matrix/applicability_sanity.rs");
+    assert_contains_all(
+        "taint matrix applicability gate",
+        &taint_applicability_sanity,
+        &[
+            "every_applicable_cell_has_an_executable_fixture",
+            "construct_families_have_positive_and_precision_coverage",
+            "scenario_catalog_matches_declared_totals_and_test_modules",
+            "mark truly unsupported cells NotApplicable or unimplemented cells AdapterDeferred",
+        ],
+    );
+
+    let taint_applicability = read("crates/taint/tests/matrix/applicability.rs");
+    assert_contains_all(
+        "taint matrix explicit gap manifest",
+        &taint_applicability,
+        &[
+            "COVERAGE_GAP_OVERRIDES",
+            "`Applicable` means there",
+            "concrete per-language test function that runs",
+        ],
+    );
+
     let wrong_flow_guard_text = [
         "crates/security/tests/no_fp_audit.rs",
         "crates/security/tests/security_pipeline_regressions.rs",

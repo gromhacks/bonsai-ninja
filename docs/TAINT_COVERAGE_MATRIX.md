@@ -7,7 +7,7 @@ scenario / applicability tables there, then rebless via:
 BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint --test matrix_coverage_report -- --nocapture
 ```
 
-**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1357
+**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1222
 
 ## What this matrix actually measures
 
@@ -17,6 +17,11 @@ language) pair, the linked test fixture exercises the real adapter
 flows reach the sink, over-taint cases stay clean). Every applicable
 cell shows `pass` because its per-language `#[test]` passes in the
 workspace test sweep — drift would block CI.
+
+The matrix also refuses to mark a cell `Applicable` unless the
+scenario fixture file contains a concrete `fn <scenario>_<lang>()`
+test. Cells without executable fixture coverage must stay explicit as
+`n/a` or `deferred`; they are not counted as passing behaviour.
 
 Two sister documents look pessimistic by comparison and that is
 intentional — they measure different things:
@@ -49,7 +54,7 @@ lives in this matrix.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `I_01` | Single assignment propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_02` | Clean reassignment overwrites taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `I_03` | Augmented assignment propagates | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_03` | Augmented assignment propagates | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | deferred | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_04` | Tuple/multiple assignment splits taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_05` | Destructure from tainted RHS | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
 | `I_06` | Ternary / conditional expression | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
@@ -57,15 +62,15 @@ lives in this matrix.
 | `I_08` | Else-branch merge propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_09` | Loop body propagation | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_10` | Loop carry across iterations | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `I_11` | For-each over tainted iterable | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_11` | For-each over tainted iterable | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_12` | While with tainted condition | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_13` | Try → throw → catch propagates | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | pass | pass | pass | pass |
-| `I_14` | Catch param propagates further | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | pass | pass | pass | pass |
+| `I_14` | Catch param propagates further | n/a | deferred | deferred | deferred | n/a | n/a | n/a | deferred | pass | pass | n/a | deferred | n/a | pass | pass | deferred | n/a | pass | deferred | deferred | pass |
 | `I_15` | Finally after taint | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass |
-| `I_16` | Pattern match arm body | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a |
-| `I_17` | Switch/case fall-through | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `I_18` | Closure captures tainted local | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `I_19` | Lambda body taint | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `I_16` | Pattern match arm body | n/a | n/a | pass | pass | pass | pass | n/a | deferred | n/a | pass | n/a | n/a | n/a | n/a | pass | deferred | pass | pass | n/a | pass | n/a |
+| `I_17` | Switch/case fall-through | n/a | n/a | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | n/a | pass | pass |
+| `I_18` | Closure captures tainted local | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | deferred | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `I_19` | Lambda body taint | n/a | deferred | deferred | pass | deferred | n/a | deferred | pass | pass | deferred | deferred | deferred | deferred | deferred | pass | pass | deferred | deferred | n/a | deferred | pass |
 | `I_20` | Lazy init via if-not assignment | pass | pass | n/a | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
 
 ## Inter-procedural
@@ -74,24 +79,24 @@ lives in this matrix.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `R_01` | Direct call with tainted arg | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_02` | Tainted return value to caller LHS | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_03` | Method receiver taint propagates | n/a | pass | pass | pass | pass | n/a | pass | pass | deferred | pass | pass | pass | deferred | deferred | deferred | deferred | pass | pass | pass | pass | pass |
-| `R_04` | Method tainted arg propagates | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_05` | Constructor / new with taint | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `R_06` | Static / class method propagates | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass |
+| `R_03` | Method receiver taint propagates | n/a | pass | pass | pass | pass | n/a | deferred | pass | deferred | pass | pass | pass | deferred | deferred | deferred | deferred | pass | pass | pass | pass | pass |
+| `R_04` | Method tainted arg propagates | n/a | pass | pass | pass | n/a | n/a | deferred | pass | pass | pass | deferred | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `R_05` | Constructor / new with taint | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `R_06` | Static / class method propagates | n/a | deferred | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | deferred | n/a | pass | pass | pass | deferred | pass | pass | pass | pass |
 | `R_07` | Dotted module call propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_08` | Out-param / mutable reference convention | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `R_09` | Higher-order: pass tainted to callback | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_10` | Higher-order: callback returns tainted | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `R_08` | Out-param / mutable reference convention | pass | pass | pass | deferred | n/a | n/a | deferred | deferred | deferred | deferred | deferred | pass | deferred | deferred | deferred | deferred | pass | deferred | n/a | deferred | deferred |
+| `R_09` | Higher-order: pass tainted to callback | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | pass | deferred | deferred | deferred | deferred | deferred | pass | deferred | pass | deferred | deferred | deferred | pass |
+| `R_10` | Higher-order: callback returns tainted | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | pass | deferred | deferred | deferred | deferred | deferred | pass | deferred | deferred | deferred | deferred | deferred | pass |
 | `R_11` | Async / await propagates | n/a | n/a | pass | pass | n/a | n/a | n/a | n/a | pass | pass | n/a | n/a | n/a | n/a | pass | n/a | pass | pass | n/a | pass | pass |
-| `R_12` | Generator yield reaches consumer | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | n/a | pass | n/a | pass | pass |
-| `R_13` | Multi-return splat to LHS variables | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `R_14` | Overload dispatch considers all candidates | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `R_12` | Generator yield reaches consumer | n/a | n/a | pass | deferred | n/a | n/a | n/a | n/a | pass | pass | deferred | n/a | n/a | n/a | pass | pass | n/a | n/a | n/a | n/a | pass |
+| `R_13` | Multi-return splat to LHS variables | n/a | n/a | pass | pass | pass | pass | pass | n/a | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `R_14` | Overload dispatch considers all candidates | n/a | pass | pass | n/a | n/a | n/a | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | pass | deferred |
 | `R_15` | Recursive function terminates with taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_16` | Mutual recursion converges | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_17` | Callable variable / function pointer | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `R_18` | Default argument value stays clean | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_19` | Variadic args carry taint | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `R_20` | Keyword args land on named param | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `R_18` | Default argument value stays clean | n/a | deferred | pass | pass | n/a | n/a | n/a | n/a | pass | pass | pass | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | pass |
+| `R_19` | Variadic args carry taint | n/a | deferred | pass | pass | n/a | n/a | deferred | pass | pass | pass | pass | deferred | pass | pass | pass | pass | n/a | deferred | n/a | pass | pass |
+| `R_20` | Keyword args land on named param | n/a | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | n/a | deferred | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass |
 
 ## Cross-file
 
@@ -133,7 +138,7 @@ lives in this matrix.
 | `OT_13` | Sibling key/index reads stay clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_14` | Argparse → eval through hardcoded filter | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_15` | Constant int/bool args don't promote | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `OT_16` | Receiver-only taint doesn't promote to scalar arg | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_16` | Receiver-only taint doesn't promote to scalar arg | n/a | pass | pass | pass | n/a | n/a | deferred | pass | pass | pass | deferred | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_17` | Variable named like seed but unrelated | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_18` | Type annotation containing seed name | n/a | pass | pass | pass | pass | pass | n/a | pass | n/a | pass | n/a | pass | n/a | n/a | pass | n/a | pass | pass | n/a | pass | pass |
 | `OT_19` | Function name with seed substring | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
@@ -143,24 +148,24 @@ lives in this matrix.
 
 | Language | Applicable cells | Tests passing | Adapter-deferred |
 |---|---:|---:|---:|
-| c | 49 | 49 | 0 |
-| cpp | 70 | 70 | 0 |
-| csharp | 73 | 73 | 0 |
-| dart | 72 | 72 | 0 |
-| elixir | 55 | 55 | 0 |
-| erlang | 49 | 49 | 0 |
-| go | 65 | 65 | 0 |
-| java | 70 | 70 | 0 |
-| javascript | 71 | 71 | 1 |
-| kotlin | 72 | 72 | 0 |
-| lua | 55 | 55 | 0 |
-| objc | 69 | 69 | 0 |
-| perl | 56 | 56 | 1 |
-| php | 65 | 65 | 1 |
-| python | 69 | 69 | 1 |
-| ruby | 67 | 67 | 1 |
-| rust | 68 | 68 | 0 |
-| scala | 72 | 72 | 0 |
-| solidity | 48 | 48 | 0 |
-| swift | 69 | 69 | 3 |
-| typescript | 73 | 73 | 0 |
+| c | 43 | 43 | 2 |
+| cpp | 61 | 61 | 7 |
+| csharp | 69 | 69 | 4 |
+| dart | 66 | 66 | 5 |
+| elixir | 47 | 47 | 3 |
+| erlang | 43 | 43 | 2 |
+| go | 51 | 51 | 8 |
+| java | 62 | 62 | 5 |
+| javascript | 69 | 69 | 2 |
+| kotlin | 68 | 68 | 4 |
+| lua | 46 | 46 | 7 |
+| objc | 59 | 59 | 7 |
+| perl | 49 | 49 | 7 |
+| php | 60 | 60 | 5 |
+| python | 66 | 66 | 2 |
+| ruby | 60 | 60 | 6 |
+| rust | 60 | 60 | 3 |
+| scala | 65 | 65 | 5 |
+| solidity | 44 | 44 | 3 |
+| swift | 63 | 63 | 8 |
+| typescript | 71 | 71 | 2 |
