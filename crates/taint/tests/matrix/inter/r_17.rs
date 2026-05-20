@@ -119,10 +119,7 @@ fn r_17_ruby() {
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
             files: &[(
                 "a.rb",
-                "def entry(args)
-  sink(args)
-end
-",
+                "def helper(p)\n  sink(p)\nend\ndef entry(args)\n  cb = method(:helper)\n  cb.call(args)\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -140,9 +137,7 @@ fn r_17_php() {
             adapter: Arc::new(bonsai_lang_php::PhpAdapter::new()),
             files: &[(
                 "a.php",
-                "<?php
-function entry($args) { sink($args); }
-",
+                "<?php\nfunction helper($p) { sink($p); }\nfunction entry($args) { $cb = 'helper'; $cb($args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -208,12 +203,7 @@ fn r_17_elixir() {
             adapter: Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
             files: &[(
                 "a.ex",
-                "defmodule Demo do
-  def entry(args) do
-    sink(args)
-  end
-end
-",
+                "defmodule Demo do\n  def helper(p), do: sink(p)\n  def entry(args) do\n    cb = &helper/1\n    cb.(args)\n  end\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -243,8 +233,7 @@ fn r_17_java() {
             adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()),
             files: &[(
                 "Demo.java",
-                "class Demo { void entry(String args) { sink(args); } }
-",
+                "import java.util.function.Consumer;\nclass Demo { void helper(String p) { sink(p); } void entry(String args) { Consumer<String> cb = this::helper; cb.accept(args); } }\n",
             )],
             entry: "entry",
             seed: &["args"],

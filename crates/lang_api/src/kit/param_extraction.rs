@@ -401,12 +401,13 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
         .or(method_param_bound_name)
         .or_else(|| param.child_by_field_name("pattern"))
         .or_else(|| param.child_by_field_name("name"))
+        .or_else(|| direct_non_type_identifier_child(param))
         // For parameter-shaped nodes without a name field, take the last
         // identifier-shaped descendant — usually the bound name in
         // `Type<Generic> name` shapes.
         .or_else(|| {
             if param.kind().contains("parameter") {
-                last_identifier_descendant(param)
+                last_identifier_descendant_by_position(param)
             } else {
                 None
             }
@@ -423,6 +424,30 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
     // rather than meaningful parameter bindings.
     if !trimmed_name.is_empty() && trimmed_name != "*" && trimmed_name != "&" {
         param_names.push(trimmed_name.to_string());
+    }
+}
+
+/// First direct identifier-like child that is not itself type syntax.
+/// This covers grammars such as Kotlin where `parameter` is
+/// `simple_identifier user_type`; grouped parameter wrappers fall
+/// through to the descendant-by-position fallback below.
+fn direct_non_type_identifier_child<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+    loop {
+        let child = cursor.node();
+        if child.is_named()
+            && looks_like_identifier(child.kind())
+            && !child.kind().contains("type")
+            && cursor.field_name() != Some("type")
+        {
+            return Some(child);
+        }
+        if !cursor.goto_next_sibling() {
+            return None;
+        }
     }
 }
 
@@ -447,23 +472,6 @@ fn repeated_named_field_values(node: Node<'_>, src: &[u8], field: &str) -> Vec<S
         }
     }
     out
-}
-
-/// Last identifier-shaped descendant of `node` in DFS order. Used as a
-/// final fallback when the more specific name fields didn't match.
-fn last_identifier_descendant<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
-    let mut latest_identifier = None;
-    let mut work_stack = vec![node];
-    while let Some(current) = work_stack.pop() {
-        if current != node && looks_like_identifier(current.kind()) {
-            latest_identifier = Some(current);
-        }
-        let mut cursor = current.walk();
-        for child in current.named_children(&mut cursor) {
-            work_stack.push(child);
-        }
-    }
-    latest_identifier
 }
 
 /// Last identifier-shaped descendant of `node` by source position

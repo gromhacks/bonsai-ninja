@@ -18,6 +18,97 @@ fn scenario_test_name(id: &str, lang: &str) -> String {
     format!("fn {}_{}(", id.to_ascii_lowercase(), lang)
 }
 
+fn test_body<'a>(body: &'a str, fn_name: &str) -> Option<&'a str> {
+    let start = body.find(&format!("fn {fn_name}("))?;
+    let rest = &body[start..];
+    let next_test = rest
+        .get(1..)
+        .and_then(|tail| tail.find("\n#[test]").map(|offset| offset + 1))
+        .unwrap_or(rest.len());
+    Some(&rest[..next_test])
+}
+
+fn fixture_file_count(test_body: &str) -> usize {
+    const EXTENSIONS: &[&str] = &[
+        ".c", ".cpp", ".cs", ".dart", ".erl", ".ex", ".go", ".java", ".js", ".kt", ".lua", ".m", ".php",
+        ".pl", ".pm", ".py", ".rb", ".rs", ".scala", ".sol", ".swift", ".ts",
+    ];
+
+    let bytes = test_body.as_bytes();
+    let mut count = 0;
+    let mut idx = 0;
+    while let Some(relative) = test_body[idx..].find('(') {
+        idx += relative + 1;
+        while bytes.get(idx).is_some_and(u8::is_ascii_whitespace) {
+            idx += 1;
+        }
+        if bytes.get(idx) != Some(&b'"') {
+            continue;
+        }
+        idx += 1;
+        let path_start = idx;
+        while let Some(byte) = bytes.get(idx) {
+            match byte {
+                b'\\' => idx += 2,
+                b'"' => break,
+                _ => idx += 1,
+            }
+        }
+        let Some(path_end) = bytes.get(idx).map(|_| idx) else {
+            break;
+        };
+        idx += 1;
+        while bytes.get(idx).is_some_and(u8::is_ascii_whitespace) {
+            idx += 1;
+        }
+        if bytes.get(idx) == Some(&b',') {
+            let path = &test_body[path_start..path_end];
+            if EXTENSIONS.iter().any(|extension| path.ends_with(extension)) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn scenario_construct_markers(id: &str) -> Option<&'static [&'static str]> {
+    match id {
+        "I_18" => Some(&[
+            "closure",
+            "lambda",
+            "proc",
+            "function() use",
+            "=>",
+            "fn ->",
+            "fun() ->",
+            "^{",
+        ]),
+        "I_19" => Some(&["lambda", "=>", "var f =", "const f =", "f ="]),
+        "R_05" => Some(&[
+            "new Box",
+            "Box::new",
+            "class Box",
+            "__construct",
+            "->new",
+            "initWith",
+            "alloc",
+        ]),
+        "R_10" => Some(&["apply_", "callback", "cb"]),
+        "R_17" => Some(&[
+            "cb",
+            "Cb",
+            "helper/1",
+            "\\&helper",
+            "::helper",
+            "Action<",
+            "(*cb)",
+        ]),
+        "R_19" => Some(&["*p", "...", "String...", "vararg", "params ", "@_"]),
+        "R_20" => Some(&["name=", "name =", "name:"]),
+        _ => None,
+    }
+}
+
 #[test]
 fn all_overrides_reference_real_scenarios() {
     for table in [OVERRIDES, COVERAGE_GAP_OVERRIDES] {
@@ -58,6 +149,82 @@ fn all_overrides_reference_real_languages() {
             );
         }
     }
+}
+
+#[test]
+fn applicable_cross_file_cells_use_cross_file_fixtures() {
+    let mut single_file = Vec::new();
+    for scenario in SCENARIOS
+        .iter()
+        .filter(|scenario| scenario.category == Category::CrossFile)
+    {
+        let path = scenario_file(scenario.category, scenario.id);
+        let body =
+            std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        for &lang in LANGUAGES {
+            if status(lang, scenario.id) != Status::Applicable {
+                continue;
+            }
+            let fn_name = format!("{}_{}", scenario.id.to_ascii_lowercase(), lang);
+            let Some(body) = test_body(&body, &fn_name) else {
+                continue;
+            };
+            let file_count = fixture_file_count(body);
+            if file_count < 2 {
+                single_file.push(format!(
+                    "{}/{} is Applicable but {} uses only {file_count} fixture file(s)",
+                    scenario.id,
+                    lang,
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        single_file.is_empty(),
+        "Cross-file taint matrix cells must exercise cross-file resolution; \
+         replace single-file placeholders with real multi-file fixtures or mark the cell deferred:\n{}",
+        single_file.join("\n")
+    );
+}
+
+#[test]
+fn applicable_nontrivial_construct_cells_use_semantic_fixtures() {
+    let mut placeholders = Vec::new();
+    for scenario in SCENARIOS {
+        let Some(markers) = scenario_construct_markers(scenario.id) else {
+            continue;
+        };
+        let path = scenario_file(scenario.category, scenario.id);
+        let body =
+            std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        for &lang in LANGUAGES {
+            if status(lang, scenario.id) != Status::Applicable {
+                continue;
+            }
+            let fn_name = format!("{}_{}", scenario.id.to_ascii_lowercase(), lang);
+            let Some(body) = test_body(&body, &fn_name) else {
+                continue;
+            };
+            if !markers.iter().any(|marker| body.contains(marker)) {
+                placeholders.push(format!(
+                    "{}/{} is Applicable but {} lacks a fixture marker for {:?}",
+                    scenario.id,
+                    lang,
+                    path.display(),
+                    markers
+                ));
+            }
+        }
+    }
+
+    assert!(
+        placeholders.is_empty(),
+        "Nontrivial taint matrix cells must exercise the named semantic construct; \
+         replace direct source-to-sink placeholders with real fixtures or mark the cell deferred/n/a:\n{}",
+        placeholders.join("\n")
+    );
 }
 
 #[test]
@@ -194,18 +361,21 @@ fn construct_families_have_positive_and_precision_coverage() {
 
 #[test]
 fn applicable_count_per_language_matches_doc_estimate() {
-    // Lower bound — sanity check that we don't accidentally mark
-    // half the matrix as n/a/deferred. If a future edit drops a
-    // language's applicable count below 40, this test fires and we
-    // revisit the coverage contract rather than hiding the gap.
+    // Lower bounds — sanity check that we don't accidentally mark
+    // half the matrix as n/a/deferred. Smaller languages legitimately
+    // have fewer applicable cells because they lack exceptions, OO,
+    // async, imports, or other scenario families.
+    let minimums = BTreeMap::from([("c", 35), ("erlang", 35), ("solidity", 35)]);
+
     for &lang in LANGUAGES {
         let applicable = SCENARIOS
             .iter()
             .filter(|s| status(lang, s.id) == Status::Applicable)
             .count();
+        let minimum = minimums.get(lang).copied().unwrap_or(40);
         assert!(
-            applicable >= 40,
-            "{lang}: applicable cell count {applicable} too low — applicability table likely overreached"
+            applicable >= minimum,
+            "{lang}: applicable cell count {applicable} below semantic floor {minimum} — applicability table likely overreached"
         );
     }
 }

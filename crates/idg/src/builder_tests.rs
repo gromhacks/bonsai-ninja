@@ -351,3 +351,63 @@ fn method_receiver_param_stitches_without_shifting_explicit_args() {
         "explicit arg must not be shifted into receiver param: {arg_to_param:?}"
     );
 }
+
+#[test]
+fn named_arg_stitches_to_matching_param_not_position() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["payload".to_string()];
+    caller.flow_events = vec![FlowEvent::Call {
+        span: span(20, 48),
+        name: "helper".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: span(27, 40),
+            name: Some("name".to_string()),
+            value_text: "payload".to_string(),
+            place: Some("payload".to_string()),
+            source_names: Vec::new(),
+        }],
+    }];
+
+    let mut callee = empty_decl(2, "helper");
+    callee.params = vec!["prefix".to_string(), "name".to_string()];
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    f2s_map.insert(FuncId::new(2), SegmentId(1));
+    let f2s = StaticF2S(f2s_map);
+
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "helper", vec![FuncId::new(2)]);
+
+    let ws = stitch_idg(
+        vec![transfer_function_for(&caller), transfer_function_for(&callee)],
+        &resolver,
+        &f2s,
+    );
+    let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
+    let callee_segment = ws.segment(SegmentId(1)).expect("callee segment");
+    let arg_to_param = ws
+        .cross_file()
+        .edges
+        .iter()
+        .filter(|edge| edge.edge.meta.kind == IdgEdgeKind::InterCallArg)
+        .map(|edge| {
+            (
+                call_arg_idx(caller_segment, edge.edge.from),
+                param_idx(callee_segment, edge.edge.to),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        arg_to_param.contains(&(Some(0), Some(1))),
+        "named arg should stitch to matching `name` param: {arg_to_param:?}"
+    );
+    assert!(
+        !arg_to_param.contains(&(Some(0), Some(0))),
+        "named arg must not fall through to the first positional param: {arg_to_param:?}"
+    );
+}

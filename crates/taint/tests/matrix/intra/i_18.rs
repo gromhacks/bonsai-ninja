@@ -18,9 +18,7 @@ fn i_18_python() {
             adapter: Arc::new(bonsai_lang_python::PythonAdapter::new()),
             files: &[(
                 "a.py",
-                "def entry(args):
-    sink(args)
-",
+                "def entry(args):\n    closure = lambda: sink(args)\n    closure()\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -38,8 +36,7 @@ fn i_18_javascript() {
             adapter: Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
             files: &[(
                 "a.js",
-                "function entry(args) { sink(args); }
-",
+                "function entry(args) { const closure = () => sink(args); closure(); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -57,8 +54,7 @@ fn i_18_typescript() {
             adapter: Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
             files: &[(
                 "a.ts",
-                "function entry(args: string) { sink(args); }
-",
+                "function entry(args: string) { const closure = () => sink(args); closure(); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -76,8 +72,7 @@ fn i_18_kotlin() {
             adapter: Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
             files: &[(
                 "a.kt",
-                "fun entry(args: String) { sink(args) }
-",
+                "fun entry(args: String) { val closure = { sink(args) }; closure() }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -95,8 +90,7 @@ fn i_18_scala() {
             adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
             files: &[(
                 "a.scala",
-                "object Demo { def entry(args: String): Unit = sink(args) }
-",
+                "object Demo { def entry(args: String): Unit = { val closure = () => sink(args); closure() } }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -114,8 +108,7 @@ fn i_18_csharp() {
             adapter: Arc::new(bonsai_lang_csharp::CSharpAdapter::new()),
             files: &[(
                 "Demo.cs",
-                "class Demo { void Entry(string args) { Sink(args); } }
-",
+                "using System;\nclass Demo { void Entry(string args) { Action closure = () => Sink(args); closure(); } }\n",
             )],
             entry: "Entry",
             seed: &["args"],
@@ -133,9 +126,7 @@ fn i_18_go() {
             adapter: Arc::new(bonsai_lang_go::GoAdapter::new()),
             files: &[(
                 "a.go",
-                "package main
-func entry(args string) { sink(args) }
-",
+                "package main\nfunc entry(args string) { closure := func() { sink(args) }; closure() }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -153,8 +144,7 @@ fn i_18_rust() {
             adapter: Arc::new(bonsai_lang_rust::RustAdapter::new()),
             files: &[(
                 "a.rs",
-                "fn entry(args: String) { sink(args); }
-",
+                "fn entry(args: String) { let closure = || sink(args); closure(); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -170,7 +160,10 @@ fn i_18_cpp() {
         LangFixture {
             lang: "cpp",
             adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
-            files: &[("a.cpp", "void entry(const char *args) { sink(args); }\n")],
+            files: &[(
+                "a.cpp",
+                "void entry(const char *args) { auto closure = [&]() { sink(args); }; closure(); }\n",
+            )],
             entry: "entry",
             seed: &["args"],
             sink: "sink",
@@ -235,8 +228,7 @@ fn i_18_swift() {
             adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
             files: &[(
                 "a.swift",
-                "func entry(args: String) { sink(args) }
-",
+                "func entry(args: String) { let closure = { sink(args) }; closure() }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -254,8 +246,7 @@ fn i_18_dart() {
             adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
             files: &[(
                 "a.dart",
-                "void entry(String args) { sink(args); }
-",
+                "void entry(String args) { var closure = () { sink(args); }; closure(); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -273,10 +264,7 @@ fn i_18_lua() {
             adapter: Arc::new(bonsai_lang_lua::LuaAdapter::new()),
             files: &[(
                 "a.lua",
-                "function entry(args)
-  sink(args)
-end
-",
+                "function entry(args)\n  local closure = function() sink(args) end\n  closure()\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -318,8 +306,7 @@ fn i_18_java() {
             adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()),
             files: &[(
                 "Demo.java",
-                "class Demo { void entry(String args) { sink(args); } }
-",
+                "class Demo { void entry(String args) { Runnable closure = () -> sink(args); closure.run(); } }\n",
             )],
             entry: "entry",
             seed: &["args"],

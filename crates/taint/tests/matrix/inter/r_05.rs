@@ -19,9 +19,7 @@ fn r_05_python() {
             adapter: Arc::new(bonsai_lang_python::PythonAdapter::new()),
             files: &[(
                 "a.py",
-                "def entry(args):
-    sink(args)
-",
+                "class Box:\n    def __init__(self, p):\n        sink(p)\n\ndef entry(args):\n    Box(args)\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -39,8 +37,7 @@ fn r_05_javascript() {
             adapter: Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
             files: &[(
                 "a.js",
-                "function entry(args) { sink(args); }
-",
+                "class Box { constructor(p) { sink(p); } }\nfunction entry(args) { new Box(args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -58,8 +55,7 @@ fn r_05_typescript() {
             adapter: Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
             files: &[(
                 "a.ts",
-                "function entry(args: string) { sink(args); }
-",
+                "class Box { constructor(p: string) { sink(p); } }\nfunction entry(args: string) { new Box(args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -89,8 +85,7 @@ fn r_05_kotlin() {
             adapter: Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
             files: &[(
                 "a.kt",
-                "fun entry(args: String) { sink(args) }
-",
+                "class Box(p: String) { init { sink(p) } }\nfun entry(args: String) { Box(args) }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -108,8 +103,7 @@ fn r_05_scala() {
             adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
             files: &[(
                 "a.scala",
-                "object Demo { def entry(args: String): Unit = sink(args) }
-",
+                "class Box(p: String) { sink(p) }\nobject Demo { def entry(args: String): Unit = new Box(args) }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -151,8 +145,7 @@ fn r_05_cpp() {
             adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
             files: &[(
                 "a.cpp",
-                "void entry(const char *args) { sink(args); }
-",
+                "class Box { public: Box(const char *p) { sink(p); } };\nvoid entry(const char *args) { Box box(args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -182,10 +175,7 @@ fn r_05_ruby() {
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
             files: &[(
                 "a.rb",
-                "def entry(args)
-  sink(args)
-end
-",
+                "class Box\n  def initialize(p)\n    sink(p)\n  end\nend\ndef entry(args)\n  Box.new(args)\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -203,9 +193,7 @@ fn r_05_php() {
             adapter: Arc::new(bonsai_lang_php::PhpAdapter::new()),
             files: &[(
                 "a.php",
-                "<?php
-function entry($args) { sink($args); }
-",
+                "<?php\nclass Box { function __construct($p) { sink($p); } }\nfunction entry($args) { new Box($args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -235,8 +223,7 @@ fn r_05_swift() {
             adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
             files: &[(
                 "a.swift",
-                "func entry(args: String) { sink(args) }
-",
+                "class Box { init(_ p: String) { sink(p) } }\nfunc entry(args: String) { Box(args) }\n",
             )],
             entry: "entry",
             seed: &["args"],

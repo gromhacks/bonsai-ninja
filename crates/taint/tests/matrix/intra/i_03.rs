@@ -249,6 +249,24 @@ fn i_03_ruby() {
 }
 
 #[test]
+fn i_03_perl() {
+    run_positive_cell(
+        "I_03",
+        LangFixture {
+            lang: "perl",
+            adapter: Arc::new(bonsai_lang_perl::PerlAdapter::new()),
+            files: &[(
+                "a.pl",
+                "sub entry { my ($args) = @_; my $x = ''; $x .= $args; sink($x); }\n",
+            )],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
 fn i_03_php() {
     run_positive_cell(
         "I_03",

@@ -7,7 +7,7 @@ scenario / applicability tables there, then rebless via:
 BLESS_TAINT_MATRIX=1 cargo test -p bonsai_taint --test matrix_coverage_report -- --nocapture
 ```
 
-**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1222
+**Scenarios:** 76  |  **Languages:** 21  |  **Applicable cells:** 1008
 
 ## What this matrix actually measures
 
@@ -54,7 +54,7 @@ lives in this matrix.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `I_01` | Single assignment propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_02` | Clean reassignment overwrites taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `I_03` | Augmented assignment propagates | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | deferred | pass | pass | pass | pass | pass | pass | pass | pass |
+| `I_03` | Augmented assignment propagates | pass | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_04` | Tuple/multiple assignment splits taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `I_05` | Destructure from tainted RHS | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
 | `I_06` | Ternary / conditional expression | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
@@ -69,8 +69,8 @@ lives in this matrix.
 | `I_15` | Finally after taint | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass |
 | `I_16` | Pattern match arm body | n/a | n/a | pass | pass | pass | pass | n/a | deferred | n/a | pass | n/a | n/a | n/a | n/a | pass | deferred | pass | pass | n/a | pass | n/a |
 | `I_17` | Switch/case fall-through | n/a | n/a | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | n/a | pass | pass |
-| `I_18` | Closure captures tainted local | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | deferred | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `I_19` | Lambda body taint | n/a | deferred | deferred | pass | deferred | n/a | deferred | pass | pass | deferred | deferred | deferred | deferred | deferred | pass | pass | deferred | deferred | n/a | deferred | pass |
+| `I_18` | Closure captures tainted local | n/a | deferred | deferred | deferred | pass | n/a | deferred | deferred | deferred | deferred | deferred | pass | deferred | pass | deferred | pass | deferred | deferred | n/a | deferred | deferred |
+| `I_19` | Lambda body taint | n/a | deferred | deferred | pass | deferred | n/a | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | pass | deferred | deferred | deferred | n/a | deferred | pass |
 | `I_20` | Lazy init via if-not assignment | pass | pass | n/a | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
 
 ## Inter-procedural
@@ -79,9 +79,9 @@ lives in this matrix.
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `R_01` | Direct call with tainted arg | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_02` | Tainted return value to caller LHS | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_03` | Method receiver taint propagates | n/a | pass | pass | pass | pass | n/a | deferred | pass | deferred | pass | pass | pass | deferred | deferred | deferred | deferred | pass | pass | pass | pass | pass |
-| `R_04` | Method tainted arg propagates | n/a | pass | pass | pass | n/a | n/a | deferred | pass | pass | pass | deferred | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_05` | Constructor / new with taint | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `R_03` | Method receiver taint propagates | n/a | pass | pass | pass | pass | n/a | pass | pass | deferred | pass | pass | pass | deferred | pass | pass | deferred | pass | pass | pass | pass | pass |
+| `R_04` | Method tainted arg propagates | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | deferred | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `R_05` | Constructor / new with taint | n/a | deferred | pass | pass | n/a | n/a | n/a | pass | deferred | deferred | n/a | pass | n/a | deferred | deferred | deferred | pass | deferred | n/a | deferred | deferred |
 | `R_06` | Static / class method propagates | n/a | deferred | pass | pass | n/a | n/a | n/a | pass | pass | pass | n/a | deferred | n/a | pass | pass | pass | deferred | pass | pass | pass | pass |
 | `R_07` | Dotted module call propagates | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_08` | Out-param / mutable reference convention | pass | pass | pass | deferred | n/a | n/a | deferred | deferred | deferred | deferred | deferred | pass | deferred | deferred | deferred | deferred | pass | deferred | n/a | deferred | deferred |
@@ -93,31 +93,31 @@ lives in this matrix.
 | `R_14` | Overload dispatch considers all candidates | n/a | pass | pass | n/a | n/a | n/a | n/a | pass | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | pass | deferred |
 | `R_15` | Recursive function terminates with taint | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `R_16` | Mutual recursion converges | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `R_17` | Callable variable / function pointer | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
+| `R_17` | Callable variable / function pointer | pass | pass | pass | pass | deferred | pass | pass | deferred | pass | deferred | pass | pass | pass | deferred | pass | deferred | pass | pass | n/a | pass | pass |
 | `R_18` | Default argument value stays clean | n/a | deferred | pass | pass | n/a | n/a | n/a | n/a | pass | pass | pass | n/a | pass | pass | pass | pass | n/a | pass | n/a | pass | pass |
-| `R_19` | Variadic args carry taint | n/a | deferred | pass | pass | n/a | n/a | deferred | pass | pass | pass | pass | deferred | pass | pass | pass | pass | n/a | deferred | n/a | pass | pass |
-| `R_20` | Keyword args land on named param | n/a | n/a | pass | pass | pass | n/a | n/a | n/a | pass | pass | n/a | deferred | n/a | pass | pass | pass | n/a | pass | n/a | pass | pass |
+| `R_19` | Variadic args carry taint | n/a | deferred | pass | n/a | n/a | n/a | deferred | pass | pass | deferred | deferred | deferred | deferred | deferred | pass | pass | n/a | deferred | n/a | pass | pass |
+| `R_20` | Keyword args land on named param | n/a | n/a | pass | pass | pass | n/a | n/a | n/a | deferred | deferred | n/a | deferred | n/a | pass | pass | pass | n/a | pass | n/a | pass | deferred |
 
 ## Cross-file
 
 | Scenario | Description | c | cpp | csharp | dart | elixir | erlang | go | java | javascript | kotlin | lua | objc | perl | php | python | ruby | rust | scala | solidity | swift | typescript |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `X_01` | Direct import + call | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | deferred | pass |
-| `X_02` | Aliased import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | deferred | pass |
+| `X_01` | Direct import + call | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | deferred | deferred | pass |
+| `X_02` | Aliased import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | n/a | deferred | pass |
 | `X_03` | From-import | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | deferred | pass |
-| `X_04` | Re-export chain A→B→C | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `X_05` | Default export (JS/TS) | n/a | pass | pass | pass | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
-| `X_06` | Namespace import (import * as X) | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | n/a | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `X_07` | Star import (from x import *) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
-| `X_08` | Dynamic import (string-driven) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
-| `X_09` | CommonJS require + assign | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | n/a | pass | pass |
-| `X_10` | ES module ↔ CommonJS interop | n/a | pass | pass | pass | n/a | n/a | n/a | n/a | pass | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | pass |
-| `X_11` | Visibility crossing — private blocks | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `X_12` | Inheritance across files | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `X_13` | Instance method on imported class | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `X_14` | Static method on imported class | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `X_15` | Module-level shadow — local wins | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `X_16` | Multi-file fan-in to same callee | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `X_04` | Re-export chain A→B→C | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | n/a | deferred | deferred |
+| `X_05` | Default export (JS/TS) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred |
+| `X_06` | Namespace import (import * as X) | n/a | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | n/a | deferred | n/a | deferred | deferred | deferred | deferred | deferred | n/a | deferred | deferred |
+| `X_07` | Star import (from x import *) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| `X_08` | Dynamic import (string-driven) | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred |
+| `X_09` | CommonJS require + assign | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred |
+| `X_10` | ES module ↔ CommonJS interop | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | deferred |
+| `X_11` | Visibility crossing — private blocks | n/a | deferred | deferred | deferred | n/a | n/a | deferred | deferred | deferred | deferred | n/a | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
+| `X_12` | Inheritance across files | n/a | deferred | deferred | deferred | n/a | n/a | deferred | deferred | deferred | deferred | n/a | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
+| `X_13` | Instance method on imported class | n/a | deferred | deferred | deferred | n/a | n/a | deferred | deferred | deferred | deferred | n/a | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
+| `X_14` | Static method on imported class | n/a | deferred | deferred | deferred | n/a | n/a | deferred | deferred | deferred | deferred | n/a | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
+| `X_15` | Module-level shadow — local wins | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
+| `X_16` | Multi-file fan-in to same callee | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred | deferred |
 
 ## Over-taint (negatives)
 
@@ -138,7 +138,7 @@ lives in this matrix.
 | `OT_13` | Sibling key/index reads stay clean | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_14` | Argparse → eval through hardcoded filter | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_15` | Constant int/bool args don't promote | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
-| `OT_16` | Receiver-only taint doesn't promote to scalar arg | n/a | pass | pass | pass | n/a | n/a | deferred | pass | pass | pass | deferred | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
+| `OT_16` | Receiver-only taint doesn't promote to scalar arg | n/a | pass | pass | pass | n/a | n/a | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_17` | Variable named like seed but unrelated | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `OT_18` | Type annotation containing seed name | n/a | pass | pass | pass | pass | pass | n/a | pass | n/a | pass | n/a | pass | n/a | n/a | pass | n/a | pass | pass | n/a | pass | pass |
 | `OT_19` | Function name with seed substring | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass | pass |
@@ -148,24 +148,24 @@ lives in this matrix.
 
 | Language | Applicable cells | Tests passing | Adapter-deferred |
 |---|---:|---:|---:|
-| c | 43 | 43 | 2 |
-| cpp | 61 | 61 | 7 |
-| csharp | 69 | 69 | 4 |
-| dart | 66 | 66 | 5 |
-| elixir | 47 | 47 | 3 |
-| erlang | 43 | 43 | 2 |
-| go | 51 | 51 | 8 |
-| java | 62 | 62 | 5 |
-| javascript | 69 | 69 | 2 |
-| kotlin | 68 | 68 | 4 |
-| lua | 46 | 46 | 7 |
-| objc | 59 | 59 | 7 |
-| perl | 49 | 49 | 7 |
-| php | 60 | 60 | 5 |
-| python | 66 | 66 | 2 |
-| ruby | 60 | 60 | 6 |
-| rust | 60 | 60 | 3 |
-| scala | 65 | 65 | 5 |
-| solidity | 44 | 44 | 3 |
-| swift | 63 | 63 | 8 |
-| typescript | 71 | 71 | 2 |
+| c | 39 | 39 | 5 |
+| cpp | 48 | 48 | 17 |
+| csharp | 57 | 57 | 13 |
+| dart | 53 | 53 | 14 |
+| elixir | 41 | 41 | 8 |
+| erlang | 38 | 38 | 6 |
+| go | 44 | 44 | 14 |
+| java | 50 | 50 | 16 |
+| javascript | 52 | 52 | 18 |
+| kotlin | 54 | 54 | 17 |
+| lua | 41 | 41 | 11 |
+| objc | 50 | 50 | 15 |
+| perl | 40 | 40 | 14 |
+| php | 49 | 49 | 15 |
+| python | 56 | 56 | 11 |
+| ruby | 48 | 48 | 17 |
+| rust | 50 | 50 | 12 |
+| scala | 54 | 54 | 15 |
+| solidity | 37 | 37 | 10 |
+| swift | 52 | 52 | 18 |
+| typescript | 55 | 55 | 17 |

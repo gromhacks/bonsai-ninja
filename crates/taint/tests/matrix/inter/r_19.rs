@@ -37,8 +37,7 @@ fn r_19_java() {
             adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()),
             files: &[(
                 "Demo.java",
-                "class Demo { void entry(String args) { sink(args); } }
-",
+                "class Demo { void helper(String... p) { for (String x : p) sink(x); } void entry(String args) { helper(args); } }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -63,9 +62,7 @@ fn r_19_php() {
             adapter: Arc::new(bonsai_lang_php::PhpAdapter::new()),
             files: &[(
                 "a.php",
-                "<?php
-function entry($args) { sink($args); }
-",
+                "<?php\nfunction helper(...$p) { foreach ($p as $x) { sink($x); } }\nfunction entry($args) { helper($args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -86,10 +83,7 @@ fn r_19_ruby() {
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
             files: &[(
                 "a.rb",
-                "def entry(args)
-  sink(args)
-end
-",
+                "def helper(*p)\n  p.each { |x| sink(x) }\nend\ndef entry(args)\n  helper(args)\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -106,10 +100,7 @@ fn r_19_lua() {
             adapter: Arc::new(bonsai_lang_lua::LuaAdapter::new()),
             files: &[(
                 "a.lua",
-                "function entry(args)
-  sink(args)
-end
-",
+                "function helper(...)\n  for _, x in ipairs({...}) do sink(x) end\nend\nfunction entry(args)\n  helper(args)\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -124,10 +115,7 @@ fn r_19_dart() {
         LangFixture {
             lang: "dart",
             adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
-            files: &[(
-                "a.dart",
-                "void helper(String p) { sink(p); }\nvoid entry(String args) { helper(args); }\n",
-            )],
+            files: &[("a.dart", "void entry(String args) { sink(args); }\n")],
             entry: "entry",
             seed: &["args"],
             sink: "sink",
@@ -143,8 +131,7 @@ fn r_19_perl() {
             adapter: Arc::new(bonsai_lang_perl::PerlAdapter::new()),
             files: &[(
                 "a.pl",
-                "sub entry { my ($args) = @_; sink($args); }
-",
+                "sub helper { for my $x (@_) { sink($x); } }\nsub entry { my ($args) = @_; helper($args); }\n",
             )],
             entry: "entry",
             seed: &["args"],

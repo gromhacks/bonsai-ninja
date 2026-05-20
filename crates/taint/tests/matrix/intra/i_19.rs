@@ -29,8 +29,7 @@ fn i_19_javascript() {
             adapter: Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
             files: &[(
                 "a.js",
-                "function entry(args) { sink(args); }
-",
+                "function entry(args) { const f = x => sink(x); f(args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -64,10 +63,7 @@ fn i_19_ruby() {
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
             files: &[(
                 "a.rb",
-                "def entry(args)
-  sink(args)
-end
-",
+                "def entry(args)\n  f = ->(x) { sink(x) }\n  f.call(args)\nend\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -84,8 +80,7 @@ fn i_19_java() {
             adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()),
             files: &[(
                 "Demo.java",
-                "class Demo { void entry(String args) { sink(args); } }
-",
+                "import java.util.function.Consumer;\nclass Demo { void entry(String args) { Consumer<String> f = x -> sink(x); f.accept(args); } }\n",
             )],
             entry: "entry",
             seed: &["args"],

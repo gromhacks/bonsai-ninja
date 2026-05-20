@@ -172,6 +172,10 @@ pub struct CallSiteRef {
     /// field writers (`env.cmd`) into callee field reads
     /// (`param.cmd`) without tainting the whole container.
     pub call_arg_places: SmallVec<[String; 4]>,
+    /// Adapter-extracted keyword / label names for call arguments.
+    /// Phase 3 uses these to stitch named arguments to the matching
+    /// callee parameter instead of relying only on positional order.
+    pub call_arg_names: SmallVec<[Option<String>; 4]>,
     /// True when this call site arose from `target = callee(args)`
     /// (a `FlowEvent::Assign` with `source_call`). Resolution still
     /// needs an explicit semantic callee or summary before any
@@ -1467,8 +1471,10 @@ fn walk_assign(
             // the conservative fallback.
             let mut arg_spans: SmallVec<[Span; 4]> = SmallVec::new();
             let mut arg_places: SmallVec<[String; 4]> = SmallVec::new();
+            let mut arg_names: SmallVec<[Option<String>; 4]> = SmallVec::new();
             for _ in 0..source_call_args.len() {
                 arg_spans.push(span);
+                arg_names.push(None);
             }
             for arg in source_call_args {
                 arg_places.push(arg.clone());
@@ -1486,6 +1492,7 @@ fn walk_assign(
                     receiver_arg_node: None,
                     call_arg_spans: arg_spans,
                     call_arg_places: arg_places,
+                    call_arg_names: arg_names,
                     is_assign_rhs: true,
                 });
             }
@@ -1588,6 +1595,7 @@ fn walk_call(
     let site = CallSiteId(span);
     let mut arg_nodes: SmallVec<[NodeId; 4]> = SmallVec::new();
     let mut arg_places: SmallVec<[String; 4]> = SmallVec::new();
+    let mut arg_names: SmallVec<[Option<String>; 4]> = SmallVec::new();
     for (idx, arg) in args.iter().enumerate() {
         let arg_idx = u8::try_from(idx).unwrap_or(u8::MAX);
         let arg_node = ctx.intern_node(Place::CallArg { site, idx: arg_idx });
@@ -1597,6 +1605,7 @@ fn walk_call(
             let _ = build_target_node(&arg_place, span, ctx);
         }
         arg_places.push(arg_place);
+        arg_names.push(arg.name.clone());
         // Connect every NAMED carrier the adapter exposed for this
         // arg expression to the CallArg node, not just the
         // canonical `place`. Some adapters (csharp, scala,
@@ -1777,6 +1786,7 @@ fn walk_call(
         if let Some(n) = emitted_arg_zero {
             arg_nodes.push(n);
             arg_places.push(String::new());
+            arg_names.push(None);
         }
     }
 
@@ -1795,6 +1805,9 @@ fn walk_call(
     while arg_places.len() < arg_nodes.len() {
         arg_places.push(String::new());
     }
+    while arg_names.len() < arg_nodes.len() {
+        arg_names.push(None);
+    }
     ctx.out.call_sites.push(CallSiteRef {
         site,
         callee_name: name.to_string(),
@@ -1807,6 +1820,7 @@ fn walk_call(
         receiver_arg_node,
         call_arg_spans: arg_spans,
         call_arg_places: arg_places,
+        call_arg_names: arg_names,
         is_assign_rhs: false,
     });
     apply_source_output_arg_writes(span, name, args, ctx);
