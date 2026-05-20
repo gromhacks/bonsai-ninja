@@ -157,10 +157,9 @@ impl LanguageAdapter for ObjCAdapter {
                 ) {
                     continue;
                 }
-                if let Some(bases) = bases_by_class
-                    .iter()
-                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
-                {
+                if let Some(bases) = bases_by_class.iter().find_map(|(span, name, bases)| {
+                    (*span == decl.span || name == &decl.name).then_some(bases)
+                }) {
                     decl.bases = bases.clone();
                 }
             }
@@ -510,15 +509,16 @@ fn objc_alloc_class_name(receiver: &str) -> Option<String> {
 /// AuditedRepository : Repository` and `@interface Foo (Cat) :
 /// Bar` shapes surface here so super dispatch + protocol
 /// conformance both inform the resolver.
-fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, Vec<String>)> {
+fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, String, Vec<String>)> {
     let class_kinds = &[
         "class_interface",
         "class_implementation",
         "category_interface",
         "category_implementation",
     ];
-    let mut out: Vec<(Span, Vec<String>)> = Vec::new();
+    let mut out: Vec<(Span, String, Vec<String>)> = Vec::new();
     for class_node in collect_kinds(tree, class_kinds) {
+        let class_name = objc_class_name(class_node, src).unwrap_or_default();
         let mut bases: Vec<String> = Vec::new();
         if let Some(superclass) = class_node
             .child_by_field_name("superclass")
@@ -557,18 +557,31 @@ fn collect_objc_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span,
         if !bases.is_empty() {
             // Merge into an existing entry for the same span if the
             // adapter already collected partial info.
-            if let Some((_, existing)) = out.iter_mut().find(|(span, _)| *span == class_span) {
+            if let Some((_, _, existing)) = out.iter_mut().find(|(span, _, _)| *span == class_span) {
                 for base in bases {
                     if !existing.iter().any(|already| already == &base) {
                         existing.push(base);
                     }
                 }
             } else {
-                out.push((class_span, bases));
+                out.push((class_span, class_name, bases));
             }
         }
     }
     out
+}
+
+fn objc_class_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let name_node = node
+        .child_by_field_name("name")
+        .or_else(|| first_named_child_of_kind(&node, "type_identifier"))
+        .or_else(|| first_named_child_of_kind(&node, "identifier"))?;
+    let name = node_text(&name_node, src).trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// Strip a base entry to the bare type name. Drops trailing
@@ -622,6 +635,7 @@ fn collect_objc_method_type_aliases(
         if let Some(params_list) = find_objc_parameter_list(fn_node) {
             collect_objc_c_parameter_aliases(params_list, src, &mut aliases);
         }
+        collect_objc_local_type_aliases(fn_node, src, &mut aliases);
         // ObjC selector parameters appear as `keyword_argument`
         // children of the method declaration node.
         let mut cursor = fn_node.walk();
@@ -636,6 +650,64 @@ fn collect_objc_method_type_aliases(
         }
     }
     aliases_by_fn
+}
+
+fn collect_objc_local_type_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "declaration" {
+            objc_declaration_aliases(current, src, aliases);
+        }
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn objc_declaration_aliases(node: Node<'_>, src: &[u8], aliases: &mut Vec<TypeAliasBinding>) {
+    let Some(type_node) = node
+        .child_by_field_name("type")
+        .or_else(|| objc_declaration_type_node(node))
+    else {
+        return;
+    };
+    let Some(canonical_type) = canonical_objc_type_name(node_text(&type_node, src)) else {
+        return;
+    };
+    if let Some(declarator) = node.child_by_field_name("declarator") {
+        if let Some(name) = objc_declarator_identifier(declarator, src) {
+            push_objc_type_alias(aliases, &name, &canonical_type);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() != "init_declarator" {
+            continue;
+        }
+        if let Some(declarator) = child.child_by_field_name("declarator") {
+            if let Some(name) = objc_declarator_identifier(declarator, src) {
+                push_objc_type_alias(aliases, &name, &canonical_type);
+            }
+        }
+    }
+}
+
+fn objc_declaration_type_node(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "type_identifier"
+                | "primitive_type"
+                | "sized_type_specifier"
+                | "qualified_type_identifier"
+                | "generic_type_specifier"
+        ) {
+            return Some(child);
+        }
+    }
+    None
 }
 
 /// Walk the `function_declarator` chain to find the

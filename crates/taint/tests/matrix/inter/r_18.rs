@@ -88,6 +88,20 @@ fn r_18_csharp() {
     run_r_18(LangFixture { lang:"csharp", adapter:Arc::new(bonsai_lang_csharp::CSharpAdapter::new()), files:&[("Demo.cs","class Demo { void Helper(string p = \"ok\") { Sink(p); } void Entry(string args) { Helper(); } }\n")], entry:"Entry", seed:&["args"], sink:"Sink" });
 }
 #[test]
+fn r_18_cpp() {
+    run_r_18(LangFixture {
+        lang: "cpp",
+        adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
+        files: &[(
+            "a.cpp",
+            "void helper(const char *p = \"ok\") { sink(p); }\nvoid entry(const char *args) { helper(); }\n",
+        )],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+#[test]
 fn r_18_swift() {
     run_r_18(LangFixture {
         lang: "swift",

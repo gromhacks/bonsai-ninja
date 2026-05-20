@@ -89,6 +89,11 @@ use tree_sitter::{Language, Node, Tree};
 use branch_repair::{looks_like_branch_arm_node, repair_branch_events_by_else_keyword};
 use foreach_header::split_foreach_header;
 
+/// Internal carrier name for language-level rest/varargs values that
+/// have no user-visible identifier, such as Lua `...` and C-family
+/// `...` parameters. This is syntax semantics, not a security rule.
+pub const SYNTHETIC_VARARGS_PARAM: &str = "__bonsai_varargs";
+
 /// Look up a language from the pack and wrap any error nicely.
 pub fn language_from_pack(name: &str) -> Result<Language, AdapterError> {
     tree_sitter_language_pack::get_language(name)
@@ -535,6 +540,7 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "if",
         "unless",
         "case",
+        "case_match",
         // Switch / match / when all branch on a discriminant.
         "switch_statement",
         "switch_expression",
@@ -3129,6 +3135,13 @@ fn synthetic_function_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
 }
 
 fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    out.extend(extract_instanceof_pattern_binding_assigns(file, node, src));
+    out.extend(extract_is_pattern_binding_assigns(file, node, src));
+    out.extend(extract_kotlin_when_subject_binding_assigns(file, node, src));
+    out.extend(extract_case_match_binding_assigns(file, node, src));
+    out.extend(extract_case_pattern_binding_assigns(file, node, src));
+
     // Two grammars to cover: Python `match SUBJECT: case PAT:` (text
     // path) and Rust / Scala / Kotlin / Swift / Dart `match SUBJECT
     // { PAT => BODY }` (AST path). Rust's tree-sitter grammar
@@ -3140,21 +3153,22 @@ fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> V
         node.kind(),
         "match_expression" | "if_let_expression" | "while_let_expression"
     ) {
-        return extract_rust_style_match_bindings(file, node, src);
+        out.extend(extract_rust_style_match_bindings(file, node, src));
+        return out;
     }
     let text = node_text(node, src);
     let trimmed = text.trim_start();
     let Some(after_match) = trimmed.strip_prefix("match ") else {
-        return Vec::new();
+        return out;
     };
     let Some((subject, rest)) = after_match.split_once(':') else {
-        return Vec::new();
+        return out;
     };
     let subject = subject.trim();
     if !looks_like_bare_identifier(subject) {
-        return Vec::new();
+        return out;
     }
-    let mut targets = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
     for line in rest.lines() {
         let line = line.trim_start();
         let Some(pattern) = line.strip_prefix("case ") else {
@@ -3172,19 +3186,345 @@ fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> V
     }
     targets.sort();
     targets.dedup();
+    out.extend(targets.into_iter().map(|target| FlowEvent::Assign {
+        span: span_of(file, node),
+        target,
+        source_name: Some(subject.to_string()),
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: Vec::new(),
+        declares_new_binding: false,
+        value_kind: None,
+    }));
+    out
+}
+
+fn extract_instanceof_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    let mut stack = vec![*node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "instanceof_expression" {
+            if let (Some(source), Some(target)) = (
+                current.child_by_field_name("left"),
+                current.child_by_field_name("name"),
+            ) {
+                let target_text = node_text(&target, src).trim();
+                if looks_like_bare_identifier(target_text) {
+                    let source_text = node_text(&source, src).trim();
+                    let source_name =
+                        looks_like_bare_identifier(source_text).then(|| source_text.to_string());
+                    let mut source_names = identifier_tokens_from_text(source_text);
+                    if source_names.is_empty() {
+                        if let Some(source_name) = source_name.as_ref() {
+                            source_names.push(source_name.clone());
+                        }
+                    }
+                    source_names.retain(|name| !same_identifier_name(name, target_text));
+                    source_names.sort();
+                    source_names.dedup();
+                    out.push(FlowEvent::Assign {
+                        span: span_of(file, &current),
+                        target: target_text.to_string(),
+                        source_name,
+                        source_call: None,
+                        source_call_args: Vec::new(),
+                        source_names,
+                        declares_new_binding: false,
+                        value_kind: None,
+                    });
+                }
+            }
+        }
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+fn extract_is_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    let mut stack = vec![*node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "is_pattern_expression" {
+            if let (Some(source), Some(pattern)) = (
+                current.child_by_field_name("expression"),
+                current.child_by_field_name("pattern"),
+            ) {
+                let source_text = node_text(&source, src).trim();
+                for target in binding_targets_from_pattern_node(&pattern, src) {
+                    if let Some(assign) = pattern_binding_assign(file, &current, &target, source_text) {
+                        out.push(assign);
+                    }
+                }
+            }
+        }
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+fn extract_kotlin_when_subject_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    let mut stack = vec![*node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "when_subject" {
+            let Some(decl) = first_named_child_of_kind(&current, "variable_declaration") else {
+                continue;
+            };
+            let Some(target_node) = first_identifier_descendant(decl) else {
+                continue;
+            };
+            let target = node_text(&target_node, src);
+            let subject_text = node_text(&current, src);
+            let source_text = subject_text
+                .split_once('=')
+                .map(|(_, rhs)| rhs.trim())
+                .unwrap_or_default();
+            if let Some(assign) = pattern_binding_assign(file, &current, &target, source_text) {
+                out.push(assign);
+            }
+        }
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+fn extract_case_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    if node.kind() != "case_match" {
+        return Vec::new();
+    }
+    let Some(subject) = node.child_by_field_name("value") else {
+        return Vec::new();
+    };
+    let subject_text = node_text(&subject, src).trim();
+    let source_name = looks_like_bare_identifier(subject_text).then(|| subject_text.to_string());
+    let mut source_names = identifier_tokens_from_text(subject_text);
+    if source_names.is_empty() {
+        if let Some(source_name) = source_name.as_ref() {
+            source_names.push(source_name.clone());
+        }
+    }
+
+    let mut targets: Vec<String> = Vec::new();
+    let mut cursor = node.walk();
+    let mut stack = vec![*node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "in_clause" {
+            if let Some(pattern) = current
+                .child_by_field_name("pattern")
+                .or_else(|| first_named_child(&current))
+            {
+                let pattern_text = node_text(&pattern, src);
+                for target in binding_tokens_from_pattern(pattern_text) {
+                    if !targets.iter().any(|seen| same_identifier_name(seen, &target)) {
+                        targets.push(target);
+                    }
+                }
+            }
+        }
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
     targets
         .into_iter()
+        .filter(|target| {
+            !source_names
+                .iter()
+                .any(|source| same_identifier_name(source, target))
+        })
         .map(|target| FlowEvent::Assign {
             span: span_of(file, node),
             target,
-            source_name: Some(subject.to_string()),
+            source_name: source_name.clone(),
             source_call: None,
             source_call_args: Vec::new(),
-            source_names: Vec::new(),
+            source_names: source_names.clone(),
             declares_new_binding: false,
             value_kind: None,
         })
         .collect()
+}
+
+fn extract_case_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    let Some(subject) = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("subject"))
+        .or_else(|| node.child_by_field_name("expr"))
+        .or_else(|| node.child_by_field_name("expression"))
+        .or_else(|| node.child_by_field_name("condition"))
+        .or_else(|| node.child_by_field_name("discriminant"))
+    else {
+        return Vec::new();
+    };
+    let subject_text = node_text(&subject, src).trim();
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    let mut stack = vec![*node];
+    while let Some(current) = stack.pop() {
+        if matches!(
+            current.kind(),
+            "case_clause"
+                | "switch_statement_case"
+                | "switch_entry"
+                | "cr_clause"
+                | "match_arm"
+                | "match_block_arm"
+                | "match_expression_arm"
+        ) {
+            let mut patterns = Vec::new();
+            for field in ["pattern", "pat"] {
+                if let Some(pattern) = current.child_by_field_name(field) {
+                    patterns.push(pattern);
+                }
+            }
+            for kind in ["variable_pattern", "switch_pattern"] {
+                if let Some(pattern) = first_named_child_of_kind(&current, kind) {
+                    patterns.push(pattern);
+                }
+            }
+            for pattern in patterns {
+                for target in binding_targets_from_pattern_node(&pattern, src) {
+                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject_text) {
+                        out.push(assign);
+                    }
+                }
+            }
+        }
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    dedup_assign_events(out)
+}
+
+fn binding_targets_from_pattern_node(pattern: &Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut cursor = pattern.walk();
+    let mut stack = vec![*pattern];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "var" {
+            push_binding_target(&mut targets, node_text(&current, src));
+        }
+        for field in ["name", "bound_identifier"] {
+            if let Some(target) = current.child_by_field_name(field) {
+                push_binding_target(&mut targets, node_text(&target, src));
+            }
+        }
+        if current.kind() == "variable_pattern" {
+            let mut child_cursor = current.walk();
+            let mut last_identifier = None;
+            for child in current.named_children(&mut child_cursor) {
+                if matches!(
+                    child.kind(),
+                    "identifier"
+                        | "simple_identifier"
+                        | "field_identifier"
+                        | "shorthand_property_identifier_pattern"
+                ) {
+                    last_identifier = Some(node_text(&child, src));
+                }
+            }
+            if let Some(target) = last_identifier {
+                push_binding_target(&mut targets, target);
+            }
+        }
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    if targets.is_empty() {
+        for target in binding_tokens_from_pattern(node_text(pattern, src)) {
+            push_binding_target(&mut targets, &target);
+        }
+    }
+    targets.sort();
+    targets.dedup_by(|left, right| same_identifier_name(left, right));
+    targets
+}
+
+fn push_binding_target(out: &mut Vec<String>, raw: &str) {
+    let target = raw.trim().trim_start_matches(&['$', '@', '%'][..]);
+    if !target.is_empty()
+        && looks_like_bare_identifier(target)
+        && !out.iter().any(|seen| same_identifier_name(seen, target))
+    {
+        out.push(target.to_string());
+    }
+}
+
+fn pattern_binding_assign(
+    file: FileId,
+    span_node: &Node<'_>,
+    target: &str,
+    source_text: &str,
+) -> Option<FlowEvent> {
+    let source_text = source_text.trim();
+    if source_text.is_empty() || !looks_like_bare_identifier(target) {
+        return None;
+    }
+    let source_name = looks_like_bare_identifier(source_text).then(|| source_text.to_string());
+    let mut source_names = identifier_tokens_from_text(source_text);
+    if source_names.is_empty() {
+        if let Some(source_name) = source_name.as_ref() {
+            source_names.push(source_name.clone());
+        }
+    }
+    source_names.retain(|name| !same_identifier_name(name, target));
+    source_names.sort();
+    source_names.dedup();
+    if source_name.is_none() && source_names.is_empty() {
+        return None;
+    }
+    Some(FlowEvent::Assign {
+        span: span_of(file, span_node),
+        target: target.to_string(),
+        source_name,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names,
+        declares_new_binding: false,
+        value_kind: None,
+    })
+}
+
+fn dedup_assign_events(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    for event in events {
+        let duplicate = match &event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_names,
+                ..
+            } => out.iter().any(|seen| {
+                matches!(
+                    seen,
+                    FlowEvent::Assign {
+                        target: seen_target,
+                        source_name: seen_source_name,
+                        source_names: seen_source_names,
+                        ..
+                    } if same_identifier_name(seen_target, target)
+                        && seen_source_name == source_name
+                        && seen_source_names == source_names
+                )
+            }),
+            _ => false,
+        };
+        if !duplicate {
+            out.push(event);
+        }
+    }
+    out
 }
 
 /// Walk a Rust-style `match_expression` / `if_let_expression` /
@@ -3332,6 +3672,13 @@ fn extract_comprehension_for_clause_assigns(file: FileId, clause: &Node<'_>, src
 
 fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
     let text = node_text(node, src);
+    foreach_binding_assigns_from_text(span_of(file, node), text)
+}
+
+/// Synthesize loop-variable bindings from a source-level foreach
+/// header. Adapters call this as a repair pass when their grammar
+/// exposes a loop body but not a standard foreach node kind.
+pub fn foreach_binding_assigns_from_text(span: Span, text: &str) -> Vec<FlowEvent> {
     let Some((lhs, rhs)) = split_foreach_header(text) else {
         return Vec::new();
     };
@@ -3350,11 +3697,11 @@ fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) ->
     // Surface operand identifiers as source_names so the taint engine
     // can propagate through the binding without assuming anything
     // about an arbitrary callee's return value.
-    let source_names = identifier_tokens_from_text(rhs);
+    let source_names = iterable_source_names_from_text(rhs);
     targets
         .into_iter()
         .map(|target| FlowEvent::Assign {
-            span: span_of(file, node),
+            span,
             target,
             source_name: source_name.clone(),
             source_call: None,
@@ -3364,6 +3711,16 @@ fn extract_foreach_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) ->
             value_kind: None,
         })
         .collect()
+}
+
+fn iterable_source_names_from_text(text: &str) -> Vec<String> {
+    let mut source_names = identifier_tokens_from_text(text);
+    if text.contains("...") && !source_names.iter().any(|name| name == SYNTHETIC_VARARGS_PARAM) {
+        source_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
+    }
+    source_names.sort();
+    source_names.dedup();
+    source_names
 }
 
 /// Extract bare-identifier-shaped tokens from arbitrary expression
@@ -4059,7 +4416,7 @@ pub fn decl_index_with_handler(
                     lambda.start_position().column + 1
                 )
             },
-            |name_node| node_text(&name_node, src).trim().to_string(),
+            |name_node| callable_binding_name_from_text(node_text(&name_node, src)),
         );
         if name.is_empty() {
             continue;
@@ -4236,6 +4593,38 @@ pub fn decl_index_with_handler(
         strings,
         comments,
     }
+}
+
+fn callable_binding_name_from_text(text: &str) -> String {
+    let trimmed = text.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if looks_like_bare_identifier(trimmed.trim_start_matches('$')) {
+        return trimmed.to_string();
+    }
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in trimmed.chars() {
+        if ch == '$' || ch == '_' || ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+        .into_iter()
+        .rev()
+        .find(|token| {
+            let bare = token.trim_start_matches('$');
+            !bare.is_empty()
+                && looks_like_bare_identifier(bare)
+                && !matches!(bare, "my" | "our" | "local" | "let" | "var" | "const")
+        })
+        .unwrap_or_default()
 }
 
 fn pre_body_call_events(
@@ -7614,6 +8003,302 @@ fn c_family_function_pointer_alias(
     Some((span_of(file, node), target, source))
 }
 
+/// Rewrite syntax-proven callable-reference assignments into the
+/// canonical local callable-alias shape consumed by the callgraph and
+/// taint engines.
+///
+/// This is intentionally syntax-only. It recognizes language surfaces
+/// that pass a callable value instead of invoking it (`this::helper`,
+/// `&helper/1`, `method(:helper)`, qualified callable paths, etc.) and
+/// leaves resolution to the semantic resolver. Plain identifier aliases
+/// such as `cb = helper` already come from the generic assignment
+/// walker, so this helper only fills gaps where the original HIR looks
+/// like a literal or call-result despite being a callable value.
+pub fn inject_callable_reference_aliases_from_source(events: &mut [FlowEvent], source: &str) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } => {
+                let Some(rhs) = assignment_rhs_from_span(source, *span) else {
+                    continue;
+                };
+                if !rhs_is_non_bare_callable_reference(rhs) {
+                    continue;
+                }
+                *source_name = Some(rhs.to_string());
+                *source_call = None;
+                source_call_args.clear();
+                source_names.clear();
+                *value_kind = Some(crate::AssignValueKind::Compound);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_callable_reference_aliases_from_source(then_events, source);
+                inject_callable_reference_aliases_from_source(else_events, source);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_callable_reference_aliases_from_source(body, source);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_callable_reference_aliases_from_source(body, source);
+                inject_callable_reference_aliases_from_source(catch_events, source);
+                inject_callable_reference_aliases_from_source(finally_events, source);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract formal parameter names from common anonymous callable
+/// surface syntax. This is intentionally syntax-level and
+/// language-agnostic: it recognizes lambda/closure delimiters such as
+/// `x => ...`, `{ x: T -> ... }`, `{ (x: T) in ... }`, `|x| ...`,
+/// `function(x) { ... }`, and `^(T x) { ... }`.
+pub fn callable_param_names_from_text(text: &str) -> Vec<String> {
+    let text = text.trim().trim_end_matches(';').trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let segment = if let Some(rest) = text.strip_prefix("lambda ") {
+        rest.split_once(':').map(|(params, _)| params)
+    } else if let Some(rest) = text.strip_prefix("fn ") {
+        rest.split_once("->").map(|(params, _)| params)
+    } else if text.starts_with("function") || text.starts_with("func ") || text.starts_with("sub ") {
+        first_parenthesized_segment(text)
+    } else if text.starts_with("->") || text.starts_with('^') {
+        first_parenthesized_segment(text)
+    } else if text.starts_with('|') {
+        text[1..].split_once('|').map(|(params, _)| params)
+    } else if text.starts_with('{') {
+        text.split_once("->")
+            .map(|(params, _)| params.trim_start_matches('{').trim())
+            .or_else(|| {
+                text.split_once(" in ")
+                    .map(|(params, _)| params.trim_start_matches('{').trim())
+            })
+    } else {
+        text.split_once("=>")
+            .map(|(params, _)| params)
+            .or_else(|| text.split_once("->").map(|(params, _)| params))
+            .or_else(|| {
+                text.starts_with('(')
+                    .then(|| first_parenthesized_segment(text))
+                    .flatten()
+            })
+    };
+
+    segment.map(param_names_from_segment).unwrap_or_default()
+}
+
+fn first_parenthesized_segment(text: &str) -> Option<&str> {
+    let open = text.find('(')?;
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (idx, ch) in text[open..].char_indices() {
+        let absolute = open + idx;
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return text.get(open + 1..absolute);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn param_names_from_segment(segment: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for piece in split_top_level_commas(segment) {
+        if let Some(name) = param_name_from_piece(&piece) {
+            if !out.iter().any(|existing| existing == &name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+fn split_top_level_commas(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(text[start..idx].to_string());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(text[start..].to_string());
+    parts
+}
+
+fn param_name_from_piece(piece: &str) -> Option<String> {
+    if piece.trim() == "..." {
+        return Some(SYNTHETIC_VARARGS_PARAM.to_string());
+    }
+    let mut piece = piece
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim()
+        .trim_start_matches("mut ")
+        .trim_start_matches("ref ")
+        .trim_start_matches("inout ")
+        .trim_start_matches("required ")
+        .trim()
+        .trim_start_matches("...")
+        .trim();
+    if piece.is_empty() || piece == "_" {
+        return None;
+    }
+    if let Some((before, _)) = piece.split_once('=') {
+        piece = before.trim();
+    }
+    if let Some((before, _)) = piece.split_once(':') {
+        piece = before.trim();
+    }
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in piece.chars() {
+        if ch == '$' || ch == '_' || ch.is_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens.into_iter().rev().find(|token| {
+        let bare = token.trim_start_matches('$');
+        !bare.is_empty()
+            && bare != "_"
+            && looks_like_bare_identifier(bare)
+            && !matches!(
+                bare,
+                "const" | "var" | "let" | "final" | "void" | "func" | "function"
+            )
+    })
+}
+
+fn assignment_rhs_from_span(source: &str, span: Span) -> Option<&str> {
+    let start = usize::try_from(span.start).ok()?.min(source.len());
+    let end = usize::try_from(span.end).ok()?.min(source.len());
+    if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    let text = source.get(start..end)?;
+    let rhs = assignment_rhs_text(text)?.trim();
+    Some(rhs.trim_end_matches(';').trim())
+}
+
+fn rhs_is_non_bare_callable_reference(rhs: &str) -> bool {
+    let rhs = rhs.trim();
+    if rhs.is_empty() {
+        return false;
+    }
+    // A quoted bare word is first a data literal. Treating every
+    // `"abc"` / `'abc'` assignment as a callable alias pollutes
+    // FlowEvent source slots and prevents literal overwrites from
+    // being classified as clean writes. Quoted callback strings in
+    // actual call arguments are still handled by
+    // `callable_reference_variants` at the call site; assignment-level
+    // aliasing requires explicit callable-reference syntax.
+    if quoted_bare_word(rhs) {
+        return false;
+    }
+    if !rhs_has_explicit_callable_reference_syntax(rhs) {
+        return false;
+    }
+    let variants = bonsai_common::callable_reference_variants(rhs);
+    variants
+        .iter()
+        .any(|variant| variant.trim() != rhs && looks_like_bare_identifier(variant.trim()))
+}
+
+fn rhs_has_explicit_callable_reference_syntax(rhs: &str) -> bool {
+    let rhs = rhs.trim();
+    rhs.starts_with('&')
+        || rhs.starts_with("\\&")
+        || rhs.starts_with("fun ")
+        || rhs.starts_with("method(")
+        || rhs.contains("::")
+        || rhs.ends_with('.')
+        || rhs.ends_with("->")
+}
+
+fn quoted_bare_word(value: &str) -> bool {
+    let value = value.trim();
+    let Some(quote) = value.as_bytes().first().copied() else {
+        return false;
+    };
+    if !matches!(quote, b'\'' | b'"' | b'`') || value.as_bytes().last().copied() != Some(quote) {
+        return false;
+    }
+    let Some(inner) = value.get(1..value.len().saturating_sub(1)) else {
+        return false;
+    };
+    looks_like_bare_identifier(inner.trim())
+}
+
 fn c_family_declarator_is_function_pointer(node: &Node<'_>) -> bool {
     if node.kind() == "function_declarator" && subtree_has_kind(node, "pointer_declarator") {
         return true;
@@ -8071,6 +8756,14 @@ fn receiver_types_for_expr(
     let normalized = normalize_receiver_type_expr(receiver);
     let tail = short_name_of(&normalized);
     let mut out = Vec::new();
+    if let Some(inner) = receiver_class_object_inner_expr(&normalized) {
+        for ty in receiver_types_for_expr(inner, aliases, implicit_receiver_types, class_facts) {
+            push_unique_receiver_type(&mut out, ty);
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
     if let Some(projected_type) = receiver_projected_type_name(&normalized, class_facts) {
         push_receiver_type_and_bases(&mut out, projected_type, class_facts);
         return out;
@@ -8102,6 +8795,25 @@ fn receiver_types_for_expr(
         }
     }
     out
+}
+
+fn receiver_class_object_inner_expr(receiver: &str) -> Option<&str> {
+    let expr = receiver.trim();
+    if let Some(inner) = expr.strip_prefix("type(").and_then(|rest| rest.strip_suffix(')')) {
+        let inner = inner.trim();
+        if !inner.is_empty() {
+            return Some(inner);
+        }
+    }
+    for suffix in [".__class__", ".class", ".constructor"] {
+        if let Some(inner) = expr.strip_suffix(suffix) {
+            let inner = inner.trim();
+            if !inner.is_empty() {
+                return Some(inner);
+            }
+        }
+    }
+    None
 }
 
 fn receiver_projected_alias_matches(receiver: &str, alias_name: &str) -> bool {

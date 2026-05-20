@@ -3,11 +3,11 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, language_from_pack, node_text, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
+        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
+        walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding,
+    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding,
     TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::Node;
@@ -114,6 +114,7 @@ impl LanguageAdapter for SwiftAdapter {
             // enclosing class so receiver dispatch reaches the real
             // method decl.
             let class_field_aliases = collect_swift_class_field_aliases(&tree, file, src);
+            synthesize_swift_constructor_decls(&mut idx, file, &tree, src);
             let class_span_for_parent: std::collections::HashMap<bonsai_common::SymbolId, Span> = idx
                 .defs
                 .iter()
@@ -236,6 +237,146 @@ fn normalize_swift_parameter_names(decl: &mut bonsai_lang_api::Decl) {
         .collect::<std::collections::HashSet<_>>();
     decl.params
         .retain(|param| !type_names.contains(param) || alias_names.contains(param));
+}
+
+fn synthesize_swift_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
+    let class_names = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| decl.name.clone())
+        .collect::<Vec<_>>();
+    let classes = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.symbol, decl.name.clone(), decl.name_span))
+        .collect::<Vec<_>>();
+    let mut next = idx
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    for init in collect_kinds(tree, &["init_declaration"]) {
+        let Some(class_node) = nearest_swift_class_node(init) else {
+            continue;
+        };
+        let class_span = span_of(file, &class_node);
+        let Some((_, class_symbol, class_name, class_name_span)) =
+            classes.iter().find(|(span, _, _, _)| *span == class_span)
+        else {
+            continue;
+        };
+        let body = first_named_child_of_kind(&init, "function_body").unwrap_or(init);
+        let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+        idx.defs.push(swift_constructor_decl(
+            bonsai_common::SymbolId::new(next),
+            *class_symbol,
+            class_name,
+            *class_name_span,
+            span_of(file, &init),
+            span_of(file, &body),
+            constructor_param_names(init, src),
+            flow_events,
+        ));
+        next = next.saturating_add(1);
+    }
+}
+
+fn nearest_swift_class_node(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if matches!(
+            parent.kind(),
+            "class_declaration" | "struct_declaration" | "enum_declaration" | "extension_declaration"
+        ) {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
+fn swift_constructor_decl(
+    symbol: bonsai_common::SymbolId,
+    parent: bonsai_common::SymbolId,
+    class_name: &str,
+    name_span: Span,
+    span: Span,
+    body_span: Span,
+    params: Vec<String>,
+    flow_events: Vec<bonsai_lang_api::FlowEvent>,
+) -> Decl {
+    Decl {
+        symbol,
+        kind: DeclKind::Constructor,
+        name: class_name.to_string(),
+        qualified_name: None,
+        module_path: bonsai_lang_api::ModulePath::default(),
+        span,
+        name_span,
+        visibility: Visibility::Public,
+        parent: Some(parent),
+        body_span: Some(body_span),
+        flow_events,
+        has_implicit_returns: false,
+        params,
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
+        receiver_state_sources: Vec::new(),
+        return_type: None,
+    }
+}
+
+fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    collect_descendant_kinds(node, &["parameter"])
+        .into_iter()
+        .filter_map(|param| parameter_binding_name(param, src))
+        .collect()
+}
+
+fn parameter_binding_name(param: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut names = Vec::new();
+    collect_binding_identifiers(param, src, &mut names);
+    names.into_iter().rev().find(|name| name != "_")
+}
+
+fn collect_binding_identifiers(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    if matches!(node.kind(), "simple_identifier" | "identifier") {
+        let name = node_text(&node, src).trim();
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "user_type" | "type_identifier") {
+            continue;
+        }
+        collect_binding_identifiers(child, src, out);
+    }
+}
+
+fn collect_descendant_kinds<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if kinds.contains(&current.kind()) {
+            out.push(current);
+        }
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
 }
 
 /// Walk every Swift class-like declaration and pull `(name, type)`

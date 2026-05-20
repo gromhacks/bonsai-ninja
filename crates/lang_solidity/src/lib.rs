@@ -175,6 +175,19 @@ impl LanguageAdapter for SolidityAdapter {
                     decl.type_aliases = aliases.clone();
                 }
             }
+            let local_aliases_by_span = collect_solidity_local_variable_type_aliases(&tree, file, src);
+            for decl in &mut idx.defs {
+                if let Some(aliases) = local_aliases_by_span
+                    .iter()
+                    .find_map(|(span, aliases)| (*span == decl.span).then_some(aliases))
+                {
+                    for alias in aliases {
+                        if !decl.type_aliases.contains(alias) {
+                            decl.type_aliases.push(alias.clone());
+                        }
+                    }
+                }
+            }
             let state_aliases_by_class = collect_solidity_state_variable_type_aliases(&tree, file, src);
             for decl in &mut idx.defs {
                 if !is_callable_decl(decl.kind) {
@@ -199,10 +212,9 @@ impl LanguageAdapter for SolidityAdapter {
                 if !is_class_like(decl.kind) {
                     continue;
                 }
-                if let Some(bases) = bases_by_span
-                    .iter()
-                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
-                {
+                if let Some(bases) = bases_by_span.iter().find_map(|(span, name, bases)| {
+                    (*span == decl.span || name == &decl.name).then_some(bases)
+                }) {
                     decl.bases = bases.clone();
                 }
             }
@@ -690,6 +702,53 @@ fn canonical_solidity_type_name(raw: &str) -> String {
         .to_string()
 }
 
+fn collect_solidity_local_variable_type_aliases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<TypeAliasBinding>)> {
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(tree, SOLIDITY_TYPE_ALIASES.fn_kinds) {
+        let mut aliases = Vec::new();
+        for decl_node in collect_solidity_variable_declarations_under(fn_node) {
+            let Some(name_node) = decl_node.child_by_field_name("name") else {
+                continue;
+            };
+            let Some(type_node) = decl_node.child_by_field_name("type") else {
+                continue;
+            };
+            let name = node_text(&name_node, src).trim().to_string();
+            let type_name = canonical_solidity_type_name(node_text(&type_node, src));
+            if name.is_empty() || type_name.is_empty() || name == type_name {
+                continue;
+            }
+            let alias = TypeAliasBinding { name, type_name };
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+        if !aliases.is_empty() {
+            out.push((span_of(file, &fn_node), aliases));
+        }
+    }
+    out
+}
+
+fn collect_solidity_variable_declarations_under(root: tree_sitter::Node<'_>) -> Vec<tree_sitter::Node<'_>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "variable_declaration" {
+            out.push(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
 /// Walk Solidity contract / interface / library declarations and
 /// collect bare base contract names from `inheritance_specifier`
 /// children. Grammar shape (verified):
@@ -708,7 +767,7 @@ fn collect_solidity_class_bases(
     tree: &Tree,
     file: FileId,
     src: &[u8],
-) -> Vec<(bonsai_common::Span, Vec<String>)> {
+) -> Vec<(bonsai_common::Span, String, Vec<String>)> {
     let mut bases_by_class = Vec::new();
     let class_kinds = &[
         "contract_declaration",
@@ -716,6 +775,7 @@ fn collect_solidity_class_bases(
         "library_declaration",
     ];
     for class_node in collect_kinds(tree, class_kinds) {
+        let class_name = solidity_class_name(class_node, src).unwrap_or_default();
         let mut bases: Vec<String> = Vec::new();
         let mut child_cursor = class_node.walk();
         for child in class_node.named_children(&mut child_cursor) {
@@ -736,10 +796,32 @@ fn collect_solidity_class_bases(
             }
         }
         if !bases.is_empty() {
-            bases_by_class.push((span_of(file, &class_node), bases));
+            bases_by_class.push((span_of(file, &class_node), class_name, bases));
         }
     }
     bases_by_class
+}
+
+fn solidity_class_name(node: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    let name_node = if let Some(name_node) = node.child_by_field_name("name") {
+        name_node
+    } else {
+        let mut found = None;
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() == "identifier" {
+                found = Some(child);
+                break;
+            }
+        }
+        found?
+    };
+    let name = node_text(&name_node, src).trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// Canonicalize a base-contract reference to a bare type name.

@@ -29,7 +29,7 @@ fn i_16_scala() {
             adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()),
             files: &[(
                 "a.scala",
-                "object Demo { def entry(args: String): Unit = sink(args) }\n",
+                "object Demo { def entry(args: String): Unit = args match { case v => sink(v) } }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -46,7 +46,7 @@ fn i_16_swift() {
             adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
             files: &[(
                 "a.swift",
-                "func entry(args: String) { sink(args) }
+                "func entry(args: String) { switch args { case let v: sink(v) } }
 ",
             )],
             entry: "entry",
@@ -64,7 +64,7 @@ fn i_16_csharp() {
             adapter: Arc::new(bonsai_lang_csharp::CSharpAdapter::new()),
             files: &[(
                 "Demo.cs",
-                "class Demo { void Entry(string args) { Sink(args); } }
+                "class Demo { void Entry(object args) { if (args is string v) { Sink(v); } } }
 ",
             )],
             entry: "Entry",
@@ -82,7 +82,7 @@ fn i_16_kotlin() {
             adapter: Arc::new(bonsai_lang_kotlin::KotlinAdapter::new()),
             files: &[(
                 "a.kt",
-                "fun entry(args: Any) { when (args) { is String -> sink(args) } }\n",
+                "fun entry(args: Any) { when (val v = args) { is String -> sink(v) } }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -118,7 +118,9 @@ fn i_16_elixir() {
                 "a.ex",
                 "defmodule Demo do
   def entry(args) do
-    sink(args)
+    case args do
+      v -> sink(v)
+    end
   end
 end
 ",
@@ -138,7 +140,7 @@ fn i_16_erlang() {
             adapter: Arc::new(bonsai_lang_erlang::ErlangAdapter::new()),
             files: &[(
                 "demo.erl",
-                "-module(demo).\n-export([entry/1]).\nentry(Args) -> sink(Args).\n",
+                "-module(demo).\n-export([entry/1]).\nentry(Args) -> case Args of V -> sink(V) end.\n",
             )],
             entry: "entry",
             seed: &["Args"],
@@ -153,7 +155,46 @@ fn i_16_dart() {
         LangFixture {
             lang: "dart",
             adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
-            files: &[("a.dart", "void entry(String args) { sink(args); }\n")],
+            files: &[(
+                "a.dart",
+                "void entry(Object args) { switch (args) { case String v: sink(v); } }\n",
+            )],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn i_16_java() {
+    run_positive_cell(
+        "I_16",
+        LangFixture {
+            lang: "java",
+            adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()),
+            files: &[(
+                "Demo.java",
+                "class Demo { void entry(Object args) { if (args instanceof String v) { sink(v); } } }\n",
+            )],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn i_16_ruby() {
+    run_positive_cell(
+        "I_16",
+        LangFixture {
+            lang: "ruby",
+            adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
+            files: &[(
+                "a.rb",
+                "def entry(args)\n  case args\n  in String => v\n    sink(v)\n  end\nend\n",
+            )],
             entry: "entry",
             seed: &["args"],
             sink: "sink",

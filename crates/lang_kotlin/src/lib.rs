@@ -3,12 +3,12 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, language_from_pack, node_text, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
+        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
+        walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding,
-    Visibility,
+    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary,
+    TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -103,6 +103,7 @@ impl LanguageAdapter for KotlinAdapter {
             // each such pattern and re-parent the contained methods so
             // `Foo.bar(...)` dispatches correctly.
             synthesize_kotlin_object_decls(&mut idx, file, &tree, src);
+            synthesize_kotlin_constructor_decls(&mut idx, file, &tree, src);
             // Module path from `package com.foo.bar` declaration; falls
             // back to file-stem when absent.
             if let Some(segments) = extract_kotlin_package(tree.root_node(), src) {
@@ -673,6 +674,150 @@ fn synthesize_kotlin_object_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree
                 decl.kind = DeclKind::Method;
             }
         }
+    }
+}
+
+fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
+    let class_names = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| decl.name.clone())
+        .collect::<Vec<_>>();
+    let classes = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.symbol, decl.name.clone(), decl.name_span))
+        .collect::<Vec<_>>();
+    let mut next = idx
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    for class_node in collect_kinds(tree, &["class_declaration"]) {
+        let class_span = span_of(file, &class_node);
+        let Some((_, class_symbol, class_name, class_name_span)) =
+            classes.iter().find(|(span, _, _, _)| *span == class_span)
+        else {
+            continue;
+        };
+        if let Some(primary) = first_named_child_of_kind(&class_node, "primary_constructor") {
+            if let Some(body) = first_named_child_of_kind(&class_node, "class_body") {
+                let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+                if !flow_events.is_empty() {
+                    idx.defs.push(kotlin_constructor_decl(
+                        bonsai_common::SymbolId::new(next),
+                        *class_symbol,
+                        class_name,
+                        *class_name_span,
+                        class_span,
+                        span_of(file, &body),
+                        constructor_param_names(primary, src),
+                        flow_events,
+                    ));
+                    next = next.saturating_add(1);
+                }
+            }
+        }
+        for secondary in collect_descendant_kinds(class_node, &["secondary_constructor"]) {
+            let body = first_named_child_of_kind(&secondary, "statements").unwrap_or(secondary);
+            let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+            idx.defs.push(kotlin_constructor_decl(
+                bonsai_common::SymbolId::new(next),
+                *class_symbol,
+                class_name,
+                *class_name_span,
+                span_of(file, &secondary),
+                span_of(file, &body),
+                constructor_param_names(secondary, src),
+                flow_events,
+            ));
+            next = next.saturating_add(1);
+        }
+    }
+}
+
+fn kotlin_constructor_decl(
+    symbol: bonsai_common::SymbolId,
+    parent: bonsai_common::SymbolId,
+    class_name: &str,
+    name_span: bonsai_common::Span,
+    span: bonsai_common::Span,
+    body_span: bonsai_common::Span,
+    params: Vec<String>,
+    flow_events: Vec<FlowEvent>,
+) -> Decl {
+    Decl {
+        symbol,
+        kind: DeclKind::Constructor,
+        name: class_name.to_string(),
+        qualified_name: None,
+        module_path: bonsai_lang_api::ModulePath::default(),
+        span,
+        name_span,
+        visibility: Visibility::Public,
+        parent: Some(parent),
+        body_span: Some(body_span),
+        flow_events,
+        has_implicit_returns: false,
+        params,
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
+        receiver_state_sources: Vec::new(),
+        return_type: None,
+    }
+}
+
+fn collect_descendant_kinds<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if kinds.contains(&current.kind()) {
+            out.push(current);
+        }
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    collect_descendant_kinds(node, &["class_parameter", "parameter"])
+        .into_iter()
+        .filter_map(|param| parameter_binding_name(param, src))
+        .collect()
+}
+
+fn parameter_binding_name(param: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut names = Vec::new();
+    collect_binding_identifiers(param, src, &mut names);
+    names.into_iter().filter(|name| name != "_").next()
+}
+
+fn collect_binding_identifiers(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    if matches!(node.kind(), "simple_identifier" | "identifier") {
+        let name = node_text(&node, src).trim();
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "user_type" | "type_identifier") {
+            continue;
+        }
+        collect_binding_identifiers(child, src, out);
     }
 }
 

@@ -73,3 +73,25 @@ function save(PDOStatement $stmt, $id) {
         "PHP sigiled receiver should inherit parameter type, got {calls:?}"
     );
 }
+
+#[test]
+fn class_declaration_records_extends_base() {
+    let db = db_with(
+        r#"
+<?php
+namespace App;
+class Base {}
+namespace;
+use App\Base;
+class Child extends Base {}
+"#,
+    );
+    let global = db.global_index();
+    let child = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "Child")
+        .expect("Child class should be indexed");
+
+    assert_eq!(child.bases, vec!["Base"]);
+}

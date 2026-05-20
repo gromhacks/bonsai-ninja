@@ -4,8 +4,8 @@ use bonsai_lang_api::kit::with_fn_kinds_and_implicit_receivers;
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
     ModifierVocabulary, TypeAliasVocabulary, Visibility,
 };
 
@@ -140,10 +140,9 @@ impl LanguageAdapter for PhpAdapter {
                 if !is_class_like(decl.kind) {
                     continue;
                 }
-                if let Some(bases) = bases_by_span
-                    .iter()
-                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
-                {
+                if let Some(bases) = bases_by_span.iter().find_map(|(span, name, bases)| {
+                    (*span == decl.span || name == &decl.name).then_some(bases)
+                }) {
                     decl.bases = bases.clone();
                 }
             }
@@ -176,6 +175,10 @@ impl LanguageAdapter for PhpAdapter {
         ];
         for decl in &mut idx.defs {
             augment_php_qualified_source_names(&mut decl.flow_events, &source);
+            bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
+                &mut decl.flow_events,
+                &source,
+            );
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PHP_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -195,9 +198,20 @@ fn augment_php_qualified_source_names(events: &mut [FlowEvent], source: &str) {
     for event in events {
         match event {
             FlowEvent::Assign {
-                span, source_names, ..
+                target,
+                span,
+                source_name,
+                source_names,
+                value_kind,
+                ..
             } => {
                 if let Some(rhs) = php_assignment_rhs_text(source, *span) {
+                    if target.trim_start().starts_with('$')
+                        && php_quoted_bare_callable_literal(&rhs).is_some()
+                    {
+                        *source_name = Some(rhs.clone());
+                        *value_kind = Some(AssignValueKind::Literal);
+                    }
                     for access in php_qualified_accesses(&rhs) {
                         push_unique_source(source_names, access.clone());
                         let bare = access.trim_start_matches(['$', '@', '%']).to_string();
@@ -241,6 +255,24 @@ fn augment_php_qualified_source_names(events: &mut [FlowEvent], source: &str) {
             _ => {}
         }
     }
+}
+
+fn php_quoted_bare_callable_literal(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let quote = value.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || value.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let inner = value.get(1..value.len().saturating_sub(1))?.trim();
+    if inner.is_empty()
+        || inner
+            .chars()
+            .any(|ch| !(ch == '_' || ch == '\\' || ch.is_ascii_alphanumeric()))
+        || inner.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(inner)
 }
 
 fn php_assignment_rhs_text(source: &str, span: Span) -> Option<String> {
@@ -715,10 +747,25 @@ fn is_class_like(kind: DeclKind) -> bool {
 ///
 /// `interface_declaration` uses its own `interface_base_clause` (just
 /// `extends`). `trait_declaration` has no parent list.
-fn collect_php_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(bonsai_common::Span, Vec<String>)> {
+fn collect_php_class_bases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, String, Vec<String>)> {
     let mut bases_by_class = Vec::new();
     let class_kinds = &["class_declaration", "interface_declaration", "enum_declaration"];
     for class_node in collect_kinds(tree, class_kinds) {
+        let Some(name_node) = class_node
+            .child_by_field_name("name")
+            .or_else(|| first_named_child_of_kind(&class_node, "name"))
+            .or_else(|| first_named_child_of_kind(&class_node, "qualified_name"))
+        else {
+            continue;
+        };
+        let class_name = node_text(&name_node, src).trim();
+        if class_name.is_empty() {
+            continue;
+        }
         let mut bases: Vec<String> = Vec::new();
         let mut cursor = class_node.walk();
         for child in class_node.named_children(&mut cursor) {
@@ -743,7 +790,7 @@ fn collect_php_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(bonsai
             }
         }
         if !bases.is_empty() {
-            bases_by_class.push((span_of(file, &class_node), bases));
+            bases_by_class.push((span_of(file, &class_node), class_name.to_string(), bases));
         }
     }
     bases_by_class

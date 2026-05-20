@@ -224,6 +224,58 @@ fn body_contains_call(body: &[FlowEvent], callee: &str) -> bool {
     )
 }
 
+#[test]
+fn ruby_no_parentheses_receiver_send_stays_call_result() {
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter_for_lang("ruby")],
+        &[(
+            "app.rb",
+            r#"def helper
+  raw = gets.to_s
+  cb = method(:helper)
+  cb.call(raw)
+end
+"#,
+        )],
+    );
+    let helper = find_decl(&ws, "helper").expect("helper decl");
+    let raw_assign = helper
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                value_kind,
+                ..
+            } if target == "raw" => Some((source_name, source_call, value_kind)),
+            _ => None,
+        })
+        .expect("raw assignment");
+    assert_eq!(raw_assign.0.as_deref(), None);
+    assert_eq!(raw_assign.1.as_deref(), Some("gets.to_s"));
+    assert_eq!(raw_assign.2, &Some(AssignValueKind::CallResult));
+
+    let callback_assign = helper
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                value_kind,
+                ..
+            } if target == "cb" => Some((source_name, source_call, value_kind)),
+            _ => None,
+        })
+        .expect("callback assignment");
+    assert_eq!(callback_assign.0.as_deref(), Some("method(:helper)"));
+    assert_eq!(callback_assign.1.as_deref(), None);
+    assert_eq!(callback_assign.2, &Some(AssignValueKind::Compound));
+}
+
 fn fixture_for(lang: &str) -> Conformance {
     match lang {
         "python" => Conformance {

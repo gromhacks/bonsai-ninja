@@ -61,6 +61,39 @@ fn r_06_dart() {
     run_positive_cell("R_06", LangFixture { lang:"dart", adapter:Arc::new(bonsai_lang_dart::DartAdapter::new()), files:&[("a.dart","class Box { static void helper(String p) { sink(p); } }\nvoid entry(String args) { Box.helper(args); }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
 #[test]
+fn r_06_cpp() {
+    run_positive_cell("R_06", LangFixture {
+        lang: "cpp",
+        adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
+        files: &[("a.cpp", "class Box { public: static void helper(const char *p) { sink(p); } };\nvoid entry(const char *args) { Box::helper(args); }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+#[test]
+fn r_06_objc() {
+    run_positive_cell("R_06", LangFixture {
+        lang: "objc",
+        adapter: Arc::new(bonsai_lang_objc::ObjCAdapter::new()),
+        files: &[("a.m", "@interface Box : NSObject\n+ (void)helper:(NSString *)p;\n@end\n@implementation Box\n+ (void)helper:(NSString *)p { sink(p); }\n@end\nvoid entry(NSString *args) { [Box helper:args]; }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+#[test]
+fn r_06_rust() {
+    run_positive_cell("R_06", LangFixture {
+        lang: "rust",
+        adapter: Arc::new(bonsai_lang_rust::RustAdapter::new()),
+        files: &[("a.rs", "struct Box;\nimpl Box { fn helper(p: String) { sink(p); } }\nfn entry(args: String) { Box::helper(args); }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+#[test]
 fn r_06_solidity() {
     run_positive_cell("R_06", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","library Box { function helper(string memory p) internal pure { sink(p); } }\ncontract Demo { function entry(string memory args) public pure { Box.helper(args); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }

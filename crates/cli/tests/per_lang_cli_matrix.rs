@@ -2373,6 +2373,22 @@ fn mega_flow_dump_taint_threads_every_cross_function_hop() {
             "taint record missing callee_name: {rec}"
         );
     }
+    let has_execute = records.iter().any(|rec| {
+        rec.get("callee_name").and_then(|v| v.as_str()) == Some("execute")
+            && rec
+                .get("tainted_args")
+                .and_then(|v| v.as_array())
+                .is_some_and(|args| {
+                    args.iter().any(|arg| {
+                        arg.get("value_text").and_then(|v| v.as_str()) == Some("cmd")
+                            && arg.get("param_name").and_then(|v| v.as_str()) == Some("cmd")
+                    })
+                })
+    });
+    assert!(
+        has_execute,
+        "mega_flow dump-taint must keep IDG-proven receiver/super flows into execute(cmd): {out}"
+    );
 }
 
 #[test]

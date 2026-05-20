@@ -34,7 +34,7 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
     // TypeScript's default class-member visibility is `public`.
     default_visibility: Visibility::Public,
 };
-use bonsai_lang_javascript::{js_ts_imports, js_ts_require_calls};
+use bonsai_lang_javascript::{apply_js_ts_default_export_aliases, js_ts_imports, js_ts_require_calls};
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("typescript");
@@ -116,6 +116,7 @@ impl LanguageAdapter for TypeScriptAdapter {
         }
         if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
             let src = snapshot.text.as_bytes();
+            apply_js_ts_default_export_aliases(&mut decl_index, &tree, src, file);
             // Phase-6 return-type extraction: `function f(): T {}` / `(): T => ...`
             // populates `Decl.return_type` for `apply_assign_call_result_types`.
             bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);

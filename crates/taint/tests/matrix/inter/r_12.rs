@@ -43,3 +43,14 @@ fn r_12_kotlin() {
 fn r_12_php() {
     run_positive_cell("R_12", LangFixture { lang:"php", adapter:Arc::new(bonsai_lang_php::PhpAdapter::new()), files:&[("a.php","<?php\nfunction gen($args) { yield $args; }\nfunction entry($args) { foreach (gen($args) as $v) { sink($v); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
+#[test]
+fn r_12_dart() {
+    run_positive_cell("R_12", LangFixture {
+        lang: "dart",
+        adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
+        files: &[("a.dart", "Iterable<String> gen(String args) sync* { yield args; }\nvoid entry(String args) { for (final v in gen(args)) sink(v); }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}

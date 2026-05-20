@@ -2,10 +2,12 @@
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
+    kit::{
+        collect_kinds, foreach_binding_assigns_from_text, language_from_pack, node_text, parse_with, span_of,
+    },
     AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
     ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
-    RefKind,
+    RefKind, TypeAliasBinding,
 };
 use tree_sitter::{Language, Tree};
 
@@ -181,6 +183,16 @@ impl LanguageAdapter for PerlAdapter {
                 }
             }
         }
+        for decl in &mut idx.defs {
+            mark_perl_method_receiver_param(decl);
+            let mut aliases = collect_perl_bless_type_aliases(&decl.flow_events);
+            dedup_perl_type_aliases(&mut aliases);
+            for alias in aliases {
+                if !decl.type_aliases.contains(&alias) {
+                    decl.type_aliases.push(alias);
+                }
+            }
+        }
         // Recognised Perl lifecycle transitions. Perl is procedural;
         // method calls (`$fh->close`) land bare. `undef $x` is the
         // idiomatic Perl free, surfaced as a call to `undef`.
@@ -249,6 +261,85 @@ fn apply_perl_package_semantic_identity(idx: &mut DeclIndex) {
     }
 }
 
+fn mark_perl_method_receiver_param(decl: &mut bonsai_lang_api::Decl) {
+    if decl.receiver_param_index.is_some() {
+        return;
+    }
+    let Some(first_param) = decl.params.first().map(String::as_str) else {
+        return;
+    };
+    // Perl method dispatch passes the invocant as the first @_ item.
+    // The conventional bindings are `$self` for instance methods and
+    // `$class` for class methods; mark only those explicit shapes so
+    // ordinary package functions keep positional argument binding.
+    if matches!(first_param, "$self" | "self" | "$class" | "class") {
+        decl.receiver_param_index = Some(0);
+    }
+}
+
+fn collect_perl_bless_type_aliases(events: &[FlowEvent]) -> Vec<TypeAliasBinding> {
+    let mut out = Vec::new();
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                target,
+                source_call: Some(source_call),
+                source_call_args,
+                ..
+            } if source_call == "bless" => {
+                if let Some(type_name) = source_call_args
+                    .get(1)
+                    .and_then(|arg| canonical_perl_base_name(arg))
+                {
+                    push_perl_type_alias(&mut out, target, &type_name);
+                    let sigiled = format!("${target}");
+                    push_perl_type_alias(&mut out, &sigiled, &type_name);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                out.extend(collect_perl_bless_type_aliases(then_events));
+                out.extend(collect_perl_bless_type_aliases(else_events));
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                out.extend(collect_perl_bless_type_aliases(body));
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                out.extend(collect_perl_bless_type_aliases(body));
+                out.extend(collect_perl_bless_type_aliases(catch_events));
+                out.extend(collect_perl_bless_type_aliases(finally_events));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn push_perl_type_alias(out: &mut Vec<TypeAliasBinding>, name: &str, type_name: &str) {
+    let name = name.trim();
+    let type_name = type_name.trim();
+    if name.is_empty() || type_name.is_empty() || name == type_name {
+        return;
+    }
+    out.push(TypeAliasBinding {
+        name: name.to_string(),
+        type_name: type_name.to_string(),
+    });
+}
+
+fn dedup_perl_type_aliases(aliases: &mut Vec<TypeAliasBinding>) {
+    let mut seen = std::collections::HashSet::new();
+    aliases.retain(|alias| seen.insert((alias.name.clone(), alias.type_name.clone())));
+}
+
 /// Augment Assign events with extra `source_names` so collection
 /// transforms (`map`/`grep`/`sort`) and `push @arr, $tainted` calls
 /// surface the underlying collection in taint flow.
@@ -297,13 +388,25 @@ fn augment_perl_collection_flow_events(events: &mut Vec<FlowEvent>, source: &str
     // Assign event so taint flowing into `$x` propagates to `@arr`.
     let mut rewritten = Vec::with_capacity(events.len());
     for event in events.drain(..) {
+        let foreach_assignments = perl_foreach_binding_assignments(&event, source);
         let push_assignment = perl_push_assignment(&event);
+        rewritten.extend(foreach_assignments);
         rewritten.push(event);
         if let Some(assign) = push_assignment {
             rewritten.push(assign);
         }
     }
     *events = rewritten;
+}
+
+fn perl_foreach_binding_assignments(event: &FlowEvent, source: &str) -> Vec<FlowEvent> {
+    let FlowEvent::Loop { span, .. } = event else {
+        return Vec::new();
+    };
+    let Some(text) = source_span_text(source, *span) else {
+        return Vec::new();
+    };
+    foreach_binding_assigns_from_text(*span, text)
 }
 
 /// Add exact callable-alias facts for Perl coderef assignments such
@@ -660,6 +763,15 @@ fn assignment_lhs_rhs_text(source: &str, span: Span) -> Option<(String, String)>
         statement[..separator_idx].trim().to_string(),
         statement[separator_idx + separator_len..].trim().to_string(),
     ))
+}
+
+fn source_span_text(source: &str, span: Span) -> Option<&str> {
+    let start = usize::try_from(span.start).ok()?.min(source.len());
+    let end = usize::try_from(span.end).ok()?.min(source.len());
+    if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    source.get(start..end)
 }
 
 /// Normalize a hash-deref expression to dotted form, falling back to
@@ -2009,31 +2121,168 @@ fn collect_perl_class_bases(
             continue;
         }
         // Find the smallest class-decl span that contains this
-        // use_statement; attach the bases there.
+        // use_statement; attach the bases there. If the grammar
+        // models `package Foo;` as a statement rather than a
+        // container, fall back to the package range ending at the
+        // next package statement.
         let use_span = span_of(file, &use_node);
-        let mut best_decl: Option<(usize, u64)> = None;
-        for (decl_idx, decl) in idx.defs.iter().enumerate() {
-            if !is_class_like(decl.kind) {
-                continue;
-            }
-            let body = decl.body_span.unwrap_or(decl.span);
-            if use_span.file == body.file && use_span.start >= body.start && use_span.end <= body.end {
-                let body_len = body.end.saturating_sub(body.start);
-                if best_decl.is_none_or(|(_, prev_len)| body_len < prev_len) {
-                    best_decl = Some((decl_idx, body_len));
-                }
-            }
+        if let Some(decl_idx) = perl_class_decl_for_span(use_span, idx, file, src.len()) {
+            push_perl_bases(&mut bases_by_decl, idx.defs[decl_idx].span, bases);
         }
-        if let Some((decl_idx, _)) = best_decl {
-            let entry = bases_by_decl.entry(idx.defs[decl_idx].span).or_default();
-            for name in bases {
-                if !entry.iter().any(|existing| existing == &name) {
-                    entry.push(name);
-                }
+    }
+    collect_perl_isa_assignment_bases(src, file, idx, &mut bases_by_decl);
+    bases_by_decl.into_iter().collect()
+}
+
+fn perl_class_decl_for_span(span: Span, idx: &DeclIndex, file: FileId, source_len: usize) -> Option<usize> {
+    let mut best_decl: Option<(usize, u64)> = None;
+    for (decl_idx, decl) in idx.defs.iter().enumerate() {
+        if !is_class_like(decl.kind) {
+            continue;
+        }
+        let body = decl.body_span.unwrap_or(decl.span);
+        if span.file == body.file && span.start >= body.start && span.end <= body.end {
+            let body_len = body.end.saturating_sub(body.start);
+            if best_decl.is_none_or(|(_, prev_len)| body_len < prev_len) {
+                best_decl = Some((decl_idx, body_len));
             }
         }
     }
-    bases_by_decl.into_iter().collect()
+    if let Some((decl_idx, _)) = best_decl {
+        return Some(decl_idx);
+    }
+    perl_package_ranges(idx, file, source_len)
+        .into_iter()
+        .find_map(|(decl_idx, range)| {
+            (span.file == range.file && span.start >= range.start && span.end <= range.end)
+                .then_some(decl_idx)
+        })
+}
+
+fn perl_package_ranges(idx: &DeclIndex, file: FileId, source_len: usize) -> Vec<(usize, Span)> {
+    let mut packages: Vec<(usize, Span)> = idx
+        .defs
+        .iter()
+        .enumerate()
+        .filter(|(_, decl)| is_class_like(decl.kind) && decl.span.file == file)
+        .map(|(idx, decl)| (idx, decl.span))
+        .collect();
+    packages.sort_by_key(|(_, span)| span.start);
+    let file_end = u64::try_from(source_len).unwrap_or(u64::MAX);
+    let mut ranges = Vec::new();
+    for pos in 0..packages.len() {
+        let (decl_idx, span) = packages[pos];
+        let end = packages
+            .get(pos + 1)
+            .map(|(_, next_span)| next_span.start)
+            .unwrap_or(file_end);
+        ranges.push((decl_idx, Span::new(file, span.start, end)));
+    }
+    ranges
+}
+
+fn collect_perl_isa_assignment_bases(
+    src: &[u8],
+    file: FileId,
+    idx: &DeclIndex,
+    bases_by_decl: &mut std::collections::HashMap<bonsai_common::Span, Vec<String>>,
+) {
+    let source = std::str::from_utf8(src).unwrap_or("");
+    for (decl_idx, range) in perl_package_ranges(idx, file, src.len()) {
+        let start = usize::try_from(range.start)
+            .unwrap_or(usize::MAX)
+            .min(source.len());
+        let end = usize::try_from(range.end).unwrap_or(usize::MAX).min(source.len());
+        if start >= end {
+            continue;
+        }
+        let bases = perl_isa_bases_from_text(&source[start..end]);
+        if !bases.is_empty() {
+            push_perl_bases(bases_by_decl, idx.defs[decl_idx].span, bases);
+        }
+    }
+}
+
+fn perl_isa_bases_from_text(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while let Some(relative) = source[offset..].find("@ISA") {
+        let isa_start = offset + relative;
+        let after_isa = &source[isa_start + "@ISA".len()..];
+        let Some(eq_pos) = after_isa.find('=') else {
+            offset = isa_start + "@ISA".len();
+            continue;
+        };
+        let rhs = &after_isa[eq_pos + 1..];
+        let stmt_len = rhs.find(';').unwrap_or(rhs.len());
+        collect_perl_isa_rhs_bases(&rhs[..stmt_len], &mut out);
+        offset = isa_start + "@ISA".len() + eq_pos + 1 + stmt_len;
+    }
+    out
+}
+
+fn collect_perl_isa_rhs_bases(rhs: &str, out: &mut Vec<String>) {
+    let mut offset = 0;
+    while let Some(relative) = rhs[offset..].find("qw") {
+        let qw_start = offset + relative;
+        let after_qw = rhs[qw_start + 2..].trim_start();
+        if let Some(content) = after_qw.strip_prefix('(').and_then(|rest| rest.split(')').next()) {
+            for piece in content.split_whitespace() {
+                push_perl_base_name(out, piece);
+            }
+        }
+        offset = qw_start + 2;
+    }
+
+    let bytes = rhs.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let quote = bytes[i];
+        if quote != b'\'' && quote != b'"' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        i = start;
+        while i < bytes.len() && bytes[i] != quote {
+            if bytes[i] == b'\\' {
+                i = i.saturating_add(1);
+            }
+            i += 1;
+        }
+        if i <= bytes.len() {
+            push_perl_base_name(out, &rhs[start..i]);
+        }
+        i = i.saturating_add(1);
+    }
+
+    for token in rhs.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')) {
+        if matches!(token, "" | "qw" | "ISA" | "our" | "my") {
+            continue;
+        }
+        push_perl_base_name(out, token);
+    }
+}
+
+fn push_perl_bases(
+    bases_by_decl: &mut std::collections::HashMap<bonsai_common::Span, Vec<String>>,
+    decl_span: Span,
+    bases: Vec<String>,
+) {
+    let entry = bases_by_decl.entry(decl_span).or_default();
+    for name in bases {
+        if !entry.iter().any(|existing| existing == &name) {
+            entry.push(name);
+        }
+    }
+}
+
+fn push_perl_base_name(out: &mut Vec<String>, raw: &str) {
+    if let Some(name) = canonical_perl_base_name(raw) {
+        if !out.iter().any(|existing| existing == &name) {
+            out.push(name);
+        }
+    }
 }
 
 /// Strip Perl namespace separators (`::`) from a base name, returning

@@ -220,6 +220,24 @@ fn i_18_php() {
 }
 
 #[test]
+fn i_18_perl() {
+    run_positive_cell(
+        "I_18",
+        LangFixture {
+            lang: "perl",
+            adapter: Arc::new(bonsai_lang_perl::PerlAdapter::new()),
+            files: &[(
+                "a.pl",
+                "sub entry { my ($args) = @_; my $closure = sub { sink($args); }; $closure->(); }\n",
+            )],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
 fn i_18_swift() {
     run_positive_cell(
         "I_18",

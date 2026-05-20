@@ -4,8 +4,8 @@ use bonsai_lang_api::kit::with_fn_kinds_and_implicit_receivers;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind,
+    AdapterContext, AdapterError, DeclIndex, DeclKind, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind,
 };
 use tree_sitter::{Language, Tree};
 
@@ -77,6 +77,13 @@ impl LanguageAdapter for RubyAdapter {
                 // definitions. See `apply_ruby_scope_visibility` for
                 // the exact contract this implements.
                 apply_ruby_scope_visibility(&mut idx, snapshot.text.as_bytes(), file);
+                for decl in &mut idx.defs {
+                    bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
+                        &mut decl.flow_events,
+                        snapshot.text.as_ref(),
+                    );
+                    inject_ruby_raise_throw_events(&mut decl.flow_events);
+                }
             }
             // Per-class `bases`: `class Echo < Base` → ["Base"].
             // Ruby has only single-inheritance; mixins via `include`
@@ -173,7 +180,8 @@ impl LanguageAdapter for RubyAdapter {
         // (`raw @value`) instead of falling back to arg-less refs.
         let src = processed.as_bytes();
         let root = tree.root_node();
-        let root_events = bonsai_lang_api::kit::walk_flow_events(root, file, src, &HANDLER, &[]);
+        let mut root_events = bonsai_lang_api::kit::walk_flow_events(root, file, src, &HANDLER, &[]);
+        inject_ruby_raise_throw_events(&mut root_events);
         let has_actionable_event = root_events.iter().any(|event| {
             matches!(
                 event,
@@ -262,6 +270,62 @@ impl LanguageAdapter for RubyAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn inject_ruby_raise_throw_events(events: &mut Vec<FlowEvent>) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                inject_ruby_raise_throw_events(then_events);
+                inject_ruby_raise_throw_events(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                inject_ruby_raise_throw_events(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                inject_ruby_raise_throw_events(body);
+                inject_ruby_raise_throw_events(catch_events);
+                inject_ruby_raise_throw_events(finally_events);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let synthetic_throw = ruby_raise_throw_event(&event);
+        rewritten.push(event);
+        if let Some(throw_event) = synthetic_throw {
+            rewritten.push(throw_event);
+        }
+    }
+    *events = rewritten;
+}
+
+fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
+    let FlowEvent::Call { name, args, span, .. } = event else {
+        return None;
+    };
+    if name != "raise" {
+        return None;
+    }
+    let first_arg = args.first();
+    Some(FlowEvent::Throw {
+        span: *span,
+        value_name: first_arg
+            .and_then(|arg| arg.place.clone())
+            .or_else(|| first_arg.map(|arg| arg.value_text.clone())),
+        thrown_type: None,
+    })
 }
 
 fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
@@ -726,12 +790,25 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         if matches!(method, "require" | "require_relative" | "load") {
             imports.push(ImportSpec {
                 span: span_of(file, &call_node),
-                module,
+                module: module.clone(),
                 alias: None,
                 is_wildcard: true,
                 original_name: None,
                 scope: ImportScope::Local,
             });
+            if let Some(stem) = module.rsplit(['/', '\\']).next() {
+                let constant = ruby_constant_name_from_snake_case(stem);
+                if !constant.is_empty() && constant != module {
+                    imports.push(ImportSpec {
+                        span: span_of(file, &call_node),
+                        module,
+                        alias: Some(constant),
+                        is_wildcard: true,
+                        original_name: None,
+                        scope: ImportScope::Module,
+                    });
+                }
+            }
         }
     }
     for assignment in collect_kinds(tree, &["assignment"]) {
@@ -769,6 +846,22 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+fn ruby_constant_name_from_snake_case(stem: &str) -> String {
+    stem.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            let mut out = String::new();
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+            out
+        })
+        .collect::<String>()
 }
 
 fn inside_ruby_executable_scope(node: tree_sitter::Node<'_>) -> bool {

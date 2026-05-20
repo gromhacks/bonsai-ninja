@@ -27,3 +27,14 @@ fn r_14_scala() {
 fn r_14_swift() {
     run_positive_cell("R_14", LangFixture { lang:"swift", adapter:Arc::new(bonsai_lang_swift::SwiftAdapter::new()), files:&[("a.swift","func helper(p: String) { sink(p) }\nfunc helper(p: Int) {}\nfunc entry(args: String) { helper(p: args) }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
+#[test]
+fn r_14_typescript() {
+    run_positive_cell("R_14", LangFixture {
+        lang: "typescript",
+        adapter: Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
+        files: &[("a.ts", "function helper(p: string): void;\nfunction helper(p: number): void;\nfunction helper(p: string | number) { if (typeof p === 'string') sink(p); }\nfunction entry(args: string) { helper(args); }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
