@@ -52,6 +52,10 @@ fn render() -> String {
     out.push_str("flows reach the sink, over-taint cases stay clean). Every applicable\n");
     out.push_str("cell shows `pass` because its per-language `#[test]` passes in the\n");
     out.push_str("workspace test sweep — drift would block CI.\n\n");
+    out.push_str("The matrix also refuses to mark a cell `Applicable` unless the\n");
+    out.push_str("scenario fixture file contains a concrete `fn <scenario>_<lang>()`\n");
+    out.push_str("test. Cells without executable fixture coverage must stay explicit as\n");
+    out.push_str("`n/a` or `deferred`; they are not counted as passing behaviour.\n\n");
     out.push_str("Two sister documents look pessimistic by comparison and that is\n");
     out.push_str("intentional — they measure different things:\n\n");
     out.push_str("- [`COVERAGE_BASELINE.md`](COVERAGE_BASELINE.md) reports per-construct\n");

@@ -46,9 +46,11 @@ pub const LANGUAGES: &[&str] = &[
 /// construct) or `AdapterDeferred` (construct exists but adapter
 /// doesn't model it yet).
 pub fn status(lang: &str, scenario_id: &str) -> Status {
-    for &(l, ids, status) in OVERRIDES {
-        if l == lang && ids.contains(&scenario_id) {
-            return status;
+    for table in [OVERRIDES, COVERAGE_GAP_OVERRIDES] {
+        for &(l, ids, status) in table {
+            if l == lang && ids.contains(&scenario_id) {
+                return status;
+            }
         }
     }
     Status::Applicable
@@ -219,6 +221,118 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
     ),
     // --- TypeScript: like JS + generics + decorators. No macros, no pattern match.
     ("typescript", &["I_16", "OT_05", "OT_06"], Status::NotApplicable),
+];
+
+/// Cells where the language construct exists but the matrix does not
+/// yet ship an executable semantic fixture, plus a few cells that were
+/// historically left applicable even though the language has no matching
+/// construct. Keeping these separate from the semantic table above makes
+/// the current behavioural contract explicit: `Applicable` means there
+/// is a concrete per-language test function that runs.
+const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
+    ("c", &["I_11", "R_13", "R_18", "OT_16"], Status::NotApplicable),
+    ("c", &["R_09", "R_10"], Status::AdapterDeferred),
+    (
+        "cpp",
+        &["I_14", "I_19", "R_06", "R_09", "R_10", "R_18", "R_19"],
+        Status::AdapterDeferred,
+    ),
+    ("cpp", &["R_13", "R_20"], Status::NotApplicable),
+    (
+        "csharp",
+        &["I_14", "I_19", "R_09", "R_10"],
+        Status::AdapterDeferred,
+    ),
+    (
+        "dart",
+        &["I_14", "R_08", "R_09", "R_10", "R_12"],
+        Status::AdapterDeferred,
+    ),
+    ("dart", &["R_14"], Status::NotApplicable),
+    (
+        "elixir",
+        &["I_17", "R_04", "R_12", "R_19", "OT_16"],
+        Status::NotApplicable,
+    ),
+    ("elixir", &["I_19", "R_09", "R_10"], Status::AdapterDeferred),
+    (
+        "erlang",
+        &["I_17", "R_19", "R_20", "OT_16"],
+        Status::NotApplicable,
+    ),
+    ("erlang", &["R_09", "R_10"], Status::AdapterDeferred),
+    (
+        "go",
+        &["R_05", "R_06", "R_12", "R_14", "R_18", "R_20"],
+        Status::NotApplicable,
+    ),
+    (
+        "go",
+        &["I_19", "R_03", "R_04", "R_08", "R_09", "R_10", "R_19", "OT_16"],
+        Status::AdapterDeferred,
+    ),
+    ("java", &["R_13", "R_18", "R_20"], Status::NotApplicable),
+    (
+        "java",
+        &["I_14", "I_16", "R_08", "R_09", "R_10"],
+        Status::AdapterDeferred,
+    ),
+    ("javascript", &["R_14"], Status::NotApplicable),
+    ("javascript", &["R_08"], Status::AdapterDeferred),
+    (
+        "kotlin",
+        &["I_19", "R_08", "R_09", "R_10"],
+        Status::AdapterDeferred,
+    ),
+    ("lua", &["I_03", "R_20"], Status::NotApplicable),
+    (
+        "lua",
+        &["I_19", "R_04", "R_08", "R_09", "R_10", "R_12", "OT_16"],
+        Status::AdapterDeferred,
+    ),
+    ("objc", &["R_13", "R_14", "R_18"], Status::NotApplicable),
+    (
+        "objc",
+        &["I_14", "I_19", "R_06", "R_09", "R_10", "R_19", "R_20"],
+        Status::AdapterDeferred,
+    ),
+    ("perl", &["R_20"], Status::NotApplicable),
+    (
+        "perl",
+        &["I_03", "I_18", "I_19", "R_08", "R_09", "R_10"],
+        Status::AdapterDeferred,
+    ),
+    ("php", &["R_14"], Status::NotApplicable),
+    ("php", &["I_19", "R_08", "R_09", "R_10"], Status::AdapterDeferred),
+    ("python", &["I_17", "R_14"], Status::NotApplicable),
+    ("python", &["R_08"], Status::AdapterDeferred),
+    ("ruby", &["I_17", "R_14"], Status::NotApplicable),
+    (
+        "ruby",
+        &["I_14", "I_16", "R_08", "R_09", "R_10"],
+        Status::AdapterDeferred,
+    ),
+    (
+        "rust",
+        &["I_17", "R_14", "R_18", "R_19", "R_20"],
+        Status::NotApplicable,
+    ),
+    ("rust", &["I_19", "R_06", "R_10"], Status::AdapterDeferred),
+    ("scala", &["I_17", "R_12"], Status::NotApplicable),
+    (
+        "scala",
+        &["I_19", "R_08", "R_09", "R_10", "R_19"],
+        Status::AdapterDeferred,
+    ),
+    ("solidity", &["R_18"], Status::NotApplicable),
+    ("solidity", &["I_14", "R_09", "R_10"], Status::AdapterDeferred),
+    ("swift", &["R_12"], Status::NotApplicable),
+    (
+        "swift",
+        &["I_14", "I_19", "R_08", "R_09", "R_10"],
+        Status::AdapterDeferred,
+    ),
+    ("typescript", &["R_08", "R_14"], Status::AdapterDeferred),
 ];
 
 /// Total scenarios = 76. Used in coverage reporting.
