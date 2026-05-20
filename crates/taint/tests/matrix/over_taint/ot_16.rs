@@ -118,6 +118,18 @@ fn ot_16_csharp() {
 }
 
 #[test]
+fn ot_16_go() {
+    run_ot_16(LangFixture {
+        lang: "go",
+        adapter: Arc::new(bonsai_lang_go::GoAdapter::new()),
+        files: &[("a.go", "package main\ntype Box struct{}\nfunc (b *Box) method(x string) { sink(x) }\nfunc entry(args *Box) { args.method(\"clean\") }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+
+#[test]
 fn ot_16_rust() {
     run_ot_16(LangFixture {
         lang: "rust",
@@ -211,6 +223,21 @@ fn ot_16_dart() {
         lang: "dart",
         adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
         files: &[("a.dart", "class Box { void method(String x) { sink(x); } }\nvoid entry(Box args) { args.method('clean'); }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+
+#[test]
+fn ot_16_lua() {
+    run_ot_16(LangFixture {
+        lang: "lua",
+        adapter: Arc::new(bonsai_lang_lua::LuaAdapter::new()),
+        files: &[(
+            "a.lua",
+            "local Box = {}\nfunction Box.method(self, x)\n  sink(x)\nend\nfunction entry(args)\n  Box.method(args, 'clean')\nend\n",
+        )],
         entry: "entry",
         seed: &["args"],
         sink: "sink",

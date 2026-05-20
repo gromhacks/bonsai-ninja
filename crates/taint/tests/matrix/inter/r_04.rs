@@ -31,6 +31,19 @@ fn r_04_scala() {
 fn r_04_csharp() {
     run_positive_cell("R_04", LangFixture { lang:"csharp", adapter:Arc::new(bonsai_lang_csharp::CSharpAdapter::new()), files:&[("Demo.cs","class Box { public void Method(string p) { Sink(p); } }\nclass Demo { void Entry(string args) { var obj = new Box(); obj.Method(args); } }\n")], entry:"Entry", seed:&["args"], sink:"Sink" });
 }
+
+#[test]
+fn r_04_go() {
+    run_positive_cell("R_04", LangFixture {
+        lang: "go",
+        adapter: Arc::new(bonsai_lang_go::GoAdapter::new()),
+        files: &[("a.go", "package main\ntype Box struct{}\nfunc (b *Box) method(p string) { sink(p) }\nfunc entry(args string) { obj := &Box{}; obj.method(args) }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+
 #[test]
 fn r_04_rust() {
     run_positive_cell(
@@ -91,6 +104,25 @@ fn r_04_swift() {
 fn r_04_dart() {
     run_positive_cell("R_04", LangFixture { lang:"dart", adapter:Arc::new(bonsai_lang_dart::DartAdapter::new()), files:&[("a.dart","class Box { void method(String p) { sink(p); } }\nvoid entry(String args) { var obj = Box(); obj.method(args); }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
+
+#[test]
+fn r_04_lua() {
+    run_positive_cell(
+        "R_04",
+        LangFixture {
+            lang: "lua",
+            adapter: Arc::new(bonsai_lang_lua::LuaAdapter::new()),
+            files: &[(
+                "a.lua",
+                "local Box = {}\nfunction Box.method(self, p)\n  sink(p)\nend\nfunction entry(args)\n  Box.method(Box, args)\nend\n",
+            )],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
 #[test]
 fn r_04_solidity() {
     run_positive_cell("R_04", LangFixture { lang:"solidity", adapter:Arc::new(bonsai_lang_solidity::SolidityAdapter::new()), files:&[("Demo.sol","contract Demo { function entry(string memory args) public { method(args); } function method(string memory p) internal { sink(p); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });

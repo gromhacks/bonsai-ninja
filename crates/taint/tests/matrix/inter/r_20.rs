@@ -29,8 +29,7 @@ fn r_20_javascript() {
             adapter: Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
             files: &[(
                 "a.js",
-                "function entry(args) { sink(args); }
-",
+                "function helper({name}) { sink(name); }\nfunction entry(args) { helper({name: args}); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -47,8 +46,7 @@ fn r_20_typescript() {
             adapter: Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
             files: &[(
                 "a.ts",
-                "function entry(args: string) { sink(args); }
-",
+                "function helper({name}: {name: string}) { sink(name); }\nfunction entry(args: string) { helper({name: args}); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -107,8 +105,7 @@ fn r_20_dart() {
             adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
             files: &[(
                 "a.dart",
-                "void entry(String args) { sink(args); }
-",
+                "void helper({required String name}) { sink(name); }\nvoid entry(String args) { helper(name: args); }\n",
             )],
             entry: "entry",
             seed: &["args"],
@@ -146,7 +143,7 @@ fn r_20_elixir() {
             adapter: Arc::new(bonsai_lang_elixir::ElixirAdapter::new()),
             files: &[(
                 "a.ex",
-                "defmodule Demo do\n  def entry(args) do\n    sink(args)\n  end\nend\n",
+                "defmodule Demo do\n  def helper(name: name), do: sink(name)\n  def entry(args) do\n    helper(name: args)\n  end\nend\n",
             )],
             entry: "entry",
             seed: &["args"],

@@ -14,7 +14,7 @@ fn r_03_python() {
     run_positive_cell("R_03", LangFixture {
         lang: "python",
         adapter: Arc::new(bonsai_lang_python::PythonAdapter::new()),
-        files: &[("a.py", "class Box:\n    def method(self):\n        sink(self)\n\ndef entry(args):\n    args.method()\n")],
+        files: &[("a.py", "class Box:\n    def method(self):\n        sink(self)\n\ndef entry(args: Box):\n    args.method()\n")],
         entry: "entry",
         seed: &["args"],
         sink: "sink",
@@ -108,6 +108,18 @@ fn r_03_csharp() {
 // R_03 not applicable to C (no methods) — skipped via applicability table
 
 #[test]
+fn r_03_go() {
+    run_positive_cell("R_03", LangFixture {
+        lang: "go",
+        adapter: Arc::new(bonsai_lang_go::GoAdapter::new()),
+        files: &[("a.go", "package main\ntype Box struct{}\nfunc (b *Box) method() { sink(b) }\nfunc entry(args *Box) { args.method() }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}
+
+#[test]
 fn r_03_rust() {
     run_positive_cell("R_03", LangFixture {
         lang: "rust",
@@ -166,7 +178,7 @@ fn r_03_php() {
     run_positive_cell("R_03", LangFixture {
         lang: "php",
         adapter: Arc::new(bonsai_lang_php::PhpAdapter::new()),
-        files: &[("a.php", "<?php\nclass Box { public function method() { sink($this); } }\nfunction entry($args) { $args->method(); }\n")],
+        files: &[("a.php", "<?php\nclass Box { public function method() { sink($this); } }\nfunction entry(Box $args) { $args->method(); }\n")],
         entry: "entry",
         seed: &["args"],
         sink: "sink",

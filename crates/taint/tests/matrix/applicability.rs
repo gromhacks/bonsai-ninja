@@ -167,21 +167,11 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
         ],
         Status::NotApplicable,
     ),
-    (
-        "php",
-        &["R_03"],
-        Status::AdapterDeferred, // requires typed receiver evidence; untyped $args->method must not fan out by name
-    ),
     // --- Python: OO, generators, async. PEP 634 match in 3.10+. No formal generics on funcs.
     (
         "python",
         &["X_05", "X_07", "X_08", "X_10", "OT_05", "OT_06"],
         Status::NotApplicable,
-    ),
-    (
-        "python",
-        &["R_03"],
-        Status::AdapterDeferred, // unannotated receiver dispatch is dynamic; exact pass needs a type annotation
     ),
     // --- Ruby: blocks, fibers (coroutines), no async/await, no generics.
     (
@@ -230,11 +220,200 @@ const OVERRIDES: &[(&str, &[&str], Status)] = &[
 /// the current behavioural contract explicit: `Applicable` means there
 /// is a concrete per-language test function that runs.
 const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
+    (
+        "cpp",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "csharp",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints delegate value, not sink in body
+    ),
+    (
+        "dart",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "go",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "java",
+        &["I_18"],
+        Status::AdapterDeferred, // lambda body invocation currently taints functional value, not sink in body
+    ),
+    (
+        "javascript",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "kotlin",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "lua",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "python",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "rust",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "scala",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "swift",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    (
+        "typescript",
+        &["I_18"],
+        Status::AdapterDeferred, // closure body invocation currently taints closure value, not sink in body
+    ),
+    // Cross-file scenarios below still have single-file placeholder
+    // fixtures. They must not count as semantic import/module-flow
+    // coverage until each cell has a real multi-file fixture.
+    ("c", &["X_04", "X_15", "X_16"], Status::AdapterDeferred),
+    ("c", &["X_09"], Status::NotApplicable),
+    (
+        "cpp",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("cpp", &["X_05", "X_09", "X_10"], Status::NotApplicable),
+    (
+        "csharp",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("csharp", &["X_05", "X_09", "X_10"], Status::NotApplicable),
+    (
+        "dart",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("dart", &["X_05", "X_09", "X_10"], Status::NotApplicable),
+    (
+        "elixir",
+        &["X_04", "X_06", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("elixir", &["X_09"], Status::NotApplicable),
+    (
+        "erlang",
+        &["X_04", "X_06", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("erlang", &["X_09"], Status::NotApplicable),
+    (
+        "go",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("go", &["X_09"], Status::NotApplicable),
+    (
+        "java",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("java", &["X_09"], Status::NotApplicable),
+    (
+        "javascript",
+        &[
+            "X_04", "X_05", "X_06", "X_08", "X_09", "X_10", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16",
+        ],
+        Status::AdapterDeferred,
+    ),
+    ("javascript", &["X_07"], Status::NotApplicable),
+    (
+        "kotlin",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("kotlin", &["X_09"], Status::NotApplicable),
+    ("lua", &["X_04", "X_15", "X_16"], Status::AdapterDeferred),
+    ("lua", &["X_09"], Status::NotApplicable),
+    (
+        "objc",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("objc", &["X_09"], Status::NotApplicable),
+    (
+        "perl",
+        &["X_04", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("perl", &["X_02", "X_09"], Status::NotApplicable),
+    (
+        "php",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("php", &["X_09"], Status::NotApplicable),
+    (
+        "python",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("python", &["X_09"], Status::NotApplicable),
+    (
+        "ruby",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("ruby", &["X_09"], Status::NotApplicable),
+    (
+        "rust",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("rust", &["X_09"], Status::NotApplicable),
+    (
+        "scala",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("scala", &["X_09"], Status::NotApplicable),
+    (
+        "solidity",
+        &["X_01", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    (
+        "swift",
+        &["X_04", "X_06", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16"],
+        Status::AdapterDeferred,
+    ),
+    ("swift", &["X_09"], Status::NotApplicable),
+    (
+        "typescript",
+        &[
+            "X_04", "X_05", "X_06", "X_08", "X_09", "X_10", "X_11", "X_12", "X_13", "X_14", "X_15", "X_16",
+        ],
+        Status::AdapterDeferred,
+    ),
+    ("typescript", &["X_07"], Status::NotApplicable),
     ("c", &["I_11", "R_13", "R_18", "OT_16"], Status::NotApplicable),
     ("c", &["R_09", "R_10"], Status::AdapterDeferred),
     (
         "cpp",
-        &["I_14", "I_19", "R_06", "R_09", "R_10", "R_18", "R_19"],
+        &["I_14", "I_19", "R_05", "R_06", "R_09", "R_10", "R_18", "R_19"],
         Status::AdapterDeferred,
     ),
     ("cpp", &["R_13", "R_20"], Status::NotApplicable),
@@ -248,13 +427,17 @@ const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
         &["I_14", "R_08", "R_09", "R_10", "R_12"],
         Status::AdapterDeferred,
     ),
-    ("dart", &["R_14"], Status::NotApplicable),
+    ("dart", &["R_14", "R_19"], Status::NotApplicable),
     (
         "elixir",
         &["I_17", "R_04", "R_12", "R_19", "OT_16"],
         Status::NotApplicable,
     ),
-    ("elixir", &["I_19", "R_09", "R_10"], Status::AdapterDeferred),
+    (
+        "elixir",
+        &["I_19", "R_09", "R_10", "R_17"],
+        Status::AdapterDeferred,
+    ),
     (
         "erlang",
         &["I_17", "R_19", "R_20", "OT_16"],
@@ -268,26 +451,30 @@ const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
     ),
     (
         "go",
-        &["I_19", "R_03", "R_04", "R_08", "R_09", "R_10", "R_19", "OT_16"],
+        &["I_19", "R_08", "R_09", "R_10", "R_19"],
         Status::AdapterDeferred,
     ),
     ("java", &["R_13", "R_18", "R_20"], Status::NotApplicable),
     (
         "java",
-        &["I_14", "I_16", "R_08", "R_09", "R_10"],
+        &["I_14", "I_16", "I_19", "R_08", "R_09", "R_10", "R_17"],
         Status::AdapterDeferred,
     ),
     ("javascript", &["R_14"], Status::NotApplicable),
-    ("javascript", &["R_08"], Status::AdapterDeferred),
+    (
+        "javascript",
+        &["I_19", "R_05", "R_08", "R_20"],
+        Status::AdapterDeferred,
+    ),
     (
         "kotlin",
-        &["I_19", "R_08", "R_09", "R_10"],
+        &["I_19", "R_05", "R_08", "R_09", "R_10", "R_17", "R_19", "R_20"],
         Status::AdapterDeferred,
     ),
     ("lua", &["I_03", "R_20"], Status::NotApplicable),
     (
         "lua",
-        &["I_19", "R_04", "R_08", "R_09", "R_10", "R_12", "OT_16"],
+        &["I_19", "R_04", "R_08", "R_09", "R_10", "R_12", "R_19"],
         Status::AdapterDeferred,
     ),
     ("objc", &["R_13", "R_14", "R_18"], Status::NotApplicable),
@@ -299,17 +486,21 @@ const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
     ("perl", &["R_20"], Status::NotApplicable),
     (
         "perl",
-        &["I_03", "I_18", "I_19", "R_08", "R_09", "R_10"],
+        &["I_18", "I_19", "R_08", "R_09", "R_10", "R_19"],
         Status::AdapterDeferred,
     ),
     ("php", &["R_14"], Status::NotApplicable),
-    ("php", &["I_19", "R_08", "R_09", "R_10"], Status::AdapterDeferred),
+    (
+        "php",
+        &["I_19", "R_05", "R_08", "R_09", "R_10", "R_17", "R_19"],
+        Status::AdapterDeferred,
+    ),
     ("python", &["I_17", "R_14"], Status::NotApplicable),
-    ("python", &["R_08"], Status::AdapterDeferred),
+    ("python", &["R_05", "R_08"], Status::AdapterDeferred),
     ("ruby", &["I_17", "R_14"], Status::NotApplicable),
     (
         "ruby",
-        &["I_14", "I_16", "R_08", "R_09", "R_10"],
+        &["I_14", "I_16", "I_19", "R_05", "R_08", "R_09", "R_10", "R_17"],
         Status::AdapterDeferred,
     ),
     (
@@ -321,7 +512,7 @@ const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
     ("scala", &["I_17", "R_12"], Status::NotApplicable),
     (
         "scala",
-        &["I_19", "R_08", "R_09", "R_10", "R_19"],
+        &["I_19", "R_05", "R_08", "R_09", "R_10", "R_19"],
         Status::AdapterDeferred,
     ),
     ("solidity", &["R_18"], Status::NotApplicable),
@@ -329,10 +520,14 @@ const COVERAGE_GAP_OVERRIDES: &[(&str, &[&str], Status)] = &[
     ("swift", &["R_12"], Status::NotApplicable),
     (
         "swift",
-        &["I_14", "I_19", "R_08", "R_09", "R_10"],
+        &["I_14", "I_19", "R_05", "R_08", "R_09", "R_10"],
         Status::AdapterDeferred,
     ),
-    ("typescript", &["R_08", "R_14"], Status::AdapterDeferred),
+    (
+        "typescript",
+        &["R_05", "R_08", "R_14", "R_20"],
+        Status::AdapterDeferred,
+    ),
 ];
 
 /// Total scenarios = 76. Used in coverage reporting.

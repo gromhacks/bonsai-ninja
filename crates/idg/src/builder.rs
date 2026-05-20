@@ -799,8 +799,18 @@ fn stitch_call_site(
         // `caller.CallArg(site, i) → callee.Param(j)`. When the
         // callee has a declared receiver parameter, `j` skips that
         // formal slot instead of treating the receiver as arg zero.
+        // Named / labelled arguments bind by adapter-supplied formal
+        // name first, then fall back to positional order.
         for i in 0..site.args_count as usize {
-            let callee_param_idx = explicit_arg_param_index(i, endpoints.receiver_param_index);
+            let callee_param_idx = site
+                .call_arg_names
+                .get(i)
+                .and_then(|name| {
+                    name.as_deref().and_then(|name| {
+                        named_arg_param_index(name, &endpoints.param_names, endpoints.receiver_param_index)
+                    })
+                })
+                .unwrap_or_else(|| explicit_arg_param_index(i, endpoints.receiver_param_index));
             let Some(&callee_param_node) = endpoints.params.get(callee_param_idx) else {
                 continue;
             };
@@ -1020,6 +1030,22 @@ fn explicit_arg_param_index(arg_idx: usize, receiver_param_index: Option<usize>)
         Some(receiver_idx) if arg_idx >= receiver_idx => arg_idx.saturating_add(1),
         _ => arg_idx,
     }
+}
+
+fn named_arg_param_index(
+    arg_name: &str,
+    param_names: &[String],
+    receiver_param_index: Option<usize>,
+) -> Option<usize> {
+    let arg_name = arg_name.trim();
+    if arg_name.is_empty() {
+        return None;
+    }
+    param_names
+        .iter()
+        .enumerate()
+        .find(|(idx, param)| Some(*idx) != receiver_param_index && param.trim() == arg_name)
+        .map(|(idx, _)| idx)
 }
 
 fn stitch_field_argument_forwarding(
