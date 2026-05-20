@@ -1,5 +1,5 @@
 //! C++ language adapter.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
@@ -159,8 +159,12 @@ impl LanguageAdapter for CppAdapter {
             // `Decl.return_type` for `apply_assign_call_result_types`.
             bonsai_lang_api::populate_decl_return_types(&mut decl_index, &tree, src, &HANDLER);
             let bases_by_span = collect_cpp_class_bases(&tree, file, src);
+            let access_by_span = collect_cpp_member_visibility(&tree, file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &CPP_TYPE_ALIASES);
             for decl in &mut decl_index.defs {
+                if let Some(visibility) = access_by_span.get(&decl.span).copied() {
+                    decl.visibility = visibility;
+                }
                 if let Some(aliases) = alias_map.get(&decl.span) {
                     decl.type_aliases = aliases.clone();
                 }
@@ -174,10 +178,9 @@ impl LanguageAdapter for CppAdapter {
                 if !is_class_like(decl.kind) {
                     continue;
                 }
-                if let Some(bases) = bases_by_span
-                    .iter()
-                    .find_map(|(span, bases)| (*span == decl.span).then_some(bases))
-                {
+                if let Some(bases) = bases_by_span.iter().find_map(|(span, name, bases)| {
+                    (*span == decl.span || name == &decl.name).then_some(bases)
+                }) {
                     decl.bases = bases.clone();
                 }
             }
@@ -230,6 +233,44 @@ fn collect_tu_private_function_names(
     let root = tree.root_node();
     walk_for_tu_private(root, src, false, &mut private_names);
     private_names
+}
+
+fn collect_cpp_member_visibility(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> std::collections::HashMap<Span, Visibility> {
+    let mut out = std::collections::HashMap::new();
+    for class_node in collect_kinds(tree, &["class_specifier", "struct_specifier"]) {
+        let default_visibility = if class_node.kind() == "struct_specifier" {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        let mut current_visibility = default_visibility;
+        if let Some(body) = class_node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            for child in body.named_children(&mut cursor) {
+                if child.kind() == "access_specifier" {
+                    current_visibility = cpp_access_visibility(node_text(&child, src), default_visibility);
+                    continue;
+                }
+                if child.kind() == "function_definition" {
+                    out.insert(span_of(file, &child), current_visibility);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn cpp_access_visibility(raw: &str, default_visibility: Visibility) -> Visibility {
+    match raw.trim().trim_end_matches(':') {
+        "public" => Visibility::Public,
+        "protected" => Visibility::Protected,
+        "private" => Visibility::Private,
+        _ => default_visibility,
+    }
 }
 
 /// Recursive walker tracking whether we're currently inside an
@@ -331,10 +372,25 @@ fn is_class_like(kind: DeclKind) -> bool {
 /// `type_identifier` / `qualified_identifier` / `template_type`
 /// nodes (alternating with `access_specifier` keywords). Generic /
 /// qualified bases collapse to the bare tail.
-fn collect_cpp_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(bonsai_common::Span, Vec<String>)> {
+fn collect_cpp_class_bases(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, String, Vec<String>)> {
     let mut bases_by_class = Vec::new();
     let class_kinds = &["class_specifier", "struct_specifier", "union_specifier"];
     for class_node in collect_kinds(tree, class_kinds) {
+        let Some(name_node) = class_node
+            .child_by_field_name("name")
+            .or_else(|| first_named_child_of_kind(&class_node, "type_identifier"))
+            .or_else(|| first_named_child_of_kind(&class_node, "identifier"))
+        else {
+            continue;
+        };
+        let class_name = node_text(&name_node, src).trim();
+        if class_name.is_empty() {
+            continue;
+        }
         let mut bases: Vec<String> = Vec::new();
         let mut class_cursor = class_node.walk();
         for class_child in class_node.named_children(&mut class_cursor) {
@@ -363,7 +419,7 @@ fn collect_cpp_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(bonsai
             }
         }
         if !bases.is_empty() {
-            bases_by_class.push((span_of(file, &class_node), bases));
+            bases_by_class.push((span_of(file, &class_node), class_name.to_string(), bases));
         }
     }
     bases_by_class

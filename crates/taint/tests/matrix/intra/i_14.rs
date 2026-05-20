@@ -27,3 +27,51 @@ fn i_14_scala() {
 fn i_14_php() {
     run_positive_cell("I_14", LangFixture { lang:"php", adapter:Arc::new(bonsai_lang_php::PhpAdapter::new()), files:&[("a.php","<?php\nfunction entry($args) { try { throw new Exception($args); } catch (Exception $e) { $copy = $e; sink($copy); } }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
+
+#[test]
+fn i_14_cpp() {
+    run_positive_cell("I_14", LangFixture { lang: "cpp", adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()), files: &[("a.cpp", "void entry(const char *args) { try { throw args; } catch (const char *e) { const char *copy = e; sink(copy); } }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}
+
+#[test]
+fn i_14_csharp() {
+    run_positive_cell("I_14", LangFixture { lang: "csharp", adapter: Arc::new(bonsai_lang_csharp::CSharpAdapter::new()), files: &[("Demo.cs", "using System;\nclass Demo { void Entry(string args) { try { throw new Exception(args); } catch (Exception e) { var copy = e; Sink(copy); } } }\n")], entry: "Entry", seed: &["args"], sink: "Sink" });
+}
+
+#[test]
+fn i_14_dart() {
+    run_positive_cell(
+        "I_14",
+        LangFixture {
+            lang: "dart",
+            adapter: Arc::new(bonsai_lang_dart::DartAdapter::new()),
+            files: &[(
+                "a.dart",
+                "void entry(String args) { try { throw args; } catch (e) { var copy = e; sink(copy); } }\n",
+            )],
+            entry: "entry",
+            seed: &["args"],
+            sink: "sink",
+        },
+    );
+}
+
+#[test]
+fn i_14_java() {
+    run_positive_cell("I_14", LangFixture { lang: "java", adapter: Arc::new(bonsai_lang_java::JavaAdapter::new()), files: &[("Demo.java", "class Demo { void entry(String args) { try { throw new RuntimeException(args); } catch (Exception e) { Object copy = e; sink(copy); } } }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}
+
+#[test]
+fn i_14_objc() {
+    run_positive_cell("I_14", LangFixture { lang: "objc", adapter: Arc::new(bonsai_lang_objc::ObjCAdapter::new()), files: &[("a.m", "void entry(NSString *args) { @try { @throw args; } @catch (NSString *e) { NSString *copy = e; sink(copy); } }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}
+
+#[test]
+fn i_14_ruby() {
+    run_positive_cell("I_14", LangFixture { lang: "ruby", adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()), files: &[("a.rb", "def entry(args)\n  begin\n    raise StandardError.new(args)\n  rescue StandardError => e\n    copy = e\n    sink(copy)\n  end\nend\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}
+
+#[test]
+fn i_14_swift() {
+    run_positive_cell("I_14", LangFixture { lang: "swift", adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()), files: &[("a.swift", "struct BoxError: Error { let value: String }\nfunc entry(args: String) { do { throw BoxError(value: args) } catch let e { let copy = e; sink(copy) } }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}

@@ -4534,7 +4534,10 @@ pub fn infer_entry_point_sources(ws: &Workspace) -> Vec<RuleMatch> {
             let mut entry_kind: Option<EntryKind> = None;
             if let Some(k) = decorator_kind {
                 entry_kind = Some(k);
-            } else if !has_callers && matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
+            } else if !has_callers
+                && matches!(decl.kind, DeclKind::Function | DeclKind::Method)
+                && !is_synthetic_anonymous_callable(decl)
+            {
                 entry_kind = Some(EntryKind::Unreferenced);
             }
 
@@ -4785,6 +4788,10 @@ fn param_name_matches(params: &[String], name: &str) -> bool {
     params
         .iter()
         .any(|param| normalize_param_name(param) == normalized)
+}
+
+fn is_synthetic_anonymous_callable(decl: &bonsai_lang_api::Decl) -> bool {
+    decl.name.starts_with("<lambda@") && decl.name.ends_with('>')
 }
 
 /// Strip leading sigils (`$` / `&` / `*`) from a parameter name so

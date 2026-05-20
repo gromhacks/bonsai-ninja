@@ -72,11 +72,19 @@ pub(super) fn split_foreach_header(text: &str) -> Option<(&str, &str)> {
 }
 
 /// Split on the iteration keyword (`in` or `of`) — the two surface forms
-/// every supported language reduces to.
+/// most supported languages reduce to. PHP's `foreach ($xs as $x)`
+/// reverses the written order, so return `(binding, iterable)` for
+/// that spelling too.
 fn split_foreach_lhs_rhs(text: &str) -> Option<(&str, &str)> {
     text.split_once(" in ")
         .or_else(|| text.split_once(" of "))
         .or_else(|| text.split_once(" : "))
+        .or_else(|| {
+            text.split_once(" as ").map(|(iterable, binding)| {
+                let binding = binding.rsplit_once("=>").map_or(binding, |(_, value)| value);
+                (binding, iterable)
+            })
+        })
 }
 
 /// Strip a leading binding keyword (`const`/`let`/`var`/`final`) so the

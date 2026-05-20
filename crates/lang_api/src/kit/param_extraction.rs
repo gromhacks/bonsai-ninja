@@ -25,8 +25,9 @@
 use tree_sitter::Node;
 
 use super::{
-    extract_direct_call_info, first_identifier_descendant, first_identifier_like_child,
-    first_named_child_of_kind, looks_like_identifier, node_text, short_name_of, COMMON_CALL_KINDS,
+    binding_tokens_from_pattern, callable_param_names_from_text, extract_direct_call_info,
+    first_identifier_descendant, first_identifier_like_child, first_named_child_of_kind,
+    looks_like_identifier, node_text, short_name_of, COMMON_CALL_KINDS, SYNTHETIC_VARARGS_PARAM,
 };
 
 /// Per-parameter annotation/decorator names, parallel-indexed with
@@ -327,7 +328,49 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
         // keep parameter-index alignment with annotations.
         param_names.push(bound_name.unwrap_or_default());
     }
+    let fn_text = node_text(fn_node, src);
+    let fallback_params = callable_param_names_from_text(fn_text);
+    if param_names.is_empty() {
+        param_names.extend(fallback_params);
+    } else if fallback_params
+        .iter()
+        .any(|param| param == SYNTHETIC_VARARGS_PARAM)
+        && !param_names.iter().any(|param| param == SYNTHETIC_VARARGS_PARAM)
+    {
+        param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
+    }
+    if has_standalone_ellipsis_param(fn_text)
+        && !param_names.iter().any(|param| param == SYNTHETIC_VARARGS_PARAM)
+    {
+        param_names.push(SYNTHETIC_VARARGS_PARAM.to_string());
+    }
     param_names
+}
+
+fn has_standalone_ellipsis_param(text: &str) -> bool {
+    let Some(segment) = first_parenthesized_segment_text(text) else {
+        return false;
+    };
+    segment.split(',').any(|piece| piece.trim() == "...")
+}
+
+fn first_parenthesized_segment_text(text: &str) -> Option<&str> {
+    let open = text.find('(')?;
+    let mut depth = 0usize;
+    for (idx, ch) in text[open..].char_indices() {
+        let absolute = open + idx;
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return text.get(open + 1..absolute);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Push a single parameter's name onto `out`, handling:
@@ -420,6 +463,13 @@ fn push_param_name(param: Node<'_>, src: &[u8], param_names: &mut Vec<String>) {
         _ => return,
     };
     let trimmed_name = raw_name_text.trim();
+    if trimmed_name.starts_with(['{', '[', '(']) {
+        let pattern_bindings = binding_tokens_from_pattern(trimmed_name);
+        if !pattern_bindings.is_empty() {
+            param_names.extend(pattern_bindings);
+            return;
+        }
+    }
     // Filter out sigil-only entries (`*`, `&`) that are syntax noise
     // rather than meaningful parameter bindings.
     if !trimmed_name.is_empty() && trimmed_name != "*" && trimmed_name != "&" {

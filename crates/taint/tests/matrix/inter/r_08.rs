@@ -25,3 +25,14 @@ fn r_08_rust() {
 fn r_08_objc() {
     run_positive_cell("R_08", LangFixture { lang:"objc", adapter:Arc::new(bonsai_lang_objc::ObjCAdapter::new()), files:&[("a.m","void helper(NSString *p, NSString **out) { *out = p; }\nvoid entry(NSString *args) { NSString *out; helper(args, &out); sink(out); }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
+#[test]
+fn r_08_go() {
+    run_positive_cell("R_08", LangFixture {
+        lang: "go",
+        adapter: Arc::new(bonsai_lang_go::GoAdapter::new()),
+        files: &[("a.go", "package main\nfunc helper(p string, out *string) { *out = p }\nfunc entry(args string) { var out string; helper(args, &out); sink(out) }\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}

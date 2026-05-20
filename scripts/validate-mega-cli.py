@@ -58,7 +58,7 @@ EXPECTED_FINDINGS = {
     "dart": 0,
     "elixir": 0,
     "erlang": 2,
-    "go": 3,
+    "go": 2,
     "java": 0,
     "javascript": 1,
     "kotlin": 1,

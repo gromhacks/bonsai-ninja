@@ -296,12 +296,6 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
     let seed_names: Vec<String> = effective_seed.iter().cloned().collect();
     let seed_nodes = idg_seed_nodes_for_names(idg.as_ref(), source_func, &seed_names, global.as_ref());
 
-    let reachable_funcs: ahash::AHashSet<bonsai_common::FuncId> = ws
-        .cached_resolved_call_graph()
-        .inner()
-        .reachable(source_func)
-        .into_iter()
-        .collect();
     let closure_nodes =
         idg.forward_closure_with_max_precision(&seed_nodes, Some(SEMANTIC_FLOW_MAX_PRECISION));
     let cross_calls = idg
@@ -310,7 +304,6 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
             Some(SEMANTIC_FLOW_MAX_PRECISION),
         )
         .into_iter()
-        .filter(|ce| reachable_funcs.contains(&ce.caller))
         .collect::<Vec<_>>();
     let tainted_arg_sites = idg.tainted_call_args_in_reachable_nodes(&closure_nodes);
     // Legacy worklist knobs have no exactness-preserving surface on
@@ -480,11 +473,30 @@ fn tainted_unresolved_workspace_call_reasons(
         let Some(call_name) = caller_call_name(global, *caller, *span) else {
             continue;
         };
+        if workspace_call_site_has_semantic_resolution(ws, global, *caller, *span, &call_name) {
+            continue;
+        }
         if workspace_has_callable_named_in_context(ws, global, *caller, &call_name) {
             reasons.push(format!("unresolved-call:{call_name}"));
         }
     }
     reasons
+}
+
+fn workspace_call_site_has_semantic_resolution(
+    ws: &Workspace,
+    global: &bonsai_index::GlobalIndex,
+    caller: bonsai_common::FuncId,
+    call_span: bonsai_common::Span,
+    call_name: &str,
+) -> bool {
+    ws.cached_resolved_call_graph().callees_of(caller).any(|edge| {
+        edge.precision.is_semantic()
+            && call_site_spans_match(edge.span, call_span)
+            && global
+                .decl_of(bonsai_common::SymbolId::new(edge.to.raw()))
+                .is_some_and(|decl| call_names_match(&decl.name, call_name))
+    })
 }
 
 fn workspace_has_callable_named_in_context(
@@ -511,6 +523,39 @@ fn workspace_has_callable_named_in_context(
         !candidate.is_empty()
             && !bonsai_resolve::resolve_callable_with_context(global, candidate, &ctx).is_empty()
     })
+}
+
+fn call_site_spans_match(edge_span: bonsai_common::Span, event_span: bonsai_common::Span) -> bool {
+    edge_span == event_span
+        || (edge_span.file == event_span.file
+            && (span_contains(edge_span, event_span) || span_contains(event_span, edge_span)))
+}
+
+fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn call_names_match(decl_name: &str, event_name: &str) -> bool {
+    if decl_name == event_name {
+        return true;
+    }
+    let mut tail = event_name;
+    if let Some(idx) = tail.rfind("->") {
+        tail = &tail[idx + 2..];
+    }
+    if let Some((_, rest)) = tail.rsplit_once(['.', ':']) {
+        tail = rest;
+    }
+    if let Some(idx) = tail.find('/') {
+        if tail[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
+            tail = &tail[..idx];
+        }
+    }
+    decl_name == tail
+        || decl_name
+            .rsplit_once(['.', ':'])
+            .map(|(_, suffix)| suffix == tail)
+            .unwrap_or(false)
 }
 
 /// Stable content-hash id for a taint propagation: `T:` + 8

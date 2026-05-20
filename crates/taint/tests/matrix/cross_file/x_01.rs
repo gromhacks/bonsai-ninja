@@ -309,9 +309,9 @@ fn x_01_swift() {
             lang: "swift",
             adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
             files: &[
-                ("Helpers.swift", "public func helper(p: String) { sink(p) }\n"),
+                ("src/Helpers.swift", "public func helper(p: String) { sink(p) }\n"),
                 (
-                    "Entry.swift",
+                    "src/Entry.swift",
                     "public func entry(args: String) { helper(p: args) }\n",
                 ),
             ],
@@ -421,7 +421,14 @@ fn x_01_solidity() {
         lang: "solidity",
         adapter: Arc::new(bonsai_lang_solidity::SolidityAdapter::new()),
         files: &[
-            ("Demo.sol", "contract Demo { function entry(string memory args) public { helper(args); } function helper(string memory p) internal { sink(p); } }\n"),
+            (
+                "Helper.sol",
+                "library Helper { function helper(string memory p) public { sink(p); } }\n",
+            ),
+            (
+                "Entry.sol",
+                "import './Helper.sol';\ncontract Entry { function entry(string memory args) public { Helper.helper(args); } }\n",
+            ),
         ],
         entry: "entry",
         seed: &["args"],

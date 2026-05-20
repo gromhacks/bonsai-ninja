@@ -1,5 +1,5 @@
 //! JavaScript language adapter.
-use bonsai_common::FileId;
+use bonsai_common::{FileId, SymbolId};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{
@@ -74,6 +74,9 @@ impl LanguageAdapter for JavaScriptAdapter {
         } else {
             // Fall back to the file stem when the workspace root is unknown.
             bonsai_lang_api::apply_file_stem_semantic_identity(&mut decl_index, ctx);
+        }
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            apply_js_ts_default_export_aliases(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
         }
         // ECMAScript private fields/methods are syntactically marked by a leading `#`.
         for decl in &mut decl_index.defs {
@@ -186,7 +189,8 @@ pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<
         //   - Shorthand `{ a }` becomes Local-scope so bare `a(...)` expands
         //     to `module.a` while default browse hides it.
         let import_clause = first_named_child_of_kind(&import_node, "import_clause");
-        let mut alias: Option<String> = None;
+        let mut module_alias: Option<String> = None;
+        let mut default_alias: Option<String> = None;
         let mut is_wildcard = false;
         let mut renames: Vec<(String, String)> = Vec::new();
         let mut shorthands: Vec<String> = Vec::new();
@@ -196,11 +200,11 @@ pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<
                 match clause_child.kind() {
                     "identifier" => {
                         // Default import: `import Foo from "..."`.
-                        alias = Some(node_text(&clause_child, src).to_string());
+                        default_alias = Some(node_text(&clause_child, src).to_string());
                     }
                     "namespace_import" => {
                         // `import * as ns from "..."` — single binding bound to the whole module.
-                        alias = first_named_child_of_kind(&clause_child, "identifier")
+                        module_alias = first_named_child_of_kind(&clause_child, "identifier")
                             .map(|ident| node_text(&ident, src).to_string());
                         is_wildcard = true;
                     }
@@ -232,11 +236,21 @@ pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<
         imports.push(ImportSpec {
             span: span_of(file, &import_node),
             module: module.clone(),
-            alias,
+            alias: module_alias,
             is_wildcard,
             original_name: None,
             scope: ImportScope::Module,
         });
+        if let Some(default_alias) = default_alias.filter(|alias| !alias.is_empty()) {
+            imports.push(ImportSpec {
+                span: span_of(file, &import_node),
+                module: module.clone(),
+                alias: Some(default_alias),
+                is_wildcard: false,
+                original_name: Some("default".to_string()),
+                scope: ImportScope::Module,
+            });
+        }
         for (original_name, local_alias) in renames {
             imports.push(ImportSpec {
                 span: span_of(file, &import_node),
@@ -259,6 +273,79 @@ pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<
         }
     }
     imports
+}
+
+/// Surface ECMAScript `export default` as an additional callable/type
+/// binding named `default` in the exporting module. The original
+/// declaration remains indexed by its real local name, so same-file
+/// references still resolve while default imports can target the
+/// language-level export name.
+pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
+    let mut default_exports = Vec::new();
+    for export_node in collect_kinds(tree, &["export_statement"]) {
+        let text = node_text(&export_node, src).trim_start();
+        if !text.starts_with("export default") {
+            continue;
+        }
+        let target = export_node
+            .child_by_field_name("declaration")
+            .or_else(|| export_node.child_by_field_name("value"));
+        let Some(target) = target else {
+            continue;
+        };
+        if target.kind() == "identifier" {
+            let name = node_text(&target, src).to_string();
+            if !name.is_empty() {
+                default_exports.push(DefaultExportTarget::Name(name));
+            }
+        } else {
+            default_exports.push(DefaultExportTarget::Span(span_of(file, &target)));
+        }
+    }
+    if default_exports.is_empty() || decl_index.defs.iter().any(|decl| decl.name == "default") {
+        return;
+    }
+
+    let mut next_symbol = decl_index
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .map_or(0, |raw| raw.saturating_add(1));
+    let mut aliases = Vec::new();
+    for target in default_exports {
+        let Some(source) = decl_index.defs.iter().find(|decl| match &target {
+            DefaultExportTarget::Span(span) => decl.span == *span,
+            DefaultExportTarget::Name(name) => decl.name == *name,
+        }) else {
+            continue;
+        };
+        if !matches!(
+            source.kind,
+            bonsai_lang_api::DeclKind::Function
+                | bonsai_lang_api::DeclKind::Method
+                | bonsai_lang_api::DeclKind::Constructor
+                | bonsai_lang_api::DeclKind::Class
+        ) {
+            continue;
+        }
+        let mut alias = source.clone();
+        alias.symbol = SymbolId::new(next_symbol);
+        next_symbol = next_symbol.saturating_add(1);
+        alias.name = "default".to_string();
+        alias.qualified_name = if alias.module_path.is_empty() {
+            Some("default".to_string())
+        } else {
+            Some(format!("{}.default", alias.module_path.segments.join(".")))
+        };
+        aliases.push(alias);
+    }
+    decl_index.defs.extend(aliases);
+}
+
+enum DefaultExportTarget {
+    Span(bonsai_common::Span),
+    Name(String),
 }
 
 /// CommonJS `const x = require("y")` / `const { a } = require("y")` /

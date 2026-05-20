@@ -7,7 +7,9 @@
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{short_qualified_tail, FileId, SymbolId};
 use bonsai_index::GlobalIndex;
-use bonsai_lang_api::{AliasTarget, ImportSpec, ModulePath, Visibility, WILDCARD_IMPORT_ALIAS_PREFIX};
+use bonsai_lang_api::{
+    AliasTarget, DeclKind, ImportSpec, ModulePath, Visibility, WILDCARD_IMPORT_ALIAS_PREFIX,
+};
 
 /// Caller-side context the resolver consults when narrowing a
 /// candidate set. Built by callgraph / taint / matcher at edge-
@@ -918,14 +920,19 @@ pub fn qualified_module_alias_call(name: &str, aliases: &AHashMap<String, String
 /// the caller's adapter declares via
 /// `LanguageCapabilities::module_export_aliases`. JS/TS declare
 /// `["exports", "module.exports"]`, so `foo` becomes
-/// `[foo, exports.foo, module.exports.foo]`. Languages without the
-/// convention pass `&[]` and the result is a single-element vec.
+/// `[exports.foo, module.exports.foo, foo]`. The explicit exported
+/// receiver forms are tried first because CommonJS adapters can emit
+/// both `exports.foo = ...` and a bare `foo` alias for the same span;
+/// the receiver-qualified fact is the higher-fidelity semantic target.
+/// Languages without the convention pass `&[]` and the result is a
+/// single-element vec.
 #[must_use]
 pub fn export_name_variants(alias_tail: &str, caller_export_aliases: &[&'static str]) -> Vec<String> {
-    let mut variants = vec![alias_tail.to_string()];
+    let mut variants = Vec::new();
     for receiver in caller_export_aliases {
-        variants.push(format!("{receiver}.{alias_tail}"));
+        push_unique(&mut variants, format!("{receiver}.{alias_tail}"));
     }
+    push_unique(&mut variants, alias_tail.to_string());
     variants
 }
 
@@ -993,13 +1000,17 @@ pub fn collect_transitive_base_type_names(
     let Some(class_decl) = global.decl_of(class_sym) else {
         return;
     };
+    let Some(class_file) = global.declaring_file(class_sym) else {
+        return;
+    };
+    let base_ctx = class_decl_context(ctx, class_file, &class_decl.module_path);
     for base in &class_decl.bases {
         let canonical = canonical_dispatch_type_name(base);
         if !out.insert(canonical) {
             continue;
         }
-        for base_sym in resolve_class(global, base, ctx) {
-            collect_transitive_base_type_names(global, base_sym, ctx, out);
+        for base_sym in resolve_class(global, base, &base_ctx) {
+            collect_transitive_base_type_names(global, base_sym, &base_ctx, out);
         }
     }
 }
@@ -1123,7 +1134,21 @@ fn collect_method_candidates_for_class_inner(
     if matched_local_method {
         return;
     }
-    let base_ctx = ResolveContext::new(class_file, &class_decl.module_path);
+    if !class_decl_has_owned_callable(global, class_sym, class_decl)
+        && collect_peer_partial_class_method_candidates(
+            global,
+            class_sym,
+            class_decl,
+            method_name,
+            ctx,
+            seen_methods,
+            seen_classes,
+            out,
+        )
+    {
+        return;
+    }
+    let base_ctx = class_decl_context(ctx, class_file, &class_decl.module_path);
     for base in &class_decl.bases {
         for base_sym in resolve_class(global, base, &base_ctx) {
             collect_method_candidates_for_class_inner(
@@ -1139,6 +1164,69 @@ fn collect_method_candidates_for_class_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Mirrors the recursive class walk state.
+fn collect_peer_partial_class_method_candidates(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    class_decl: &bonsai_lang_api::Decl,
+    method_name: &str,
+    ctx: &ResolveContext<'_>,
+    seen_methods: &mut AHashSet<SymbolId>,
+    seen_classes: &mut AHashSet<SymbolId>,
+    out: &mut Vec<bonsai_common::FuncId>,
+) -> bool {
+    let before = out.len();
+    // CONTEXTLESS_LOOKUP_JUSTIFICATION: peer partial-class stitching
+    // only runs after a same-symbol class has no owned callable; the
+    // candidates are narrowed to the same class-like name, visibility,
+    // and semantic method ownership before any method leaves this helper.
+    for peer_sym in global.find_by_name(&class_decl.name).iter().copied() {
+        if peer_sym == class_sym || seen_classes.contains(&peer_sym) {
+            continue;
+        }
+        let Some(peer_decl) = global.decl_of(peer_sym) else {
+            continue;
+        };
+        let Some(peer_file) = global.declaring_file(peer_sym) else {
+            continue;
+        };
+        if !matches!(
+            peer_decl.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Trait | DeclKind::Interface
+        ) || peer_decl.name != class_decl.name
+            || !visibility_allows(peer_decl, peer_file, &peer_decl.module_path, ctx)
+        {
+            continue;
+        }
+        collect_method_candidates_for_class_inner(
+            global,
+            peer_sym,
+            method_name,
+            ctx,
+            seen_methods,
+            seen_classes,
+            out,
+        );
+    }
+    out.len() > before
+}
+
+fn class_decl_has_owned_callable(
+    global: &GlobalIndex,
+    class_sym: SymbolId,
+    class_decl: &bonsai_lang_api::Decl,
+) -> bool {
+    let Some(class_file) = global.declaring_file(class_sym) else {
+        return false;
+    };
+    global.decls_in(class_file).iter().any(|decl| {
+        matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) && decl_belongs_to_class(decl, class_sym, class_decl)
+    })
+}
+
 fn decl_belongs_to_class(
     decl: &bonsai_lang_api::Decl,
     class_sym: SymbolId,
@@ -1151,6 +1239,21 @@ fn decl_belongs_to_class(
     decl.name_span.file == class_span.file
         && decl.name_span.start >= class_span.start
         && decl.name_span.end <= class_span.end
+}
+
+fn class_decl_context<'a>(
+    inherited: &ResolveContext<'a>,
+    class_file: FileId,
+    class_module: &'a ModulePath,
+) -> ResolveContext<'a> {
+    let mut ctx = ResolveContext::new(class_file, class_module);
+    if let Some(alias_map) = inherited.alias_map {
+        ctx = ctx.with_alias_map(alias_map);
+    }
+    if let Some(file_path_lookup) = inherited.file_path_lookup {
+        ctx = ctx.with_file_path_lookup(file_path_lookup.lookup);
+    }
+    ctx
 }
 
 /// Lift each `TypeAliasBinding` into the alias-target map as a
@@ -1351,10 +1454,14 @@ pub fn resolve_class(
             .map(|(decl, _)| decl.symbol)
             .collect::<Vec<_>>()
     };
+    let collect_caller_lexical_scope = |lookup: &str| {
+        let mut candidates = collect(lookup);
+        retain_caller_lexical_symbol_candidates(global, &mut candidates, ctx);
+        candidates
+    };
     let mut out = Vec::new();
     for lookup in type_lookup_variants(name) {
-        out.extend(collect(&lookup));
-        retain_caller_lexical_symbol_candidates(global, &mut out, ctx);
+        out.extend(collect_caller_lexical_scope(&lookup));
         if !out.is_empty() {
             dedup_symbols(&mut out);
             return out;
@@ -1370,6 +1477,17 @@ pub fn resolve_class(
                 if !out.is_empty() {
                     dedup_symbols(&mut out);
                     return out;
+                }
+                if let Some(target_module) = rewrite.target_module.as_deref() {
+                    for alias_lookup in alias_bound_class_lookup_names(name, &lookup) {
+                        let mut candidates = collect(&alias_lookup);
+                        candidates.retain(|sym| symbol_in_alias_target(global, *sym, target_module, ctx));
+                        out.extend(candidates);
+                    }
+                    if !out.is_empty() {
+                        dedup_symbols(&mut out);
+                        return out;
+                    }
                 }
                 if let Some((_, tail)) = lookup.rsplit_once(['.', ':']) {
                     // Bare-name fallback: workspace-wide lookup of
@@ -1417,7 +1535,17 @@ pub fn resolve_class(
             }
         }
     }
-    dedup_symbols(&mut out);
+    out
+}
+
+fn alias_bound_class_lookup_names(local_name: &str, rewritten: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in [local_name.trim(), rewritten.trim()] {
+        push_unique(&mut out, value.to_string());
+        if let Some((_, tail)) = value.rsplit_once(['.', ':', '\\', '/']) {
+            push_unique(&mut out, tail.trim().to_string());
+        }
+    }
     out
 }
 

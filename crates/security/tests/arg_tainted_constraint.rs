@@ -506,9 +506,12 @@ fn matcher_policy_fingerprint_was_bumped_for_arg_tainted() {
     // `any_arg_tainted` started accepting synthetic write evidence
     // for `MatchKind::Write` rules while remaining call-only for
     // call/new rules.
+    // Bumped 0x002c → 0x002d when resolver/call-flow semantics
+    // stopped using broad public-name fallback for cross-file class
+    // dispatch and synthetic anonymous callback entrypoints.
     assert_eq!(
         bonsai_security::MATCHER_POLICY_FINGERPRINT,
-        0x4d41_5443_4845_525f_504f_4c49_4359_002c_u128
+        0x4d41_5443_4845_525f_504f_4c49_4359_002d_u128
     );
 }
 

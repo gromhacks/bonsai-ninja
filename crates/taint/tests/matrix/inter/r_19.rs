@@ -139,3 +139,23 @@ fn r_19_perl() {
         },
     );
 }
+
+#[test]
+fn r_19_cpp() {
+    run_positive_cell("R_19", LangFixture { lang: "cpp", adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()), files: &[("a.cpp", "#include <cstdarg>\nvoid helper(const char *first, ...) { va_list ap; va_start(ap, first); const char *x = va_arg(ap, const char *); sink(x); va_end(ap); }\nvoid entry(const char *args) { helper(\"prefix\", args); }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}
+
+#[test]
+fn r_19_go() {
+    run_positive_cell("R_19", LangFixture { lang: "go", adapter: Arc::new(bonsai_lang_go::GoAdapter::new()), files: &[("a.go", "package main\nfunc helper(p ...string) { for _, x := range p { sink(x) } }\nfunc entry(args string) { helper(args) }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}
+
+#[test]
+fn r_19_objc() {
+    run_positive_cell("R_19", LangFixture { lang: "objc", adapter: Arc::new(bonsai_lang_objc::ObjCAdapter::new()), files: &[("a.m", "void helper(NSString *p, ...) { sink(p); }\nvoid entry(NSString *args) { helper(args, nil); }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}
+
+#[test]
+fn r_19_scala() {
+    run_positive_cell("R_19", LangFixture { lang: "scala", adapter: Arc::new(bonsai_lang_scala::ScalaAdapter::new()), files: &[("a.scala", "object Demo { def helper(p: String*): Unit = p.foreach(x => sink(x)); def entry(args: String): Unit = helper(args) }\n")], entry: "entry", seed: &["args"], sink: "sink" });
+}

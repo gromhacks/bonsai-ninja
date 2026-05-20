@@ -71,7 +71,7 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         "dart" => 0,
         "elixir" => 0,
         "erlang" => 2,
-        "go" => 3,
+        "go" => 2,
         "java" => 0,
         "javascript" => 1,
         "kotlin" => 1,

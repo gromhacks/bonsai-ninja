@@ -1026,7 +1026,7 @@ fn copy_workspace_tree(src: &std::path::Path, dst: &std::path::Path) {
     for entry in std::fs::read_dir(src).expect("read source workspace") {
         let entry = entry.expect("source workspace entry");
         let name = entry.file_name();
-        if name == std::ffi::OsStr::new(".bonsai") {
+        if name == std::ffi::OsStr::new(".bonsai") || name == std::ffi::OsStr::new(".bonsai-agent") {
             continue;
         }
         let src_path = entry.path();

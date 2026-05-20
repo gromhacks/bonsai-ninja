@@ -141,6 +141,45 @@ fn two_files_with_call_creates_cross_file_edges_when_callgraph_resolves() {
 }
 
 #[test]
+fn callee_token_call_site_stitches_full_expression_callgraph_edge() {
+    // Some adapters anchor FlowEvent::Call at the callee token
+    // (`execute`) while the callgraph resolver anchors the same
+    // dispatch at the full expression (`Executor.execute(cmd)`).
+    // The stitcher must treat those contained spans as one semantic
+    // call site, while callee-name filtering still chooses the
+    // correct target.
+    let mut f = empty_decl(1, 0, "f");
+    f.flow_events = vec![FlowEvent::Call {
+        span: span(0, 30, 37),
+        name: "Executor.execute".to_string(),
+        receiver: Some("Executor".to_string()),
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Method,
+        args: vec![bonsai_lang_api::CallArg {
+            span: span(0, 38, 41),
+            name: None,
+            value_text: "cmd".to_string(),
+            place: Some("cmd".to_string()),
+            source_names: vec!["cmd".to_string()],
+        }],
+    }];
+    let mut execute = empty_decl(2, 1, "execute");
+    execute.params = vec!["cmd".to_string()];
+
+    let idx = build_index(vec![f, execute]);
+    let f_id = func_id(&idx, "f");
+    let execute_id = func_id(&idx, "execute");
+    let cg = resolved_graph([(f_id, execute_id, span(0, 21, 42))]);
+
+    let ws = build(&idx, &cg);
+    assert_eq!(
+        ws.cross_file().len(),
+        2,
+        "callee-token flow event span must stitch to full-expression callgraph edge"
+    );
+}
+
+#[test]
 fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
     let mut entry = empty_decl(1, 0, "entry");
     entry.flow_events = vec![FlowEvent::Call {

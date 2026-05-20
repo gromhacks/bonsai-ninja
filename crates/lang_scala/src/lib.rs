@@ -3,11 +3,12 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, language_from_pack, node_text, parse_with, span_of,
-        with_fn_kinds_and_implicit_receivers,
+        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
+        walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
+    Visibility,
 };
 use tree_sitter::Node;
 
@@ -112,6 +113,7 @@ impl LanguageAdapter for ScalaAdapter {
             // dispatch `authService.runAdminCommand(...)` to the real
             // `AuthService` decl.
             let class_field_aliases = collect_scala_class_field_aliases(&tree, file, src);
+            synthesize_scala_constructor_decls(&mut idx, file, &tree, src);
             for decl in &mut idx.defs {
                 if let Some(vis) = vis_map.get(&decl.span).copied() {
                     decl.visibility = vis;
@@ -208,6 +210,148 @@ impl LanguageAdapter for ScalaAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &Tree, src: &[u8]) {
+    let class_names = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| decl.name.clone())
+        .collect::<Vec<_>>();
+    let classes = idx
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| {
+            (
+                decl.span,
+                decl.symbol,
+                decl.name.clone(),
+                decl.name_span,
+                decl.module_path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut next = idx
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    for class_node in collect_kinds(tree, &["class_definition"]) {
+        let class_span = span_of(file, &class_node);
+        let Some((_, class_symbol, class_name, class_name_span, module_path)) =
+            classes.iter().find(|(span, _, _, _, _)| *span == class_span)
+        else {
+            continue;
+        };
+        let Some(body) = first_named_child_of_kind(&class_node, "template_body") else {
+            continue;
+        };
+        let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+        if flow_events.is_empty() {
+            continue;
+        }
+        let params = first_named_child_of_kind(&class_node, "class_parameters")
+            .map_or_else(Vec::new, |params| constructor_param_names(params, src));
+        idx.defs.push(scala_constructor_decl(
+            bonsai_common::SymbolId::new(next),
+            *class_symbol,
+            class_name,
+            *class_name_span,
+            class_span,
+            span_of(file, &body),
+            params,
+            flow_events,
+            module_path.clone(),
+        ));
+        next = next.saturating_add(1);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scala_constructor_decl(
+    symbol: bonsai_common::SymbolId,
+    parent: bonsai_common::SymbolId,
+    class_name: &str,
+    name_span: Span,
+    span: Span,
+    body_span: Span,
+    params: Vec<String>,
+    flow_events: Vec<bonsai_lang_api::FlowEvent>,
+    module_path: bonsai_lang_api::ModulePath,
+) -> Decl {
+    Decl {
+        symbol,
+        kind: DeclKind::Constructor,
+        name: class_name.to_string(),
+        qualified_name: None,
+        module_path,
+        span,
+        name_span,
+        visibility: Visibility::Public,
+        parent: Some(parent),
+        body_span: Some(body_span),
+        flow_events,
+        has_implicit_returns: false,
+        params,
+        param_annotations: Vec::new(),
+        type_aliases: Vec::new(),
+        bases: Vec::new(),
+        receiver_param_index: None,
+        receiver_field_writes: Vec::new(),
+        implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
+        receiver_state_sources: Vec::new(),
+        return_type: None,
+    }
+}
+
+fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    collect_descendant_kinds(node, &["class_parameter", "parameter"])
+        .into_iter()
+        .filter_map(|param| parameter_binding_name(param, src))
+        .collect()
+}
+
+fn parameter_binding_name(param: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut names = Vec::new();
+    collect_binding_identifiers(param, src, &mut names);
+    names.into_iter().filter(|name| name != "_").next()
+}
+
+fn collect_binding_identifiers(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    if node.kind() == "identifier" {
+        let name = node_text(&node, src).trim();
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "type_identifier" {
+            continue;
+        }
+        collect_binding_identifiers(child, src, out);
+    }
+}
+
+fn collect_descendant_kinds<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
+    let mut out = Vec::new();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if kinds.contains(&current.kind()) {
+            out.push(current);
+        }
+        let mut cursor = current.walk();
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
 }
 
 /// Walk every Scala class-like declaration and pull `(name, type)`

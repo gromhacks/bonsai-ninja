@@ -211,26 +211,24 @@
   enabled: true
   language: ruby
   tag: sql-parameter
-  # Match against the gem name (`require "activerecord"`) and the
-  # PascalCase constant (`ActiveRecord::Base`) so the package gate
-  # accepts either when the example binds `connection` from the
-  # constant chain.
-  packages: [activerecord, ActiveRecord]
+  # Match against the gem-style require names and the PascalCase
+  # constant (`ActiveRecord::Base`) so the package gate accepts both
+  # `require "active_record"` and canonical constant-qualified calls.
+  packages: [activerecord, active_record, ActiveRecord]
   match:
     kind: call
     callee:
-      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.quote$"
+      regex: "^[A-Za-z_][A-Za-z0-9_]*(?:(?:::|\\.)[A-Za-z_][A-Za-z0-9_]*)*\\.quote$"
   match_examples:
   - name: ruby.sanitizer.activerecord_quote example
     code: |
-      require "activerecord"
+      require "active_record"
       class Demo
         def example(input)
-          connection = ActiveRecord::Base.new
-          connection.quote(input)
+          ActiveRecord::Base.connection.quote(input)
         end
       end
-    expect_match_text: ["connection.quote"]
+    expect_match_text: ["ActiveRecord::Base.connection.quote"]
   description: "AR connection.quote."
 
 - id: ruby.sanitizer.openssl_escape_filter

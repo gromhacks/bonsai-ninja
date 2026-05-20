@@ -149,7 +149,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
         let mut seen: ahash::AHashSet<(FuncId, bonsai_callgraph::EdgeKind, bonsai_common::Precision)> =
             ahash::AHashSet::default();
         for edge in self.call_graph.callees_of(caller) {
-            if edge.span != site {
+            if !call_site_spans_match(edge.span, site) {
                 continue;
             }
             if !edge.precision.is_semantic() {
@@ -423,6 +423,20 @@ fn funcs_share_language(
 
 fn file_language(file_to_language: &AHashMap<FileId, &'static str>, file: FileId) -> Option<&'static str> {
     file_to_language.get(&file).copied()
+}
+
+fn call_site_spans_match(edge_span: bonsai_common::Span, event_span: bonsai_common::Span) -> bool {
+    if edge_span == event_span {
+        return true;
+    }
+    if edge_span.file != event_span.file {
+        return false;
+    }
+    span_contains(edge_span, event_span) || span_contains(event_span, edge_span)
+}
+
+fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
 }
 
 fn symbol_language(

@@ -151,3 +151,15 @@ fn r_20_elixir() {
         },
     );
 }
+
+#[test]
+fn r_20_objc() {
+    run_positive_cell("R_20", LangFixture {
+        lang: "objc",
+        adapter: Arc::new(bonsai_lang_objc::ObjCAdapter::new()),
+        files: &[("a.m", "@interface Demo : NSObject\n- (void)helperWithName:(NSString *)name;\n- (void)entry:(NSString *)args;\n@end\n@implementation Demo\n- (void)helperWithName:(NSString *)name { sink(name); }\n- (void)entry:(NSString *)args { [self helperWithName:args]; }\n@end\n")],
+        entry: "entry",
+        seed: &["args"],
+        sink: "sink",
+    });
+}

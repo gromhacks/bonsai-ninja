@@ -75,6 +75,10 @@ impl LanguageAdapter for ElixirAdapter {
                 {
                     decl.params = params;
                 }
+                bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                );
             }
             let private_spans = collect_elixir_defp_spans(&tree, snapshot.text.as_bytes());
             for decl in &mut decl_index.defs {

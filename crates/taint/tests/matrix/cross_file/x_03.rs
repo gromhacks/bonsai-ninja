@@ -308,9 +308,9 @@ fn x_03_swift() {
             lang: "swift",
             adapter: Arc::new(bonsai_lang_swift::SwiftAdapter::new()),
             files: &[
-                ("Util.swift", "public func helper(p: String) { sink(p) }\n"),
+                ("src/Util.swift", "public func helper(p: String) { sink(p) }\n"),
                 (
-                    "Entry.swift",
+                    "src/Entry.swift",
                     "public func entry(args: String) { helper(p: args) }\n",
                 ),
             ],

@@ -145,7 +145,7 @@ fn r_05_cpp() {
             adapter: Arc::new(bonsai_lang_cpp::CppAdapter::new()),
             files: &[(
                 "a.cpp",
-                "class Box { public: Box(const char *p) { sink(p); } };\nvoid entry(const char *args) { Box box(args); }\n",
+                "class Box { public: Box(const char *p) { sink(p); } };\nvoid entry(const char *args) { new Box(args); }\n",
             )],
             entry: "entry",
             seed: &["args"],

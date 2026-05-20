@@ -30,8 +30,9 @@ fn test_body<'a>(body: &'a str, fn_name: &str) -> Option<&'a str> {
 
 fn fixture_file_count(test_body: &str) -> usize {
     const EXTENSIONS: &[&str] = &[
-        ".c", ".cpp", ".cs", ".dart", ".erl", ".ex", ".go", ".java", ".js", ".kt", ".lua", ".m", ".php",
-        ".pl", ".pm", ".py", ".rb", ".rs", ".scala", ".sol", ".swift", ".ts",
+        ".c", ".cc", ".cpp", ".cs", ".cxx", ".dart", ".erl", ".ex", ".go", ".h", ".hh", ".hpp", ".hxx",
+        ".java", ".js", ".kt", ".lua", ".m", ".mm", ".php", ".pl", ".pm", ".py", ".rb", ".rs", ".scala",
+        ".sol", ".swift", ".ts",
     ];
 
     let bytes = test_body.as_bytes();
@@ -83,7 +84,8 @@ fn scenario_construct_markers(id: &str) -> Option<&'static [&'static str]> {
             "fun() ->",
             "^{",
         ]),
-        "I_19" => Some(&["lambda", "=>", "var f =", "const f =", "f ="]),
+        "I_19" => Some(&["lambda", "=>", "var f =", "const f =", "f =", "f :=", "^("]),
+        "I_16" => Some(&["match", "case", "when", "switch", "instanceof", " is "]),
         "R_05" => Some(&[
             "new Box",
             "Box::new",
@@ -103,8 +105,8 @@ fn scenario_construct_markers(id: &str) -> Option<&'static [&'static str]> {
             "Action<",
             "(*cb)",
         ]),
-        "R_19" => Some(&["*p", "...", "String...", "vararg", "params ", "@_"]),
-        "R_20" => Some(&["name=", "name =", "name:"]),
+        "R_19" => Some(&["*p", "...", "String...", "String*", "vararg", "params ", "@_"]),
+        "R_20" => Some(&["name=", "name =", "name:", "Name:"]),
         _ => None,
     }
 }
@@ -149,6 +151,24 @@ fn all_overrides_reference_real_languages() {
             );
         }
     }
+}
+
+#[test]
+fn no_cells_remain_adapter_deferred() {
+    let mut deferred = Vec::new();
+    for &lang in LANGUAGES {
+        for scenario in SCENARIOS {
+            if status(lang, scenario.id) == Status::AdapterDeferred {
+                deferred.push(format!("{}/{}", scenario.id, lang));
+            }
+        }
+    }
+
+    assert!(
+        deferred.is_empty(),
+        "taint matrix must resolve every cell as Applicable or NotApplicable; deferred cells:\n{}",
+        deferred.join("\n")
+    );
 }
 
 #[test]

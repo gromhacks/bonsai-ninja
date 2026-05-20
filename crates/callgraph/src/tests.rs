@@ -963,6 +963,68 @@ fn bare_method_call_prefers_same_class_implicit_receiver() {
 }
 
 #[test]
+fn typed_child_receiver_resolves_inherited_base_method() {
+    let base_file = FileId::new(1);
+    let entry_file = FileId::new(2);
+    let mut global = GlobalIndex::new();
+    let base = with_module_path(
+        decl_with(base_file, 0, "Base", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    let helper = with_params(
+        with_module_path(
+            decl_with(base_file, 1, "helper", DeclKind::Method, Some(0), Vec::new()),
+            &["app"],
+        ),
+        &["p"],
+    );
+    let mut child = with_module_path(
+        decl_with(entry_file, 0, "Child", DeclKind::Class, None, Vec::new()),
+        &["app"],
+    );
+    child.bases = vec!["Base".to_string()];
+    let entry = with_params(
+        with_module_path(
+            decl_with(
+                entry_file,
+                1,
+                "entry",
+                DeclKind::Function,
+                None,
+                vec![FlowEvent::Call {
+                    span: Span::new(entry_file, 10, 29),
+                    name: "new Child().helper".to_string(),
+                    receiver: Some("new Child()".to_string()),
+                    receiver_types: vec!["Child".to_string(), "Base".to_string()],
+                    call_kind: CallKind::Method,
+                    args: vec![CallArg {
+                        span: Span::new(entry_file, 30, 34),
+                        name: None,
+                        value_text: "args".to_string(),
+                        place: Some("args".to_string()),
+                        source_names: vec!["args".to_string()],
+                    }],
+                }],
+            ),
+            &["app"],
+        ),
+        &["args"],
+    );
+    insert_file(&mut global, base_file, vec![base, helper.clone()]);
+    insert_file(&mut global, entry_file, vec![child, entry]);
+    global.finalize_semantic_facts();
+
+    let cg = build_graph(&global, |_| Some("javascript"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let helper = FuncId::new(helper.symbol.raw());
+    let edges = cg.callees_of(entry).collect::<Vec<_>>();
+    assert!(
+        edges.iter().any(|edge| edge.to == helper),
+        "typed Child receiver should dispatch to inherited Base.helper; got {edges:?}"
+    );
+}
+
+#[test]
 fn bare_method_call_without_adapter_implicit_receiver_does_not_fan_out() {
     let caller_file = FileId::new(1);
     let other_file = FileId::new(2);
@@ -1504,6 +1566,86 @@ fn prior_local_value_assignment_still_shadows_workspace_callable() {
         cg.callees_of(entry).count(),
         0,
         "a real earlier local value binding should still shadow a same-named workspace callable"
+    );
+}
+
+#[test]
+fn quoted_runtime_callable_variable_resolves_to_workspace_function() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "entry",
+                vec![
+                    FlowEvent::Assign {
+                        span: Span::new(file, 10, 24),
+                        target: "$cb".to_string(),
+                        source_name: Some("'helper'".to_string()),
+                        source_call: None,
+                        source_call_args: Vec::new(),
+                        source_names: Vec::new(),
+                        declares_new_binding: false,
+                        value_kind: Some(AssignValueKind::Literal),
+                    },
+                    call_with_args(file, "$cb", &["arg"]),
+                ],
+            ),
+            decl(file, 1, "helper", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("php"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let helper = FuncId::new(global.find_by_name("helper")[0].raw());
+
+    assert!(
+        cg.callees_of(entry).any(|edge| edge.to == helper),
+        "quoted callable literal assigned to a runtime callable variable should resolve when invoked"
+    );
+}
+
+#[test]
+fn quoted_literal_assignment_without_runtime_callable_target_is_not_callback_binding() {
+    let file = FileId::new(1);
+    let mut global = GlobalIndex::new();
+    insert_file(
+        &mut global,
+        file,
+        vec![
+            decl(
+                file,
+                0,
+                "entry",
+                vec![
+                    FlowEvent::Assign {
+                        span: Span::new(file, 10, 24),
+                        target: "cb".to_string(),
+                        source_name: Some("\"helper\"".to_string()),
+                        source_call: None,
+                        source_call_args: Vec::new(),
+                        source_names: Vec::new(),
+                        declares_new_binding: false,
+                        value_kind: Some(AssignValueKind::Literal),
+                    },
+                    call_with_args(file, "cb", &["arg"]),
+                ],
+            ),
+            decl(file, 1, "helper", Vec::new()),
+        ],
+    );
+
+    let cg = build_graph(&global, |_| Some("javascript"));
+    let entry = FuncId::new(global.find_by_name("entry")[0].raw());
+    let helper = FuncId::new(global.find_by_name("helper")[0].raw());
+
+    assert!(
+        !cg.callees_of(entry).any(|edge| edge.to == helper),
+        "ordinary quoted data literals must not become callback aliases"
     );
 }
 

@@ -1989,9 +1989,14 @@ fn collect_local_callable_bindings_into(
                 source_name,
                 source_call,
                 source_names,
+                span,
                 value_kind,
                 ..
             } => {
+                if let Some(sym) = resolve_assigned_lambda_binding(global, caller_decl, target, *span) {
+                    bindings.insert(target.clone(), sym);
+                    continue;
+                }
                 if let Some(factory_call) = source_call.as_deref().filter(|call| !call.trim().is_empty()) {
                     // Bind `cb = makeCallback()` only when the factory's
                     // returned lambda can be identified uniquely. This keeps
@@ -2000,6 +2005,20 @@ fn collect_local_callable_bindings_into(
                     if let Some(sym) = resolve_returned_lambda_factory_with_alias_index(
                         global,
                         factory_call,
+                        caller_decl,
+                        alias_targets,
+                        alias_index,
+                    ) {
+                        bindings.insert(target.clone(), sym);
+                        continue;
+                    }
+                }
+                if let Some(quoted_callable) =
+                    quoted_runtime_callable_literal(target, source_name.as_deref(), source_names, *value_kind)
+                {
+                    if let Some(sym) = resolve_callable_symbol_with_alias_index(
+                        global,
+                        quoted_callable,
                         caller_decl,
                         alias_targets,
                         alias_index,
@@ -2124,6 +2143,42 @@ fn collect_local_callable_bindings_into(
     }
 }
 
+fn resolve_assigned_lambda_binding(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    target: &str,
+    assign_span: Span,
+) -> Option<FuncId> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let mut exact_candidates = Vec::new();
+    let mut anonymous_candidates = Vec::new();
+    for decl in global.decls_in(caller_decl.span.file) {
+        if decl.symbol == caller_decl.symbol || decl.kind != DeclKind::Function {
+            continue;
+        }
+        if !span_contains_or_equal(assign_span, decl.span) {
+            continue;
+        }
+        if decl.name == target {
+            exact_candidates.push(FuncId::new(decl.symbol.raw()));
+        } else if decl.name.starts_with("<lambda@") {
+            anonymous_candidates.push(FuncId::new(decl.symbol.raw()));
+        }
+    }
+    let candidates = if exact_candidates.is_empty() {
+        anonymous_candidates
+    } else {
+        exact_candidates
+    };
+    let [candidate] = candidates.as_slice() else {
+        return None;
+    };
+    Some(*candidate)
+}
+
 fn resolve_returned_lambda_factory_with_alias_index(
     global: &GlobalIndex,
     raw: &str,
@@ -2212,6 +2267,27 @@ fn assign_rhs_is_callable_reference(
         return false;
     }
     source_names.is_empty() || source_names.iter().all(|name| name.trim() == source_name)
+}
+
+fn quoted_runtime_callable_literal<'a>(
+    target: &str,
+    source_name: Option<&'a str>,
+    source_names: &[String],
+    value_kind: Option<AssignValueKind>,
+) -> Option<&'a str> {
+    if !target.trim_start().starts_with('$')
+        || !source_names.is_empty()
+        || !matches!(value_kind, Some(AssignValueKind::Literal))
+    {
+        return None;
+    }
+    let source = source_name?.trim();
+    let quote = source.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"') || source.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let inner = source.get(1..source.len().saturating_sub(1))?.trim();
+    (!inner.is_empty() && !inner.chars().any(char::is_whitespace)).then_some(inner)
 }
 
 /// Resolve a local-binding RHS like `let f = some_func;` to a
@@ -2356,6 +2432,9 @@ fn collect_receiver_method_targets(
     for type_name in
         receiver_call_return_type_names(global, caller_decl, alias_targets, receiver, Some(call_span))
     {
+        push_unique_string(&mut receiver_type_names, type_name);
+    }
+    for type_name in receiver_constructed_type_names(global, caller_decl, alias_targets, receiver) {
         push_unique_string(&mut receiver_type_names, type_name);
     }
     if receiver_type_names.is_empty() {
@@ -2515,11 +2594,15 @@ fn receiver_call_return_type_names(
     receiver: &str,
     _call_span: Option<Span>,
 ) -> Vec<String> {
+    let mut out = receiver_constructed_type_names(global, caller_decl, alias_targets, receiver);
     let Some(inner_call) = receiver_inner_call_name(receiver) else {
-        return Vec::new();
+        return out;
     };
+    for type_name in receiver_constructed_type_names(global, caller_decl, alias_targets, &inner_call) {
+        push_unique_string(&mut out, type_name);
+    }
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
-        return Vec::new();
+        return out;
     };
     let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
     let mut funcs = Vec::new();
@@ -2548,7 +2631,6 @@ fn receiver_call_return_type_names(
             push_unique_func(&mut funcs, func);
         }
     }
-    let mut out = Vec::new();
     for func in funcs {
         let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
             continue;
@@ -2561,6 +2643,25 @@ fn receiver_call_return_type_names(
             late_static_type.as_deref(),
             &mut out,
         );
+    }
+    out
+}
+
+fn receiver_constructed_type_names(
+    global: &GlobalIndex,
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    receiver: &str,
+) -> Vec<String> {
+    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
+        return Vec::new();
+    };
+    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
+    let mut out = Vec::new();
+    for candidate in constructed_type_candidates(receiver) {
+        if !resolve_class(global, &candidate, &ctx).is_empty() {
+            push_unique_string(&mut out, short_callee(&candidate).to_string());
+        }
     }
     out
 }
@@ -2727,24 +2828,73 @@ fn constructed_return_type_from_text(
     ctx: &ResolveContext<'_>,
     value_text: &str,
 ) -> Option<String> {
+    constructed_type_name_from_expr(global, ctx, value_text)
+}
+
+fn constructed_type_name_from_expr(
+    global: &GlobalIndex,
+    ctx: &ResolveContext<'_>,
+    value_text: &str,
+) -> Option<String> {
     let mut text = value_text.trim();
     for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
         text = text.strip_prefix(*keyword).unwrap_or(text).trim();
     }
-    let candidate = text
-        .split(['(', '{', '[', ' ', '\t', '\r', '\n'])
-        .next()
-        .unwrap_or(text)
-        .trim();
-    if candidate.is_empty()
-        || !short_callee(candidate)
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
-    {
-        return None;
+    for candidate in constructed_type_candidates(text) {
+        if !resolve_class(global, &candidate, ctx).is_empty() {
+            return Some(short_callee(&candidate).to_string());
+        }
     }
-    (!resolve_class(global, candidate, ctx).is_empty()).then(|| short_callee(candidate).to_string())
+    None
+}
+
+fn constructed_type_candidates(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    push_constructed_type_candidate(text, &mut out);
+    let normalised = normalize_receiver_alias_text(&text.replace("::", "."));
+    push_constructed_type_candidate(&normalised, &mut out);
+    out
+}
+
+fn push_constructed_type_candidate(text: &str, out: &mut Vec<String>) {
+    let mut candidate = strip_outer_parens(text.trim());
+    for keyword in bonsai_common::VALUE_TEXT_LEADING_KEYWORDS {
+        candidate = candidate.strip_prefix(*keyword).unwrap_or(candidate).trim();
+    }
+    if let Some(rest) = candidate.strip_prefix("new ") {
+        candidate = rest.trim();
+    }
+    candidate = strip_outer_parens(candidate);
+    if let Some(open) = candidate.find('(') {
+        candidate = candidate[..open].trim();
+    }
+    candidate = candidate.trim_end_matches("()").trim();
+    if let Some(owner) = candidate
+        .strip_suffix(".new")
+        .or_else(|| candidate.strip_suffix("::new"))
+        .or_else(|| candidate.strip_suffix("->new"))
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+    {
+        candidate = owner;
+    }
+    if candidate.is_empty() || !call_name_looks_type_constructor(candidate) {
+        return;
+    }
+    let value = candidate.to_string();
+    if !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
+}
+
+fn strip_outer_parens(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim();
+        if !(trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() > 1) {
+            return trimmed;
+        }
+        text = &trimmed[1..trimmed.len() - 1];
+    }
 }
 
 fn type_alias_for_receiver<'a>(decl: &'a Decl, receiver: &str) -> Option<&'a str> {
@@ -3080,6 +3230,9 @@ fn collect_assigned_receiver_type_names(
                     continue;
                 }
                 let distance = call_span.map(|call_span| call_span.start.saturating_sub(span.start));
+                let caller_ctx = caller_decl_file(global, caller_decl).map(|file| {
+                    ResolveContext::new(file, &caller_decl.module_path).with_alias_map(alias_targets)
+                });
                 if let Some(source_call) = source_call {
                     for type_name in receiver_call_return_type_names(
                         global,
@@ -3097,15 +3250,11 @@ fn collect_assigned_receiver_type_names(
                     .chain(source_names.iter())
                 {
                     let candidate = normalize_receiver_alias_text(candidate);
-                    if call_name_looks_type_constructor(&candidate)
-                        && class_like_constructor_call(global, caller_decl, alias_targets, &candidate)
-                    {
-                        push_assigned_receiver_type(
-                            out,
-                            best_distance,
-                            short_callee(&candidate).to_string(),
-                            distance,
-                        );
+                    let Some(caller_ctx) = caller_ctx.as_ref() else {
+                        continue;
+                    };
+                    if let Some(type_name) = constructed_type_name_from_expr(global, caller_ctx, &candidate) {
+                        push_assigned_receiver_type(out, best_distance, type_name, distance);
                     }
                 }
             }
@@ -3216,23 +3365,6 @@ fn call_name_looks_type_constructor(name: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
-}
-
-fn class_like_constructor_call(
-    global: &GlobalIndex,
-    caller_decl: &Decl,
-    alias_targets: &AHashMap<String, AliasTarget>,
-    callee_name: &str,
-) -> bool {
-    let Some(caller_file) = caller_decl_file(global, caller_decl) else {
-        return false;
-    };
-    let ctx = ResolveContext::new(caller_file, &caller_decl.module_path).with_alias_map(alias_targets);
-    if !resolve_class(global, callee_name, &ctx).is_empty() {
-        return true;
-    }
-    let tail = short_callee(callee_name);
-    tail != callee_name && !resolve_class(global, tail, &ctx).is_empty()
 }
 
 fn alias_targets_for_decl(
