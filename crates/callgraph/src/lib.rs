@@ -3601,6 +3601,27 @@ fn collect_qualified_workspace_targets(
     caller_export_aliases: &[&'static str],
     caller_decl: &Decl,
 ) -> Vec<FuncId> {
+    if let Some(alias_target) = alias_targets.get(name) {
+        let alias_tail = match alias_target {
+            AliasTarget::Namespace { .. } => Some("default"),
+            AliasTarget::Member { member, .. } => Some(member.as_str()),
+            AliasTarget::Type { .. } => None,
+        };
+        if let Some(alias_tail) = alias_tail {
+            let candidates = collect_workspace_targets_for_alias_entry(
+                global,
+                alias_target,
+                alias_tail,
+                path_for_file,
+                caller_export_aliases,
+                caller_decl,
+                alias_targets,
+            );
+            if !candidates.is_empty() {
+                return candidates;
+            }
+        }
+    }
     if let Some((alias_target, alias_tail)) = namespace_alias_target_tail(name, alias_targets) {
         let candidates = collect_workspace_module_targets(
             global,

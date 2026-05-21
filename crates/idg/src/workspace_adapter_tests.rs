@@ -180,6 +180,62 @@ fn callee_token_call_site_stitches_full_expression_callgraph_edge() {
 }
 
 #[test]
+fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
+    let call_span = span(0, 20, 35);
+    let mut f = empty_decl(1, 0, "f");
+    f.flow_events = vec![FlowEvent::Call {
+        span: call_span,
+        name: "render".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: bonsai_lang_api::CallKind::Function,
+        args: vec![
+            bonsai_lang_api::CallArg {
+                span: span(0, 27, 29),
+                name: None,
+                value_text: "el".to_string(),
+                place: Some("el".to_string()),
+                source_names: vec!["el".to_string()],
+            },
+            bonsai_lang_api::CallArg {
+                span: span(0, 31, 35),
+                name: None,
+                value_text: "html".to_string(),
+                place: Some("html".to_string()),
+                source_names: vec!["html".to_string()],
+            },
+        ],
+    }];
+    let mut default_export = empty_decl(2, 1, "default");
+    default_export.params = vec!["el".to_string(), "html".to_string()];
+
+    let idx = build_index(vec![f, default_export]);
+    let f_id = func_id(&idx, "f");
+    let default_id = func_id(&idx, "default");
+    let cg = resolved_graph([(f_id, default_id, call_span)]);
+
+    let ws = build(&idx, &cg);
+    let caller_seg = ws.segment_for_func(f_id).expect("caller segment");
+    let callee_seg = ws.segment_for_func(default_id).expect("callee segment");
+    let arg_edges = ws
+        .cross_file()
+        .edges
+        .iter()
+        .filter(|cross| {
+            cross.from_segment == caller_seg
+                && cross.to_segment == callee_seg
+                && cross.edge.meta.kind == crate::edge::IdgEdgeKind::InterCallArg
+                && cross.edge.meta.via_span == call_span
+        })
+        .count();
+
+    assert_eq!(
+        arg_edges, 2,
+        "an exact callgraph site must stitch even when the callee decl is `default` and the call text is an alias"
+    );
+}
+
+#[test]
 fn higher_order_callback_stitches_invocation_arg_to_bound_function_param() {
     let mut entry = empty_decl(1, 0, "entry");
     entry.flow_events = vec![FlowEvent::Call {
