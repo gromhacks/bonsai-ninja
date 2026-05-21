@@ -56,6 +56,10 @@ const GO_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
     },
 ];
 
+type GoRangeAssignments = Vec<FlowEvent>;
+type GoRangeLoopAssignments = Vec<(Span, GoRangeAssignments)>;
+type GoRangeAssignmentsByDecl = Vec<(Span, GoRangeLoopAssignments)>;
+
 const HANDLER: GrammarHandler = GrammarHandler {
     fn_kinds: &["function_declaration", "method_declaration"],
     call_kinds: GO_CALL_KINDS,
@@ -380,11 +384,7 @@ fn collect_go_class_bases(tree: &Tree, file: FileId, src: &[u8]) -> Vec<(Span, V
     out
 }
 
-fn collect_go_range_assignments_by_decl(
-    tree: &Tree,
-    file: FileId,
-    src: &[u8],
-) -> Vec<(Span, Vec<(Span, Vec<FlowEvent>)>)> {
+fn collect_go_range_assignments_by_decl(tree: &Tree, file: FileId, src: &[u8]) -> GoRangeAssignmentsByDecl {
     let channel_returns = collect_go_channel_return_functions(tree, src);
     let mut out = Vec::new();
     for fn_node in collect_kinds(tree, &["function_declaration", "method_declaration"]) {

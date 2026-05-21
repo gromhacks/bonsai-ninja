@@ -1902,7 +1902,7 @@ pub fn collect_local_callable_bindings(
 ///
 /// This is semantically equivalent to calling
 /// [`collect_local_callable_bindings`] for each function with no
-/// file-level aliases, but avoids rebuilding [`WorkspaceAliasIndex`]
+/// file-level aliases, but avoids rebuilding `WorkspaceAliasIndex`
 /// for every unresolved RHS. The IDG workspace adapter uses this to
 /// mirror function-pointer / closure aliases from the callgraph
 /// without turning large C workspaces into O(functions * decls)

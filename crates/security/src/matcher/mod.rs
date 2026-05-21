@@ -967,9 +967,7 @@ fn match_base_name(text: &str) -> Option<&str> {
     if text.is_empty() {
         return None;
     }
-    let end = text
-        .find(|ch: char| ch == '.' || ch == '[' || ch == '-' || ch == ':' || ch == '(')
-        .unwrap_or(text.len());
+    let end = text.find(['.', '[', '-', ':', '(']).unwrap_or(text.len());
     let base = text[..end].trim();
     (!base.is_empty()).then_some(base)
 }

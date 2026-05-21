@@ -3,7 +3,7 @@
 use std::io;
 use thiserror::Error;
 
-/// Errors a [`crate::Reader`] or [`crate::Writer`] can produce.
+/// Errors a [`crate::FactStoreReader`] or [`crate::FactStoreWriter`] can produce.
 #[derive(Debug, Error)]
 pub enum FactStoreError {
     /// I/O error from the OS layer (file open, mmap, write, rename).

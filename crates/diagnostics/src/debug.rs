@@ -2,7 +2,7 @@
 //!
 //! Every analyzer phase that wants to surface internal state behind a
 //! flag declares its category as a string and emits via
-//! [`debug_log!`]. The runtime filter is a comma-separated list in
+//! `debug_log!`. The runtime filter is a comma-separated list in
 //! the `BONSAI_DEBUG` environment variable — a category emits to
 //! stderr when that list contains either `*` (everything) or the
 //! category's exact name. The CLI's `--debug <cat>` flag sets the

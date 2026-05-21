@@ -1,4 +1,4 @@
-//! On-disk encoding for [`DataFlowCache`] entries.
+//! On-disk encoding for `DataFlowCache` entries.
 //!
 //! Each per-function entry is the bincode-encoded triple
 //! `(KindedTokens, EntryTaintGraph, Vec<FileId>)` — facts, the

@@ -15,7 +15,7 @@ cd "$ROOT_DIR"
 # A crate may depend on any crate in its own tier or a lower tier, but
 # never on a crate in a higher tier.
 declare -a TIER_0=(bonsai_common bonsai_hash)
-declare -a TIER_1=(bonsai_diagnostics bonsai_vfs bonsai_parser)
+declare -a TIER_1=(bonsai_diagnostics bonsai_vfs bonsai_parser bonsai_factstore)
 declare -a TIER_2=(bonsai_lang_api)
 declare -a TIER_3=(
     bonsai_lang_c bonsai_lang_cpp bonsai_lang_csharp bonsai_lang_scala
@@ -25,7 +25,7 @@ declare -a TIER_3=(
     bonsai_lang_dart bonsai_lang_objc bonsai_lang_lua bonsai_lang_elixir
     bonsai_lang_erlang bonsai_lang_solidity
 )
-declare -a TIER_4=(bonsai_index bonsai_resolve bonsai_cfg bonsai_callgraph bonsai_abstract_interp bonsai_db)
+declare -a TIER_4=(bonsai_index bonsai_resolve bonsai_cfg bonsai_callgraph bonsai_abstract_interp bonsai_idg bonsai_db)
 declare -a TIER_5=(bonsai_taint)
 declare -a TIER_6=(bonsai_workspace)
 declare -a TIER_7=(bonsai_inspect bonsai_browse bonsai_trace bonsai_security)

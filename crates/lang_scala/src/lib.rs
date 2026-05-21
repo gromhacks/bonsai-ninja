@@ -319,7 +319,7 @@ fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
 fn parameter_binding_name(param: Node<'_>, src: &[u8]) -> Option<String> {
     let mut names = Vec::new();
     collect_binding_identifiers(param, src, &mut names);
-    names.into_iter().filter(|name| name != "_").next()
+    names.into_iter().find(|name| name != "_")
 }
 
 fn collect_binding_identifiers(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {

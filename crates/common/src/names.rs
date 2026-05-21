@@ -94,7 +94,7 @@ pub const ABSOLUTE_PATH_PREFIXES: &[&str] = &["crate::", "self::", "::", "\\"];
 /// (`Foo()`, `Bar.baz()`) regardless of how the adapter shaped the
 /// raw text.
 ///
-/// Adapters that use [`bonsai_lang_api::kit::extract_return_value_text`]
+/// Adapters that use `bonsai_lang_api::kit::extract_return_value_text`
 /// already get clean text — this list exists so engine sites that
 /// receive less-processed text (factory-method inference,
 /// constructor-shape detection) don't have to enumerate the

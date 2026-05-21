@@ -8,9 +8,9 @@
 //! On disk we deduplicate aggressively:
 //!
 //! - Every distinct [`ValueFlowNode`] is assigned a `NodeIdx` and
-//!   listed once in [`OnDiskEntry::nodes`].
+//!   listed once in `OnDiskEntry::nodes`.
 //! - Every distinct [`ValueFlowEdge`] is assigned an `EdgeIdx` and
-//!   listed once in [`OnDiskEntry::edges`].
+//!   listed once in `OnDiskEntry::edges`.
 //! - `forward` and `backward` are `Vec<(NodeIdx, Vec<EdgeIdx>)>` —
 //!   the same edge is referenced from both sides without copying its
 //!   payload.

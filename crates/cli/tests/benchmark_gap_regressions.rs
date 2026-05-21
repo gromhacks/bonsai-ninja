@@ -85,14 +85,13 @@ fn run_taint_json(ws: &Path, source: &str, sink: &str) -> Vec<Value> {
         .output()
         .expect("run bonsai-ninja");
 
-    if !out.status.success() {
-        panic!(
-            "taint-analysis failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    assert!(
+        out.status.success(),
+        "taint-analysis failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     serde_json::from_slice::<Vec<Value>>(&out.stdout).unwrap_or_else(|error| {
         panic!(
@@ -125,14 +124,13 @@ fn run_sinks_json(ws: &Path, rule_regex: &str) -> Vec<Value> {
         .output()
         .expect("run bonsai-ninja sinks");
 
-    if !out.status.success() {
-        panic!(
-            "sinks failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    assert!(
+        out.status.success(),
+        "sinks failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let value = serde_json::from_slice::<Value>(&out.stdout).unwrap_or_else(|error| {
         panic!(

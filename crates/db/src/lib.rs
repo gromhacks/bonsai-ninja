@@ -125,7 +125,7 @@ impl AnalyzerDb {
     }
 
     /// Seed the workspace-wide IDG query service. Called by
-    /// [`bonsai_workspace::Workspace`] at open / index time once the
+    /// `bonsai_workspace::Workspace` at open / index time once the
     /// global index and resolved call graph are in place. Consumers
     /// then fetch the service via [`Self::idg_service`].
     pub fn set_idg_service(&self, service: Arc<IdgQueryService>) {

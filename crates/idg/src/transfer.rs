@@ -2284,9 +2284,7 @@ pub(crate) fn extract_identifiers_outside_strings(text: &str) -> Vec<String> {
             quote = Some(c);
             continue;
         }
-        if matches!(c, '@' | '$' | '%') && current.is_empty() {
-            current.push(c);
-        } else if c == '_' || c.is_ascii_alphanumeric() {
+        if (matches!(c, '@' | '$' | '%') && current.is_empty()) || c == '_' || c.is_ascii_alphanumeric() {
             current.push(c);
         } else {
             push_id_token(&mut tokens, &mut current);
