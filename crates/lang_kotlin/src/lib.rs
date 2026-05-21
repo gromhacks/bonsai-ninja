@@ -713,9 +713,11 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
                         bonsai_common::SymbolId::new(next),
                         *class_symbol,
                         class_name,
-                        *class_name_span,
-                        class_span,
-                        span_of(file, &body),
+                        KotlinConstructorSpans {
+                            name: *class_name_span,
+                            decl: class_span,
+                            body: span_of(file, &body),
+                        },
                         constructor_param_names(primary, src),
                         flow_events,
                     ));
@@ -730,9 +732,11 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
                 bonsai_common::SymbolId::new(next),
                 *class_symbol,
                 class_name,
-                *class_name_span,
-                span_of(file, &secondary),
-                span_of(file, &body),
+                KotlinConstructorSpans {
+                    name: *class_name_span,
+                    decl: span_of(file, &secondary),
+                    body: span_of(file, &body),
+                },
                 constructor_param_names(secondary, src),
                 flow_events,
             ));
@@ -741,13 +745,17 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
     }
 }
 
+struct KotlinConstructorSpans {
+    name: bonsai_common::Span,
+    decl: bonsai_common::Span,
+    body: bonsai_common::Span,
+}
+
 fn kotlin_constructor_decl(
     symbol: bonsai_common::SymbolId,
     parent: bonsai_common::SymbolId,
     class_name: &str,
-    name_span: bonsai_common::Span,
-    span: bonsai_common::Span,
-    body_span: bonsai_common::Span,
+    spans: KotlinConstructorSpans,
     params: Vec<String>,
     flow_events: Vec<FlowEvent>,
 ) -> Decl {
@@ -757,11 +765,11 @@ fn kotlin_constructor_decl(
         name: class_name.to_string(),
         qualified_name: None,
         module_path: bonsai_lang_api::ModulePath::default(),
-        span,
-        name_span,
+        span: spans.decl,
+        name_span: spans.name,
         visibility: Visibility::Public,
         parent: Some(parent),
-        body_span: Some(body_span),
+        body_span: Some(spans.body),
         flow_events,
         has_implicit_returns: false,
         params,
@@ -801,7 +809,7 @@ fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
 fn parameter_binding_name(param: Node<'_>, src: &[u8]) -> Option<String> {
     let mut names = Vec::new();
     collect_binding_identifiers(param, src, &mut names);
-    names.into_iter().filter(|name| name != "_").next()
+    names.into_iter().find(|name| name != "_")
 }
 
 fn collect_binding_identifiers(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {

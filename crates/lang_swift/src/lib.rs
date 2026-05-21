@@ -276,9 +276,11 @@ fn synthesize_swift_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
             bonsai_common::SymbolId::new(next),
             *class_symbol,
             class_name,
-            *class_name_span,
-            span_of(file, &init),
-            span_of(file, &body),
+            SwiftConstructorSpans {
+                name: *class_name_span,
+                decl: span_of(file, &init),
+                body: span_of(file, &body),
+            },
             constructor_param_names(init, src),
             flow_events,
         ));
@@ -299,13 +301,17 @@ fn nearest_swift_class_node(mut node: Node<'_>) -> Option<Node<'_>> {
     None
 }
 
+struct SwiftConstructorSpans {
+    name: Span,
+    decl: Span,
+    body: Span,
+}
+
 fn swift_constructor_decl(
     symbol: bonsai_common::SymbolId,
     parent: bonsai_common::SymbolId,
     class_name: &str,
-    name_span: Span,
-    span: Span,
-    body_span: Span,
+    spans: SwiftConstructorSpans,
     params: Vec<String>,
     flow_events: Vec<bonsai_lang_api::FlowEvent>,
 ) -> Decl {
@@ -315,11 +321,11 @@ fn swift_constructor_decl(
         name: class_name.to_string(),
         qualified_name: None,
         module_path: bonsai_lang_api::ModulePath::default(),
-        span,
-        name_span,
+        span: spans.decl,
+        name_span: spans.name,
         visibility: Visibility::Public,
         parent: Some(parent),
-        body_span: Some(body_span),
+        body_span: Some(spans.body),
         flow_events,
         has_implicit_returns: false,
         params,

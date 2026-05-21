@@ -56,8 +56,8 @@ pub struct CrossFileEdge {
 /// receiver-field assignment feeding a reader method's
 /// receiver-field load. Built by Phase 3c
 /// (`stitch_receiver_field_flow`) and consumed by
-/// [`IdgQueryService::cross_call_edges_in_closure`] which
-/// synthesises a [`CrossCallEdge`] when both endpoints land in
+/// [`crate::service::IdgQueryService::cross_call_edges_in_closure`] which
+/// synthesises a [`crate::service::CrossCallEdge`] when both endpoints land in
 /// the same forward closure. The synthetic edge lets the
 /// security-analysis lineage walk cross the writer-reader
 /// boundary the same way it crosses a real call edge — without

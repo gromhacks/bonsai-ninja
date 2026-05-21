@@ -106,6 +106,7 @@ CROSS_TAG_CREDITS: dict[str, list[str]] = {
     # treats these as identity edges instead of clears).
     "passthrough-decode": [],
     "passthrough-encode": [],
+    "passthrough-transform": [],
     # Recognized but intentionally non-crediting.
     "validation": [],
     "schema-validate": [],

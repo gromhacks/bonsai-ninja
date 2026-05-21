@@ -123,7 +123,7 @@ pub fn parse_with(name: &str, file: FileId, ctx: &AdapterContext<'_>) -> Option<
 /// helper finds Branch events whose `then_events` contain at least
 /// one event from each arm-body span (heuristic for "this Branch is
 /// the match's collapsed form") and rewrites `then_events` into a
-/// right-leaning chain: arm[0] body in `then_events`, the rest
+/// right-leaning chain: `arm[0]` body in `then_events`, the rest
 /// recursively in `else_events`. Each arm sees a fresh fork of the
 /// pre-match state and unions back at the merge.
 ///
@@ -3286,7 +3286,7 @@ fn extract_kotlin_when_subject_binding_assigns(file: FileId, node: &Node<'_>, sr
                 .split_once('=')
                 .map(|(_, rhs)| rhs.trim())
                 .unwrap_or_default();
-            if let Some(assign) = pattern_binding_assign(file, &current, &target, source_text) {
+            if let Some(assign) = pattern_binding_assign(file, &current, target, source_text) {
                 out.push(assign);
             }
         }
@@ -8079,12 +8079,15 @@ pub fn callable_param_names_from_text(text: &str) -> Vec<String> {
         rest.split_once(':').map(|(params, _)| params)
     } else if let Some(rest) = text.strip_prefix("fn ") {
         rest.split_once("->").map(|(params, _)| params)
-    } else if text.starts_with("function") || text.starts_with("func ") || text.starts_with("sub ") {
+    } else if text.starts_with("function")
+        || text.starts_with("func ")
+        || text.starts_with("sub ")
+        || text.starts_with("->")
+        || text.starts_with('^')
+    {
         first_parenthesized_segment(text)
-    } else if text.starts_with("->") || text.starts_with('^') {
-        first_parenthesized_segment(text)
-    } else if text.starts_with('|') {
-        text[1..].split_once('|').map(|(params, _)| params)
+    } else if let Some(rest) = text.strip_prefix('|') {
+        rest.split_once('|').map(|(params, _)| params)
     } else if text.starts_with('{') {
         text.split_once("->")
             .map(|(params, _)| params.trim_start_matches('{').trim())

@@ -2298,9 +2298,7 @@ fn propagate_call_event(
         ) {
             seed_lexical_callable_capture(&mut callee_seed, state, call.name, effective_receiver);
         }
-        let receiver_value_for_binding = tainted_receiver
-            .as_deref()
-            .or_else(|| descendant_receiver.as_deref());
+        let receiver_value_for_binding = tainted_receiver.as_deref().or(descendant_receiver.as_deref());
         if let (Some(receiver_index), Some(receiver_value)) =
             (callee_decl.receiver_param_index, receiver_value_for_binding)
         {
@@ -3776,11 +3774,10 @@ fn apply_return_taint(
             insert_descendant_target_taint(state, target);
             tainted = true;
         }
-        if named_field_tainted && has_named_field_args {
-            tainted = true;
-        } else if constructor_field_tainted {
-            tainted = true;
-        } else if field_tainted_transits {
+        if (named_field_tainted && has_named_field_args)
+            || constructor_field_tainted
+            || field_tainted_transits
+        {
             tainted = true;
         } else if constructs_container && tainted_call_arg && !constructor_has_receiver_field_writes {
             insert_descendant_target_taint(state, target);
@@ -4812,8 +4809,7 @@ fn configured_constructor_method_for_caller(db: &AnalyzerDb, caller: FuncId, met
             adapter
                 .capabilities()
                 .effective_constructor_method_names()
-                .iter()
-                .any(|configured| *configured == method_name)
+                .contains(&method_name)
         })
         .unwrap_or_else(|| bonsai_common::CONSTRUCTOR_METHOD_NAMES.contains(&method_name))
 }
@@ -6942,11 +6938,11 @@ fn collect_workspace_callable_targets_by_name(
 pub(super) fn apply_event_transfer(
     event: &FlowEvent,
     state: &mut TokenSet,
-    _config: &InterTaintConfig,
+    config: &InterTaintConfig,
     db: Option<&AnalyzerDb>,
     caller: Option<FuncId>,
 ) {
-    apply_event_transfer_with_options(event, state, _config, db, caller, false);
+    apply_event_transfer_with_options(event, state, config, db, caller, false);
 }
 
 fn apply_event_transfer_with_options(
@@ -6957,184 +6953,182 @@ fn apply_event_transfer_with_options(
     caller: Option<FuncId>,
     suppress_container_taint: bool,
 ) {
-    match event {
-        FlowEvent::Assign {
-            target,
-            source_name,
-            source_call,
-            source_call_args,
-            source_names,
-            span,
-            ..
-        } => {
-            if target.is_empty() {
-                return;
-            }
-            if suppress_container_taint {
-                return;
-            }
-            let assignment_rhs = assignment_rhs_text(db, *span);
-            if assignment_lhs_projects_collapsed_target(db, *span, target) {
-                let rhs_tainted = assignment_rhs
+    if let FlowEvent::Assign {
+        target,
+        source_name,
+        source_call,
+        source_call_args,
+        source_names,
+        span,
+        ..
+    } = event
+    {
+        if target.is_empty() {
+            return;
+        }
+        if suppress_container_taint {
+            return;
+        }
+        let assignment_rhs = assignment_rhs_text(db, *span);
+        if assignment_lhs_projects_collapsed_target(db, *span, target) {
+            let rhs_tainted = assignment_rhs
+                .as_deref()
+                .is_some_and(|rhs| assignment_rhs_is_tainted(rhs, state))
+                || source_name
                     .as_deref()
-                    .is_some_and(|rhs| assignment_rhs_is_tainted(rhs, state))
-                    || source_name
-                        .as_deref()
-                        .is_some_and(|src| arg_text_is_tainted(src, state))
-                    || source_call.as_deref().is_some_and(|callee| {
-                        source_call_rhs_is_tainted(callee, source_call_args, source_names, state)
-                    });
-                if rhs_tainted {
-                    insert_descendant_target_taint(state, target);
-                }
-                return;
+                    .is_some_and(|src| arg_text_is_tainted(src, state))
+                || source_call.as_deref().is_some_and(|callee| {
+                    source_call_rhs_is_tainted(callee, source_call_args, source_names, state)
+                });
+            if rhs_tainted {
+                insert_descendant_target_taint(state, target);
             }
-            if source_call.is_none() {
-                let field_values = assignment_rhs
-                    .as_deref()
-                    .map(|rhs| named_field_initializer_values_for_target(target, rhs))
-                    .unwrap_or_default();
-                if !field_values.is_empty() {
-                    remove_target_and_descendant_taint(state, target);
-                    for field_value in field_values {
-                        if assignment_rhs_is_tainted(&field_value, state)
-                            || actual_has_descendant_taint(&field_value, state)
-                        {
-                            insert_value_target_taint(state, target);
-                            if actual_has_descendant_taint(&field_value, state) {
-                                insert_descendant_target_taint(state, target);
-                            }
-                        }
-                        if state.contains(&normalise_target_text(target)) {
-                            break;
+            return;
+        }
+        if source_call.is_none() {
+            let field_values = assignment_rhs
+                .as_deref()
+                .map(|rhs| named_field_initializer_values_for_target(target, rhs))
+                .unwrap_or_default();
+            if !field_values.is_empty() {
+                remove_target_and_descendant_taint(state, target);
+                for field_value in field_values {
+                    if assignment_rhs_is_tainted(&field_value, state)
+                        || actual_has_descendant_taint(&field_value, state)
+                    {
+                        insert_value_target_taint(state, target);
+                        if actual_has_descendant_taint(&field_value, state) {
+                            insert_descendant_target_taint(state, target);
                         }
                     }
-                    return;
-                }
-            }
-            let non_call_rhs_tainted = source_call.is_none()
-                && assignment_rhs
-                    .as_deref()
-                    .is_some_and(|rhs| assignment_rhs_is_tainted(rhs, state));
-            if let Some(rhs) = assignment_rhs.as_ref() {
-                if assignment_span_lhs_matches_target(db, *span, target)
-                    && !named_field_initializers(&rhs).is_empty()
-                {
-                    let field_updates = named_field_initializers(&rhs);
-                    let mut changed = apply_named_field_arg_taint(target, &[rhs.clone()], state);
-                    if named_field_update_copies_tainted_base(
-                        source_names,
-                        &field_updates,
-                        *span,
-                        db,
-                        caller,
-                        state,
-                    ) {
-                        insert_descendant_target_taint(state, target);
-                        changed = true;
-                    }
-                    if changed {
-                        return;
-                    }
-                    remove_target_taint(state, target);
-                    return;
-                }
-            }
-            if let Some(callee) = source_call.as_deref() {
-                if source_call_rhs_is_tainted(callee, source_call_args, source_names, state) {
-                    insert_value_target_taint(state, target);
-                    if rhs_has_descendant_shape(source_names) {
-                        insert_descendant_target_taint(state, target);
-                    }
-                    return;
-                }
-                if source_names.is_empty() && state.contains(target) {
-                    return;
-                }
-            }
-            if source_call.is_none() {
-                if let Some(field_target) = qualified_lhs_for_synthetic_carrier_target(target, *span, db) {
-                    let rhs_tainted = source_name
-                        .as_deref()
-                        .is_some_and(|src| arg_text_is_tainted(src, state))
-                        || assignment_source_names_any_tainted(source_names, *span, db, caller, state);
-                    if rhs_tainted {
-                        insert_value_target_taint(state, &field_target);
-                        if rhs_has_descendant_shape(source_names) {
-                            insert_descendant_target_taint(state, &field_target);
-                        }
-                    } else {
-                        remove_target_taint(state, &field_target);
-                    }
-                    return;
-                }
-            }
-            // G2: compound-expression RHS operands (concat, ternary,
-            // template literal, member access, subscript). If ANY
-            // operand is currently tainted, taint the target.
-            //
-            // Field-sensitivity: when the RHS is a qualified read
-            // (`data['other']` produces source_names containing both
-            // `data` and `data.other` from the adapter), bare-name
-            // operands like `data` should NOT match against
-            // qualified seeds in state via the loose
-            // base/tail-promotion that `state_qualified_token_matches_text`
-            // performs at call-site checks. That promotion is correct
-            // for arg passing (passing `obj` propagates carrier
-            // taint) but wrong for assignment RHS extraction
-            // (`out = data['other']` should not pick up
-            // `data.value`'s taint because `data['other']` and
-            // `data['value']` are distinct fields). Use the
-            // strict comparison that requires explicit qualified
-            // matching or direct membership.
-            if !source_names.is_empty() {
-                if source_call.is_none()
-                    && assignment_span_is_iteration_binding(db, *span, target)
-                    && source_names.iter().any(|source| {
-                        actual_has_descendant_taint(source, state)
-                            || arg_text_has_mapped_descendant_taint(source, state)
-                    })
-                {
-                    insert_descendant_target_taint(state, target);
-                    return;
-                }
-                if assignment_source_names_any_tainted(source_names, *span, db, caller, state)
-                    || non_call_rhs_tainted
-                {
-                    insert_value_target_taint(state, target);
-                    if rhs_has_descendant_shape(source_names) {
-                        insert_descendant_target_taint(state, target);
-                    }
-                    return;
-                }
-            }
-            let qualified_bases = synthetic_qualified_source_bases(source_names, *span, db);
-            match source_name.as_deref() {
-                Some(src)
-                    if assignment_source_name_is_value_tainted(src, &qualified_bases, db, caller, state) =>
-                {
-                    insert_value_target_taint(state, target);
-                }
-                Some(src)
-                    if source_call.is_none()
-                        && !qualified_bases.contains(&canonical_bare_name(src))
-                        && copy_assignment_descendant_taint(state, target, src) => {}
-                _ if non_call_rhs_tainted => {
-                    insert_value_target_taint(state, target);
-                    if rhs_has_descendant_shape(source_names) {
-                        insert_descendant_target_taint(state, target);
+                    if state.contains(&normalise_target_text(target)) {
+                        break;
                     }
                 }
-                Some(_) | None => {
-                    // Semantic overwrite: if the RHS did not expose
-                    // a tainted source_name/source_names/source_call
-                    // path above, the previous value no longer
-                    // reaches this target.
-                    remove_target_taint(state, target);
-                }
+                return;
             }
         }
-        _ => {}
+        let non_call_rhs_tainted = source_call.is_none()
+            && assignment_rhs
+                .as_deref()
+                .is_some_and(|rhs| assignment_rhs_is_tainted(rhs, state));
+        if let Some(rhs) = assignment_rhs.as_ref() {
+            if assignment_span_lhs_matches_target(db, *span, target)
+                && !named_field_initializers(rhs).is_empty()
+            {
+                let field_updates = named_field_initializers(rhs);
+                let mut changed = apply_named_field_arg_taint(target, &[rhs.clone()], state);
+                if named_field_update_copies_tainted_base(
+                    source_names,
+                    &field_updates,
+                    *span,
+                    db,
+                    caller,
+                    state,
+                ) {
+                    insert_descendant_target_taint(state, target);
+                    changed = true;
+                }
+                if changed {
+                    return;
+                }
+                remove_target_taint(state, target);
+                return;
+            }
+        }
+        if let Some(callee) = source_call.as_deref() {
+            if source_call_rhs_is_tainted(callee, source_call_args, source_names, state) {
+                insert_value_target_taint(state, target);
+                if rhs_has_descendant_shape(source_names) {
+                    insert_descendant_target_taint(state, target);
+                }
+                return;
+            }
+            if source_names.is_empty() && state.contains(target) {
+                return;
+            }
+        }
+        if source_call.is_none() {
+            if let Some(field_target) = qualified_lhs_for_synthetic_carrier_target(target, *span, db) {
+                let rhs_tainted = source_name
+                    .as_deref()
+                    .is_some_and(|src| arg_text_is_tainted(src, state))
+                    || assignment_source_names_any_tainted(source_names, *span, db, caller, state);
+                if rhs_tainted {
+                    insert_value_target_taint(state, &field_target);
+                    if rhs_has_descendant_shape(source_names) {
+                        insert_descendant_target_taint(state, &field_target);
+                    }
+                } else {
+                    remove_target_taint(state, &field_target);
+                }
+                return;
+            }
+        }
+        // G2: compound-expression RHS operands (concat, ternary,
+        // template literal, member access, subscript). If ANY
+        // operand is currently tainted, taint the target.
+        //
+        // Field-sensitivity: when the RHS is a qualified read
+        // (`data['other']` produces source_names containing both
+        // `data` and `data.other` from the adapter), bare-name
+        // operands like `data` should NOT match against
+        // qualified seeds in state via the loose
+        // base/tail-promotion that `state_qualified_token_matches_text`
+        // performs at call-site checks. That promotion is correct
+        // for arg passing (passing `obj` propagates carrier
+        // taint) but wrong for assignment RHS extraction
+        // (`out = data['other']` should not pick up
+        // `data.value`'s taint because `data['other']` and
+        // `data['value']` are distinct fields). Use the
+        // strict comparison that requires explicit qualified
+        // matching or direct membership.
+        if !source_names.is_empty() {
+            if source_call.is_none()
+                && assignment_span_is_iteration_binding(db, *span, target)
+                && source_names.iter().any(|source| {
+                    actual_has_descendant_taint(source, state)
+                        || arg_text_has_mapped_descendant_taint(source, state)
+                })
+            {
+                insert_descendant_target_taint(state, target);
+                return;
+            }
+            if assignment_source_names_any_tainted(source_names, *span, db, caller, state)
+                || non_call_rhs_tainted
+            {
+                insert_value_target_taint(state, target);
+                if rhs_has_descendant_shape(source_names) {
+                    insert_descendant_target_taint(state, target);
+                }
+                return;
+            }
+        }
+        let qualified_bases = synthetic_qualified_source_bases(source_names, *span, db);
+        match source_name.as_deref() {
+            Some(src)
+                if assignment_source_name_is_value_tainted(src, &qualified_bases, db, caller, state) =>
+            {
+                insert_value_target_taint(state, target);
+            }
+            Some(src)
+                if source_call.is_none()
+                    && !qualified_bases.contains(&canonical_bare_name(src))
+                    && copy_assignment_descendant_taint(state, target, src) => {}
+            _ if non_call_rhs_tainted => {
+                insert_value_target_taint(state, target);
+                if rhs_has_descendant_shape(source_names) {
+                    insert_descendant_target_taint(state, target);
+                }
+            }
+            Some(_) | None => {
+                // Semantic overwrite: if the RHS did not expose
+                // a tainted source_name/source_names/source_call
+                // path above, the previous value no longer
+                // reaches this target.
+                remove_target_taint(state, target);
+            }
+        }
     }
 }
 

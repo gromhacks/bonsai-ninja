@@ -3,6 +3,8 @@ use bonsai_lang_api::{FlowEvent, LanguageRegistry};
 use bonsai_vfs::Vfs;
 use std::sync::Arc;
 
+type AssignSummary = (String, Option<String>, Option<String>, Vec<String>);
+
 fn db_with(source: &str) -> AnalyzerDb {
     let vfs = Arc::new(Vfs::new());
     vfs.write("main.go".to_string(), Arc::<str>::from(source));
@@ -15,10 +17,7 @@ fn db_with(source: &str) -> AnalyzerDb {
     db
 }
 
-fn collect_assigns(
-    events: &[FlowEvent],
-    out: &mut Vec<(String, Option<String>, Option<String>, Vec<String>)>,
-) {
+fn collect_assigns(events: &[FlowEvent], out: &mut Vec<AssignSummary>) {
     for event in events {
         match event {
             FlowEvent::Assign {

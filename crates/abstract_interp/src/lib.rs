@@ -58,7 +58,7 @@ pub enum StepKind {
 
 /// One row in a [`RawTrace`]. The "raw" prefix marks this as the
 /// pre-finalisation shape — `bonsai_trace::finalize` lifts it to a
-/// schema-stable [`bonsai_trace::TraceStep`] with line/col spans and
+/// schema-stable `bonsai_trace::TraceStep` with line/col spans and
 /// resolved function names.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RawStep {
@@ -146,7 +146,7 @@ fn push_branch_successors(
 /// Emits a linear trace — sufficient for the spec's "trace from function
 /// entry" query. Path splitting is handled by enqueueing unvisited
 /// successors onto a worklist; interprocedural expansion is the
-/// workspace-level [`bonsai_workspace::cross_module`] tracer's job.
+/// workspace-level `bonsai_workspace::cross_module` tracer's job.
 pub fn run_entry(func: FuncId, cfg: &Cfg, limits: TraceLimits) -> RawTrace {
     let mut trace = RawTrace::default();
     let mut next_step: u32 = 0;

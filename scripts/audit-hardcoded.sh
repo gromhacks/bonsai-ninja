@@ -19,10 +19,11 @@ mkdir -p "$OUT_DIR"
 # Crates that LEGITIMATELY know language/library/framework names:
 # - lang_*  (per-language adapters)
 # - adapters (registers all adapters)
-# - security (rulepack-driven; loader/compile/pkg/validate know the schema)
+# - security loader/compile/pkg/report/deps modules know the rule schema
 # - cli, sdk (compose surfaces; expected to name commands)
 # - testkit, conformance (test infra)
-EXCLUDE_REGEX='^crates/(lang_|adapters|cli|sdk|testkit|conformance|security/src/(loader|compile|pkg|rule|finding|report|deps|sanitizer_credit)\.rs)'
+EXCLUDE_CRATE_REGEX='^crates/(lang_|adapters|cli|sdk|testkit|conformance)'
+EXCLUDE_FILE_REGEX='/crates/security/src/(loader|compile|pkg|rule|finding|report|deps|sanitizer_credit)\.rs:'
 
 # Suspect string-literal patterns. A hit is something a future
 # contributor should explain or migrate.
@@ -57,7 +58,7 @@ for crate_dir in "$ROOT_DIR"/crates/*/src/; do
     crate_name="$(basename "$crate_path")"
     rel="crates/$crate_name"
 
-    if [[ "$rel" =~ $EXCLUDE_REGEX ]]; then
+    if [[ "$rel" =~ $EXCLUDE_CRATE_REGEX ]]; then
         continue
     fi
 
@@ -71,8 +72,11 @@ for crate_dir in "$ROOT_DIR"/crates/*/src/; do
         while IFS= read -r line; do
             # Skip test files (path or *_test{,s}.rs filename) and doc-comment-only hits.
             case "$line" in
-                */tests/*|*/_tests.rs:*|*_test.rs:*|*_tests.rs:*) continue ;;
+                */tests/*|*/tests.rs:*|*/_tests.rs:*|*_test.rs:*|*_tests.rs:*) continue ;;
             esac
+            if [[ "$line" =~ $EXCLUDE_FILE_REGEX ]]; then
+                continue
+            fi
             # Skip lines that are pure doc comments (`/// ...`).
             content="${line#*:*:}"
             content_trimmed="${content#"${content%%[![:space:]]*}"}"

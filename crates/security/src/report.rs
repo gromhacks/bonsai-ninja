@@ -26,7 +26,7 @@ pub struct SecurityReport {
 
 impl SecurityReport {
     /// Build a report from findings only — runtime-disabled rules
-    /// default to empty. Use [`with_runtime_disabled_rules`] when
+    /// default to empty. Use [`Self::with_runtime_disabled_rules`] when
     /// the matcher actually dropped rules.
     #[must_use]
     pub fn new(findings: Vec<Finding>) -> Self {

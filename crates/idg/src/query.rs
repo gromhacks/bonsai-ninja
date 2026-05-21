@@ -104,7 +104,7 @@ impl ReachabilityIndex {
 
     /// True iff `src` reaches `sink`. O(forward closure + AND test).
     /// For batch reachability ("which sources reach this sink?"),
-    /// use [`Self::sources_reaching_sinks`] which amortises closures.
+    /// use [`Self::cut`] which amortises closures.
     #[must_use]
     pub fn reaches(&self, src: NodeId, sink: NodeId) -> bool {
         let forward = self.forward_closure(&[src]);

@@ -419,7 +419,7 @@ impl IdgQueryService {
     /// callers can immediately feed them to [`Self::forward_closure`].
     /// Resolve the workspace IDG nodes for `func`'s params whose
     /// declared name appears in `names`. Returns an empty Vec when
-    /// none match. Differs from [`param_nodes_of`] in that it does
+    /// none match. Differs from [`Self::param_nodes_of`] in that it does
     /// NOT include unrelated params — kind-param seed builders use
     /// it so a rule that only matches `user` doesn't seed the sibling
     /// `safe` param and over-paint the closure with unrelated flows.
