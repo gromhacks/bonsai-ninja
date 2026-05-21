@@ -33,6 +33,34 @@ fn python_ws_multi(files: &[(&str, &str)]) -> AnalyzerDb {
     db
 }
 
+fn javascript_ws_multi(files: &[(&str, &str)]) -> AnalyzerDb {
+    let vfs = Arc::new(Vfs::new());
+    for (path, source) in files {
+        vfs.write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    for file in db.vfs().all_files() {
+        let _ = db.decl_index(file);
+    }
+    db
+}
+
+fn rust_ws_multi(files: &[(&str, &str)]) -> AnalyzerDb {
+    let vfs = Arc::new(Vfs::new());
+    for (path, source) in files {
+        vfs.write((*path).to_string(), Arc::<str>::from(*source));
+    }
+    let registry = Arc::new(LanguageRegistry::new());
+    registry.register(Arc::new(bonsai_lang_rust::RustAdapter::new()));
+    let db = AnalyzerDb::new(vfs, registry);
+    for file in db.vfs().all_files() {
+        let _ = db.decl_index(file);
+    }
+    db
+}
+
 fn perl_ws_one_file(source: &str) -> AnalyzerDb {
     let vfs = Arc::new(Vfs::new());
     vfs.write("main.pl".to_string(), Arc::<str>::from(source));
@@ -1349,6 +1377,126 @@ def entry(value):
         candidates.is_empty(),
         "fmt:Println must resolve through the fmt import target or remain unresolved; \
          retrying bare Println fabricates a taint edge to the local function"
+    );
+}
+
+#[test]
+fn commonjs_default_require_callable_module_exports_function_resolves() {
+    let db = javascript_ws_multi(&[
+        (
+            "src/controller.js",
+            r#"const render = require("./view");
+function handle(el, html) {
+  return render(el, html);
+}
+"#,
+        ),
+        (
+            "src/view.js",
+            r#"module.exports = function render(el, html) {
+  el.innerHTML = html;
+};
+"#,
+        ),
+    ]);
+    let handle = func_id_of(&db, "handle");
+    let default_export = func_id_of(&db, "default");
+    let global = db.global_index();
+    let decl = global
+        .decl_of(SymbolId::new(handle.raw()))
+        .expect("handle decl")
+        .clone();
+    let file = global
+        .declaring_file(SymbolId::new(handle.raw()))
+        .expect("handle file");
+    let aliases = alias_map_for_file(&db.imports_for(file));
+    let alias_targets = alias_targets_for_decl(&db.imports_for(file), &decl);
+    let local_bindings = bonsai_callgraph::collect_local_callable_bindings_with_aliases(
+        &decl.flow_events,
+        &global,
+        &decl,
+        &alias_targets,
+    );
+
+    let candidates = resolve_call_candidates_with_caller(
+        "render",
+        &aliases,
+        &alias_targets,
+        &local_bindings,
+        &db,
+        handle,
+        &InterTaintConfig::default(),
+    );
+
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.func == default_export),
+        "CommonJS default callable require must resolve to module.exports function; \
+         aliases={aliases:?} alias_targets={alias_targets:?} candidates={candidates:?}"
+    );
+}
+
+#[test]
+fn rust_imported_instance_and_static_methods_propagate_into_impl_body() {
+    let db = rust_ws_multi(&[
+        (
+            "util.rs",
+            r#"pub struct Util;
+impl Util {
+    pub fn helper(&self, p: String) { sink(p); }
+    pub fn static_helper(p: String) { sink(p); }
+}
+"#,
+        ),
+        (
+            "entry.rs",
+            r#"use crate::util::Util;
+pub fn entry(args: String) {
+    let u = Util;
+    u.helper(args);
+    Util::static_helper(args);
+}
+"#,
+        ),
+    ]);
+    let entry = func_id_of(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &config(&[]), &db);
+
+    assert!(
+        result
+            .tainted_calls
+            .iter()
+            .any(|call| call.name == "sink" && call.tainted_args.iter().any(|arg| arg.value_text == "p")),
+        "Rust imported impl methods must propagate taint into the impl body; got {:#?}",
+        result.tainted_calls
+    );
+}
+
+#[test]
+fn unqualified_local_function_shadows_import_alias_in_legacy_inter_resolver() {
+    let db = python_ws_multi(&[
+        ("helper.py", "def helper(p):\n    decoy_sink(p)\n"),
+        (
+            "entry.py",
+            "from helper import helper\n\ndef helper(p):\n    sink(p)\n\ndef entry(args):\n    helper(args)\n",
+        ),
+    ]);
+    let entry = func_id_of(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &config(&[]), &db);
+
+    assert!(
+        result
+            .tainted_calls
+            .iter()
+            .any(|call| call.name == "sink" && call.tainted_args.iter().any(|arg| arg.value_text == "p")),
+        "local helper should receive taint; got {:#?}",
+        result.tainted_calls
+    );
+    assert!(
+        !result.tainted_calls.iter().any(|call| call.name == "decoy_sink"),
+        "imported decoy helper must not receive taint when shadowed locally; got {:#?}",
+        result.tainted_calls
     );
 }
 

@@ -5529,6 +5529,12 @@ fn resolve_call_candidates_with_caller_at_uncached(
                 precision: Precision::Narrowed,
             }];
         }
+        if unqualified_call_name(lookup_name) {
+            let exact_targets = resolve_contextual_call_name(lookup_name, scope);
+            if !exact_targets.is_empty() {
+                return exact_targets;
+            }
+        }
         if !receiver_types.is_empty() {
             if let Some(receiver) = call_receiver_from_name(lookup_name) {
                 let targets = if is_super_receiver(&receiver) {
@@ -5547,6 +5553,11 @@ fn resolve_call_candidates_with_caller_at_uncached(
                 if !targets.is_empty() {
                     return semantic_callees_from_candidates(targets, true);
                 }
+            }
+        }
+        if let Some(candidates) = resolve_whole_name_alias_target(lookup_name, scope) {
+            if !candidates.is_empty() {
+                return semantic_callees_from_candidates(candidates, false);
             }
         }
         if let Some((alias_target, alias_tail)) =
@@ -5665,6 +5676,23 @@ fn resolve_call_candidates_with_caller_at_uncached(
     )
 }
 
+fn resolve_whole_name_alias_target(lookup_name: &str, scope: &CallResolveScope<'_>) -> Option<Vec<FuncId>> {
+    let alias_target = scope.alias_targets.get(lookup_name)?;
+    let alias_tail = match alias_target {
+        AliasTarget::Namespace { .. } => "default",
+        AliasTarget::Member { member, .. } => member.as_str(),
+        AliasTarget::Type { .. } => return Some(Vec::new()),
+    };
+    let caller_ctx = caller_resolve_context_data(scope.db, scope.caller);
+    Some(resolve_workspace_targets_for_alias_entry(
+        scope.db,
+        alias_target,
+        alias_tail,
+        caller_ctx.as_ref(),
+        scope.alias_targets,
+    ))
+}
+
 fn expression_receiver_method_name(name: &str) -> Option<String> {
     callable_reference_variants(name)
         .into_iter()
@@ -5756,6 +5784,15 @@ fn alias_qualified_lookup_name(
     qualified_module_alias_call(name, aliases)
         || split_qualified_head_tail(name)
             .is_some_and(|(head, tail)| !tail.is_empty() && alias_targets.contains_key(head))
+}
+
+fn unqualified_call_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('.')
+        && !trimmed.contains("::")
+        && !trimmed.contains(':')
+        && !trimmed.contains('\\')
 }
 
 fn unique_narrowed_candidate(candidates: &[ResolvedCallee]) -> Option<FuncId> {
@@ -6715,6 +6752,25 @@ fn resolve_call_candidates(
     if !candidates.is_empty() {
         return semantic_callees_from_candidates(candidates, false);
     }
+    if let Some(alias_target) = alias_targets.get(lookup_name) {
+        let alias_tail = match alias_target {
+            AliasTarget::Namespace { .. } => Some("default"),
+            AliasTarget::Member { member, .. } => Some(member.as_str()),
+            AliasTarget::Type { .. } => None,
+        };
+        if let Some(alias_tail) = alias_tail {
+            let candidates = resolve_workspace_targets_for_alias_entry(
+                db,
+                alias_target,
+                alias_tail,
+                caller_ctx.as_ref(),
+                alias_targets,
+            );
+            if !candidates.is_empty() {
+                return semantic_callees_from_candidates(candidates, false);
+            }
+        }
+    }
     if is_single_colon_qualified(lookup_name) {
         let Some((module, function)) = lookup_name.split_once(':') else {
             return Vec::new();
@@ -6901,6 +6957,28 @@ fn resolve_workspace_module_targets(
         }
     }
     out
+}
+
+fn resolve_workspace_targets_for_alias_entry(
+    db: &AnalyzerDb,
+    alias_target: &AliasTarget,
+    alias_tail: &str,
+    caller_ctx: Option<&(FileId, ModulePath)>,
+    alias_targets: &AHashMap<String, AliasTarget>,
+) -> Vec<FuncId> {
+    match alias_target {
+        AliasTarget::Namespace { module } => {
+            resolve_workspace_module_targets(db, module, alias_tail, caller_ctx, alias_targets)
+        }
+        AliasTarget::Member { module, member } => {
+            let mut out = resolve_workspace_module_targets(db, module, alias_tail, caller_ctx, alias_targets);
+            if out.is_empty() {
+                out = resolve_workspace_module_targets(db, member, alias_tail, caller_ctx, alias_targets);
+            }
+            out
+        }
+        AliasTarget::Type { .. } => Vec::new(),
+    }
 }
 
 fn collect_workspace_callable_targets_by_name(

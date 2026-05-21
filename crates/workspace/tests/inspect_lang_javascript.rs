@@ -253,6 +253,25 @@ fn resolved_graph_links_commonjs_namespace_require_exports_assignment() {
     assert_resolved_edge(&w, "handle", "exports.searchByCode");
 }
 
+#[test]
+fn resolved_graph_links_commonjs_default_require_callable_module_exports_function() {
+    let w = ws_multi(
+        js(),
+        &[
+            (
+                "/w/api/render.js",
+                "const render = require('../views/render');\n\
+                 function handle(el, html) { return render(el, html); }\n",
+            ),
+            (
+                "/w/views/render.js",
+                "module.exports = function render(el, html) { el.innerHTML = html; };\n",
+            ),
+        ],
+    );
+    assert_resolved_edge(&w, "handle", "default");
+}
+
 fn assert_resolved_edge(w: &bonsai_workspace::Workspace, caller: &str, callee: &str) {
     let global = w.db().global_index();
     let caller_id = func_id_by_name(w, caller);

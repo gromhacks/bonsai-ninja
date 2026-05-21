@@ -275,11 +275,12 @@ pub fn js_ts_imports(file: FileId, tree: &tree_sitter::Tree, src: &[u8]) -> Vec<
     imports
 }
 
-/// Surface ECMAScript `export default` as an additional callable/type
+/// Surface ECMAScript `export default` and CommonJS
+/// `module.exports = function ...` as an additional callable/type
 /// binding named `default` in the exporting module. The original
 /// declaration remains indexed by its real local name, so same-file
-/// references still resolve while default imports can target the
-/// language-level export name.
+/// references still resolve while default imports / callable
+/// CommonJS requires can target the language-level export name.
 pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
     let mut default_exports = Vec::new();
     for export_node in collect_kinds(tree, &["export_statement"]) {
@@ -302,6 +303,30 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
             default_exports.push(DefaultExportTarget::Span(span_of(file, &target)));
         }
     }
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let left = assignment.child_by_field_name("left");
+        let right = assignment.child_by_field_name("right");
+        let (Some(left), Some(right)) = (left, right) else {
+            continue;
+        };
+        if node_text(&left, src).trim() != "module.exports" {
+            continue;
+        }
+        if right.kind() == "identifier" {
+            let name = node_text(&right, src).trim();
+            if !name.is_empty() {
+                default_exports.push(DefaultExportTarget::Name(name.to_string()));
+            }
+            continue;
+        }
+        default_exports.push(DefaultExportTarget::Span(span_of(file, &right)));
+        if let Some(name_node) = right.child_by_field_name("name") {
+            let name = node_text(&name_node, src).trim();
+            if !name.is_empty() {
+                default_exports.push(DefaultExportTarget::Name(name.to_string()));
+            }
+        }
+    }
     if default_exports.is_empty() || decl_index.defs.iter().any(|decl| decl.name == "default") {
         return;
     }
@@ -313,6 +338,7 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
         .max()
         .map_or(0, |raw| raw.saturating_add(1));
     let mut aliases = Vec::new();
+    let mut seen_sources = Vec::new();
     for target in default_exports {
         let Some(source) = decl_index.defs.iter().find(|decl| match &target {
             DefaultExportTarget::Span(span) => decl.span == *span,
@@ -320,6 +346,9 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
         }) else {
             continue;
         };
+        if seen_sources.contains(&source.symbol) {
+            continue;
+        }
         if !matches!(
             source.kind,
             bonsai_lang_api::DeclKind::Function
@@ -329,6 +358,7 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
         ) {
             continue;
         }
+        seen_sources.push(source.symbol);
         let mut alias = source.clone();
         alias.symbol = SymbolId::new(next_symbol);
         next_symbol = next_symbol.saturating_add(1);

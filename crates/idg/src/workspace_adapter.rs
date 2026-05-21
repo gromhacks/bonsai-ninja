@@ -158,7 +158,13 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
             if !self.funcs_share_language(caller, edge.to) {
                 continue;
             }
-            // Filter by callee name. Adapters surface call events
+            // Filter by callee name. Exact-span callgraph rows are
+            // already the semantic resolution for this call site; do
+            // not reject them just because the callee has an exported
+            // synthetic name (`default`) while the source calls it
+            // through a local alias (`render`).
+            let exact_site_match = edge.span == site;
+            // Adapters surface call events
             // with whatever syntactic form the source used — bare
             // (`runPipeline(x)`), qualified (`Pipeline.runPipeline(x)`,
             // `Module::func(x)`), or arity-suffixed (`foo/2`). Match
@@ -167,7 +173,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
             // narrowed receiver types, so any name match here is a
             // legitimate dispatch target.
             if let Some(decl_name) = self.func_to_name.get(&edge.to) {
-                let mut matched = names_match_for_callee(decl_name, callee_name);
+                let mut matched = exact_site_match || names_match_for_callee(decl_name, callee_name);
                 if !matched {
                     // Alias-aware fallback: each FuncId tracks
                     // every textual name it can be called as,

@@ -591,10 +591,32 @@ fn method_parent_matches_receiver_type(
 /// (`orchestrate`) instead of being chopped at the first `:`. The
 /// dotted/colon fallback covers JS / Python / PHP shapes.
 fn rewrite_through_alias_map_with_target(name: &str, ctx: &ResolveContext<'_>) -> Option<AliasRewrite> {
+    rewrite_through_alias_map_with_mode(name, ctx, AliasRewriteMode::Callable)
+}
+
+fn rewrite_through_alias_map_with_type_target(name: &str, ctx: &ResolveContext<'_>) -> Option<AliasRewrite> {
+    rewrite_through_alias_map_with_mode(name, ctx, AliasRewriteMode::Type)
+}
+
+#[derive(Clone, Copy)]
+enum AliasRewriteMode {
+    Callable,
+    Type,
+}
+
+fn rewrite_through_alias_map_with_mode(
+    name: &str,
+    ctx: &ResolveContext<'_>,
+    mode: AliasRewriteMode,
+) -> Option<AliasRewrite> {
     let map = ctx.alias_map?;
     // Whole-name alias: `req` → `flask.request`.
     if let Some(target) = map.get(name) {
-        return Some(AliasRewrite::from_target(target, target.target_text()));
+        let rewritten = match mode {
+            AliasRewriteMode::Callable => target.callable_target_text(),
+            AliasRewriteMode::Type => target.target_text(),
+        };
+        return Some(AliasRewrite::from_target(target, rewritten));
     }
     let (head, tail) = split_alias_head_tail(name)?;
     let target = map.get(head)?;
@@ -647,6 +669,7 @@ impl AliasRewrite {
 
 trait AliasTargetExt {
     fn target_text(&self) -> String;
+    fn callable_target_text(&self) -> String;
     fn rewrite_with_tail(&self, tail: &str) -> String;
 }
 
@@ -655,6 +678,14 @@ impl AliasTargetExt for AliasTarget {
         match self {
             AliasTarget::Member { module, member } => format!("{module}.{member}"),
             AliasTarget::Namespace { module } => module.clone(),
+            AliasTarget::Type { type_name } => type_name.clone(),
+        }
+    }
+
+    fn callable_target_text(&self) -> String {
+        match self {
+            AliasTarget::Member { module, member } => format!("{module}.{member}"),
+            AliasTarget::Namespace { module } => format!("{module}.default"),
             AliasTarget::Type { type_name } => type_name.clone(),
         }
     }
@@ -1468,7 +1499,7 @@ pub fn resolve_class(
         }
     }
     if out.is_empty() {
-        if let Some(rewrite) = rewrite_through_alias_map_with_target(name, ctx) {
+        if let Some(rewrite) = rewrite_through_alias_map_with_type_target(name, ctx) {
             for lookup in type_lookup_variants(&rewrite.rewritten) {
                 // Exact rewrite trusts the alias map — if the
                 // resolver finds a class decl named exactly this,

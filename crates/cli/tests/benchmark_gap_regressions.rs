@@ -430,6 +430,51 @@ module.exports = { save };
 }
 
 #[test]
+fn javascript_browser_source_crosses_commonjs_default_export_to_dom_sink() {
+    let ws = temp_workspace("js-cjs-default-domxss");
+    write_file(
+        &ws,
+        "src/controller.js",
+        r#"const render = require("./view");
+
+function handle(el) {
+  const html = window.location.hash;
+  return render(el, html);
+}
+
+module.exports = { handle };
+"#,
+    );
+    write_file(
+        &ws,
+        "src/view.js",
+        r#"module.exports = function render(el, html) {
+  el.innerHTML = html;
+};
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^javascript\\.source\\.window_location_hash$",
+        "^javascript\\.xss\\.innerhtml$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "javascript.source.window_location_hash",
+            "javascript.xss.innerhtml",
+            "src/controller.js",
+            "src/view.js",
+            "handle",
+            "default",
+            "window.location.hash",
+            "el.innerHTML",
+        ],
+    );
+}
+
+#[test]
 fn javascript_graphql_args_arbitrary_field_reaches_cross_file_sql_sink() {
     let ws = temp_workspace("js-graphql-q");
     write_file(
