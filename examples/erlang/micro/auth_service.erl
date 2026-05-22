@@ -1,4 +1,5 @@
 -module(auth_service).
+-include_lib("epgsql/include/epgsql.hrl").
 -export([verify_token/1, run_admin_command/2]).
 
 verify_token(Token) ->

@@ -411,3 +411,160 @@ fn named_arg_stitches_to_matching_param_not_position() {
         "named arg must not fall through to the first positional param: {arg_to_param:?}"
     );
 }
+
+#[test]
+fn field_argument_forwarding_preserves_matching_field_path() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["src".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(10, 18),
+            target: "box.cmd".to_string(),
+            source_name: Some("src".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(30, 45),
+            name: "helper".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(37, 40),
+                name: None,
+                value_text: "box".to_string(),
+                place: Some("box".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+
+    let mut callee = empty_decl(2, "helper");
+    callee.params = vec!["arg".to_string()];
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    f2s_map.insert(FuncId::new(2), SegmentId(1));
+    let f2s = StaticF2S(f2s_map);
+
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "helper", vec![FuncId::new(2)]);
+
+    let ws = stitch_idg(
+        vec![transfer_function_for(&caller), transfer_function_for(&callee)],
+        &resolver,
+        &f2s,
+    );
+    let caller_segment = ws.segment(SegmentId(0)).expect("caller segment");
+    let callee_segment = ws.segment(SegmentId(1)).expect("callee segment");
+    let forwards_cmd_field = ws.cross_file().edges.iter().any(|edge| {
+        edge.edge.meta.kind == IdgEdgeKind::InterCallArg
+            && place_storage_name(
+                caller_segment,
+                node_place(caller_segment, edge.edge.from).expect("from place"),
+            )
+            .as_deref()
+                == Some("box.cmd")
+            && place_storage_name(
+                callee_segment,
+                node_place(callee_segment, edge.edge.to).expect("to place"),
+            )
+            .as_deref()
+                == Some("arg.cmd")
+    });
+
+    assert!(
+        forwards_cmd_field,
+        "expected worklist field forwarding from caller box.cmd to callee arg.cmd: {:?}",
+        ws.cross_file().edges
+    );
+}
+
+#[test]
+fn same_segment_field_argument_forwarding_treats_synthetic_param_fields_as_inputs() {
+    let mut caller = empty_decl(1, "caller");
+    caller.params = vec!["src".to_string()];
+    caller.flow_events = vec![
+        FlowEvent::Assign {
+            span: span(70, 78),
+            target: "box.cmd".to_string(),
+            source_name: Some("src".to_string()),
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: None,
+        },
+        FlowEvent::Call {
+            span: span(80, 95),
+            name: "helper".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(87, 90),
+                name: None,
+                value_text: "box".to_string(),
+                place: Some("box".to_string()),
+                source_names: Vec::new(),
+            }],
+        },
+    ];
+
+    let mut helper = empty_decl(2, "helper");
+    helper.params = vec!["arg".to_string()];
+    helper.flow_events = vec![FlowEvent::Call {
+        span: span(20, 35),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: span(27, 30),
+            name: None,
+            value_text: "arg".to_string(),
+            place: Some("arg".to_string()),
+            source_names: Vec::new(),
+        }],
+    }];
+
+    let mut sink = empty_decl(3, "sink");
+    sink.params = vec!["value".to_string()];
+
+    let mut f2s_map = AHashMap::new();
+    f2s_map.insert(FuncId::new(1), SegmentId(0));
+    f2s_map.insert(FuncId::new(2), SegmentId(0));
+    f2s_map.insert(FuncId::new(3), SegmentId(0));
+    let f2s = StaticF2S(f2s_map);
+
+    let mut resolver = MockResolver::new();
+    resolver.add(FuncId::new(1), "helper", vec![FuncId::new(2)]);
+    resolver.add(FuncId::new(2), "sink", vec![FuncId::new(3)]);
+
+    let ws = stitch_idg(
+        vec![
+            transfer_function_for(&caller),
+            transfer_function_for(&helper),
+            transfer_function_for(&sink),
+        ],
+        &resolver,
+        &f2s,
+    );
+    let segment = ws.segment(SegmentId(0)).expect("single segment");
+    let forwards_cmd_field = segment.edges.iter().any(|edge| {
+        edge.meta.kind == IdgEdgeKind::InterCallArg
+            && place_storage_name(segment, node_place(segment, edge.from).expect("from place")).as_deref()
+                == Some("arg.cmd")
+            && place_storage_name(segment, node_place(segment, edge.to).expect("to place")).as_deref()
+                == Some("value.cmd")
+    });
+
+    assert!(
+        forwards_cmd_field,
+        "expected helper arg.cmd to forward to sink value.cmd despite caller call span ordering"
+    );
+}

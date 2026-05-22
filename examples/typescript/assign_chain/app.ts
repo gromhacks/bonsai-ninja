@@ -1,4 +1,5 @@
 // Assignment-chain audit fixture (TypeScript).
+import "express";
 import { exec } from "child_process";
 import { runInOtherFile } from "./executor";
 

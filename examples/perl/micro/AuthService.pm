@@ -2,6 +2,7 @@ package AuthService;
 use strict;
 use warnings;
 
+use CGI;
 use Exporter 'import';
 our @EXPORT_OK = qw(verify_token run_admin_command);
 

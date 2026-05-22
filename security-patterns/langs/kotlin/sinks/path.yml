@@ -535,6 +535,7 @@
   tag: path-traversal
   severity: high
   packages:
+  - java.io
   - kotlin.io
   cwe:
   - CWE-22
@@ -549,6 +550,7 @@
   match_examples:
   - name: tainted file receiver
     code: |
+      import java.io.File
       import kotlin.io.*
       class App {
         fun handle(input: String) {
@@ -558,6 +560,7 @@
       }
   - name: literal file receiver negative
     code: |
+      import java.io.File
       import kotlin.io.*
       class App {
         fun handle(input: String) {

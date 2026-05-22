@@ -5,7 +5,7 @@
   severity: critical
   category: process-exec
   packages: ["scala.sys.process"]
-  imports: ["scala.sys.process"]
+  imports: ["scala.sys.process", "sys.process"]
   cwe: [CWE-78]
   match:
     kind: call
@@ -40,7 +40,7 @@
   tag: command-injection
   severity: critical
   packages: ["scala.sys.process"]
-  imports: ["scala.sys.process"]
+  imports: ["scala.sys.process", "sys.process"]
   cwe: [CWE-78]
   match:
     kind: call

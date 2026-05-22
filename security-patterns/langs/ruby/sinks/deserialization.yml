@@ -20,13 +20,13 @@
   match_examples:
   - name: ruby.deser.yaml_load example
     code: |
-      require "oj"
+      require "yaml"
       def example(input, url, id, payload, request, params)
         YAML.load(input)
       end
   - name: ruby.deser.yaml_load literal negative
     code: |
-      require "oj"
+      require "yaml"
       def example(input, url, id, payload, request, params)
         YAML.load("---\nname: alice\n")
       end
@@ -40,8 +40,11 @@
   - ruby.path.kernel_load
   - ruby.xxe.ox_load
   packages:
+  - yaml
   - oj
   - ox
+  imports:
+  - yaml
 - id: ruby.deser.yaml_unsafe_load
   enabled: true
   language: ruby

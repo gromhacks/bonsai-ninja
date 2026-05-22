@@ -62,7 +62,10 @@ EXPECTED_FINDINGS = {
     "java": 0,
     "javascript": 1,
     "kotlin": 1,
-    "lua": 3,
+    # Lua previously reported two extra SQLi findings from generic
+    # Executor.execute calls. LuaSQL sinks now require LuaSQL package
+    # evidence, leaving the one real os.execute command-injection flow.
+    "lua": 1,
     "objc": 2,
     "perl": 1,
     "php": 0,

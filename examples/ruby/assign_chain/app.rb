@@ -1,4 +1,5 @@
 # Assignment-chain audit fixture (Ruby).
+require "actionpack"
 require_relative 'executor'
 
 CONST_OK = "ls /tmp"

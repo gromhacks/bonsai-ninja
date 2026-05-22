@@ -84,3 +84,40 @@ fn dependency_inventory_treats_manifest_package_name_as_evidence() {
         inventory.rows
     );
 }
+
+#[test]
+fn dependency_inventory_does_not_project_one_package_signal_onto_siblings() {
+    let root = temp_root("bonsai-deps-package-siblings");
+    std::fs::write(
+        root.join("pom.xml"),
+        r"<project><artifactId>log4j-core</artifactId></project>",
+    )
+    .expect("pom");
+    let ws = Workspace::new(std::sync::Arc::new(bonsai_lang_api::LanguageRegistry::new()));
+
+    let mut rule = package_rule("log4j-core");
+    rule.packages.push("commons-io".to_string());
+
+    let mut pack = Rulepack::default();
+    pack.packs.insert(
+        "java".to_string(),
+        LanguagePack {
+            language: "java".to_string(),
+            sources: Vec::new(),
+            sinks: vec![rule],
+            sanitizers: Vec::new(),
+        },
+    );
+
+    let inventory = build_inventory(&pack, &ws, &root);
+    assert!(
+        inventory.rows.iter().any(|row| row.key == "log4j-core"),
+        "expected log4j-core evidence, got {:?}",
+        inventory.rows
+    );
+    assert!(
+        inventory.rows.iter().all(|row| row.key != "commons-io"),
+        "did not expect commons-io evidence from a log4j-core manifest, got {:?}",
+        inventory.rows
+    );
+}

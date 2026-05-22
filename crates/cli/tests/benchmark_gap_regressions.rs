@@ -145,6 +145,50 @@ fn run_sinks_json(ws: &Path, rule_regex: &str) -> Vec<Value> {
         .unwrap_or_else(|| panic!("sinks JSON missing rows array: {value:#}"))
 }
 
+fn run_sources_json(ws: &Path, rule_regex: &str) -> Vec<Value> {
+    let Some(bin) = bin_path() else {
+        return Vec::new();
+    };
+    let out = Command::new(bin)
+        .args(["--no-cache", "--no-progress", "security"])
+        .arg(ws)
+        .args([
+            "sources",
+            "--rules-dir",
+            rules_dir().to_str().expect("rules dir"),
+            "--rule-regex",
+            rule_regex,
+            "--format",
+            "json",
+            "--all",
+            "--no-color",
+        ])
+        .env("NO_COLOR", "1")
+        .env("COLUMNS", "200")
+        .output()
+        .expect("run bonsai-ninja sources");
+
+    assert!(
+        out.status.success(),
+        "sources failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let value = serde_json::from_slice::<Value>(&out.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid sources JSON: {error}\nstdout:\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    value
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| panic!("sources JSON missing rows array: {value:#}"))
+}
+
 fn assert_has_finding(rows: &[Value], fragments: &[&str]) {
     let text = serde_json::to_string_pretty(rows).expect("serialize rows");
     assert!(!rows.is_empty(), "expected at least one finding:\n{text}");
@@ -388,7 +432,8 @@ fn javascript_commonjs_route_source_reaches_service_sink() {
     write_file(
         &ws,
         "src/routes/upload.js",
-        r#"const store = require("../services/store");
+        r#"const express = require("express");
+const store = require("../services/store");
 
 function upload(req) {
   const name = req.query.name;
@@ -427,6 +472,159 @@ module.exports = { save };
             "save",
         ],
     );
+}
+
+#[test]
+fn typescript_framework_source_requires_matching_package_evidence() {
+    let ws = temp_workspace("ts-framework-source-package-gate");
+    write_file(
+        &ws,
+        "fastify.ts",
+        r#"import fastify from "fastify";
+
+function route(request: any): unknown {
+  return request.headers;
+}
+"#,
+    );
+    write_file(
+        &ws,
+        "hono.ts",
+        r#"import { Hono } from "hono";
+
+function route(request: any): unknown {
+  return request.headers;
+}
+"#,
+    );
+
+    let rows = run_sources_json(&ws, "^typescript\\.source\\.fastify_request_headers$");
+    assert_has_row(
+        &rows,
+        &["typescript.source.fastify_request_headers", "fastify.ts"],
+    );
+    assert_rows_do_not_contain(&rows, &["hono.ts"]);
+}
+
+#[test]
+fn typescript_package_gated_xss_sinks_require_matching_package_evidence() {
+    let ws = temp_workspace("ts-xss-sink-package-gate");
+    write_file(
+        &ws,
+        "serialize-js.ts",
+        r#"import serialize from "serialize-javascript";
+
+function embed(value: unknown): string {
+  return serialize(value, { unsafe: true });
+}
+"#,
+    );
+    write_file(
+        &ws,
+        "local-cookie.ts",
+        r#"import { serialize } from "./utils/cookie";
+
+function generateCookie(name: string, value: string): string {
+  return serialize(name, value);
+}
+"#,
+    );
+    write_file(
+        &ws,
+        "koa.ts",
+        r#"import Koa from "koa";
+
+function route(ctx: any, html: string): void {
+  ctx.body = "<h1>" + html + "</h1>";
+}
+"#,
+    );
+    write_file(
+        &ws,
+        "hono.ts",
+        r#"import { Hono } from "hono";
+
+function createRequest(requestInit: RequestInit, body: string): void {
+  requestInit.body = body;
+}
+"#,
+    );
+
+    let serialize_rows = run_sinks_json(&ws, "^typescript\\.xss\\.serialize_javascript_unsafe_embed$");
+    assert_has_row(
+        &serialize_rows,
+        &[
+            "typescript.xss.serialize_javascript_unsafe_embed",
+            "serialize-js.ts",
+        ],
+    );
+    assert_rows_do_not_contain(&serialize_rows, &["local-cookie.ts"]);
+
+    let body_rows = run_sinks_json(&ws, "^typescript\\.xss\\.koa_ctx_body_html$");
+    assert_has_row(&body_rows, &["typescript.xss.koa_ctx_body_html", "koa.ts"]);
+    assert_rows_do_not_contain(&body_rows, &["hono.ts"]);
+}
+
+#[test]
+fn lua_luasql_execute_requires_matching_package_evidence() {
+    let ws = temp_workspace("lua-luasql-package-gate");
+    write_file(
+        &ws,
+        "luasql.lua",
+        r#"local _luasql = require("luasql")
+
+function lookup(conn, name)
+  return conn:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
+end
+"#,
+    );
+    write_file(
+        &ws,
+        "generic.lua",
+        r#"local Executor = {}
+
+function Executor.execute(cmd)
+  os.execute(cmd)
+end
+
+function run(cmd)
+  return Executor.execute(cmd)
+end
+"#,
+    );
+
+    let rows = run_sinks_json(&ws, "^lua\\.sqli\\.luasql_execute$");
+    assert_has_row(&rows, &["lua.sqli.luasql_execute", "luasql.lua"]);
+    assert_rows_do_not_contain(&rows, &["generic.lua", "Executor.execute"]);
+}
+
+#[test]
+fn ruby_actionview_template_sink_accepts_manifest_package_evidence() {
+    let ws = temp_workspace("ruby-actionview-manifest-gate");
+    write_file(&ws, "Gemfile", "gem \"actionview\"\n");
+    write_file(
+        &ws,
+        "show.html.erb",
+        r#"<div>
+  <%= raw @comment %>
+</div>
+"#,
+    );
+
+    let rows = run_sinks_json(&ws, "^ruby\\.xss\\.raw$");
+    assert_has_row(&rows, &["ruby.xss.raw", "show.html.erb"]);
+
+    let no_manifest = temp_workspace("ruby-actionview-no-manifest-gate");
+    write_file(
+        &no_manifest,
+        "show.html.erb",
+        r#"<div>
+  <%= raw @comment %>
+</div>
+"#,
+    );
+    let no_manifest_rows = run_sinks_json(&no_manifest, "^ruby\\.xss\\.raw$");
+    assert_no_finding(&no_manifest_rows);
 }
 
 #[test]
@@ -692,6 +890,27 @@ def search(term):
 }
 
 #[test]
+fn python_graphql_args_requires_graphql_package_evidence() {
+    let ws = temp_workspace("py-graphql-args-package-gate");
+    write_file(
+        &ws,
+        "app/release.py",
+        r#"import os
+
+def clone(args):
+    os.system(args)
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^python\\.graphql\\.graphene_resolver_args$",
+        "^python\\.cmdi\\.os_system$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
 fn go_graphql_resolveparams_args_reach_cross_file_sql_querycontext() {
     let ws = temp_workspace("go-graphql-cross-file-sqli");
     write_file(&ws, "go.mod", "module example.com/app\n\ngo 1.22\n");
@@ -849,7 +1068,9 @@ fn javascript_html_return_requires_tainted_return_expression() {
     write_file(
         &ws,
         "src/page.js",
-        r#"function page(req) {
+        r#"const express = require("express");
+
+function page(req) {
   const name = req.query.name;
   return `<h1>${name}</h1>`;
 }
@@ -874,7 +1095,9 @@ fn javascript_html_return_requires_tainted_return_expression() {
     write_file(
         &clean,
         "src/page.js",
-        r#"function page(req) {
+        r#"const express = require("express");
+
+function page(req) {
   const unused = req.query.name;
   return `<h1>safe</h1>`;
 }
@@ -940,7 +1163,9 @@ fn typescript_html_return_requires_tainted_return_expression() {
     write_file(
         &ws,
         "src/page.ts",
-        r#"function page(req: any): string {
+        r#"import express from "express";
+
+function page(req: any): string {
   const name = req.query.name;
   return `<h1>${name}</h1>`;
 }
@@ -965,7 +1190,9 @@ fn typescript_html_return_requires_tainted_return_expression() {
     write_file(
         &clean,
         "src/page.ts",
-        r#"function page(req: any): string {
+        r#"import express from "express";
+
+function page(req: any): string {
   const unused = req.query.name;
   return `<h1>safe</h1>`;
 }
@@ -1115,7 +1342,8 @@ fn javascript_decode_uri_component_preserves_query_taint_without_sibling_overtai
     write_file(
         &ws,
         "src/upload.js",
-        r#"const path = require("path");
+        r#"const express = require("express");
+const path = require("path");
 
 function upload(req) {
   const raw = req.query.name;
@@ -1145,7 +1373,8 @@ function upload(req) {
     write_file(
         &clean,
         "src/upload.js",
-        r#"const path = require("path");
+        r#"const express = require("express");
+const path = require("path");
 
 function upload(req) {
   const unused = req.query.name;
