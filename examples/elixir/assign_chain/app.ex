@@ -1,5 +1,7 @@
 # Assignment-chain audit fixture (Elixir).
 defmodule App do
+  alias Phoenix
+
   @const_ok "ls /tmp"
 
   def passthrough(x), do: x

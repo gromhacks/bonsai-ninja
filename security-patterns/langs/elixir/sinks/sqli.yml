@@ -43,6 +43,7 @@
     expect_no_match: true
   description: "Repo.query/2 or App.Repo.query/2 — raw SQL with interpolated values bypasses Ecto's parameter binding."
   imports:
+  - Ecto.Adapters.SQL
   - Ecto_sql
 - id: elixir.sqli.ecto_repo_query_bang
   enabled: true
@@ -88,6 +89,7 @@
     expect_no_match: true
   description: "Repo.query!/2 or App.Repo.query!/2 — raw SQL variant; same interpolation risk as query/2."
   imports:
+  - Ecto.Adapters.SQL
   - Ecto_sql
 - id: elixir.sqli.ecto_fragment
   enabled: true

@@ -1,4 +1,6 @@
 defmodule MyApp.AuthService do
+  alias Ecto.Adapters.SQL
+
   def verify_token(token) do
     query = "SELECT user_id FROM tokens WHERE token = '" <> token <> "'"
     # sink: SQL injection via concatenation

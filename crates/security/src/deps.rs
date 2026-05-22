@@ -22,11 +22,12 @@ use crate::loader::Rulepack;
 use crate::pkg::import_matches_package;
 use crate::rule::{Rule, Severity};
 use ahash::{AHashMap, AHashSet};
-use bonsai_common::dependency_metadata::dependency_metadata_dir_skipped;
+use bonsai_common::dependency_metadata::{dependency_metadata_dir_skipped, walk_dependency_metadata_files};
 use bonsai_lang_api::RefKind;
 use bonsai_workspace::Workspace;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DependencyRow {
@@ -62,9 +63,8 @@ pub fn build_inventory(pack: &Rulepack, ws: &Workspace, root: &Path) -> Dependen
         if !rule.enabled {
             continue;
         }
-        let keys = rule_signal_keys(rule);
-        for key in keys {
-            let (signals, evidence) = rule_evidence(rule, &manifest_files, &imports_by_lang);
+        for key in rule_signal_keys(rule) {
+            let (signals, evidence) = rule_key_evidence(rule, &key, &manifest_files, &imports_by_lang);
             if signals.is_empty() {
                 continue;
             }
@@ -110,6 +110,181 @@ pub fn build_inventory(pack: &Rulepack, ws: &Workspace, root: &Path) -> Dependen
     DependencyInventory { rows }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct WorkspaceDependencyPackages {
+    pub fingerprint: u64,
+    pub packages: Arc<AHashSet<String>>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceDependencyPackageContext {
+    fingerprint: u64,
+    by_language: AHashMap<String, Arc<AHashSet<String>>>,
+}
+
+static WORKSPACE_DEPENDENCY_PACKAGE_CACHE: std::sync::LazyLock<
+    parking_lot::RwLock<AHashMap<String, Arc<WorkspaceDependencyPackageContext>>>,
+> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
+
+/// Return package/dependency names declared in workspace-level manifests
+/// for `language`.
+///
+/// Per-file imports are still the strongest evidence used by the matcher,
+/// but framework template files often do not contain an import for the
+/// runtime package they execute under (Rails ERB / ActionView is the
+/// canonical case). This language-scoped manifest context lets package gates
+/// accept those real project dependencies without letting one language's
+/// manifest satisfy another language's package-scoped rules in a monorepo.
+pub(crate) fn workspace_dependency_packages_for_language(
+    root: &Path,
+    language: &str,
+) -> WorkspaceDependencyPackages {
+    let root_key = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    if let Some(context) = WORKSPACE_DEPENDENCY_PACKAGE_CACHE.read().get(&root_key).cloned() {
+        return WorkspaceDependencyPackages {
+            fingerprint: context.fingerprint,
+            packages: context
+                .by_language
+                .get(language)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(AHashSet::new())),
+        };
+    }
+
+    let context = Arc::new(build_workspace_dependency_package_context(root));
+    let mut cache = WORKSPACE_DEPENDENCY_PACKAGE_CACHE.write();
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    let context = cache.entry(root_key).or_insert_with(|| context.clone()).clone();
+    WorkspaceDependencyPackages {
+        fingerprint: context.fingerprint,
+        packages: context
+            .by_language
+            .get(language)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(AHashSet::new())),
+    }
+}
+
+fn build_workspace_dependency_package_context(root: &Path) -> WorkspaceDependencyPackageContext {
+    let mut by_language: AHashMap<String, AHashSet<String>> = AHashMap::new();
+    let mut fingerprint_parts = Vec::new();
+    let _ = walk_dependency_metadata_files(root, |path, rel| {
+        let bytes = std::fs::read(path)?;
+        fingerprint_parts.push(format!("{rel}:{}", bonsai_hash::fnv1a_bytes64(&bytes)));
+        let text = String::from_utf8_lossy(&bytes);
+        let packages = dependency_manifest_package_tokens(&text);
+        if !packages.is_empty() {
+            for language in dependency_manifest_languages(path) {
+                by_language
+                    .entry((*language).to_string())
+                    .or_default()
+                    .extend(packages.iter().cloned());
+            }
+        }
+        Ok(())
+    });
+    fingerprint_parts.sort();
+    let fingerprint = bonsai_hash::fnv1a_names64(&fingerprint_parts);
+    let by_language = by_language
+        .into_iter()
+        .map(|(language, packages)| (language, Arc::new(packages)))
+        .collect();
+    WorkspaceDependencyPackageContext {
+        fingerprint,
+        by_language,
+    }
+}
+
+fn dependency_manifest_languages(path: &Path) -> &'static [&'static str] {
+    let basename = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let lower = basename.to_ascii_lowercase();
+    match basename {
+        "Gemfile" | "Gemfile.lock" => &["ruby"],
+        "package.json"
+        | "package-lock.json"
+        | "pnpm-lock.yaml"
+        | "pnpm-workspace.yaml"
+        | "yarn.lock"
+        | "bun.lock"
+        | "bun.lockb"
+        | "deno.json"
+        | "deno.jsonc"
+        | "deno.lock" => &["javascript", "typescript"],
+        "mix.exs" | "mix.lock" => &["elixir"],
+        "rebar.config" | "rebar.lock" => &["erlang"],
+        "go.mod" | "go.sum" | "go.work" | "go.work.sum" => &["go"],
+        "Cargo.toml" | "Cargo.lock" => &["rust"],
+        "composer.json" | "composer.lock" => &["php"],
+        "pyproject.toml" | "requirements.txt" | "Pipfile" | "Pipfile.lock" | "poetry.lock" | "uv.lock" => {
+            &["python"]
+        }
+        "pom.xml"
+        | "build.gradle"
+        | "build.gradle.kts"
+        | "settings.gradle"
+        | "settings.gradle.kts"
+        | "gradle.lockfile"
+        | "gradle.properties" => &["java", "kotlin", "scala"],
+        "Package.swift" | "Package.resolved" | "Cartfile" | "Cartfile.resolved" => &["swift"],
+        "Podfile" | "Podfile.lock" => &["objc", "swift"],
+        "packages.config" => &["csharp"],
+        _ if path_has_extension(&lower, "gemspec") => &["ruby"],
+        _ if path_has_extension(&lower, "csproj")
+            || path_has_extension(&lower, "fsproj")
+            || path_has_extension(&lower, "vbproj")
+            || path_has_extension(&lower, "sln")
+            || path_has_extension(&lower, "slnx")
+            || path_has_extension(&lower, "props")
+            || path_has_extension(&lower, "targets") =>
+        {
+            &["csharp"]
+        }
+        _ if lower.starts_with("requirements") && path_has_extension(&lower, "txt") => &["python"],
+        _ => &[],
+    }
+}
+
+fn path_has_extension(path: &str, extension: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(extension))
+}
+
+fn dependency_manifest_package_tokens(text: &str) -> AHashSet<String> {
+    let mut out = AHashSet::new();
+    let mut token = String::new();
+    for ch in text.chars() {
+        if dependency_package_token_char(ch) {
+            token.push(ch);
+            continue;
+        }
+        insert_dependency_package_token(&mut out, &token);
+        token.clear();
+    }
+    insert_dependency_package_token(&mut out, &token);
+    out
+}
+
+fn dependency_package_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '@' | ':' | '+')
+}
+
+fn insert_dependency_package_token(out: &mut AHashSet<String>, token: &str) {
+    let token = token.trim_matches(|ch: char| matches!(ch, '.' | '/' | ':' | '+' | '-' | '_'));
+    if token.len() < 2 || !token.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return;
+    }
+    out.insert(token.to_string());
+    let lower = token.to_ascii_lowercase();
+    out.insert(lower);
+}
+
 /// Collect every distinct signal key the rule advertises across the
 /// `frameworks` / `packages` / `modules` / `imports` fields. The
 /// dedup keeps the inventory's row keys stable when a rule mentions
@@ -125,13 +300,15 @@ fn rule_signal_keys(rule: &Rule) -> Vec<String> {
     keys
 }
 
-/// Gather signal labels and evidence file paths showing where each
-/// rule's package claim is grounded — manifest filenames, lockfile
-/// filenames, adapter-visible imports, or package names mentioned in
-/// dependency manifests. Returns `(signals, evidence)` deduped and
-/// sorted for stable rendering.
-fn rule_evidence(
+/// Gather signal labels and evidence file paths showing where one
+/// dependency key is grounded — manifest filenames, lockfile filenames,
+/// adapter-visible imports, or package names mentioned in dependency
+/// manifests. Keeping this key-scoped prevents one matching package signal
+/// from making every package/import listed on a broad multi-framework rule
+/// look present in the workspace.
+fn rule_key_evidence(
     rule: &Rule,
+    key: &str,
     manifest_files: &[String],
     imports_by_lang: &AHashMap<String, Vec<(String, String)>>,
 ) -> (Vec<String>, Vec<String>) {
@@ -169,36 +346,42 @@ fn rule_evidence(
         // counts as "this file imports package X" — including PHP
         // namespaces (`Cake\\Datasource`), Perl scope (`DBI::db`),
         // C/C++ header forms (`sqlite3.h`), and dotted prefixes.
-        for needle in rule.imports.iter().chain(rule.modules.iter()) {
-            for (file, imported) in lang_imports {
-                if import_matches_package(imported, needle) {
-                    signals.push(format!("imports:{needle}"));
-                    evidence.push(file.clone());
-                    break;
-                }
-            }
+        if rule.imports.iter().any(|needle| needle == key) {
+            push_import_signal_for_key(&mut signals, &mut evidence, lang_imports, "imports", key);
         }
-        for needle in &rule.packages {
-            for (file, imported) in lang_imports {
-                if import_matches_package(imported, needle) {
-                    signals.push(format!("packages:{needle}"));
-                    evidence.push(file.clone());
-                    break;
-                }
-            }
+        if rule.modules.iter().any(|needle| needle == key) {
+            push_import_signal_for_key(&mut signals, &mut evidence, lang_imports, "modules", key);
+        }
+        if rule.packages.iter().any(|needle| needle == key) {
+            push_import_signal_for_key(&mut signals, &mut evidence, lang_imports, "packages", key);
+        }
+        if rule.frameworks.iter().any(|needle| needle == key) {
+            push_import_signal_for_key(&mut signals, &mut evidence, lang_imports, "frameworks", key);
         }
     }
     // Manifest-content scan: catches first-party packages that ARE the
     // workspace (e.g. a Java project whose own `pom.xml` declares
     // `<artifactId>log4j-core</artifactId>`) without an import line
     // anywhere in the source tree.
-    for needle in &rule.packages {
+    if rule.packages.iter().any(|needle| needle == key) {
         for path in manifest_files {
             if !is_dependency_manifest_file(path) {
                 continue;
             }
-            if manifest_mentions_package(path, needle) {
-                signals.push(format!("packages:{needle}"));
+            if manifest_mentions_package(path, key) {
+                signals.push(format!("packages:{key}"));
+                evidence.push(path.clone());
+                break;
+            }
+        }
+    }
+    if rule.frameworks.iter().any(|needle| needle == key) {
+        for path in manifest_files {
+            if !is_dependency_manifest_file(path) {
+                continue;
+            }
+            if manifest_mentions_package(path, key) {
+                signals.push(format!("frameworks:{key}"));
                 evidence.push(path.clone());
                 break;
             }
@@ -209,6 +392,22 @@ fn rule_evidence(
     evidence.sort();
     evidence.dedup();
     (signals, evidence)
+}
+
+fn push_import_signal_for_key(
+    signals: &mut Vec<String>,
+    evidence: &mut Vec<String>,
+    lang_imports: &[(String, String)],
+    signal_prefix: &str,
+    key: &str,
+) {
+    for (file, imported) in lang_imports {
+        if import_matches_package(imported, key) {
+            signals.push(format!("{signal_prefix}:{key}"));
+            evidence.push(file.clone());
+            break;
+        }
+    }
 }
 
 /// True when `path` is a recognised package-manager manifest whose

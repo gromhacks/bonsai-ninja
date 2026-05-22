@@ -170,7 +170,7 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "java" => 0,
         "javascript" => 1,
         "kotlin" => 1,
-        "lua" => 3,
+        "lua" => 1,
         "objc" => 2,
         "perl" => 1,
         "php" => 0,
@@ -183,6 +183,12 @@ fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
     }
+}
+
+fn chain_contains_hop(chain: &[&str], hop: &str) -> bool {
+    chain
+        .iter()
+        .any(|step| *step == hop || step.strip_prefix(hop).is_some_and(|rest| rest.starts_with('@')))
 }
 
 fn mega_entry_symbol(lang: &str) -> &'static str {
@@ -1813,6 +1819,17 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
                 "objc: mega_flow must attribute at least one finding to the configured fgets output-argument source:\n{out}"
             );
         }
+        if *lang == "lua" {
+            assert!(
+                rows.iter().all(|row| {
+                    row.get("sink")
+                        .and_then(|v| v.get("rule_id"))
+                        .and_then(|v| v.as_str())
+                        == Some("lua.cmdi.os_execute")
+                }),
+                "lua: generic Executor.execute must not be classified as LuaSQL SQL injection:\n{out}"
+            );
+        }
         for row in rows {
             let finding_id = row.get("finding_id").and_then(|v| v.as_str()).unwrap_or("");
             assert!(
@@ -1867,7 +1884,7 @@ fn taint_analysis_run_across_every_mega_flow_lang() {
                     .flatten()
                     .filter_map(|v| v.as_str())
                     .collect::<Vec<_>>();
-                expected_hops.iter().all(|hop| chain.contains(hop))
+                expected_hops.iter().all(|hop| chain_contains_hop(&chain, hop))
             }),
             "{lang}: expected a canonical mega_flow chain containing {:?}:\n{out}",
             expected_hops
@@ -2195,6 +2212,7 @@ def handle():
         "benches/bench_cmd.py",
         "CMakeFiles/generated_cmd.py",
         "docs/example_cmd.py",
+        "support/release.py",
     ] {
         let path = ws.join(relative);
         if let Some(parent) = path.parent() {
@@ -2234,6 +2252,7 @@ def handle():
         "benches/",
         "CMakeFiles/",
         "docs/",
+        "support/",
     ] {
         assert!(
             !out.contains(excluded),
@@ -2243,11 +2262,86 @@ def handle():
 }
 
 #[test]
+fn production_profile_excludes_flows_through_test_lineage() {
+    let ws = temp_workspace("production-profile-test-lineage");
+    std::fs::write(
+        ws.join("app.py"),
+        r#"
+from flask import request
+from tests.helper import run
+
+def handle():
+    run(request.args.get("cmd"))
+"#,
+    )
+    .expect("write app");
+    std::fs::create_dir_all(ws.join("tests")).expect("create tests dir");
+    std::fs::write(ws.join("tests/__init__.py"), "").expect("write package marker");
+    std::fs::write(
+        ws.join("tests/helper.py"),
+        r#"
+from sink import exec_cmd
+
+def run(cmd):
+    exec_cmd(cmd)
+"#,
+    )
+    .expect("write test helper");
+    std::fs::write(
+        ws.join("sink.py"),
+        r#"
+import os
+
+def exec_cmd(cmd):
+    os.system(cmd)
+"#,
+    )
+    .expect("write sink");
+
+    let broad = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    assert!(
+        broad.contains("\"finding_id\"") && broad.contains("tests/helper.py"),
+        "broad scan should prove the test-lineage flow before production filtering:\n{broad}"
+    );
+
+    let production = run(&[
+        "security",
+        ws.to_str().unwrap(),
+        "--rules-dir",
+        &rules_dir(),
+        "taint-analysis",
+        "--profile",
+        "production",
+        "--format",
+        "json",
+        "--all",
+    ])
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&production).expect("production profile JSON");
+    assert_eq!(
+        parsed.as_array().map(Vec::len),
+        Some(0),
+        "production profile must drop flows whose proof path crosses tests:\n{production}"
+    );
+}
+
+#[test]
 fn rulepack_rules_surface_common_sink_shapes() {
     let ws = temp_workspace("rulepack-common-sink-shapes");
     std::fs::write(
         ws.join("interp_prepare.pl"),
         r#"
+use DBI;
 sub lookup_user {
     my ($dbh, $name) = @_;
     return $dbh->prepare("SELECT id FROM users WHERE name = '$name'");
@@ -2277,6 +2371,7 @@ void use_after_free(Cache *cache) {
     std::fs::write(
         ws.join("sql.lua"),
         r#"
+local _luasql = require("luasql")
 function lookup(conn, name)
     conn:execute("SELECT id FROM users WHERE name = '" .. name .. "'")
 end
@@ -2336,6 +2431,7 @@ object Comment {
     std::fs::write(
         ws.join("xss.erl"),
         r#"
+-include_lib("cowboy/include/cowboy.hrl").
 -module(xss).
 -export([handle/2]).
 handle(Req, State) ->
@@ -2390,6 +2486,7 @@ function merge(target: any, source: any) {
 "#,
     )
     .expect("write ERB fixture");
+    std::fs::write(ws.join("Gemfile"), "gem \"actionview\"\n").expect("write Ruby dependency fixture");
 
     let mut checked = 0usize;
     for rule in [
@@ -2509,6 +2606,7 @@ void run_cmd(const char *user) {
     std::fs::write(
         ws.join("lua_cases.lua"),
         r#"
+local _luasql = require("luasql")
 function handle()
   local args = ngx.req.get_uri_args()
   local q = args.q
@@ -2534,6 +2632,7 @@ void render(String comment, dynamic div) {
     std::fs::write(
         ws.join("elixir_xss.ex"),
         r#"
+alias Phoenix_html
 defmodule Page do
   def show(conn) do
     body = conn.params["body"]
@@ -2546,6 +2645,7 @@ end
     std::fs::write(
         ws.join("erlang_xss.erl"),
         r##"
+-include_lib("cowboy/include/cowboy.hrl").
 -module(erlang_xss).
 -export([handle/2]).
 handle(Req, State) ->

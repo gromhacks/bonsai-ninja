@@ -153,6 +153,9 @@ pub struct SourceAnalysisOptions {
     pub tag: Option<String>,
     pub files: Vec<String>,
     pub exclude_files: Vec<String>,
+    /// Drop direct source matches and rendered lineage paths that cross
+    /// conventional test files. Mirrors `TaintAnalysisOptions::exclude_tests`.
+    pub exclude_tests: bool,
     /// See `TaintAnalysisOptions::include_inferred_sources`.
     pub include_inferred_sources: bool,
     /// Lineage evidence bounds for rendered source-flow paths. Default
@@ -817,6 +820,11 @@ where
     if let Some(max_precision) = options.max_precision {
         findings.retain(|combined| finding_precision_within(&combined.finding.precision, max_precision));
     }
+    if !options.exclude_files.is_empty() || options.exclude_tests {
+        findings.retain(|combined| {
+            !finding_has_excluded_path(&combined.finding, &options.exclude_files, options.exclude_tests)
+        });
+    }
     if options.exclude_tests {
         // Test-path post-filter — catches cross-file flows where one
         // side wasn't pruned earlier (e.g. prod source → test sink).
@@ -929,6 +937,9 @@ where
         options.tag.as_deref(),
     );
     filter_by_path(&mut source_hits, &options.files, &options.exclude_files);
+    if options.exclude_tests {
+        source_hits.retain(|m| !crate::finding::path_is_test_file(&m.file));
+    }
     sort_matches(&mut source_hits);
 
     // Source-analysis is exact and source-seeded, but its source
@@ -1209,6 +1220,11 @@ where
     }
     on_progress(AnalysisProgress::PhaseFinished);
 
+    if !options.exclude_files.is_empty() || options.exclude_tests {
+        candidates.retain(|candidate| {
+            !source_candidate_has_excluded_path(ws, candidate, &options.exclude_files, options.exclude_tests)
+        });
+    }
     let candidates = combine_source_analysis_candidates(candidates);
     let lineage_summary = SourceLineageSummary::from_candidates(&candidates);
     finish_workspace_taint_graph_cache(ws);
@@ -3155,7 +3171,6 @@ struct CallEvidence {
 
 fn build_call_evidence(
     ws: &Workspace,
-    global: &bonsai_index::GlobalIndex,
     trace_index: &AHashMap<u64, &TaintedCallEdge>,
     canonical_chain_index: &CanonicalChainIndex,
     source_func: FuncId,
@@ -3184,14 +3199,7 @@ fn build_call_evidence(
         return None;
     }
     let taint_path = taint_path_for_lineage(ws, &records, Some(call));
-    let chain_names: Vec<String> = chain_funcs
-        .iter()
-        .filter_map(|&func| {
-            global
-                .decl_of(SymbolId::new(func.raw()))
-                .map(|decl| decl.name.clone())
-        })
-        .collect();
+    let chain_names = chain_names_for_path(ws, &chain_funcs)?;
     let group_id = group_id_for_taint_path(&chain_names, &taint_path);
     let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
     let sink_tainted_args: Vec<TaintedArgInfo> = call
@@ -3470,11 +3478,27 @@ fn chain_funcs_for_lineage(
     Some(deduped)
 }
 
-fn propagation_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> TaintPropagationStep {
+fn propagation_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> Option<TaintPropagationStep> {
+    if record.caller == record.callee {
+        return None;
+    }
     let (file, line, column) = resolve_span_location(ws, record.call_span);
+    let caller = func_display_name(ws, record.caller);
+    let callee = func_display_name(ws, record.callee);
+    let same_name = caller == callee;
+    let caller = if same_name {
+        func_display_name_with_site(ws, record.caller)
+    } else {
+        caller
+    };
+    let callee = if same_name {
+        func_display_name_with_site(ws, record.callee)
+    } else {
+        callee
+    };
     TaintPropagationStep {
-        caller: func_display_name(ws, record.caller),
-        callee: func_display_name(ws, record.callee),
+        caller,
+        callee,
         file,
         line,
         column,
@@ -3488,6 +3512,7 @@ fn propagation_step_for_edge(ws: &Workspace, record: &TaintedCallEdge) -> TaintP
             })
             .collect(),
     }
+    .into()
 }
 
 fn propagation_step_for_terminal_call(ws: &Workspace, call: &TaintedCall) -> TaintPropagationStep {
@@ -3508,8 +3533,13 @@ fn propagation_step_for_terminal_call(ws: &Workspace, call: &TaintedCall) -> Tai
             param_name: receiver.to_string(),
         });
     }
+    let caller = func_display_name(ws, call.caller);
     TaintPropagationStep {
-        caller: func_display_name(ws, call.caller),
+        caller: if caller == call.name {
+            func_display_name_with_site(ws, call.caller)
+        } else {
+            caller
+        },
         callee: call.name.clone(),
         file,
         line,
@@ -3525,7 +3555,7 @@ fn taint_path_for_lineage(
 ) -> Vec<TaintPropagationStep> {
     let mut path: Vec<TaintPropagationStep> = records
         .iter()
-        .map(|record| propagation_step_for_edge(ws, record))
+        .filter_map(|record| propagation_step_for_edge(ws, record))
         .collect();
     if let Some(call) = terminal_call {
         path.push(propagation_step_for_terminal_call(ws, call));
@@ -3539,6 +3569,36 @@ fn func_display_name(ws: &Workspace, func: FuncId) -> String {
         .decl_of(SymbolId::new(func.raw()))
         .map(|decl| decl.name.clone())
         .unwrap_or_else(|| format!("func#{}", func.raw()))
+}
+
+fn func_display_name_with_site(ws: &Workspace, func: FuncId) -> String {
+    let global = ws.db().global_index();
+    let Some(decl) = global.decl_of(SymbolId::new(func.raw())) else {
+        return format!("func#{}", func.raw());
+    };
+
+    let file_name = ws
+        .vfs()
+        .path(decl.span.file)
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let line = ws
+        .vfs()
+        .snapshot(decl.span.file)
+        .ok()
+        .map(|snapshot| {
+            let span_map =
+                bonsai_common::cached_span_map(decl.span.file, snapshot.version, snapshot.text.as_ref());
+            span_map.line_col(decl.name_span.start).line
+        })
+        .unwrap_or_default();
+
+    if file_name.is_empty() || line == 0 {
+        format!("{}#{}", decl.name, func.raw())
+    } else {
+        format!("{}@{}:{}", decl.name, file_name, line)
+    }
 }
 
 fn resolve_span_location(ws: &Workspace, span: Span) -> (String, u32, u32) {
@@ -3574,6 +3634,57 @@ fn filter_by_path(matches: &mut Vec<RuleMatch>, files: &[String], exclude: &[Str
                 .any(|filter| path_filter_matches(&rule_match.file, filter))
         });
     }
+}
+
+fn path_is_excluded(path: &str, exclude_files: &[String], exclude_tests: bool) -> bool {
+    (exclude_tests && crate::finding::path_is_test_file(path))
+        || exclude_files
+            .iter()
+            .any(|filter| path_filter_matches(path, filter))
+}
+
+fn taint_path_has_excluded_file(
+    taint_path: &[TaintPropagationStep],
+    exclude_files: &[String],
+    exclude_tests: bool,
+) -> bool {
+    taint_path
+        .iter()
+        .any(|step| path_is_excluded(&step.file, exclude_files, exclude_tests))
+}
+
+fn func_file_path(ws: &Workspace, func: FuncId) -> Option<String> {
+    let global = ws.db().global_index();
+    let decl = global.decl_of(SymbolId::new(func.raw()))?;
+    ws.vfs()
+        .path(decl.span.file)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn source_candidate_has_excluded_path(
+    ws: &Workspace,
+    candidate: &SourceAnalysisCandidate,
+    exclude_files: &[String],
+    exclude_tests: bool,
+) -> bool {
+    path_is_excluded(&candidate.source.file, exclude_files, exclude_tests)
+        || taint_path_has_excluded_file(&candidate.taint_path, exclude_files, exclude_tests)
+        || candidate.path.iter().any(|&func| {
+            func_file_path(ws, func)
+                .as_deref()
+                .is_some_and(|path| path_is_excluded(path, exclude_files, exclude_tests))
+        })
+}
+
+fn finding_has_excluded_path(finding: &Finding, exclude_files: &[String], exclude_tests: bool) -> bool {
+    path_is_excluded(&finding.source.file, exclude_files, exclude_tests)
+        || path_is_excluded(&finding.sink.file, exclude_files, exclude_tests)
+        || taint_path_has_excluded_file(&finding.taint_path, exclude_files, exclude_tests)
+        || finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| path_is_excluded(&sanitizer.file, exclude_files, exclude_tests))
 }
 
 /// True when `path` matches the CLI path filter `filter`.
@@ -3707,13 +3818,31 @@ fn merge_source_lineage_status(current: &mut SourceLineageStatus, incoming: Sour
 
 fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> {
     let global = ws.db().global_index();
-    path.iter()
+    let named_funcs: Option<Vec<(FuncId, String)>> = path
+        .iter()
         .map(|func| {
             global
                 .decl_of(SymbolId::new(func.raw()))
-                .map(|decl| decl.name.clone())
+                .map(|decl| (*func, decl.name.clone()))
         })
-        .collect()
+        .collect();
+    let named_funcs = named_funcs?;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, name) in &named_funcs {
+        *counts.entry(name.clone()).or_default() += 1;
+    }
+    Some(
+        named_funcs
+            .into_iter()
+            .map(|(func, name)| {
+                if counts.get(&name).copied().unwrap_or_default() > 1 {
+                    func_display_name_with_site(ws, func)
+                } else {
+                    name
+                }
+            })
+            .collect(),
+    )
 }
 
 /// True when two source-side `FindingMatch`es refer to the exact
@@ -4356,7 +4485,6 @@ where
                     let evidence = cached_evidence.get_or_insert_with(|| {
                         build_call_evidence(
                             ws,
-                            global.as_ref(),
                             &trace_index,
                             &canonical_chain_index,
                             src_func_id,
@@ -5433,8 +5561,12 @@ fn make_finding(
     // test path. The CLI / SDK consumer can use `--exclude-tests`
     // to drop these for "production review" reports without
     // rebuilding the analysis.
-    let from_test =
-        crate::finding::path_is_test_file(&src.file) || crate::finding::path_is_test_file(&snk.file);
+    let from_test = crate::finding::path_is_test_file(&src.file)
+        || crate::finding::path_is_test_file(&snk.file)
+        || context
+            .taint_path
+            .iter()
+            .any(|step| crate::finding::path_is_test_file(&step.file));
 
     // Trust-aware severity. Source rules carry a `trust` tag
     // (`remote`, `local`, `inferred`). Local-trust sources are

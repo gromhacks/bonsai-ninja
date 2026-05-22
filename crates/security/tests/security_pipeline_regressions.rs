@@ -75,7 +75,10 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         "java" => 0,
         "javascript" => 1,
         "kotlin" => 1,
-        "lua" => 3,
+        // Lua mega_flow has one real command-injection flow. The old count
+        // included LuaSQL-shaped SQLi false positives on generic executor
+        // calls without LuaSQL package evidence.
+        "lua" => 1,
         "objc" => 2,
         "perl" => 1,
         "php" => 0,

@@ -205,7 +205,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: true,
         min_sources_micro: 0,
         min_source_flows_micro: 0,
-        min_deps_micro: 5,
+        min_deps_micro: 4,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -243,7 +243,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 0,
         min_source_flows_micro: 0,
-        min_deps_micro: 0,
+        min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -262,7 +262,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 0,
         min_source_flows_micro: 0,
-        min_deps_micro: 0,
+        min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -281,7 +281,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 3,
         min_source_flows_micro: 7,
-        min_deps_micro: 19,
+        min_deps_micro: 5,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -300,7 +300,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: true,
         min_sources_micro: 3,
         min_source_flows_micro: 8,
-        min_deps_micro: 9,
+        min_deps_micro: 4,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -319,7 +319,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 5,
         min_source_flows_micro: 7,
-        min_deps_micro: 29,
+        min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -338,7 +338,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: true,
         min_sources_micro: 2,
         min_source_flows_micro: 7,
-        min_deps_micro: 5,
+        min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -395,7 +395,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 0,
         min_source_flows_micro: 0,
-        min_deps_micro: 0,
+        min_deps_micro: 1,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -436,7 +436,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 2,
         min_source_flows_micro: 3,
-        min_deps_micro: 22,
+        min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -458,7 +458,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: true,
         min_sources_micro: 6,
         min_source_flows_micro: 6,
-        min_deps_micro: 7,
+        min_deps_micro: 2,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -477,7 +477,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 0,
         min_source_flows_micro: 0,
-        min_deps_micro: 5,
+        min_deps_micro: 2,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -496,7 +496,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: true,
         min_sources_micro: 2,
         min_source_flows_micro: 4,
-        min_deps_micro: 7,
+        min_deps_micro: 4,
         min_sanitizers_micro: 0,
     },
     LangExp {
@@ -553,7 +553,7 @@ pub const LANGS: &[LangExp] = &[
         has_classes: false,
         min_sources_micro: 9,
         min_source_flows_micro: 14,
-        min_deps_micro: 25,
+        min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
 ];
@@ -985,7 +985,10 @@ fn expected_default_mega_flow_findings(lang: &str) -> usize {
         "java" => 0,
         "javascript" => 1,
         "kotlin" => 1,
-        "lua" => 3,
+        // The old count included LuaSQL-shaped SQLi false positives on
+        // generic executor calls without LuaSQL package evidence. The
+        // default mega-flow fixture now has one real command-injection flow.
+        "lua" => 1,
         "objc" => 2,
         "perl" => 1,
         "php" => 0,
@@ -1393,6 +1396,19 @@ fn check_security_deps(ws: &str, lang: &str, expected_min: usize) {
                 .is_some_and(|rules| !rules.is_empty()),
             "[{lang}] security deps row missing rule_ids: {row}"
         );
+        let key = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let signals = row
+            .get("signals")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            signals
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|signal| dependency_signal_value(signal).is_some_and(|value| value == key)),
+            "[{lang}] security deps row key `{key}` was not grounded by its own signal: {row}"
+        );
         assert!(
             row.get("evidence_files")
                 .and_then(|v| v.as_array())
@@ -1400,6 +1416,19 @@ fn check_security_deps(ws: &str, lang: &str, expected_min: usize) {
             "[{lang}] security deps row missing evidence_files: {row}"
         );
     }
+}
+
+fn dependency_signal_value(signal: &str) -> Option<&str> {
+    [
+        "frameworks:",
+        "packages:",
+        "imports:",
+        "modules:",
+        "manifests:",
+        "lockfiles:",
+    ]
+    .iter()
+    .find_map(|prefix| signal.strip_prefix(prefix))
 }
 
 /// Assert `security sanitizers` has the expected inventory count. Most

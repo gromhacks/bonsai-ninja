@@ -1687,7 +1687,7 @@ fn idg_pipeline_hash() -> u64 {
     // on-disk layout change. This rejects old `idg.v*.factstore`
     // files whose shape can still decode but whose edges/lineage are
     // no longer semantically equivalent.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 16;
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 17;
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;

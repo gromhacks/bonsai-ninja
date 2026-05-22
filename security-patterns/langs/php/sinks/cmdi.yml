@@ -28,7 +28,6 @@
   category: process-exec
   cwe:
   - CWE-78
-  - CWE-89
   match:
     kind: call
     callee:
@@ -40,28 +39,17 @@
   - name: php.cmdi.exec example
     code: |
       <?php
-      use doctrine\dbal;
       function example($input, $url, $id, $payload, $request) {
         exec($input);
       }
   - name: arg tainted literal negative
     code: |
       <?php
-      use doctrine\dbal;
       function example($input, $url, $id, $payload, $request) {
         exec("safe");
       }
     expect_no_match: true
-  description: 'exec() — runs shell command; attacker-controlled argv concatenation lets the attacker execute arbitrary commands as the web-server user. Merged collision aliases: php.sqli.pdo_exec, php.sqli.sqlite_exec, php.sqli.doctrine_dbal_exec.'
-  aliases:
-  - php.sqli.pdo_exec
-  - php.sqli.sqlite_exec
-  - php.sqli.doctrine_dbal_exec
-  packages:
-  - doctrine/dbal
-  imports:
-  - doctrine\dbal
-  - doctrine
+  description: 'exec() — PHP builtin shell command execution; attacker-controlled argv concatenation lets the attacker execute arbitrary commands as the web-server user.'
 - id: php.cmdi.shell_exec
   enabled: true
   language: php

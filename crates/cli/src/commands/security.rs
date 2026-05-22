@@ -254,7 +254,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             mut exclude_files,
             inferred_sources,
             include_pattern_only,
-            exclude_tests,
+            mut exclude_tests,
             show_sanitized,
             taint_budget,
             intra_worklist_cap,
@@ -271,6 +271,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 &mut trust,
                 &mut severity,
                 &mut exclude_files,
+                Some(&mut exclude_tests),
                 &mut context,
                 /* set_severity = */ true,
             )?;
@@ -317,11 +318,13 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
             format,
         } => {
             let mut ignored_severity: Option<String> = None;
+            let mut exclude_tests = false;
             apply_profile(
                 profile.as_deref(),
                 &mut trust,
                 &mut ignored_severity,
                 &mut exclude_files,
+                Some(&mut exclude_tests),
                 &mut context,
                 /* set_severity = */ false,
             )?;
@@ -336,6 +339,7 @@ pub(crate) fn cmd_security(workspace: &Path, action: SecurityAction) -> Result<(
                 category,
                 files,
                 exclude_files,
+                exclude_tests,
                 inferred_sources,
                 paging_cfg,
                 no_compact,
@@ -456,6 +460,9 @@ const PRODUCTION_EXCLUDES: &[&str] = &[
     "_spec.rb",
     "_test.rb",
     "phpunit",
+    // Common first-party helper/tooling layouts that are not deployed
+    // application code but are often present in source distributions.
+    "support/",
     // C# / .NET and Swift conventions.
     "Tests/",
     ".Tests",
@@ -504,6 +511,7 @@ fn apply_profile(
     trust: &mut Option<String>,
     severity: &mut Option<String>,
     exclude_files: &mut Vec<String>,
+    exclude_tests: Option<&mut bool>,
     context: &mut Option<String>,
     set_severity: bool,
 ) -> Result<()> {
@@ -520,6 +528,9 @@ fn apply_profile(
             }
             if exclude_files.is_empty() {
                 exclude_files.extend(PRODUCTION_EXCLUDES.iter().map(|s| (*s).to_string()));
+            }
+            if let Some(exclude_tests) = exclude_tests {
+                *exclude_tests = true;
             }
             if context.is_none() {
                 *context = Some("16k".to_string());
@@ -1144,6 +1155,7 @@ fn cmd_source_analysis(
     category: Option<String>,
     files: Vec<String>,
     exclude_files: Vec<String>,
+    exclude_tests: bool,
     inferred_sources: bool,
     paging_cfg: paging::PagingConfig,
     no_compact: bool,
@@ -1160,6 +1172,7 @@ fn cmd_source_analysis(
             tag: tag.clone(),
             files: files.clone(),
             exclude_files: exclude_files.clone(),
+            exclude_tests,
             include_inferred_sources: inferred_sources,
             lineage_limits: if paging_cfg.all {
                 bonsai_sdk::SourceLineageLimits::unbounded()

@@ -911,28 +911,62 @@ impl<'a> PreparedRule<'a> {
                 push_target(&mut candidates, target);
             }
         }
-        let constrained_receiver_name_sink = self.rule.kind == crate::rule::RuleKind::Sink
-            && !self.base_name_in.is_empty()
-            && self
-                .rule
-                .tag
-                .as_deref()
-                .is_some_and(|tag| matches!(tag, "sql-injection" | "graphql-injection"));
-        let file_level_package_evidence_allowed = self.rule.kind == crate::rule::RuleKind::Source
-            || (self.rule.kind == crate::rule::RuleKind::Sink
-                && self
-                    .rule
-                    .tag
-                    .as_deref()
-                    .is_some_and(|tag| matches!(tag, "memory-safety" | "race")))
-            || constrained_receiver_name_sink;
-        self.package_signals.iter().any(|signal| {
+        let file_level_package_evidence_allowed = self.file_level_package_evidence_allowed();
+        let allowed = self.package_signals.iter().any(|signal| {
             (file_level_package_evidence_allowed && file_packages.contains(*signal))
                 || candidates
                     .iter()
                     .any(|candidate| crate::pkg::import_matches_package(candidate, signal))
-        })
+        });
+        allowed
     }
+
+    fn file_level_package_evidence_allowed(&self) -> bool {
+        if self.rule.match_spec.kind == MatchKind::Param {
+            return true;
+        }
+        match self.rule.kind {
+            crate::rule::RuleKind::Source => true,
+            crate::rule::RuleKind::Sanitizer => false,
+            crate::rule::RuleKind::Sink => {
+                if is_lifecycle_audit_pair_sink(self.rule) {
+                    return true;
+                }
+                let target = match self.rule.match_spec.kind {
+                    MatchKind::Call | MatchKind::New | MatchKind::Missing => {
+                        self.rule.match_spec.callee.as_ref()
+                    }
+                    MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+                        self.rule.match_spec.target.as_ref()
+                    }
+                };
+                let receiver_agnostic_call_regex = self.rule.match_spec.kind == MatchKind::Call
+                    && target
+                        .and_then(|target| target.regex.as_deref())
+                        .is_some_and(regex_prefix_is_receiver_agnostic)
+                    && target.is_none_or(|target| target.base_name_in.is_empty());
+                !receiver_agnostic_call_regex
+            }
+        }
+    }
+}
+
+fn is_lifecycle_audit_pair_sink(rule: &Rule) -> bool {
+    if rule.kind != crate::rule::RuleKind::Sink {
+        return false;
+    }
+    matches!(
+        rule.tag.as_deref(),
+        Some("race" | "memory-safety" | "resource-leak")
+    ) || rule.category.as_deref() == Some("source-independent")
+}
+
+fn is_lifecycle_state_sink(rule: &Rule) -> bool {
+    rule.kind == crate::rule::RuleKind::Sink
+        && matches!(
+            rule.tag.as_deref(),
+            Some("race" | "memory-safety" | "resource-leak")
+        )
 }
 
 fn split_call_head_tail(callee: &str) -> Option<(&str, &str)> {
@@ -944,6 +978,31 @@ fn split_call_head_tail(callee: &str) -> Option<(&str, &str)> {
         .split_once("::")
         .or_else(|| trimmed.split_once('.'))
         .or_else(|| trimmed.split_once(':'))
+}
+
+fn annotation_name_matches(actual: &str, expected: &str) -> bool {
+    let actual = normalize_annotation_name(actual);
+    let expected = normalize_annotation_name(expected);
+    if actual.eq_ignore_ascii_case(expected) {
+        return true;
+    }
+    annotation_tail(actual).eq_ignore_ascii_case(annotation_tail(expected))
+}
+
+fn normalize_annotation_name(value: &str) -> &str {
+    let value = value.trim().trim_start_matches('@');
+    value
+        .split_once('(')
+        .map(|(head, _)| head)
+        .unwrap_or(value)
+        .trim()
+}
+
+fn annotation_tail(value: &str) -> &str {
+    value
+        .rsplit(['.', ':', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(value)
 }
 
 fn push_alias_target_package_candidate(out: &mut Vec<String>, target: &AliasTarget) {
@@ -1159,7 +1218,7 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                     // its surfaced annotations equals the rule's
                     // requested name (case-insensitive prefix-tolerant
                     // — `RequestParam` matches `@RequestParam`).
-                    param_anns.iter().any(|a| a.eq_ignore_ascii_case(want))
+                    param_anns.iter().any(|a| annotation_name_matches(a, want))
                 } else {
                     callee_matches(param, prepared.name, prepared.attribute, prepared.regex.as_ref())
                 };
@@ -1747,7 +1806,7 @@ fn file_alias_map(ws: &Workspace, file: FileId) -> std::collections::HashMap<Str
 // byte-identical file in two workspaces returns the same package
 // set (which is correct — the package set is purely a function of
 // the file's import declarations).
-type FilePackageSetMap = AHashMap<(FileId, u64, u64), Arc<AHashSet<String>>>;
+type FilePackageSetMap = AHashMap<(FileId, u64, u64, u64), Arc<AHashSet<String>>>;
 static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<parking_lot::RwLock<FilePackageSetMap>> =
     std::sync::LazyLock::new(|| parking_lot::RwLock::new(AHashMap::new()));
 
@@ -1757,33 +1816,51 @@ static FILE_PACKAGE_SET_CACHE: std::sync::LazyLock<parking_lot::RwLock<FilePacka
 /// progressive `/`, `.`, `:`, `\`-separated prefixes) so the
 /// match-time gate can do `set.contains(rule_signal)` in O(1).
 fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
+    let workspace_packages = if workspace_manifest_package_context_allowed(ws, file) {
+        ws.db().workspace_root().map(|root| {
+            let language = ws
+                .db()
+                .adapter_for(file)
+                .map(|adapter| adapter.language_id().as_str())
+                .unwrap_or("");
+            crate::deps::workspace_dependency_packages_for_language(&root, language)
+        })
+    } else {
+        None
+    };
+    let workspace_package_fingerprint = workspace_packages
+        .as_ref()
+        .map(|packages| packages.fingerprint)
+        .unwrap_or(0);
     let (version, text_hash) = ws.db().vfs().snapshot(file).map_or((0, 0), |snapshot| {
         (
             snapshot.version,
             package_cache_content_hash(snapshot.text.as_bytes()),
         )
     });
-    let key = (file, version, text_hash);
+    let key = (file, version, text_hash, workspace_package_fingerprint);
     // Drop the read guard at the `;` before any potential write
     // upgrade — parking_lot RwLocks are non-reentrant.
     let cached = FILE_PACKAGE_SET_CACHE.read().get(&key).cloned();
     if let Some(hit) = cached {
         return hit;
     }
-    let Some(imports) = ws.db().import_index(file) else {
-        return Arc::new(AHashSet::new());
-    };
     let mut out: AHashSet<String> = AHashSet::new();
-    for spec in &imports.imports {
-        insert_import_target_prefixes(&mut out, &spec.module);
-        if let Some(stripped) = spec
-            .module
-            .strip_suffix(".h")
-            .or_else(|| spec.module.strip_suffix(".hpp"))
-            .or_else(|| spec.module.strip_suffix(".hxx"))
-        {
-            insert_import_target_prefixes(&mut out, stripped);
+    if let Some(imports) = ws.db().import_index(file) {
+        for spec in &imports.imports {
+            insert_import_target_prefixes(&mut out, &spec.module);
+            if let Some(stripped) = spec
+                .module
+                .strip_suffix(".h")
+                .or_else(|| spec.module.strip_suffix(".hpp"))
+                .or_else(|| spec.module.strip_suffix(".hxx"))
+            {
+                insert_import_target_prefixes(&mut out, stripped);
+            }
         }
+    }
+    if let Some(workspace_packages) = workspace_packages {
+        out.extend(workspace_packages.packages.iter().cloned());
     }
     let out = Arc::new(out);
     let mut write = FILE_PACKAGE_SET_CACHE.write();
@@ -1791,6 +1868,25 @@ fn file_package_set(ws: &Workspace, file: FileId) -> Arc<AHashSet<String>> {
         write.clear();
     }
     write.entry(key).or_insert_with(|| out.clone()).clone()
+}
+
+fn workspace_manifest_package_context_allowed(ws: &Workspace, file: FileId) -> bool {
+    let Some(adapter) = ws.db().adapter_for(file) else {
+        return false;
+    };
+    if adapter.language_id().as_str() != "ruby" {
+        return false;
+    }
+    let Ok(path) = ws.vfs().path(file) else {
+        return false;
+    };
+    let path = path.to_string_lossy();
+    matches!(
+        std::path::Path::new(path.as_ref())
+            .extension()
+            .and_then(|ext| ext.to_str()),
+        Some("erb" | "rhtml" | "haml" | "slim")
+    )
 }
 
 fn package_cache_content_hash(bytes: &[u8]) -> u64 {
@@ -1952,6 +2048,16 @@ pub(crate) fn rule_regex_requires_package_signal(rule: &Rule) -> bool {
 fn rule_requires_call_package_signal(rule: &Rule) -> bool {
     if rule.packages.is_empty() && rule.imports.is_empty() && rule.modules.is_empty() {
         return false;
+    }
+    if is_lifecycle_state_sink(rule) {
+        return false;
+    }
+    if matches!(
+        rule.kind,
+        crate::rule::RuleKind::Source | crate::rule::RuleKind::Sink
+    ) || rule.match_spec.kind == MatchKind::Param
+    {
+        return true;
     }
     let target = match rule.match_spec.kind {
         MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
@@ -2648,6 +2754,8 @@ fn scan_ref_writes_batch(
     let global = ws.db().global_index();
     let decls = global.decls_in(file);
     let source_text = ws.db().vfs().snapshot(file).ok().map(|snapshot| snapshot.text);
+    let file_packages = file_package_set(ws, file);
+    let alias_map = file_alias_map(ws, file);
     for r in &idx.refs {
         if r.kind != RefKind::Write {
             continue;
@@ -2675,6 +2783,9 @@ fn scan_ref_writes_batch(
                 continue;
             }
             if !prepared.base_name_allows(&r.name) {
+                continue;
+            }
+            if !prepared.call_context_allows(&r.name, &[], &alias_map, file_packages.as_ref()) {
                 continue;
             }
             if !constraints_pass(ConstraintEval {
