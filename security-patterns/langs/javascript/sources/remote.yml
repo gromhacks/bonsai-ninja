@@ -935,6 +935,48 @@
     expect_match_text: [window.location.host]
   description: "Browser location origin/path/host fields — attacker-controlled via navigation and useful DOM-XSS/open-redirect sources."
 
+- id: javascript.source.localstorage_getitem
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: browser-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [localStorage, getItem]
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: local storage get item
+    code: |
+      function demo() {
+        return localStorage.getItem("next");
+      }
+    expect_match_text: [localStorage.getItem]
+  description: "localStorage.getItem(key) — browser-persistent client storage that can carry attacker-controlled state into DOM sinks."
+
+- id: javascript.source.sessionstorage_getitem
+  enabled: true
+  language: javascript
+  trust: remote
+  tag: browser-input
+  payload_types: [text]
+  match:
+    kind: call
+    callee:
+      attribute: [sessionStorage, getItem]
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: session storage get item
+    code: |
+      function demo() {
+        return sessionStorage.getItem("html");
+      }
+    expect_match_text: [sessionStorage.getItem]
+  description: "sessionStorage.getItem(key) — browser session storage that can carry attacker-controlled state into DOM sinks."
+
 - id: javascript.cloud.gcf_http_req
   enabled: false
   disabled_reason:

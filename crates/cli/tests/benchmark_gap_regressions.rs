@@ -205,6 +205,34 @@ fn assert_no_finding(rows: &[Value]) {
     assert!(rows.is_empty(), "expected no findings:\n{text}");
 }
 
+fn assert_any_finding_has_status(rows: &[Value], status: &str) {
+    let text = serde_json::to_string_pretty(rows).expect("serialize rows");
+    assert!(
+        rows.iter()
+            .any(|row| row.get("status").and_then(Value::as_str) == Some(status)),
+        "expected at least one finding with status `{status}`:\n{text}"
+    );
+}
+
+fn assert_no_adjacent_duplicate_taint_path_steps(rows: &[Value]) {
+    for row in rows {
+        let Some(path) = row.get("taint_path").and_then(Value::as_array) else {
+            continue;
+        };
+        for pair in path.windows(2) {
+            let left = &pair[0];
+            let right = &pair[1];
+            let same_file = left.get("file") == right.get("file");
+            let same_line = left.get("line") == right.get("line");
+            assert!(
+                !(same_file && same_line),
+                "adjacent duplicate taint path steps should be normalized:\n{}",
+                serde_json::to_string_pretty(row).expect("serialize row")
+            );
+        }
+    }
+}
+
 fn assert_has_row(rows: &[Value], fragments: &[&str]) {
     assert_has_finding(rows, fragments);
 }
@@ -670,6 +698,7 @@ module.exports = { handle };
             "el.innerHTML",
         ],
     );
+    assert_no_adjacent_duplicate_taint_path_steps(&rows);
 }
 
 #[test]
@@ -1063,6 +1092,50 @@ fn javascript_document_url_reaches_innerhtml_without_document_title_overtaint() 
 }
 
 #[test]
+fn javascript_browser_storage_getitem_reaches_innerhtml() {
+    let ws = temp_workspace("js-browser-storage-domxss");
+    write_file(
+        &ws,
+        "dom.js",
+        r#"function renderStoredHtml(el) {
+  const html = localStorage.getItem("profileHtml");
+  el.innerHTML = html;
+}
+
+function renderSessionHtml(el) {
+  const html = sessionStorage.getItem("profileHtml");
+  el.innerHTML = html;
+}
+"#,
+    );
+    let rows = run_taint_json(
+        &ws,
+        "^javascript\\.source\\.(localstorage|sessionstorage)_getitem$",
+        "^javascript\\.xss\\.innerhtml$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "javascript.source.localstorage_getitem",
+            "javascript.xss.innerhtml",
+            "dom.js",
+            "renderStoredHtml",
+            "localStorage.getItem",
+        ],
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "javascript.source.sessionstorage_getitem",
+            "javascript.xss.innerhtml",
+            "dom.js",
+            "renderSessionHtml",
+            "sessionStorage.getItem",
+        ],
+    );
+}
+
+#[test]
 fn javascript_html_return_requires_tainted_return_expression() {
     let ws = temp_workspace("js-html-return-tainted");
     write_file(
@@ -1155,6 +1228,50 @@ fn typescript_location_hash_reaches_innerhtml_without_sibling_overtaint() {
         "^typescript\\.xss\\.innerhtml$",
     );
     assert_no_finding(&rows);
+}
+
+#[test]
+fn typescript_browser_storage_getitem_reaches_innerhtml() {
+    let ws = temp_workspace("ts-browser-storage-domxss");
+    write_file(
+        &ws,
+        "dom.ts",
+        r#"function renderStoredHtml(el: any): void {
+  const html = localStorage.getItem("profileHtml");
+  el.innerHTML = html;
+}
+
+function renderSessionHtml(el: any): void {
+  const html = sessionStorage.getItem("profileHtml");
+  el.innerHTML = html;
+}
+"#,
+    );
+    let rows = run_taint_json(
+        &ws,
+        "^typescript\\.source\\.(localstorage|sessionstorage)_getitem$",
+        "^typescript\\.xss\\.innerhtml$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "typescript.source.localstorage_getitem",
+            "typescript.xss.innerhtml",
+            "dom.ts",
+            "renderStoredHtml",
+            "localStorage.getItem",
+        ],
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "typescript.source.sessionstorage_getitem",
+            "typescript.xss.innerhtml",
+            "dom.ts",
+            "renderSessionHtml",
+            "sessionStorage.getItem",
+        ],
+    );
 }
 
 #[test]
@@ -1271,6 +1388,48 @@ class AuditVerticle {
             "handle",
         ],
     );
+}
+
+#[test]
+fn java_esapi_html_encoder_marks_xss_flow_sanitized() {
+    let ws = temp_workspace("java-esapi-html-sanitized");
+    write_file(
+        &ws,
+        "FeedController.java",
+        r#"import org.owasp.esapi.ESAPI;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+class FeedController {
+  @GetMapping("/feed")
+  ResponseEntity<String> feed(@RequestParam String name) {
+    String safe = ESAPI.encoder().encodeForHTML(name);
+    return ResponseEntity.ok("<p>" + safe + "</p>");
+  }
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^java\\.source\\.spring_request_param$",
+        "^java\\.xss\\.spring_responseentity_ok_html_concat$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "java.source.spring_request_param",
+            "java.xss.spring_responseentity_ok_html_concat",
+            "java.sanitizer.esapi_encode_for_html",
+            "FeedController.java",
+            "encodeForHTML",
+            "ResponseEntity.ok",
+        ],
+    );
+    assert_any_finding_has_status(&rows, "sanitized");
 }
 
 #[test]

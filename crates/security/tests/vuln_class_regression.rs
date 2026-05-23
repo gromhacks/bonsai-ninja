@@ -564,6 +564,47 @@ def handler(payload):
     assert_tag_not_reported(&outcome, "weak-crypto", "weak-crypto hashlib.sha256");
 }
 
+#[test]
+fn weak_crypto_java_strong_algorithm_assignment_clean() {
+    let src = r#"
+import java.security.MessageDigest;
+import javax.crypto.Cipher;
+class App {
+  void handle() throws Exception {
+    String cipher = "AES/GCM/NoPadding";
+    String digest = "SHA-256";
+    Cipher.getInstance(cipher);
+    MessageDigest.getInstance(digest);
+  }
+}
+"#;
+    let outcome = analyse_pattern_only(&ws_for_language("App.java", src));
+    assert_tag_absent(
+        &outcome,
+        "weak-crypto",
+        "weak-crypto Java strong algorithm assignment",
+    );
+}
+
+#[test]
+fn weak_crypto_java_weak_algorithm_assignment_reports() {
+    let src = r#"
+import java.security.MessageDigest;
+class App {
+  void handle() throws Exception {
+    String digest = "SHA-1";
+    MessageDigest.getInstance(digest);
+  }
+}
+"#;
+    let outcome = analyse_pattern_only(&ws_for_language("App.java", src));
+    assert_tag_reported(
+        &outcome,
+        "weak-crypto",
+        "weak-crypto Java weak algorithm assignment",
+    );
+}
+
 // ===========================================================================
 // 14. Weak crypto strength (RSA-1024 vs RSA-2048) — exercises arg_lt /
 //     keyword_arg_equals constraints.

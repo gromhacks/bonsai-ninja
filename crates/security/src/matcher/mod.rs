@@ -4188,7 +4188,7 @@ fn constraints_pass_uncached(ctx: &ConstraintEval<'_, '_>) -> bool {
                 let Some(Some(re)) = ctx.constraint_regexes.get(constraint_index) else {
                     return false;
                 };
-                let candidates = arg_regex_texts(arg, ctx.assignment_texts, 4, false);
+                let candidates = arg_regex_texts(arg, ctx.assignment_texts, 4, true);
                 if candidates.iter().any(|value| re.is_match(value.trim())) {
                     return false;
                 }
