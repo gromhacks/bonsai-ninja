@@ -1,8 +1,10 @@
 //! `bonsai-ninja dump-taint` data layer.
 //!
-//! Wraps `bonsai_taint::interprocedural_taint_to_completion_with_caches` with the same
-//! filtering / sorting / id-stamping the CLI applies, returning a
-//! [`TaintReport`] consumers can render or further process.
+//! Computes an IDG-backed, source-seeded taint closure, applies any
+//! rulepack-declared semantic transfers supplied by the caller, then
+//! performs the same filtering / sorting / id-stamping the CLI uses.
+//! The result is a [`TaintReport`] consumers can render or further
+//! process.
 
 use crate::common::format_span;
 use bonsai_hash::fnv1a_names_low32;
@@ -34,6 +36,15 @@ pub struct TaintFilters<'a> {
     pub intra_worklist_cap: Option<u32>,
     /// `--taint T:id` — drill into one propagation by stable id.
     pub taint_id: Option<&'a str>,
+    /// Rulepack-declared method/receiver state transfers to apply
+    /// before rendering propagation records.
+    pub receiver_state_propagations: Vec<bonsai_taint::ReceiverStatePropagation>,
+    /// Rulepack-declared call-result passthroughs to apply before
+    /// rendering propagation records.
+    pub call_result_passthroughs: Vec<bonsai_taint::CallResultPassthrough>,
+    /// Rulepack-declared output-argument flows to apply before
+    /// rendering propagation records.
+    pub output_arg_flows: Vec<bonsai_taint::OutputArgFlow>,
 }
 
 impl<'a> Default for TaintFilters<'a> {
@@ -46,6 +57,9 @@ impl<'a> Default for TaintFilters<'a> {
             budget: None,
             intra_worklist_cap: None,
             taint_id: None,
+            receiver_state_propagations: Vec::new(),
+            call_result_passthroughs: Vec::new(),
+            output_arg_flows: Vec::new(),
         }
     }
 }
@@ -294,7 +308,16 @@ pub fn dump_taint(ws: &Workspace, f: &TaintFilters<'_>) -> TaintOutcome {
         .unwrap_or_else(|| ws.build_and_seed_idg_service());
     let global = db.global_index();
     let seed_names: Vec<String> = effective_seed.iter().cloned().collect();
-    let seed_nodes = idg_seed_nodes_for_names(idg.as_ref(), source_func, &seed_names, global.as_ref());
+    let mut seed_nodes = idg_seed_nodes_for_names(idg.as_ref(), source_func, &seed_names, global.as_ref());
+    bonsai_taint::apply_configured_transfer_fixpoint(
+        &mut seed_nodes,
+        &f.receiver_state_propagations,
+        &f.call_result_passthroughs,
+        &f.output_arg_flows,
+        global.as_ref(),
+        idg.as_ref(),
+        Some(SEMANTIC_FLOW_MAX_PRECISION),
+    );
 
     let closure_nodes =
         idg.forward_closure_with_max_precision(&seed_nodes, Some(SEMANTIC_FLOW_MAX_PRECISION));

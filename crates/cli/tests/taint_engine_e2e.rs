@@ -11,11 +11,12 @@
 //!  1. **mega_flow full-chain equivalence** — for the Python
 //!     `mega_flow` fixture, where the README specifies the exact
 //!     hop sequence from `handle_request` to `os.system`, the
-//!     engine must produce a `security taint-analysis` finding, an `inspect
-//!     --query execute` FLOW block, AND an `export.taint_graph`
-//!     whose edges connect every consecutive hop pair. If any
-//!     construct silently drops the taint, at least one of the
-//!     three commands will break here.
+//!     engine must produce a `security taint-analysis` finding, an
+//!     `inspect --query execute` FLOW block, a `dump-taint` record
+//!     set with the same rulepack transfer semantics, AND an
+//!     `export.taint_graph` whose edges connect every consecutive
+//!     hop pair. If any construct silently drops the taint, at least
+//!     one command will break here.
 //!
 //!  2. **Every construct threads through** — per-construct tests
 //!     that pin each of the 30+ flow-oriented Python constructs
@@ -189,15 +190,92 @@ fn mega_flow_security_flows_produces_finding_with_full_chain_cover() {
     }
 }
 
+/// `dump-taint` is the diagnostic surface users run when a security
+/// finding looks wrong. It must apply the same rulepack-declared
+/// transfer semantics as `security taint-analysis`; otherwise
+/// transforms like `list(map(... cmd.split()))` look clean even
+/// though findings are correct.
+#[test]
+fn mega_flow_dump_taint_uses_rulepack_transfer_semantics() {
+    let Some(_) = bin_path() else { return };
+    let w = ws("python", "mega_flow");
+    let Some((out, _, code)) = run(&["dump-taint", &w, "--source", "handle_request", "--format", "json"])
+    else {
+        return;
+    };
+    assert_eq!(code, 0, "mega_flow dump-taint ec={code}");
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let records = parsed
+        .get("records")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(!records.is_empty(), "mega_flow dump-taint produced no records");
+
+    let mut edge_args: std::collections::HashMap<
+        (String, String),
+        std::collections::HashSet<(String, String)>,
+    > = std::collections::HashMap::new();
+    for rec in &records {
+        let caller = rec
+            .get("caller_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let callee = rec
+            .get("callee_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        for arg in rec
+            .get("tainted_args")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let value = arg
+                .get("value_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let param = arg
+                .get("param_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            edge_args
+                .entry((caller.clone(), callee.clone()))
+                .or_default()
+                .insert((value, param));
+        }
+    }
+
+    for (caller, callee, value, param) in [
+        ("stream_batch", "batch_expand", Some("parts"), "parts"),
+        ("stream_batch", "normalize", Some("expanded"), "item"),
+        ("orchestrate", "validate_payload", Some("chunk"), "payload"),
+        ("persist", "perform", None, "cmd"),
+        ("perform", "execute", Some("cmd"), "cmd"),
+    ] {
+        let seen = edge_args
+            .get(&(caller.to_string(), callee.to_string()))
+            .is_some_and(|args| {
+                args.iter()
+                    .any(|(v, p)| value.is_none_or(|expected| v == expected) && p == param)
+            });
+        assert!(
+            seen,
+            "dump-taint missing transfer edge {caller}->{callee} value={value:?} param={param}; edge args: {edge_args:?}"
+        );
+    }
+}
+
 /// `inspect --query execute` on mega_flow must emit a FLOW block
 /// with at least one chain hop — backward enumeration from the sink.
 ///
-/// The callable-object dispatch (`runner(cmd)` landing in
-/// `CommandRunner.__call__`) isn't model-resolvable today, so the
-/// chain from `execute` stops after one hop (`__call__ → execute`).
-/// That's a known resolver limitation, not a chain-enumeration bug.
-/// We assert the surface produces *some* chain rather than the full
-/// 10-hop prefix.
+/// This assertion stays deliberately about inspect's backward
+/// enumeration. `dump-taint` above is the stricter source-seeded
+/// per-argument check for the same fixture.
 #[test]
 fn mega_flow_inspect_execute_produces_backward_chain() {
     let Some(_) = bin_path() else { return };

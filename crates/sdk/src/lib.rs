@@ -164,10 +164,11 @@ impl Bonsai {
     }
 
     /// Load and attach a security rulepack. The rulepack classifies
-    /// sources, sinks, and sanitizer evidence for security reports; it does
-    /// not change semantic propagation facts; exact analyses and explicit
-    /// prewarm sidecars use one propagation profile regardless of the
-    /// attached rulepack.
+    /// sources, sinks, and sanitizer evidence for security reports, and
+    /// contributes declarative transfer semantics such as passthrough
+    /// decoders, output-argument sources, and receiver-state flows. The
+    /// engine still owns the transfer mechanism; API names and argument
+    /// shapes stay in the rulepack.
     pub fn with_rulepack(mut self, root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let pack = bonsai_security::load_rulepack(&root)
@@ -183,10 +184,10 @@ impl Bonsai {
     /// [`WorkspaceOpenOptions::full_prewarm`] for explicit cache
     /// rebuild/audit prewarm.
     ///
-    /// Rulepacks are report classifiers, not propagation inputs: sources,
-    /// sinks, and sanitizers are applied by `bonsai_security` after graph
-    /// construction. Explicit prewarm sidecars therefore have one semantic
-    /// propagation profile regardless of the attached rulepack.
+    /// Rulepacks classify sources/sinks/sanitizers and can contribute
+    /// declarative transfer semantics. Explicit prewarm sidecars are still
+    /// deterministic for a given rulepack/configuration; query-time exact
+    /// analysis refreshes the necessary configured transfer profile.
     pub fn index(&self, root: impl AsRef<Path>) -> Result<Project> {
         let root = root.as_ref();
         let options = self.apply_workspace_options(WorkspaceOpenOptions::parse_only());
@@ -512,9 +513,9 @@ impl Project {
         let _ = self.refresh_from_disk();
     }
 
-    /// Rebuild the live dataflow cache using the semantic propagation
-    /// profile. Rulepack sanitizers are report evidence and do not mutate
-    /// this graph.
+    /// Rebuild the live structural dataflow cache. Rulepack transfer
+    /// semantics are applied by exact security/dump query paths; sanitizer
+    /// credit remains report evidence and does not mutate this cache.
     pub fn reindex_dataflow(&self) {
         self.workspace.reindex_dataflow();
     }
@@ -1366,8 +1367,15 @@ impl Dump<'_> {
     }
 
     #[must_use]
-    pub fn taint(&self, filters: TaintFilters<'_>) -> TaintOutcome {
+    pub fn taint(&self, mut filters: TaintFilters<'_>) -> TaintOutcome {
         self.project.refresh_from_disk_best_effort();
+        if let Some(pack) = self.project.rulepack.as_deref() {
+            bonsai_security::seed_idg_service_for_rulepack(&self.project.workspace, pack);
+            let transfers = bonsai_security::taint_transfers_from_rulepack(pack);
+            filters.receiver_state_propagations = transfers.receiver_state_propagations;
+            filters.call_result_passthroughs = transfers.call_result_passthroughs;
+            filters.output_arg_flows = transfers.output_arg_flows;
+        }
         bonsai_browse::dump_taint(&self.project.workspace, &filters)
     }
 }

@@ -1265,55 +1265,15 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
         }
     }
 
-    // Receiver-state-propagation post-pass. The engine applied
-    // `taint_semantics.taint_receiver_from_args` rules during its
-    // worklist; the IDG mirrors this via a closure-augmenting
-    // post-pass driven by the rulepack-extracted propagation list.
-    // For each tainted CallArg whose call matches a configured
-    // (method, receiver_type) propagation, we walk every CallArg /
-    // CallRet / CallArg-receiver-bridge node anchored at downstream
-    // call sites that consume the receiver name (positional arg,
-    // explicit receiver, or implicit-receiver bridge) and seed
-    // those into the closure. The next-iteration closure then
-    // includes them, which surfaces them as tainted-call args for
-    // any further propagation rules to chain off. Iterate to a
-    // fixpoint — the (caller, span, receiver_name) seen-set bounds
-    // it to a small constant number of rounds.
-    if !receiver_state_propagations.is_empty() {
-        apply_receiver_state_fixpoint(
-            &mut seed_nodes,
-            receiver_state_propagations,
-            global.as_ref(),
-            idg,
-            max_precision,
-        );
-    }
-    if !call_result_passthroughs.is_empty() || !output_arg_flows.is_empty() {
-        loop {
-            let mut grew = false;
-            if !call_result_passthroughs.is_empty() {
-                grew |= apply_call_result_passthrough_fixpoint(
-                    &mut seed_nodes,
-                    call_result_passthroughs,
-                    global.as_ref(),
-                    idg,
-                    max_precision,
-                );
-            }
-            if !output_arg_flows.is_empty() {
-                grew |= apply_output_arg_flow_fixpoint(
-                    &mut seed_nodes,
-                    output_arg_flows,
-                    global.as_ref(),
-                    idg,
-                    max_precision,
-                );
-            }
-            if !grew {
-                break;
-            }
-        }
-    }
+    apply_configured_transfer_fixpoint(
+        &mut seed_nodes,
+        receiver_state_propagations,
+        call_result_passthroughs,
+        output_arg_flows,
+        global.as_ref(),
+        idg,
+        max_precision,
+    );
     let closure_nodes = idg.forward_closure_with_max_precision(&seed_nodes, max_precision);
     let closure_set: ahash::AHashSet<bonsai_idg::WsNodeId> = closure_nodes.iter().copied().collect();
 
@@ -1641,6 +1601,52 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
         }
     }
     graph
+}
+
+/// Expand an IDG seed set with rulepack-declared semantic transfer
+/// shapes before computing the final closure. This is shared by
+/// security findings and user-facing dump commands so both surfaces
+/// explain taint through the same configured receiver-state,
+/// call-result, and output-argument transfers.
+pub fn apply_configured_transfer_fixpoint(
+    seed_nodes: &mut Vec<bonsai_idg::WsNodeId>,
+    receiver_state_propagations: &[crate::inter::ReceiverStatePropagation],
+    call_result_passthroughs: &[crate::inter::CallResultPassthrough],
+    output_arg_flows: &[crate::inter::OutputArgFlow],
+    global: &bonsai_index::GlobalIndex,
+    idg: &bonsai_idg::IdgQueryService,
+    max_precision: Option<Precision>,
+) {
+    if !receiver_state_propagations.is_empty() {
+        apply_receiver_state_fixpoint(
+            seed_nodes,
+            receiver_state_propagations,
+            global,
+            idg,
+            max_precision,
+        );
+    }
+    if call_result_passthroughs.is_empty() && output_arg_flows.is_empty() {
+        return;
+    }
+    loop {
+        let mut grew = false;
+        if !call_result_passthroughs.is_empty() {
+            grew |= apply_call_result_passthrough_fixpoint(
+                seed_nodes,
+                call_result_passthroughs,
+                global,
+                idg,
+                max_precision,
+            );
+        }
+        if !output_arg_flows.is_empty() {
+            grew |= apply_output_arg_flow_fixpoint(seed_nodes, output_arg_flows, global, idg, max_precision);
+        }
+        if !grew {
+            break;
+        }
+    }
 }
 
 /// Walk a function's flow events and collect every `Return`

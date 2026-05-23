@@ -21,7 +21,8 @@ workspace test sweep — drift would block CI.
 The matrix also refuses to mark a cell `Applicable` unless the
 scenario fixture file contains a concrete `fn <scenario>_<lang>()`
 test. Cells without executable fixture coverage must stay explicit as
-`n/a` or `deferred`; they are not counted as passing behaviour.
+`n/a`; the adapter-deferred status is kept as a historical guardrail
+and must remain zero in a clean tree.
 
 Two sister documents look pessimistic by comparison and that is
 intentional — they measure different things:
@@ -46,7 +47,7 @@ lives in this matrix.
 - `pass` — applicable cell, per-language test exists and passes
 - `fail` — applicable cell, per-language test exists but fails (would block CI; never present in a clean tree)
 - `n/a` — language has no equivalent construct
-- `deferred` — language has the construct, adapter doesn't model it yet
+- `deferred` — legacy guardrail status; current sanity tests require zero deferred cells
 
 ## Intra-procedural
 

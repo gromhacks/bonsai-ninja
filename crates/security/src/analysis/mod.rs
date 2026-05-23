@@ -5883,7 +5883,22 @@ fn idg_transfer_options_from_rulepack_shapes(
     }
 }
 
-fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) {
+#[derive(Clone, Debug, Default)]
+pub struct RulepackTaintTransfers {
+    pub receiver_state_propagations: Vec<ReceiverStatePropagation>,
+    pub call_result_passthroughs: Vec<CallResultPassthrough>,
+    pub output_arg_flows: Vec<OutputArgFlow>,
+}
+
+pub fn taint_transfers_from_rulepack(pack: &Rulepack) -> RulepackTaintTransfers {
+    RulepackTaintTransfers {
+        receiver_state_propagations: receiver_state_propagations_from_rulepack(pack),
+        call_result_passthroughs: call_result_passthroughs_from_rulepack(pack),
+        output_arg_flows: output_arg_flows_from_rulepack(pack),
+    }
+}
+
+pub fn seed_idg_service_for_rulepack(ws: &Workspace, pack: &Rulepack) {
     let languages = workspace_languages(ws);
     let overwrites = clean_output_overwrites_from_rulepack_for_languages(pack, &languages);
     let source_outputs = source_output_args_from_rulepack_for_languages(pack, &languages);
