@@ -388,10 +388,12 @@ def entry(user_input):
         "test setup must start from a fully warmed graph"
     );
 
-    // Sanitizers are report classifiers, not propagation inputs:
-    // building a ChainCache with `new` is byte-identical to the
-    // previous `new_with_sanitizers` shim (which just dropped the
-    // TokenSet). The assertions below pin that contract.
+    // Explicit sanitizer-name filters are report evidence, not
+    // ChainCache inputs: building a ChainCache with `new` is
+    // byte-identical to the previous `new_with_sanitizers` shim
+    // (which just dropped the TokenSet). Rulepack-declared
+    // passthrough transfers are applied by the exact security/dump
+    // query paths, not this cache constructor.
     let cache = ChainCache::new(&ws);
     let _ = cache.taint_facts_for_entry(func_id(&ws, "entry"));
 

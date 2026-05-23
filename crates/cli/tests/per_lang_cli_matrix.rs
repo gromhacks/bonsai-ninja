@@ -2402,6 +2402,67 @@ fn mega_flow_dump_taint_threads_every_cross_function_hop() {
             "taint record missing callee_name: {rec}"
         );
     }
+    let mut edge_args: std::collections::HashMap<
+        (String, String),
+        std::collections::HashSet<(String, String)>,
+    > = std::collections::HashMap::new();
+    for rec in &records {
+        let caller = rec
+            .get("caller_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let callee = rec
+            .get("callee_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let args = rec
+            .get("tainted_args")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for arg in args {
+            let value = arg
+                .get("value_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let param = arg
+                .get("param_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            edge_args
+                .entry((caller.clone(), callee.clone()))
+                .or_default()
+                .insert((value, param));
+        }
+    }
+    let has_edge_arg = |caller: &str, callee: &str, value: Option<&str>, param: &str| {
+        edge_args
+            .get(&(caller.to_string(), callee.to_string()))
+            .is_some_and(|args| {
+                args.iter()
+                    .any(|(v, p)| value.is_none_or(|expected| v == expected) && p == param)
+            })
+    };
+    for (caller, callee, value, param) in [
+        ("handle_request", "run_pipeline", Some("envelope"), "envelope"),
+        ("run_pipeline", "orchestrate", Some("envelope"), "envelope"),
+        ("orchestrate", "stream_batch", Some("envelope"), "envelope"),
+        ("stream_batch", "batch_expand", Some("parts"), "parts"),
+        ("stream_batch", "normalize", Some("expanded"), "item"),
+        ("orchestrate", "validate_payload", Some("chunk"), "payload"),
+        ("orchestrate", "persist", Some("repo"), "receiver"),
+        ("persist", "perform", None, "cmd"),
+        ("perform", "execute", Some("cmd"), "cmd"),
+    ] {
+        assert!(
+            has_edge_arg(caller, callee, value, param),
+            "mega_flow dump-taint missing tainted arg {caller}->{callee} value={value:?} param={param}; edge args: {edge_args:?}"
+        );
+    }
     let has_execute = records.iter().any(|rec| {
         rec.get("callee_name").and_then(|v| v.as_str()) == Some("execute")
             && rec
@@ -2606,12 +2667,10 @@ fn mega_flow_propagations_span_every_hop() {
             }
         }
     }
-    // Interproc taint propagation across mega_flow is known to lose
-    // some hops at constructs like async generators and dict
-    // comprehensions (see `mega_flow_full_source_to_sink_chain_exists`
-    // for the same loosening). Assert that AT LEAST ONE of the
-    // expected chain-tail hops shows up — verifies the pass fires
-    // at all, without requiring 100% coverage.
+    // Export propagations are grouped by source-seeded records and do
+    // not need to duplicate dump-taint's per-argument edge assertions.
+    // Still require representative source, validation, and sink-tail
+    // hops so this pass cannot silently collapse to an empty graph.
     let expected: &[(&str, &str)] = &[
         ("orchestrate", "validate_payload"),
         ("persist", "perform"),

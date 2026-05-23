@@ -55,7 +55,8 @@ fn render() -> String {
     out.push_str("The matrix also refuses to mark a cell `Applicable` unless the\n");
     out.push_str("scenario fixture file contains a concrete `fn <scenario>_<lang>()`\n");
     out.push_str("test. Cells without executable fixture coverage must stay explicit as\n");
-    out.push_str("`n/a` or `deferred`; they are not counted as passing behaviour.\n\n");
+    out.push_str("`n/a`; the adapter-deferred status is kept as a historical guardrail\n");
+    out.push_str("and must remain zero in a clean tree.\n\n");
     out.push_str("Two sister documents look pessimistic by comparison and that is\n");
     out.push_str("intentional — they measure different things:\n\n");
     out.push_str("- [`COVERAGE_BASELINE.md`](COVERAGE_BASELINE.md) reports per-construct\n");
@@ -76,7 +77,9 @@ fn render() -> String {
     out.push_str("- `pass` — applicable cell, per-language test exists and passes\n");
     out.push_str("- `fail` — applicable cell, per-language test exists but fails (would block CI; never present in a clean tree)\n");
     out.push_str("- `n/a` — language has no equivalent construct\n");
-    out.push_str("- `deferred` — language has the construct, adapter doesn't model it yet\n\n");
+    out.push_str(
+        "- `deferred` — legacy guardrail status; current sanity tests require zero deferred cells\n\n",
+    );
 
     for category in [
         Category::Intra,

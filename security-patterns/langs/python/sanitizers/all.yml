@@ -1358,6 +1358,23 @@
           return list(items)
     expect_match_text: [list]
   description: "list(iterable) — materializes iterable elements; preserves taint from the iterable value."
+- id: python.passthrough.builtin_map
+  enabled: true
+  language: python
+  tag: passthrough-transform
+  match:
+    kind: call
+    callee:
+      name: map
+  taint_semantics:
+    call_result_passthrough_args: [1]
+  match_examples:
+  - name: map preserves tainted iterable
+    code: |
+      def example(items):
+          return map(lambda item: item, items)
+    expect_match_text: [map]
+  description: "map(func, iterable) — transformed elements derive from iterable elements; preserves taint from the iterable argument."
 - id: python.passthrough.functools_reduce_iterable
   enabled: true
   language: python

@@ -18,7 +18,7 @@ use anyhow::Result;
 use super::browse::effective_limit;
 use super::{
     apply_text_limit, emit_json_paged_cached, nearest_names, open_project_index_only as open_project,
-    short_file,
+    open_project_index_only_with_rulepack, short_file,
 };
 
 pub(crate) fn cmd_dump_callgraph(
@@ -656,7 +656,7 @@ pub(crate) fn cmd_dump_taint(
     taint_id_filter: Option<&str>,
     format: BrowseFormat,
 ) -> Result<()> {
-    let (project, _footer) = open_project(root)?;
+    let (project, _footer) = open_project_index_only_with_rulepack(root, None)?;
     let filters = bonsai_sdk::TaintFilters {
         source: source_name,
         seeds: seeds.to_vec(),
@@ -665,6 +665,7 @@ pub(crate) fn cmd_dump_taint(
         budget,
         intra_worklist_cap,
         taint_id: taint_id_filter,
+        ..Default::default()
     };
     // The taint pipeline (cross-function propagation + sink reachability)
     // can run for a while on large workspaces; spin so the user knows

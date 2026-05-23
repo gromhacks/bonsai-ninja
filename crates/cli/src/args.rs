@@ -731,7 +731,9 @@ pub(crate) enum Cmd {
                       Every propagation carries a stable `taint_id` (`T:` + 8 \
                       hex) derived from (caller, callee, call site, tainted \
                       params). Stable across runs; drill into a single record \
-                      with `--taint T:id`. Sanitizer names are accepted for \
+                      with `--taint T:id`. Discovered rulepacks contribute \
+                      passthrough, receiver-state, and output-argument transfer \
+                      semantics; explicit sanitizer names are accepted for \
                       compatibility but do not change propagation.\n\
                       \n\
                       Every taint edge threads through semantic, alias-aware \
