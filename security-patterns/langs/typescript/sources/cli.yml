@@ -175,16 +175,3 @@
         return program.opts(input);
       }
   description: "commander program.opts() — parsed CLI flags."
-
-- id: typescript.source.localstorage_getitem
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: typescript
-  trust: local
-  tag: browser-input
-  match:
-    kind: call
-    callee:
-      attribute: [localStorage, getItem]
-  description: "Disabled — localStorage is local; flag only when crossing a trust boundary."

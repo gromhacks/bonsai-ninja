@@ -176,16 +176,3 @@
         return program.opts(input);
       }
   description: "commander program.opts() — parsed CLI flags."
-
-- id: javascript.source.localstorage_getitem
-  enabled: false
-  disabled_reason:
-    code: requires-constraint
-  language: javascript
-  trust: local
-  tag: browser-input
-  match:
-    kind: call
-    callee:
-      attribute: [localStorage, getItem]
-  description: "Disabled — localStorage is same-origin persistent storage; flag only when values cross a trust boundary."

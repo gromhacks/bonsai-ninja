@@ -3560,7 +3560,48 @@ fn taint_path_for_lineage(
     if let Some(call) = terminal_call {
         path.push(propagation_step_for_terminal_call(ws, call));
     }
-    path
+    normalize_taint_path(path)
+}
+
+fn normalize_taint_path(path: Vec<TaintPropagationStep>) -> Vec<TaintPropagationStep> {
+    let mut normalized: Vec<TaintPropagationStep> = Vec::with_capacity(path.len());
+    for step in path {
+        let Some(previous) = normalized.last_mut() else {
+            normalized.push(step);
+            continue;
+        };
+        if !same_taint_report_site(previous, &step) {
+            normalized.push(step);
+            continue;
+        }
+        merge_taint_report_step(previous, step);
+    }
+    normalized
+}
+
+fn same_taint_report_site(left: &TaintPropagationStep, right: &TaintPropagationStep) -> bool {
+    left.file == right.file && left.line == right.line && (left.line != 0 || left.column == right.column)
+}
+
+fn merge_taint_report_step(previous: &mut TaintPropagationStep, next: TaintPropagationStep) {
+    if previous.caller.is_empty() {
+        previous.caller = next.caller;
+    }
+    if !next.callee.is_empty() {
+        previous.callee = next.callee;
+    }
+    if previous.column == 0 {
+        previous.column = next.column;
+    }
+    for arg in next.tainted_args {
+        if !previous.tainted_args.iter().any(|existing| {
+            existing.index == arg.index
+                && existing.value_text == arg.value_text
+                && existing.param_name == arg.param_name
+        }) {
+            previous.tainted_args.push(arg);
+        }
+    }
 }
 
 fn func_display_name(ws: &Workspace, func: FuncId) -> String {
@@ -6113,6 +6154,10 @@ mod source_lineage_tests;
 #[cfg(test)]
 #[path = "finding_completeness_tests.rs"]
 mod finding_completeness_tests;
+
+#[cfg(test)]
+#[path = "taint_path_tests.rs"]
+mod taint_path_tests;
 
 /// Path of `rule`'s source file relative to its
 /// `langs/<lang>/<kind>s/` bucket — `crypto.yml`, `subdir/foo.yml`,

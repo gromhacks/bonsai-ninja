@@ -107,7 +107,9 @@
   match:
     kind: call
     callee:
-      attribute: [Encoder, encodeForSQL]
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForSQL$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -118,6 +120,15 @@
         }
       }
     expect_match_text: [Encoder.encodeForSQL]
+  - name: esapi fluent encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForSQL(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForSQL]
   description: "OWASP ESAPI Encoder.encodeForSQL — codec-based SQL escaping (prefer PreparedStatement)."
 
 # URL / SSRF ---------------------------------------------------------
@@ -188,7 +199,9 @@
   match:
     kind: call
     callee:
-      attribute: [Encoder, encodeForURL]
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForURL$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -199,6 +212,15 @@
         }
       }
     expect_match_text: [Encoder.encodeForURL]
+  - name: esapi fluent encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForURL(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForURL]
   description: "OWASP ESAPI Encoder.encodeForURL."
 
 # XSS / HTML ---------------------------------------------------------
@@ -385,7 +407,9 @@
   match:
     kind: call
     callee:
-      attribute: [Encoder, encodeForHTML]
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForHTML$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -396,6 +420,15 @@
         }
       }
     expect_match_text: [Encoder.encodeForHTML]
+  - name: esapi fluent encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForHTML(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForHTML]
   description: "OWASP ESAPI Encoder.encodeForHTML."
 
 - id: java.sanitizer.esapi_encode_for_js
@@ -406,7 +439,9 @@
   match:
     kind: call
     callee:
-      attribute: [Encoder, encodeForJavaScript]
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForJavaScript$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -417,6 +452,15 @@
         }
       }
     expect_match_text: [Encoder.encodeForJavaScript]
+  - name: esapi fluent encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForJavaScript(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForJavaScript]
   description: "OWASP ESAPI Encoder.encodeForJavaScript."
 
 - id: java.sanitizer.esapi_encode_for_ldap
@@ -427,7 +471,9 @@
   match:
     kind: call
     callee:
-      attribute: [Encoder, encodeForLDAP]
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForLDAP$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -438,6 +484,15 @@
         }
       }
     expect_match_text: [Encoder.encodeForLDAP]
+  - name: esapi fluent encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForLDAP(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForLDAP]
   description: "OWASP ESAPI Encoder.encodeForLDAP — escapes LDAP filter metacharacters."
 
 - id: java.sanitizer.esapi_encode_for_xml
@@ -448,7 +503,9 @@
   match:
     kind: call
     callee:
-      attribute: [Encoder, encodeForXML]
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForXML$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -459,6 +516,15 @@
         }
       }
     expect_match_text: [Encoder.encodeForXML]
+  - name: esapi fluent encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForXML(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForXML]
   description: "OWASP ESAPI Encoder.encodeForXML — XML text encoder."
 
 # Auth / crypto ------------------------------------------------------
