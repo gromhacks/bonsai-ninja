@@ -4508,6 +4508,9 @@ where
                     let Some(sink_rule) = pack.find_rule_by_id(&snk.rule_id) else {
                         continue;
                     };
+                    if prototype_pollution_sink_is_guarded(ws, sink_rule, snk) {
+                        continue;
+                    }
                     if !sink_rule.constraints.is_empty() {
                         let current_call_view = std::slice::from_ref(call);
                         let current_call_taint_view = InterTaintView::new(current_call_view);
@@ -4953,6 +4956,123 @@ fn tainted_call_matches_sink(call: &TaintedCall, sink: &RuleMatch) -> bool {
     // happen to share a method name. See
     // `docs/contributing/design-patterns.mdx::Semantic Resolution Always`.
     spans_overlap(call.call_span, sink.span)
+}
+
+/// Prototype-pollution merge/write rules are intentionally broad once
+/// tainted keys reach dynamic property writes. A nearby denylist guard
+/// for the exact index variable is a semantic barrier: the dangerous
+/// prototype carrier keys cannot reach this write.
+fn prototype_pollution_sink_is_guarded(ws: &Workspace, sink_rule: &Rule, sink: &RuleMatch) -> bool {
+    if sink_rule.tag.as_deref() != Some("prototype-pollution")
+        || !matches!(sink.language.as_str(), "javascript" | "typescript")
+    {
+        return false;
+    }
+
+    let Ok(snapshot) = ws.vfs().snapshot(sink.span.file) else {
+        return false;
+    };
+    let source = snapshot.text.as_ref();
+    let sink_start = sink.span.start as usize;
+    let sink_end = sink.span.end as usize;
+    if sink_start > source.len() {
+        return false;
+    }
+    let sink_text = source
+        .get(sink_start..sink_end.min(source.len()))
+        .unwrap_or(sink.match_text.as_str());
+    let mut key_vars = prototype_key_index_variables(sink_text);
+    if key_vars.is_empty() && sink.match_text.contains(".key") {
+        key_vars.push("key".to_string());
+    }
+    if key_vars.is_empty() {
+        return false;
+    }
+
+    let scope_start = ws
+        .enclosing_index()
+        .enclosing_for(ws.db(), sink.span.file, sink.span.start)
+        .map(|entry| entry.start as usize)
+        .unwrap_or_else(|| sink_start.saturating_sub(1200));
+    let guard_start = scope_start.max(sink_start.saturating_sub(1200));
+    let Some(prefix) = source.get(guard_start..sink_start) else {
+        return false;
+    };
+    let compact = compact_guard_text(prefix);
+    if compact.contains("Object.freeze(Object.prototype)") {
+        return true;
+    }
+
+    key_vars
+        .iter()
+        .any(|key| prototype_key_denylist_guard_present(&compact, key))
+}
+
+fn prototype_key_index_variables(text: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find(']') else {
+            break;
+        };
+        let candidate = rest[..close].trim();
+        if is_js_identifier(candidate) && !vars.iter().any(|existing| existing == candidate) {
+            vars.push(candidate.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    vars
+}
+
+fn is_js_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first == '$' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn compact_guard_text(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn prototype_key_denylist_guard_present(compact: &str, key: &str) -> bool {
+    let has_abrupt_exit =
+        compact.contains("continue;") || compact.contains("return;") || compact.contains("throw");
+    if !has_abrupt_exit {
+        return false;
+    }
+
+    const DANGEROUS_KEYS: &[&str] = &["__proto__", "constructor", "prototype"];
+    let compares_all = DANGEROUS_KEYS
+        .iter()
+        .all(|dangerous| prototype_key_compare_present(compact, key, dangerous));
+    if compares_all {
+        return true;
+    }
+
+    let mentions_all_keys = DANGEROUS_KEYS.iter().all(|dangerous| compact.contains(dangerous));
+    mentions_all_keys
+        && (compact.contains(&format!(".includes({key})")) || compact.contains(&format!(".has({key})")))
+}
+
+fn prototype_key_compare_present(compact: &str, key: &str, dangerous: &str) -> bool {
+    [
+        format!(r#"{key}==="{dangerous}""#),
+        format!(r#"{key}=="{dangerous}""#),
+        format!(r#""{dangerous}"==={key}"#),
+        format!(r#""{dangerous}"=={key}"#),
+        format!("{key}==='{dangerous}'"),
+        format!("{key}=='{dangerous}'"),
+        format!("'{dangerous}'==={key}"),
+        format!("'{dangerous}'=={key}"),
+    ]
+    .iter()
+    .any(|needle| compact.contains(needle))
 }
 
 /// Build the `(language, file, fn_name)` lookup key for a matcher

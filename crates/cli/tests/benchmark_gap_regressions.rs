@@ -702,6 +702,76 @@ module.exports = { handle };
 }
 
 #[test]
+fn javascript_proto_pollution_unguarded_recursive_merge_still_reports() {
+    let ws = temp_workspace("js-proto-unguarded-merge");
+    write_file(&ws, "package.json", r#"{"dependencies":{"express":"latest"}}"#);
+    write_file(
+        &ws,
+        "app.js",
+        r#"const express = require("express");
+
+function merge(target, source) {
+  for (const key in source) {
+    target[key] = source[key];
+  }
+  return target;
+}
+
+function handler(req) {
+  return merge({}, req.body);
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^javascript\\.source\\.express_req_body$",
+        "^javascript\\.proto_pollution\\.recursive_merge$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "javascript.source.express_req_body",
+            "javascript.proto_pollution.recursive_merge",
+            "target.key",
+        ],
+    );
+}
+
+#[test]
+fn javascript_proto_pollution_denylist_guard_blocks_recursive_merge_write() {
+    let ws = temp_workspace("js-proto-guarded-merge");
+    write_file(&ws, "package.json", r#"{"dependencies":{"express":"latest"}}"#);
+    write_file(
+        &ws,
+        "app.js",
+        r#"const express = require("express");
+
+function merge(target, source) {
+  for (const key in source) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      continue;
+    }
+    target[key] = source[key];
+  }
+  return target;
+}
+
+function handler(req) {
+  return merge({}, req.body);
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^javascript\\.source\\.express_req_body$",
+        "^javascript\\.proto_pollution\\.recursive_merge$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
 fn javascript_graphql_args_arbitrary_field_reaches_cross_file_sql_sink() {
     let ws = temp_workspace("js-graphql-q");
     write_file(
