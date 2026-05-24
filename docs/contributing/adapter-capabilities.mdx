@@ -73,7 +73,7 @@ no equivalent construct.
 | lang_erlang | ✓ | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
 | lang_go | ✓ | ✓ | ✓ | ✓ | — | — | n/a | n/a |
 | lang_java | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
-| lang_javascript | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | — |
+| lang_javascript | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | ✓ |
 | lang_kotlin | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ |
 | lang_lua | ✓ | n/a | n/a | n/a | — | n/a | n/a | n/a |
 | lang_objc | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
@@ -85,7 +85,7 @@ no equivalent construct.
 | lang_scala | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
 | lang_solidity | ✓ | ✓ | ✓ | ✓ | ✓ | — | n/a | n/a |
 | lang_swift | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | partial |
-| lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| lang_typescript | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## What the cells mean for users
 
@@ -122,10 +122,10 @@ Visible from the matrix above:
   adapter-visible annotation facts today; Ruby is partial. Java
   `@RequestBody`, C# `[FromBody]`, Dart metadata, and Solidity modifiers
   remain candidates for route/source inference without per-language YAML.
-- **`super_dispatch` is partial in many adapters that have
-  inheritance.** Java/Kotlin/PHP/Ruby/Rust have full support today;
-  C++/ObjC/Scala/Swift are partial, and JavaScript/TypeScript still need
-  a fully semantic `super` receiver model.
+- **`super_dispatch` is partial in several adapters that have
+  inheritance.** JavaScript/TypeScript, Java/Kotlin/PHP/Python/Ruby/Rust,
+  C#/Dart, and the tested `super`/`parent`/`base` receiver shapes have full
+  support today; C++/ObjC/Scala/Swift remain partial.
 - **JavaScript / TypeScript receiver types are now populated for common
   class shapes, but dynamic prototype mutation remains a precision gap.**
 
