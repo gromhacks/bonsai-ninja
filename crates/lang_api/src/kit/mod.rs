@@ -538,7 +538,9 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "conditional_statement",
         // Ruby uses bare `if`, `unless`, `case`.
         "if",
+        "if_modifier",
         "unless",
+        "unless_modifier",
         "case",
         "case_match",
         // Switch / match / when all branch on a discriminant.
@@ -1292,7 +1294,9 @@ fn walk_into(
         //   param 0 flows to the return, y inherits x's taint.
         let (source_call, source_call_args) = rhs
             .and_then(|n| extract_direct_call_info(&n, src))
+            .or_else(|| rhs.and_then(|n| extract_dart_selector_call_info(n, file, src)))
             .or_else(|| first_call_descendant(node).and_then(|call| extract_direct_call_info(&call, src)))
+            .or_else(|| extract_dart_selector_call_info(node, file, src))
             .unwrap_or((None, Vec::new()));
         // G2: when the RHS is a compound expression (template literal,
         // string concat, binary op, f-string, interpolation, member /
@@ -1496,6 +1500,14 @@ fn walk_into(
         return;
     }
 
+    if kind == "call"
+        && (emit_elixir_control_flow_call(&node, file, src, handler, class_names, out)
+            || emit_erlang_functional_loop_call(&node, file, src, handler, class_names, out)
+            || emit_ruby_block_loop_call(&node, file, src, handler, class_names, out))
+    {
+        return;
+    }
+
     if handler.is_call(kind) {
         let call_event = build_call_event(node, file, src, handler, class_names);
         if let Some(event) = call_event.clone() {
@@ -1524,7 +1536,7 @@ fn walk_into(
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 match child.kind() {
-                    "arguments" | "argument_list" | "value_arguments" | "call_suffix" => {
+                    "arguments" | "argument_list" | "value_arguments" | "call_suffix" | "expr_args" => {
                         v.push(child);
                     }
                     _ => {}
@@ -1557,6 +1569,9 @@ fn walk_into(
         // and inline their bodies too.
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
+            if child.kind() == "do_block" && elixir_call_name(&node, src).is_some() {
+                continue;
+            }
             if is_closure_arg(child.kind(), handler) {
                 if !walked_closures.insert(child.id()) {
                     continue;
@@ -2081,9 +2096,36 @@ fn body_has_implicit_return(body: &Node<'_>, handler: &GrammarHandler) -> bool {
             | "compound_statement"
             | "function_body"
             | "body_statement"
+            | "clause_body"
+            | "statements"
             | "declaration_list"
             | "program"
     )
+}
+
+fn implicit_return_expression_node<'tree>(
+    body: &Node<'tree>,
+    handler: &GrammarHandler,
+) -> Option<Node<'tree>> {
+    if body_has_implicit_return(body, handler) {
+        return Some(*body);
+    }
+    if !matches!(body.kind(), "function_body" | "statements") {
+        return None;
+    }
+    let mut cursor = body.walk();
+    let mut children = body.named_children(&mut cursor);
+    let first = children.next()?;
+    if children.next().is_some() {
+        return None;
+    }
+    if matches!(first.kind(), "function_body" | "statements") {
+        return implicit_return_expression_node(&first, handler);
+    }
+    if !body_has_implicit_return(&first, handler) {
+        return None;
+    }
+    implicit_return_expression_node(&first, handler).or(Some(first))
 }
 
 fn last_named_child<'a>(node: &Node<'a>) -> Option<Node<'a>> {
@@ -3102,6 +3144,42 @@ fn first_call_descendant<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
     None
 }
 
+fn extract_dart_selector_call_info(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<(Option<String>, Vec<String>)> {
+    let selector = if node.kind() == "selector" {
+        Some(node)
+    } else {
+        first_dart_selector_call_descendant(node)
+    }?;
+    let FlowEvent::Call { name, args, .. } = build_dart_selector_call_event(selector, file, src)? else {
+        return None;
+    };
+    let positional_args = args
+        .into_iter()
+        .filter(|arg| arg.name.is_none())
+        .map(|arg| arg.value_text)
+        .filter(|arg| !arg.trim().is_empty())
+        .collect();
+    Some((Some(name), positional_args))
+}
+
+fn first_dart_selector_call_descendant<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    let children: Vec<Node<'tree>> = node.named_children(&mut cursor).collect();
+    for child in children {
+        if child.kind() == "selector" && first_named_child_of_kind(&child, "argument_part").is_some() {
+            return Some(child);
+        }
+        if let Some(found) = first_dart_selector_call_descendant(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn next_named_sibling_within<'tree>(parent: &Node<'tree>, after: Node<'tree>) -> Option<Node<'tree>> {
     let mut cursor = parent.walk();
     let mut seen = false;
@@ -3121,17 +3199,20 @@ fn next_named_sibling_within<'tree>(parent: &Node<'tree>, after: Node<'tree>) ->
 }
 
 fn synthetic_function_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
-    if node.kind() != "fallback_receive_definition" {
-        return None;
+    if node.kind() == "constructor_definition" {
+        return Some("constructor".to_string());
     }
-    let text = node_text(node, src).trim_start();
-    if text.starts_with("receive") {
-        Some("receive".to_string())
-    } else if text.starts_with("fallback") {
-        Some("fallback".to_string())
-    } else {
-        Some("fallback_receive".to_string())
+    if node.kind() == "fallback_receive_definition" {
+        let text = node_text(node, src).trim_start();
+        if text.starts_with("receive") {
+            return Some("receive".to_string());
+        }
+        if text.starts_with("fallback") {
+            return Some("fallback".to_string());
+        }
+        return Some("fallback_receive".to_string());
     }
+    None
 }
 
 fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
@@ -3141,6 +3222,7 @@ fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> V
     out.extend(extract_kotlin_when_subject_binding_assigns(file, node, src));
     out.extend(extract_case_match_binding_assigns(file, node, src));
     out.extend(extract_case_pattern_binding_assigns(file, node, src));
+    out.extend(extract_elixir_case_stab_clause_bindings(file, node, src));
 
     // Two grammars to cover: Python `match SUBJECT: case PAT:` (text
     // path) and Rust / Scala / Kotlin / Swift / Dart `match SUBJECT
@@ -3197,6 +3279,66 @@ fn extract_match_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> V
         value_kind: None,
     }));
     out
+}
+
+fn extract_elixir_case_stab_clause_bindings(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
+    if node.kind() != "call" {
+        return Vec::new();
+    }
+    let target_is_case = node
+        .child_by_field_name("target")
+        .is_some_and(|target| node_text(&target, src).trim() == "case");
+    if !target_is_case {
+        return Vec::new();
+    }
+    let Some(subject) = node
+        .child_by_field_name("arguments")
+        .or_else(|| first_named_child_of_kind(node, "arguments"))
+        .and_then(|arguments| first_named_child(&arguments).or(Some(arguments)))
+    else {
+        return Vec::new();
+    };
+    let subject_text = node_text(&subject, src).trim();
+    if subject_text.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    let mut stack = vec![*node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "stab_clause" {
+            if let Some(pattern) = current.child_by_field_name("left") {
+                let pattern_text = node_text(&pattern, src);
+                for target in binding_targets_from_pattern_node(&pattern, src) {
+                    if !elixir_pattern_target_is_binding(pattern_text, &target) {
+                        continue;
+                    }
+                    if let Some(assign) = pattern_binding_assign(file, &pattern, &target, subject_text) {
+                        out.push(assign);
+                    }
+                }
+            }
+        }
+        for child in current.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    dedup_assign_events(out)
+}
+
+fn elixir_pattern_target_is_binding(pattern: &str, target: &str) -> bool {
+    let target = target.trim_start_matches(&['$', '@', '%'][..]);
+    if target.is_empty() || target == "_" || target.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+        return false;
+    }
+    pattern.match_indices(target).any(|(start, _)| {
+        let end = start + target.len();
+        let before = pattern[..start].chars().next_back();
+        let after = pattern[end..].chars().next();
+        let boundary_before = before.is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()));
+        let boundary_after = after.is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()));
+        boundary_before && boundary_after && before != Some(':')
+    })
 }
 
 fn extract_instanceof_pattern_binding_assigns(file: FileId, node: &Node<'_>, src: &[u8]) -> Vec<FlowEvent> {
@@ -4295,11 +4437,12 @@ pub fn decl_index_with_handler(
                 let p_sib = parent.next_named_sibling()?;
                 matches!(p_sib.kind(), "function_body" | "block" | "body_statement").then_some(p_sib)
             });
-        let body_implicit_returns = body_node.is_some_and(|b| body_has_implicit_return(&b, handler));
+        let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
+        let body_implicit_returns = implicit_return_node.is_some();
         let mut flow_events = if let Some(b) = body_node {
             let mut events = walk_flow_events(b, file, src, handler, &class_names);
-            if body_implicit_returns {
-                append_expression_body_return(&mut events, &b, file, src);
+            if let Some(return_node) = implicit_return_node {
+                append_expression_body_return(&mut events, &return_node, file, src);
             } else if handler.tail_expression_returns {
                 append_tail_expression_return(&mut events, &b, file, src, handler);
             }
@@ -4433,11 +4576,12 @@ pub fn decl_index_with_handler(
             .or_else(|| first_named_child_of_kind(&lambda, "block"))
             .or_else(|| first_named_child_of_kind(&lambda, "compound_statement"))
             .or_else(|| first_named_child_of_kind(&lambda, "statement_block"));
-        let body_implicit_returns = body_node.is_some_and(|b| body_has_implicit_return(&b, handler));
+        let implicit_return_node = body_node.and_then(|b| implicit_return_expression_node(&b, handler));
+        let body_implicit_returns = implicit_return_node.is_some();
         let flow_events = if let Some(b) = body_node {
             let mut events = walk_flow_events(b, file, src, handler, &class_names);
-            if body_implicit_returns {
-                append_expression_body_return(&mut events, &b, file, src);
+            if let Some(return_node) = implicit_return_node {
+                append_expression_body_return(&mut events, &return_node, file, src);
             } else if handler.tail_expression_returns {
                 append_tail_expression_return(&mut events, &b, file, src, handler);
             }
@@ -4813,7 +4957,8 @@ fn grammar_uses_self_parameter_kind(node: &Node<'_>) -> bool {
     false
 }
 
-fn collect_receiver_field_writes(
+#[must_use]
+pub fn collect_receiver_field_writes(
     events: &[crate::FlowEvent],
     params: &[String],
     receiver_param_index: Option<usize>,
@@ -7447,6 +7592,371 @@ fn is_swift_defer_call(node: &Node<'_>, src: &[u8]) -> bool {
         false
     }
     find_lambda(*node, 0)
+}
+
+fn emit_elixir_control_flow_call(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) -> bool {
+    let Some(name) = elixir_call_name(node, src) else {
+        return false;
+    };
+    match name.as_str() {
+        "if" | "unless" | "case" | "cond" | "with" => {
+            let mut then_events = Vec::new();
+            let mut else_events = Vec::new();
+            if let Some(condition) = elixir_condition_arg(node) {
+                walk_into(condition, file, src, handler, class_names, out, false);
+            }
+            if let Some(value) = elixir_keyword_value(node, src, "do") {
+                walk_into(value, file, src, handler, class_names, &mut then_events, false);
+            }
+            if let Some(value) = elixir_keyword_value(node, src, "else") {
+                walk_into(value, file, src, handler, class_names, &mut else_events, false);
+            }
+            if let Some(do_block) = first_named_child_of_kind(node, "do_block") {
+                walk_elixir_do_block_as_branch(
+                    do_block,
+                    file,
+                    src,
+                    handler,
+                    class_names,
+                    &mut then_events,
+                    &mut else_events,
+                );
+            }
+            if name == "case" {
+                let match_bindings = extract_elixir_case_stab_clause_bindings(file, node, src);
+                if !match_bindings.is_empty() {
+                    let mut prefixed = match_bindings.clone();
+                    prefixed.extend(then_events);
+                    then_events = prefixed;
+                    if !else_events.is_empty() {
+                        let mut prefixed_else = match_bindings;
+                        prefixed_else.extend(else_events);
+                        else_events = prefixed_else;
+                    }
+                }
+            }
+            let condition = elixir_condition_arg(node)
+                .map(|condition| node_text(&condition, src).trim().to_string())
+                .filter(|condition| !condition.is_empty());
+            out.push(FlowEvent::Branch {
+                span: span_of(file, node),
+                condition,
+                then_events,
+                else_events,
+            });
+            true
+        }
+        "try" => {
+            let mut body = Vec::new();
+            let mut catch_events = Vec::new();
+            let mut finally_events = Vec::new();
+            if let Some(do_block) = first_named_child_of_kind(node, "do_block") {
+                let mut events = ElixirTryEventBuckets {
+                    body: &mut body,
+                    catch_events: &mut catch_events,
+                    finally_events: &mut finally_events,
+                };
+                walk_elixir_do_block_as_try(do_block, file, src, handler, class_names, &mut events);
+            }
+            out.push(FlowEvent::Try {
+                span: span_of(file, node),
+                body,
+                catch_events,
+                finally_events,
+                catch_param: extract_catch_param(node, src),
+                catch_types: Vec::new(),
+            });
+            true
+        }
+        "for" => emit_elixir_loop_call(node, file, src, handler, class_names, out),
+        _ if matches!(
+            name.as_str(),
+            "Enum.each" | "Enum.map" | "Enum.flat_map" | "Enum.reduce" | "Stream.each" | "Stream.map"
+        ) =>
+        {
+            emit_elixir_loop_call(node, file, src, handler, class_names, out)
+        }
+        _ => false,
+    }
+}
+
+fn emit_elixir_loop_call(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) -> bool {
+    let mut body = Vec::new();
+    let sources = non_closure_arg_source_names(node, src, &["arguments"]);
+    if let Some(args) = first_named_child_of_kind(node, "arguments") {
+        let mut cursor = args.walk();
+        for arg in args.named_children(&mut cursor) {
+            if arg.kind() == "anonymous_function" || is_closure_arg(arg.kind(), handler) {
+                emit_inline_closure_param_bindings(arg, file, src, &sources, &mut body);
+                walk_lambda_body(arg, file, src, handler, class_names, &mut body);
+            }
+        }
+    }
+    if let Some(do_block) = first_named_child_of_kind(node, "do_block") {
+        walk_elixir_do_block_as_branch(
+            do_block,
+            file,
+            src,
+            handler,
+            class_names,
+            &mut body,
+            &mut Vec::new(),
+        );
+    }
+    if body.is_empty() {
+        return false;
+    }
+    if let Some(event) = build_call_event(*node, file, src, handler, class_names) {
+        out.push(event);
+    }
+    out.push(FlowEvent::Loop {
+        span: span_of(file, node),
+        loop_kind: LoopKind::ForEach,
+        body,
+    });
+    true
+}
+
+fn emit_erlang_functional_loop_call(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) -> bool {
+    let Some(call_event) = build_call_event(*node, file, src, handler, class_names) else {
+        return false;
+    };
+    let FlowEvent::Call { name, .. } = &call_event else {
+        return false;
+    };
+    if !matches!(
+        name.as_str(),
+        "lists:foreach" | "lists:map" | "lists:filter" | "lists:foldl" | "lists:foldr"
+    ) {
+        return false;
+    }
+    let Some(args) = node
+        .child_by_field_name("args")
+        .or_else(|| erlang_remote_args_node(node))
+    else {
+        return false;
+    };
+    let sources = non_closure_arg_source_names_from_container(args, src);
+    let mut body = Vec::new();
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        if arg.kind() == "anonymous_fun" || handler.is_lambda(arg.kind()) {
+            emit_inline_closure_param_bindings(arg, file, src, &sources, &mut body);
+            walk_lambda_body(arg, file, src, handler, class_names, &mut body);
+        }
+    }
+    if body.is_empty() {
+        return false;
+    }
+    out.push(call_event);
+    out.push(FlowEvent::Loop {
+        span: span_of(file, node),
+        loop_kind: LoopKind::ForEach,
+        body,
+    });
+    true
+}
+
+fn emit_ruby_block_loop_call(
+    node: &Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) -> bool {
+    let Some(call_event) = build_call_event(*node, file, src, handler, class_names) else {
+        return false;
+    };
+    let FlowEvent::Call { name, .. } = &call_event else {
+        return false;
+    };
+    if !matches!(
+        short_name_of(name),
+        "each" | "each_with_index" | "map" | "flat_map" | "collect" | "select" | "filter" | "reject"
+    ) {
+        return false;
+    }
+    let block =
+        first_named_child_of_kind(node, "do_block").or_else(|| first_named_child_of_kind(node, "block"));
+    let Some(block) = block else {
+        return false;
+    };
+
+    let sources = call_event_value_source_names(&call_event);
+    let mut body = Vec::new();
+    emit_inline_closure_param_bindings(block, file, src, &sources, &mut body);
+    walk_lambda_body(block, file, src, handler, class_names, &mut body);
+    if body.is_empty() {
+        return false;
+    }
+
+    out.push(call_event);
+    out.push(FlowEvent::Loop {
+        span: span_of(file, node),
+        loop_kind: LoopKind::ForEach,
+        body,
+    });
+    true
+}
+
+fn elixir_call_name(node: &Node<'_>, src: &[u8]) -> Option<String> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let target = node.child_by_field_name("target")?;
+    let name = normalize_call_name_whitespace(node_text(&target, src));
+    (!name.is_empty()).then_some(name)
+}
+
+fn elixir_condition_arg<'tree>(node: &Node<'tree>) -> Option<Node<'tree>> {
+    let args = first_named_child_of_kind(node, "arguments")?;
+    let mut cursor = args.walk();
+    let condition = args
+        .named_children(&mut cursor)
+        .find(|child| !matches!(child.kind(), "keywords" | "pair"));
+    condition
+}
+
+fn elixir_keyword_value<'tree>(node: &Node<'tree>, src: &[u8], key: &str) -> Option<Node<'tree>> {
+    fn visit<'tree>(node: Node<'tree>, src: &[u8], key: &str) -> Option<Node<'tree>> {
+        if node.kind() == "pair" {
+            let pair_key = node.child_by_field_name("key")?;
+            let pair_key = node_text(&pair_key, src)
+                .trim()
+                .trim_end_matches(':')
+                .trim()
+                .to_string();
+            if pair_key == key {
+                return node.child_by_field_name("value");
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if let Some(found) = visit(child, src, key) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    visit(*node, src, key)
+}
+
+fn walk_elixir_do_block_as_branch(
+    do_block: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    then_events: &mut Vec<FlowEvent>,
+    else_events: &mut Vec<FlowEvent>,
+) {
+    let mut cursor = do_block.walk();
+    for child in do_block.named_children(&mut cursor) {
+        match child.kind() {
+            "else_block" => walk_named_children(child, file, src, handler, class_names, else_events),
+            "rescue_block" | "catch_block" | "after_block" => {}
+            _ => walk_into(child, file, src, handler, class_names, then_events, false),
+        }
+    }
+}
+
+struct ElixirTryEventBuckets<'a> {
+    body: &'a mut Vec<FlowEvent>,
+    catch_events: &'a mut Vec<FlowEvent>,
+    finally_events: &'a mut Vec<FlowEvent>,
+}
+
+fn walk_elixir_do_block_as_try(
+    do_block: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    events: &mut ElixirTryEventBuckets<'_>,
+) {
+    let mut cursor = do_block.walk();
+    for child in do_block.named_children(&mut cursor) {
+        match child.kind() {
+            "rescue_block" | "catch_block" => {
+                walk_named_children(child, file, src, handler, class_names, events.catch_events);
+            }
+            "after_block" => {
+                walk_named_children(child, file, src, handler, class_names, events.finally_events);
+            }
+            _ => walk_into(child, file, src, handler, class_names, events.body, false),
+        }
+    }
+}
+
+fn walk_named_children(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    handler: &GrammarHandler,
+    class_names: &[String],
+    out: &mut Vec<FlowEvent>,
+) {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        walk_into(child, file, src, handler, class_names, out, false);
+    }
+}
+
+fn non_closure_arg_source_names(node: &Node<'_>, src: &[u8], arg_container_kinds: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if arg_container_kinds.contains(&child.kind()) {
+            out.extend(non_closure_arg_source_names_from_container(child, src));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn non_closure_arg_source_names_from_container(container: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = container.walk();
+    for arg in container.named_children(&mut cursor) {
+        if matches!(
+            arg.kind(),
+            "anonymous_function" | "anonymous_fun" | "keywords" | "pair"
+        ) || arg.kind().contains("lambda")
+            || arg.kind().contains("closure")
+        {
+            continue;
+        }
+        out.extend(extract_rhs_expr_operands(&arg, src));
+        if let Some(place) = argument_place(&arg, src) {
+            push_value_text_source_name(&mut out, &place);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// A call-argument node that should have its body inlined into the

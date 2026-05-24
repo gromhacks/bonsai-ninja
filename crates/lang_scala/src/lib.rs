@@ -3,12 +3,12 @@ use bonsai_common::{FileId, Span, SymbolId};
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
-        walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
+        node_text, parse_with, span_of, walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary,
-    Visibility,
+    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, FieldWrite, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding,
+    TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::Node;
 
@@ -252,11 +252,21 @@ fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
             continue;
         };
         let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
-        if flow_events.is_empty() {
+        let class_params = first_named_child_of_kind(&class_node, "class_parameters");
+        let params = class_params.map_or_else(Vec::new, |params| constructor_param_names(params, src));
+        let mut receiver_field_writes = class_params.map_or_else(Vec::new, |params_node| {
+            scala_constructor_param_field_writes(params_node, file, src, &params)
+        });
+        let mut body_writes =
+            collect_receiver_field_writes(&flow_events, &params, None, &["this", "super"], &[]);
+        receiver_field_writes.append(&mut body_writes);
+        receiver_field_writes.sort_by_key(|write| (write.span.start, write.target.clone()));
+        receiver_field_writes.dedup_by(|a, b| {
+            a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+        });
+        if flow_events.is_empty() && receiver_field_writes.is_empty() {
             continue;
         }
-        let params = first_named_child_of_kind(&class_node, "class_parameters")
-            .map_or_else(Vec::new, |params| constructor_param_names(params, src));
         idx.defs.push(scala_constructor_decl(
             bonsai_common::SymbolId::new(next),
             *class_symbol,
@@ -266,6 +276,7 @@ fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
             span_of(file, &body),
             params,
             flow_events,
+            receiver_field_writes,
             module_path.clone(),
         ));
         next = next.saturating_add(1);
@@ -282,6 +293,7 @@ fn scala_constructor_decl(
     body_span: Span,
     params: Vec<String>,
     flow_events: Vec<bonsai_lang_api::FlowEvent>,
+    receiver_field_writes: Vec<FieldWrite>,
     module_path: bonsai_lang_api::ModulePath,
 ) -> Decl {
     Decl {
@@ -302,7 +314,7 @@ fn scala_constructor_decl(
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
-        receiver_field_writes: Vec::new(),
+        receiver_field_writes,
         implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
@@ -314,6 +326,38 @@ fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
         .into_iter()
         .filter_map(|param| parameter_binding_name(param, src))
         .collect()
+}
+
+fn scala_constructor_param_field_writes(
+    params_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    params: &[String],
+) -> Vec<FieldWrite> {
+    let mut writes = Vec::new();
+    for param in collect_descendant_kinds(params_node, &["class_parameter"]) {
+        if !scala_class_parameter_declares_property(param, src) {
+            continue;
+        }
+        let Some(name) = parameter_binding_name(param, src) else {
+            continue;
+        };
+        let Some(source_idx) = params.iter().position(|param| param == &name) else {
+            continue;
+        };
+        writes.push(FieldWrite {
+            span: span_of(file, &param),
+            target: format!("this.{name}"),
+            source_param_indices: vec![source_idx],
+        });
+    }
+    writes
+}
+
+fn scala_class_parameter_declares_property(param: Node<'_>, src: &[u8]) -> bool {
+    node_text(&param, src)
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|token| matches!(token, "val" | "var"))
 }
 
 fn parameter_binding_name(param: Node<'_>, src: &[u8]) -> Option<String> {

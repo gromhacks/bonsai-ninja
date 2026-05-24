@@ -8,8 +8,8 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding,
+    AdapterContext, AdapterError, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -231,6 +231,7 @@ impl LanguageAdapter for ObjCAdapter {
         ];
         for decl in &mut decl_index.defs {
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, OBJC_LIFECYCLE_TRANSITIONS);
+            enrich_objc_receiver_field_writes(decl);
             // Tag `[[Class alloc] init...]` / `[[Class new] ...]`
             // chains with the constructed class so the engine's
             // receiver-type dispatch recognises the alloc-init
@@ -309,7 +310,6 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
 /// reparsing the ObjC `[receiver selector]` syntax at every call
 /// resolution.
 fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
-    use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
             FlowEvent::Call {
@@ -360,13 +360,95 @@ fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
     }
 }
 
+fn enrich_objc_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
+    let params = decl.params.clone();
+    enrich_objc_receiver_field_writes_inner(&mut decl.receiver_field_writes, &decl.flow_events, &params);
+    decl.receiver_field_writes
+        .sort_by_key(|write| (write.span.start, write.target.clone()));
+    decl.receiver_field_writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
+}
+
+fn enrich_objc_receiver_field_writes_inner(
+    out: &mut Vec<FieldWrite>,
+    events: &[FlowEvent],
+    params: &[String],
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_names,
+                ..
+            } if objc_target_is_receiver_field(target) => {
+                let source_param_indices = params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, param)| {
+                        let source_matches = source_name.as_deref() == Some(param.as_str())
+                            || source_names.iter().any(|source| source == param);
+                        source_matches.then_some(idx)
+                    })
+                    .collect::<Vec<_>>();
+                if source_param_indices.is_empty() {
+                    continue;
+                }
+                out.push(FieldWrite {
+                    span: *span,
+                    target: objc_receiver_field_target(target),
+                    source_param_indices,
+                });
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                enrich_objc_receiver_field_writes_inner(out, then_events, params);
+                enrich_objc_receiver_field_writes_inner(out, else_events, params);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                enrich_objc_receiver_field_writes_inner(out, body, params);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                enrich_objc_receiver_field_writes_inner(out, body, params);
+                enrich_objc_receiver_field_writes_inner(out, catch_events, params);
+                enrich_objc_receiver_field_writes_inner(out, finally_events, params);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn objc_target_is_receiver_field(target: &str) -> bool {
+    target
+        .strip_prefix('_')
+        .is_some_and(|tail| !tail.is_empty() && !tail.starts_with('_'))
+        || target.starts_with("self.")
+}
+
+fn objc_receiver_field_target(target: &str) -> String {
+    if let Some(field) = target.strip_prefix('_') {
+        format!("self.{field}")
+    } else {
+        target.to_string()
+    }
+}
+
 /// Repair `catch_param` on ObjC `Try` events. The kit's generic
 /// extractor returns the first identifier descendant of `@catch
 /// (NSException *e)`, which is the type identifier. Re-extract the
 /// binding from the `parameter_declaration` → `declarator`
 /// chain.
 fn fix_objc_catch_params(events: &mut [bonsai_lang_api::FlowEvent], tree: &Tree, src: &[u8]) {
-    use bonsai_lang_api::FlowEvent;
     for event in events {
         match event {
             FlowEvent::Try {

@@ -3,8 +3,8 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
     ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 
@@ -90,7 +90,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     defer_kinds: &[],
     using_kinds: &[],
     method_receiver_param_index: None,
-    implicit_receiver_names: &[],
+    implicit_receiver_names: &["this"],
     implicit_receiver_prefixes: &[],
     tail_expression_returns: false,
 };
@@ -200,6 +200,20 @@ impl LanguageAdapter for SolidityAdapter {
                                 decl.type_aliases.push(alias.clone());
                             }
                         }
+                    }
+                }
+            }
+            for decl in &mut idx.defs {
+                if !is_callable_decl(decl.kind) {
+                    continue;
+                }
+                for (class_span, aliases) in &state_aliases_by_class {
+                    if span_contains(*class_span, decl.span) {
+                        let state_names = aliases
+                            .iter()
+                            .map(|alias| alias.name.as_str())
+                            .collect::<Vec<_>>();
+                        enrich_solidity_state_field_writes(decl, &state_names);
                     }
                 }
             }
@@ -623,6 +637,115 @@ fn is_callable_decl(kind: DeclKind) -> bool {
 
 fn span_contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file && outer.start <= inner.start && inner.end <= outer.end
+}
+
+fn enrich_solidity_state_field_writes(decl: &mut bonsai_lang_api::Decl, state_names: &[&str]) {
+    if state_names.is_empty() || decl.params.is_empty() {
+        return;
+    }
+    let mut writes = Vec::new();
+    collect_solidity_state_field_writes(&decl.flow_events, &decl.params, state_names, &mut writes);
+    decl.receiver_field_writes.extend(writes);
+    decl.receiver_field_writes
+        .sort_by_key(|write| (write.span.start, write.target.clone()));
+    decl.receiver_field_writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
+}
+
+fn collect_solidity_state_field_writes(
+    events: &[FlowEvent],
+    params: &[String],
+    state_names: &[&str],
+    out: &mut Vec<FieldWrite>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                target,
+                source_name,
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                let Some(field) = solidity_state_field_target(target, state_names) else {
+                    continue;
+                };
+                let sources =
+                    solidity_assignment_source_values(source_name.as_deref(), source_call_args, source_names);
+                let source_param_indices = params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, param)| solidity_source_matches_param(&sources, param).then_some(idx))
+                    .collect::<Vec<_>>();
+                if source_param_indices.is_empty() {
+                    continue;
+                }
+                out.push(FieldWrite {
+                    span: *span,
+                    target: format!("this.{field}"),
+                    source_param_indices,
+                });
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_solidity_state_field_writes(then_events, params, state_names, out);
+                collect_solidity_state_field_writes(else_events, params, state_names, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_solidity_state_field_writes(body, params, state_names, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_solidity_state_field_writes(body, params, state_names, out);
+                collect_solidity_state_field_writes(catch_events, params, state_names, out);
+                collect_solidity_state_field_writes(finally_events, params, state_names, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn solidity_state_field_target(target: &str, state_names: &[&str]) -> Option<String> {
+    let target = target.trim();
+    let bare = target.strip_prefix("this.").unwrap_or(target);
+    state_names
+        .iter()
+        .find(|name| bare == **name)
+        .map(|name| (*name).to_string())
+}
+
+fn solidity_assignment_source_values(
+    source_name: Option<&str>,
+    source_call_args: &[String],
+    source_names: &[String],
+) -> Vec<String> {
+    let mut values = Vec::new();
+    if let Some(source) = source_name {
+        values.push(source.to_string());
+    }
+    values.extend(source_call_args.iter().cloned());
+    values.extend(source_names.iter().cloned());
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn solidity_source_matches_param(sources: &[String], param: &str) -> bool {
+    let param = param.trim();
+    let stripped = param.strip_prefix('_').unwrap_or(param);
+    sources.iter().any(|source| {
+        let source = source.trim();
+        source == param || (!stripped.is_empty() && source == stripped)
+    })
 }
 
 fn attach_solidity_method_owners(idx: &mut DeclIndex) {

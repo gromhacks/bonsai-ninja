@@ -2,8 +2,11 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
+    kit::{
+        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
+        node_text, parse_with, span_of,
+    },
+    AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
     LanguageAdapter, LanguageCapabilities, LanguageId, Ref, RefKind,
 };
 use tree_sitter::{Language, Tree};
@@ -182,6 +185,7 @@ impl LanguageAdapter for LuaAdapter {
         ];
         for decl in &mut idx.defs {
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, LUA_LIFECYCLE_TRANSITIONS);
+            enrich_lua_factory_receiver_field_writes(decl);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
@@ -210,6 +214,57 @@ impl LanguageAdapter for LuaAdapter {
         }
         idx
     }
+}
+
+fn enrich_lua_factory_receiver_field_writes(decl: &mut bonsai_lang_api::Decl) {
+    if decl.params.is_empty() || !lua_returns_name(&decl.flow_events, "self") {
+        return;
+    }
+    let writes = collect_receiver_field_writes(&decl.flow_events, &decl.params, None, &["self"], &[]);
+    if writes.is_empty() {
+        return;
+    }
+    decl.receiver_field_writes.extend(writes);
+    if !decl.implicit_receiver_names.iter().any(|name| name == "self") {
+        decl.implicit_receiver_names.push("self".to_string());
+    }
+    decl.receiver_field_writes
+        .sort_by_key(|write| (write.span.start, write.target.clone()));
+    decl.receiver_field_writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
+}
+
+fn lua_returns_name(events: &[FlowEvent], name: &str) -> bool {
+    events.iter().any(|event| match event {
+        FlowEvent::Return {
+            value_name,
+            value_text,
+            ..
+        } => {
+            value_name.as_deref() == Some(name)
+                || value_text.as_deref().is_some_and(|text| text.trim() == name)
+        }
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => lua_returns_name(then_events, name) || lua_returns_name(else_events, name),
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            lua_returns_name(body, name)
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            lua_returns_name(body, name)
+                || lua_returns_name(catch_events, name)
+                || lua_returns_name(finally_events, name)
+        }
+        _ => false,
+    })
 }
 
 /// Surface every bare `arg` identifier as a Read ref. Lua exposes the

@@ -211,6 +211,13 @@ pub struct TransferOutput {
     /// Index of the declared receiver parameter, when the adapter
     /// exposes a method receiver as a normal formal parameter.
     pub receiver_param_index: Option<usize>,
+    /// Receiver/container bases that this declaration writes via
+    /// adapter-derived receiver-field metadata. Languages with
+    /// implicit receivers (Kotlin / Scala / Swift data constructors,
+    /// Ruby `@ivars`, etc.) do not have a receiver parameter index,
+    /// so Phase 3 uses these bases to forward constructor-return
+    /// fields back to the assigned object.
+    pub receiver_field_bases: Vec<String>,
     /// Place dictionary local to this function. The Phase 3 builder
     /// merges it into the segment's dictionary, remapping ids.
     pub places: PlaceDict,
@@ -241,6 +248,7 @@ impl TransferOutput {
             func,
             params: Vec::new(),
             receiver_param_index: None,
+            receiver_field_bases: Vec::new(),
             places: PlaceDict::new(),
             nodes: NodeDict::new(),
             edges: Vec::new(),
@@ -314,6 +322,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
     let mut out = TransferOutput::new(func);
     out.params.clone_from(&decl.params);
     out.receiver_param_index = decl.receiver_param_index;
+    out.receiver_field_bases = receiver_field_bases(decl);
     let mut ctx = TransferCtx {
         out: &mut out,
         options,
@@ -358,9 +367,54 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         });
     }
 
+    emit_receiver_field_writes(decl, &mut ctx);
     walk_events(&decl.flow_events, &mut ctx);
     bridge_compound_expression_calls(&mut ctx);
     out
+}
+
+fn receiver_field_bases(decl: &Decl) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = ahash::AHashSet::default();
+    for write in &decl.receiver_field_writes {
+        let Some(base) = field_base_name(&write.target) else {
+            continue;
+        };
+        let base = base.trim();
+        if !base.is_empty() && seen.insert(base.to_string()) {
+            out.push(base.to_string());
+        }
+    }
+    out
+}
+
+fn emit_receiver_field_writes(decl: &Decl, ctx: &mut TransferCtx<'_>) {
+    for write in &decl.receiver_field_writes {
+        let target = write.target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        let (write_node, is_field_write) = build_target_node(target, write.span, ctx);
+        let edge_meta = crate::edge::EdgeMeta {
+            precision: Precision::Exact,
+            kind: if is_field_write {
+                IdgEdgeKind::IntraFieldWrite
+            } else {
+                IdgEdgeKind::IntraAssign
+            },
+            call_kind: bonsai_callgraph::EdgeKind::Direct,
+            via_span: write.span,
+        };
+        for &param_idx in &write.source_param_indices {
+            let Some(param_name) = decl.params.get(param_idx).map(String::as_str) else {
+                continue;
+            };
+            if !param_name.is_empty() {
+                ctx.bridge_read(param_name, write_node, edge_meta);
+            }
+        }
+        ctx.commit_writer(target, write_node);
+    }
 }
 
 /// Post-walk pass: wire inner-call CallRet → outer-call CallArg

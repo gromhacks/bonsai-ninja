@@ -214,7 +214,20 @@ fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
     let default_id = func_id(&idx, "default");
     let cg = resolved_graph([(f_id, default_id, call_span)]);
 
-    let ws = build(&idx, &cg);
+    let no_alias_ws = build(&idx, &cg);
+    assert_eq!(
+        no_alias_ws.cross_file().len(),
+        0,
+        "same-span callgraph edges with mismatched names must not stitch without an alias fact"
+    );
+
+    let ws = build_with_aliases(&idx, &cg, |file| {
+        let mut aliases = AHashMap::new();
+        if file == FileId::new(0) {
+            aliases.insert("render".to_string(), "default".to_string());
+        }
+        aliases
+    });
     let caller_seg = ws.segment_for_func(f_id).expect("caller segment");
     let callee_seg = ws.segment_for_func(default_id).expect("callee segment");
     let arg_edges = ws
@@ -231,7 +244,7 @@ fn exact_site_edge_stitches_when_exported_decl_name_differs_from_call_alias() {
 
     assert_eq!(
         arg_edges, 2,
-        "an exact callgraph site must stitch even when the callee decl is `default` and the call text is an alias"
+        "an exact callgraph site may stitch through an explicit alias fact when the callee decl is `default` and the call text is an alias"
     );
 }
 

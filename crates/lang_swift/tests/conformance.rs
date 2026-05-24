@@ -39,3 +39,39 @@ fn function_typed_parameters_do_not_emit_type_nodes_as_params() {
         "Swift parameter extraction must not treat function/user type annotation nodes as bound params"
     );
 }
+
+#[test]
+fn single_expression_function_records_implicit_return() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_swift::SwiftAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("App.swift"),
+        "func echo(_ x: String) -> String { x }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let echo = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "echo")
+        .expect("echo declaration");
+
+    assert!(echo.has_implicit_returns);
+    assert!(
+        echo.flow_events
+            .iter()
+            .any(|event| matches!(event, FlowEvent::Return { value_name, .. } if value_name.as_deref() == Some("x"))),
+        "Swift single-expression functions should emit a Return event; events: {:?}",
+        echo.flow_events
+    );
+}

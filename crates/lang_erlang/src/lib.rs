@@ -105,12 +105,14 @@ impl LanguageAdapter for ErlangAdapter {
                 augment_erlang_record_flow_events(&mut decl.flow_events, snapshot.text.as_ref());
                 inject_erlang_fun_ref_aliases(&mut decl.flow_events, snapshot.text.as_ref());
                 augment_erlang_tail_return_event(&mut decl.flow_events, decl.span, snapshot.text.as_ref());
+                decl.has_implicit_returns = true;
             }
         } else {
             // Parser unavailable — degrade gracefully by normalizing
             // events with empty source (no record / map rewrites).
             for decl in &mut decl_index.defs {
                 normalize_erlang_access_events(&mut decl.flow_events, "");
+                decl.has_implicit_returns = true;
             }
         }
         // Recognised Erlang lifecycle transitions. Remote-call form
@@ -232,6 +234,11 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
         match event {
             FlowEvent::Call { args, .. } => {
                 for arg in args {
+                    if let Some(source) = erlang_fun_ref_source(&arg.value_text) {
+                        arg.value_text.clone_from(&source);
+                        push_unique_string(&mut arg.source_names, source);
+                        continue;
+                    }
                     // Prefer `maps:get` rewrites (they consume a pair of
                     // args), fall back to single record access.
                     if let Some(access) = erlang_maps_get_access(&arg.value_text) {
@@ -259,7 +266,9 @@ fn normalize_erlang_access_events(events: &mut [FlowEvent], src: &str) {
                     }
                 }
                 for arg in source_call_args.iter_mut() {
-                    if let Some(access) = single_erlang_record_access(arg) {
+                    if let Some(source) = erlang_fun_ref_source(arg) {
+                        *arg = source;
+                    } else if let Some(access) = single_erlang_record_access(arg) {
                         *arg = access;
                     }
                 }
@@ -965,6 +974,9 @@ fn normalize_erlang_return_expr(expr: &str) -> Option<String> {
     if expr.is_empty() {
         return None;
     }
+    if erlang_return_container_expr(expr) {
+        return Some(expr.to_string());
+    }
     if let Some(access) = erlang_maps_get_access(expr) {
         return Some(access);
     }
@@ -975,6 +987,13 @@ fn normalize_erlang_return_expr(expr: &str) -> Option<String> {
         return Some(expr.to_string());
     }
     None
+}
+
+fn erlang_return_container_expr(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || (trimmed.starts_with("<<") && trimmed.ends_with(">>"))
 }
 
 /// `Some(value)` when `value` is taintable as a return — variables or

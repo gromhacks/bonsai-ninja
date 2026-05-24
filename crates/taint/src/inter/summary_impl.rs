@@ -62,8 +62,8 @@ use super::{
     call_arg_is_directly_tainted, call_receiver_from_name, identifier_value_occurs,
     insert_descendant_target_taint, insert_target_taint, insert_value_target_taint, named_field_initializers,
     normalise_qualified_text, normalise_target_text, push_unique_string, qualified_wildcard_seed_matches,
-    value_marker, FunctionSummary, InterTaintConfig, ParamSideEffect, ReturnAccessPath, ReturnElementTaint,
-    ReturnFieldTaint,
+    type_constructor_arg_body, value_marker, FunctionSummary, InterTaintConfig, ParamSideEffect,
+    ReturnAccessPath, ReturnElementTaint, ReturnFieldTaint,
 };
 
 /// Compute the return-taint summary for one function by running the
@@ -1140,12 +1140,25 @@ fn walk_return_names(events: &[FlowEvent], out: &mut Vec<String>) {
         match event {
             FlowEvent::Return {
                 value_name: Some(name),
+                value_text,
                 ..
+            } => {
+                if value_text
+                    .as_deref()
+                    .is_some_and(return_text_constructs_container)
+                {
+                    continue;
+                }
+                out.push(name.clone());
             }
-            | FlowEvent::Yield {
+            FlowEvent::Yield {
                 value_text: Some(name),
                 ..
-            } => out.push(name.clone()),
+            } => {
+                if !return_text_constructs_container(name) {
+                    out.push(name.clone());
+                }
+            }
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -1586,20 +1599,7 @@ fn top_level_field_separator(text: &str) -> Option<usize> {
 }
 
 fn return_text_starts_with_type_constructor(text: &str) -> bool {
-    let text = terminal_return_expression_text(text).trim();
-    let Some(open_idx) = text.find(['(', '{']) else {
-        return false;
-    };
-    let candidate = text[..open_idx].trim();
-    if candidate.is_empty() || candidate.contains(char::is_whitespace) {
-        return false;
-    }
-    candidate == "Self"
-        || candidate
-            .rsplit("::")
-            .next()
-            .and_then(|tail| tail.chars().next())
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+    type_constructor_arg_body(terminal_return_expression_text(text)).is_some()
 }
 
 /// Tail-position evidence: when no explicit `Return` carries a
