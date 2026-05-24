@@ -167,10 +167,10 @@ overrides with a fall-through to the cross-language constants in
 
 The cross-language fallback fires when an adapter declares an empty
 slice. **Adapters should override with the narrowest correct set so
-fallbacks don't fire for mature adapters** — a Python source
-containing a method named `init` is currently mis-recognised as a
-constructor by the cross-language fallback because `lang_python`
-hasn't yet narrowed `constructor_method_names`.
+fallbacks don't fire for mature adapters**; Python narrows constructor
+methods to `__init__`, JS/TS to `constructor`, Rust to `new`, and
+Objective-C/Swift to `init` so same-spelled ordinary methods in other
+languages are not treated as constructors.
 
 Engine consumers prefer the adapter-aware accessor:
 

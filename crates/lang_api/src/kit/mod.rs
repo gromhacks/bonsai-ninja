@@ -829,7 +829,11 @@ impl GrammarHandler {
         self.lambda_kinds.contains(&k) || GENERIC_HANDLER.lambda_kinds.contains(&k)
     }
     fn is_constructor_method(&self, name: &str) -> bool {
-        self.constructor_names.contains(&name) || GENERIC_HANDLER.constructor_names.contains(&name)
+        if self.constructor_names.is_empty() {
+            GENERIC_HANDLER.constructor_names.contains(&name)
+        } else {
+            self.constructor_names.contains(&name)
+        }
     }
     fn is_try(&self, k: &str) -> bool {
         self.try_kinds.contains(&k) || GENERIC_HANDLER.try_kinds.contains(&k)
