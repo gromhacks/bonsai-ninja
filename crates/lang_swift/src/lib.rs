@@ -3,8 +3,8 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
-        walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
+        node_text, parse_with, span_of, walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
     AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope,
     ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding,
@@ -315,6 +315,8 @@ fn swift_constructor_decl(
     params: Vec<String>,
     flow_events: Vec<bonsai_lang_api::FlowEvent>,
 ) -> Decl {
+    let receiver_field_writes =
+        collect_receiver_field_writes(&flow_events, &params, None, &["self", "super"], &[]);
     Decl {
         symbol,
         kind: DeclKind::Constructor,
@@ -333,7 +335,7 @@ fn swift_constructor_decl(
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
-        receiver_field_writes: Vec::new(),
+        receiver_field_writes,
         implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,

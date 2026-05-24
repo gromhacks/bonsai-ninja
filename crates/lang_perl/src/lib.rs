@@ -5,9 +5,9 @@ use bonsai_lang_api::{
     kit::{
         collect_kinds, foreach_binding_assigns_from_text, language_from_pack, node_text, parse_with, span_of,
     },
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
-    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
-    RefKind, TypeAliasBinding,
+    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModulePath, Ref, RefKind, TypeAliasBinding,
 };
 use tree_sitter::{Language, Tree};
 
@@ -185,6 +185,7 @@ impl LanguageAdapter for PerlAdapter {
         }
         for decl in &mut idx.defs {
             mark_perl_method_receiver_param(decl);
+            enrich_perl_bless_receiver_field_writes(decl, &source);
             let mut aliases = collect_perl_bless_type_aliases(&decl.flow_events);
             dedup_perl_type_aliases(&mut aliases);
             for alias in aliases {
@@ -222,6 +223,151 @@ impl LanguageAdapter for PerlAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn enrich_perl_bless_receiver_field_writes(decl: &mut bonsai_lang_api::Decl, source: &str) {
+    if decl.name != "new" || decl.params.len() < 2 {
+        return;
+    }
+    let Some(text) = source.get(decl.span.start as usize..decl.span.end as usize) else {
+        return;
+    };
+    let Some(receiver) = decl.params.first().cloned() else {
+        return;
+    };
+    let mut writes = Vec::new();
+    for hash_body in perl_bless_hash_bodies(text) {
+        for field_init in split_perl_top_level(hash_body, ',') {
+            let Some((field, value)) = field_init.split_once("=>") else {
+                continue;
+            };
+            let field = perl_hash_key_name(field);
+            if field.is_empty() {
+                continue;
+            }
+            let value = value.trim();
+            let Some(source_idx) = decl
+                .params
+                .iter()
+                .position(|param| perl_param_matches_value(param, value))
+            else {
+                continue;
+            };
+            writes.push(FieldWrite {
+                span: decl.span,
+                target: format!("{receiver}.{field}"),
+                source_param_indices: vec![source_idx],
+            });
+        }
+    }
+    if writes.is_empty() {
+        return;
+    }
+    decl.receiver_field_writes.extend(writes);
+    decl.receiver_field_writes
+        .sort_by_key(|write| (write.span.start, write.target.clone()));
+    decl.receiver_field_writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
+}
+
+fn perl_bless_hash_bodies(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find("bless") {
+        rest = &rest[pos + "bless".len()..];
+        let Some(open) = rest.find('{') else {
+            continue;
+        };
+        let after_open = &rest[open + 1..];
+        let Some(close) = find_matching_perl_brace(after_open) else {
+            continue;
+        };
+        out.push(&after_open[..close]);
+        rest = &after_open[close + 1..];
+    }
+    out
+}
+
+fn find_matching_perl_brace(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' if depth == 0 => return Some(idx),
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_perl_top_level(text: &str, delimiter: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                out.push(text[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(text[start..].trim());
+    out
+}
+
+fn perl_hash_key_name(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|ch| matches!(ch, '\'' | '"' | '$' | '{' | '}' | ' '))
+        .to_string()
+}
+
+fn perl_param_matches_value(param: &str, value: &str) -> bool {
+    let param = param.trim();
+    let value = value.trim();
+    if value == param {
+        return true;
+    }
+    let param_bare = param.trim_start_matches('$');
+    let value_bare = value.trim_start_matches('$');
+    !param_bare.is_empty() && param_bare == value_bare
 }
 
 fn apply_perl_package_semantic_identity(idx: &mut DeclIndex) {

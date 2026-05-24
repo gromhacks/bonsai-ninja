@@ -1346,6 +1346,24 @@ fn check_security_source_analysis(ws: &str, lang: &str, expected_min: usize, han
                 .and_then(|source| source.get("enclosing_fn"))
                 .and_then(|v| v.as_str())
                 .is_some_and(|name| name.contains(expected_anchor))
+            || flow
+                .get("functions")
+                .and_then(|v| v.as_array())
+                .is_some_and(|functions| {
+                    functions.iter().any(|function| {
+                        function
+                            .get("owners")
+                            .and_then(|v| v.as_array())
+                            .is_some_and(|owners| {
+                                owners.iter().any(|owner| {
+                                    owner
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .is_some_and(|name| name.contains(expected_anchor))
+                                })
+                            })
+                    })
+                })
         {
             mentions_handler = true;
         }

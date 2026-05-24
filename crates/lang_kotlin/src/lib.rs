@@ -3,12 +3,12 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_modifier_visibility, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
-        walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
+        node_text, parse_with, span_of, walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary,
-    TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    ModifierVocabulary, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -706,28 +706,35 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
             continue;
         };
         if let Some(primary) = first_named_child_of_kind(&class_node, "primary_constructor") {
-            if let Some(body) = first_named_child_of_kind(&class_node, "class_body") {
-                let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
-                if !flow_events.is_empty() {
-                    idx.defs.push(kotlin_constructor_decl(
-                        bonsai_common::SymbolId::new(next),
-                        *class_symbol,
-                        class_name,
-                        KotlinConstructorSpans {
-                            name: *class_name_span,
-                            decl: class_span,
-                            body: span_of(file, &body),
-                        },
-                        constructor_param_names(primary, src),
-                        flow_events,
-                    ));
-                    next = next.saturating_add(1);
-                }
+            let body = first_named_child_of_kind(&class_node, "class_body");
+            let flow_events = body
+                .map(|body| walk_flow_events(body, file, src, &HANDLER, &class_names))
+                .unwrap_or_default();
+            let params = constructor_param_names(primary, src);
+            let receiver_field_writes = kotlin_primary_constructor_field_writes(primary, file, src, &params);
+            if !flow_events.is_empty() || !receiver_field_writes.is_empty() {
+                idx.defs.push(kotlin_constructor_decl(
+                    bonsai_common::SymbolId::new(next),
+                    *class_symbol,
+                    class_name,
+                    KotlinConstructorSpans {
+                        name: *class_name_span,
+                        decl: class_span,
+                        body: body.map_or_else(|| span_of(file, &primary), |body| span_of(file, &body)),
+                    },
+                    params,
+                    flow_events,
+                    receiver_field_writes,
+                ));
+                next = next.saturating_add(1);
             }
         }
         for secondary in collect_descendant_kinds(class_node, &["secondary_constructor"]) {
             let body = first_named_child_of_kind(&secondary, "statements").unwrap_or(secondary);
             let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+            let params = constructor_param_names(secondary, src);
+            let receiver_field_writes =
+                collect_receiver_field_writes(&flow_events, &params, None, &["this", "super"], &[]);
             idx.defs.push(kotlin_constructor_decl(
                 bonsai_common::SymbolId::new(next),
                 *class_symbol,
@@ -737,8 +744,9 @@ fn synthesize_kotlin_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: 
                     decl: span_of(file, &secondary),
                     body: span_of(file, &body),
                 },
-                constructor_param_names(secondary, src),
+                params,
                 flow_events,
+                receiver_field_writes,
             ));
             next = next.saturating_add(1);
         }
@@ -758,6 +766,7 @@ fn kotlin_constructor_decl(
     spans: KotlinConstructorSpans,
     params: Vec<String>,
     flow_events: Vec<FlowEvent>,
+    receiver_field_writes: Vec<FieldWrite>,
 ) -> Decl {
     Decl {
         symbol,
@@ -777,11 +786,47 @@ fn kotlin_constructor_decl(
         type_aliases: Vec::new(),
         bases: Vec::new(),
         receiver_param_index: None,
-        receiver_field_writes: Vec::new(),
+        receiver_field_writes,
         implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
         receiver_state_sources: Vec::new(),
         return_type: None,
     }
+}
+
+fn kotlin_primary_constructor_field_writes(
+    primary: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    params: &[String],
+) -> Vec<FieldWrite> {
+    let mut writes = Vec::new();
+    for param in collect_descendant_kinds(primary, &["class_parameter"]) {
+        if !kotlin_class_parameter_declares_property(param, src) {
+            continue;
+        }
+        let Some(name) = parameter_binding_name(param, src) else {
+            continue;
+        };
+        let Some(source_idx) = params.iter().position(|param| param == &name) else {
+            continue;
+        };
+        writes.push(FieldWrite {
+            span: span_of(file, &param),
+            target: format!("this.{name}"),
+            source_param_indices: vec![source_idx],
+        });
+    }
+    writes.sort_by_key(|write| (write.span.start, write.target.clone()));
+    writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
+    writes
+}
+
+fn kotlin_class_parameter_declares_property(param: Node<'_>, src: &[u8]) -> bool {
+    node_text(&param, src)
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|token| matches!(token, "val" | "var"))
 }
 
 fn collect_descendant_kinds<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Node<'tree>> {
@@ -792,7 +837,9 @@ fn collect_descendant_kinds<'tree>(node: Node<'tree>, kinds: &[&str]) -> Vec<Nod
             out.push(current);
         }
         let mut cursor = current.walk();
-        for child in current.named_children(&mut cursor) {
+        let mut children = current.named_children(&mut cursor).collect::<Vec<_>>();
+        children.reverse();
+        for child in children {
             stack.push(child);
         }
     }

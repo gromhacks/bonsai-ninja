@@ -6,8 +6,8 @@ use bonsai_lang_api::{
         collect_kinds, collect_param_type_aliases, first_named_child_of_kind, language_from_pack, node_text,
         parse_with, span_of, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, DeclIndex, DeclKind, FieldWrite, GrammarHandler, ImportIndex, ImportScope,
+    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
 };
 
 /// C++ parameter shape: `parameter_declaration` carries `type` and
@@ -161,6 +161,7 @@ impl LanguageAdapter for CppAdapter {
             let bases_by_span = collect_cpp_class_bases(&tree, file, src);
             let access_by_span = collect_cpp_member_visibility(&tree, file, src);
             let alias_map = collect_param_type_aliases(&tree, file, src, &CPP_TYPE_ALIASES);
+            let initializer_specs = collect_cpp_initializer_field_specs(&tree, file, src);
             for decl in &mut decl_index.defs {
                 if let Some(visibility) = access_by_span.get(&decl.span).copied() {
                     decl.visibility = visibility;
@@ -175,6 +176,36 @@ impl LanguageAdapter for CppAdapter {
                 fix_cpp_catch_params(&mut decl.flow_events, &tree, src);
                 // Bases only attach to class-shaped decls; skip
                 // free functions, methods, vars, etc.
+                if let Some(specs) = initializer_specs
+                    .iter()
+                    .find_map(|(span, specs)| (*span == decl.span).then_some(specs))
+                {
+                    for spec in specs {
+                        let source_param_indices = decl
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, param)| {
+                                cpp_value_mentions_param(&spec.value, param).then_some(idx)
+                            })
+                            .collect::<Vec<_>>();
+                        if source_param_indices.is_empty() {
+                            continue;
+                        }
+                        decl.receiver_field_writes.push(FieldWrite {
+                            span: spec.span,
+                            target: format!("this.{}", spec.field),
+                            source_param_indices,
+                        });
+                    }
+                    decl.receiver_field_writes
+                        .sort_by_key(|write| (write.span.start, write.target.clone()));
+                    decl.receiver_field_writes.dedup_by(|a, b| {
+                        a.span == b.span
+                            && a.target == b.target
+                            && a.source_param_indices == b.source_param_indices
+                    });
+                }
                 if !is_class_like(decl.kind) {
                     continue;
                 }
@@ -233,6 +264,73 @@ fn collect_tu_private_function_names(
     let root = tree.root_node();
     walk_for_tu_private(root, src, false, &mut private_names);
     private_names
+}
+
+#[derive(Clone, Debug)]
+struct CppInitializerFieldSpec {
+    span: Span,
+    field: String,
+    value: String,
+}
+
+fn collect_cpp_initializer_field_specs(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(Span, Vec<CppInitializerFieldSpec>)> {
+    let mut out = Vec::new();
+    for fn_node in collect_kinds(tree, &["function_definition"]) {
+        let Some(initializers) = first_named_child_of_kind(&fn_node, "field_initializer_list") else {
+            continue;
+        };
+        let mut specs = Vec::new();
+        let mut cursor = initializers.walk();
+        for init in initializers.named_children(&mut cursor) {
+            if init.kind() != "field_initializer" {
+                continue;
+            }
+            let Some(field_node) = first_named_child_of_kind(&init, "field_identifier") else {
+                continue;
+            };
+            let Some(value_node) = first_named_child_of_kind(&init, "argument_list") else {
+                continue;
+            };
+            let field = node_text(&field_node, src).trim().to_string();
+            let value = node_text(&value_node, src)
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim()
+                .to_string();
+            if field.is_empty() || value.is_empty() {
+                continue;
+            }
+            specs.push(CppInitializerFieldSpec {
+                span: span_of(file, &init),
+                field,
+                value,
+            });
+        }
+        if !specs.is_empty() {
+            out.push((span_of(file, &fn_node), specs));
+        }
+    }
+    out
+}
+
+fn cpp_value_mentions_param(value: &str, param: &str) -> bool {
+    let mut token = String::new();
+    for ch in value.chars().chain(std::iter::once(' ')) {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            token.push(ch);
+            continue;
+        }
+        if token == param {
+            return true;
+        }
+        token.clear();
+    }
+    false
 }
 
 fn collect_cpp_member_visibility(

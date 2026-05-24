@@ -1895,9 +1895,12 @@ fn dart_mega_flow_handle_reaches_execute_from_readline_value() {
                 && global
                     .decl_of(bonsai_common::SymbolId::new(record.callee.raw()))
                     .is_some_and(|decl| decl.name == "run")
-                && record.tainted_args.iter().any(|arg| arg.value_text == "repo")
+                && record
+                    .tainted_args
+                    .iter()
+                    .any(|arg| arg.value_text == "repo" || arg.value_text.starts_with("repo."))
         }),
-        "expected Dart receiver dispatch `repo.run()` to resolve to run, not callback-constructor binding; records={:?}",
+        "expected Dart receiver dispatch `repo.run()` to resolve to run with repo-derived taint, not callback-constructor binding; records={:?}",
         result
             .call_records
             .iter()

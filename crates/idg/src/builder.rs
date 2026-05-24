@@ -55,6 +55,7 @@ struct CalleeEndpoints {
     params: Vec<NodeId>,
     param_names: Vec<String>,
     receiver_param_index: Option<usize>,
+    receiver_field_bases: Vec<String>,
     return_node: Option<NodeId>,
 }
 
@@ -64,6 +65,7 @@ struct FunctionStitchData {
     call_sites: Vec<CallSiteRef>,
     param_count: usize,
     receiver_param_index: Option<usize>,
+    receiver_field_bases: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -344,6 +346,7 @@ pub fn stitch_idg(
                 func,
                 params,
                 receiver_param_index,
+                receiver_field_bases,
                 call_sites,
                 ..
             } = out;
@@ -355,6 +358,7 @@ pub fn stitch_idg(
                     call_sites,
                     param_count,
                     receiver_param_index,
+                    receiver_field_bases,
                 },
             );
             local_remaps.push((func, remap));
@@ -516,6 +520,10 @@ fn build_callee_endpoints(
                     .map(|data| data.params.clone())
                     .unwrap_or_default(),
                 receiver_param_index: stitch_data.get(&func).and_then(|data| data.receiver_param_index),
+                receiver_field_bases: stitch_data
+                    .get(&func)
+                    .map(|data| data.receiver_field_bases.clone())
+                    .unwrap_or_default(),
                 return_node,
             },
         );
@@ -983,20 +991,28 @@ fn stitch_call_site(
         if resolver.is_constructor_func(cand.func) {
             let caller_call_ret = caller_remap.get(site.call_ret_node);
             if !caller_call_ret.is_sentinel() {
-                if let Some(receiver_idx) = endpoints.receiver_param_index {
-                    if let Some(receiver_param_name) =
-                        endpoints.param_names.get(receiver_idx).map(String::as_str)
+                let mut receiver_bases: Vec<String> = endpoints
+                    .receiver_param_index
+                    .and_then(|idx| endpoints.param_names.get(idx).cloned())
+                    .into_iter()
+                    .collect();
+                for base in &endpoints.receiver_field_bases {
+                    if !receiver_bases.iter().any(|existing| existing == base) {
+                        receiver_bases.push(base.clone());
+                    }
+                }
+                if !receiver_bases.is_empty() {
+                    for (target_base, write_span) in
+                        call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret)
                     {
-                        for (target_base, write_span) in
-                            call_ret_assignment_targets(ws, caller_seg, caller, caller_call_ret)
-                        {
+                        for receiver_param_name in &receiver_bases {
                             constructor_return_sites.push(ConstructorReturnStitch {
                                 caller,
                                 caller_seg,
                                 callee: cand.func,
                                 callee_seg: endpoints.segment,
-                                target_base,
-                                receiver_param_name: receiver_param_name.to_string(),
+                                target_base: target_base.clone(),
+                                receiver_param_name: receiver_param_name.clone(),
                                 call_span: site.site.0,
                                 write_span,
                                 precision: cand.precision,

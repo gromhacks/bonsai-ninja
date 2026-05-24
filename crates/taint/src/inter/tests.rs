@@ -396,6 +396,49 @@ fn named_constructor_field_initializer_taints_only_that_field() {
 }
 
 #[test]
+fn typed_constructor_named_args_are_field_initializers() {
+    assert_eq!(
+        named_field_initializers("Envelope(cmd: input, user: clean)"),
+        vec![
+            ("cmd".to_string(), "input".to_string()),
+            ("user".to_string(), "clean".to_string()),
+        ],
+    );
+    assert_eq!(
+        named_field_initializers("model.Envelope.named(cmd: input)"),
+        vec![("cmd".to_string(), "input".to_string())],
+    );
+    assert!(
+        named_field_initializers("helper(cmd: input)").is_empty(),
+        "lowercase function calls must not be treated as typed data-object constructors"
+    );
+}
+
+#[test]
+fn typed_constructor_return_named_args_preserve_field_taint_summary() {
+    let flow_events = vec![FlowEvent::Return {
+        span: Span::new(FileId::new(0), 1, 2),
+        value_text: Some("Envelope(cmd: input ?? this.cmd, user: clean)".to_string()),
+        value_name: Some("Envelope".to_string()),
+    }];
+    let summary = compute_function_summary(&summary_decl(flow_events, false));
+    assert!(
+        summary
+            .returns_field_taint_of
+            .iter()
+            .any(|field| field.param == 0 && field.field == "cmd"),
+        "typed constructor return should preserve named field taint: {summary:?}"
+    );
+    assert!(
+        summary
+            .returns_field_taint_of
+            .iter()
+            .all(|field| field.field != "user"),
+        "clean sibling named args must stay clean: {summary:?}"
+    );
+}
+
+#[test]
 fn compound_arg_token_fallback_keeps_standalone_value_next_to_qualified_access() {
     let state = seed(&["raw"]);
     assert!(
@@ -1794,6 +1837,42 @@ def entry(valid, user):
     assert!(
         result.tainted_calls.iter().all(|call| call.name != "sink_cmd"),
         "constructor named arg must not taint unrelated data field: {:?}",
+        result.tainted_calls
+    );
+}
+
+#[test]
+fn implicit_this_constructor_field_writes_stay_field_scoped() {
+    let src = r#"
+class Box {
+  constructor(cmd, user) {
+    this.cmd = cmd;
+    this.user = user;
+  }
+
+  run() {
+    sink_cmd(this.cmd);
+    sink_user(this.user);
+  }
+}
+
+function entry(cmd, user) {
+  const box = new Box(cmd, user);
+  box.run();
+}
+"#;
+    let db = javascript_ws_multi(&[("main.js", src)]);
+    let entry = func_id_of(&db, "entry");
+    let result = interprocedural_taint(entry, &seed(&["user"]), &config(&[]), &db);
+
+    assert!(
+        result.tainted_calls.iter().any(|call| call.name == "sink_user"),
+        "implicit-this constructor field write should taint the matching field: {:?}",
+        result.tainted_calls
+    );
+    assert!(
+        result.tainted_calls.iter().all(|call| call.name != "sink_cmd"),
+        "implicit-this constructor field write must not taint sibling fields: {:?}",
         result.tainted_calls
     );
 }

@@ -710,6 +710,11 @@ fn mega_flow_requires_alias_map(lang: &str) -> bool {
 fn collect_flow_event_kinds(value: &serde_json::Value, out: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(obj) => {
+            if obj.len() == 1 {
+                if let Some(kind) = obj.keys().next().filter(|kind| is_flow_event_kind(kind)) {
+                    out.insert(kind.clone());
+                }
+            }
             if let Some(events) = obj.get("flow_events").and_then(|v| v.as_array()) {
                 for event in events {
                     if let Some(kind) = event.as_object().and_then(|o| o.keys().next()) {
@@ -728,6 +733,26 @@ fn collect_flow_event_kinds(value: &serde_json::Value, out: &mut BTreeSet<String
         }
         _ => {}
     }
+}
+
+fn is_flow_event_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "Assign"
+            | "Await"
+            | "Branch"
+            | "Break"
+            | "Call"
+            | "Continue"
+            | "Defer"
+            | "Lifecycle"
+            | "Loop"
+            | "Return"
+            | "Throw"
+            | "Try"
+            | "Using"
+            | "Yield"
+    )
 }
 
 fn collect_rule_ids(value: &serde_json::Value, out: &mut BTreeSet<String>) {

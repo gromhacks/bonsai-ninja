@@ -158,12 +158,15 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
             if !self.funcs_share_language(caller, edge.to) {
                 continue;
             }
-            // Filter by callee name. Exact-span callgraph rows are
-            // already the semantic resolution for this call site; do
-            // not reject them just because the callee has an exported
-            // synthetic name (`default`) while the source calls it
-            // through a local alias (`render`).
-            let exact_site_match = edge.span == site;
+            // Filter by callee name. The call graph's span is a
+            // necessary selector, but not a sufficient one: some
+            // adapters emit multiple semantic candidates on the same
+            // expression span (receiver bridges, synthetic return
+            // hops, class-object helpers). If exact span equality
+            // bypasses the textual callee check, IDG stitching can
+            // wire `Type.method(arg)` into an unrelated peer method
+            // that happens to share the span. Alias/default export
+            // cases are handled by `func_to_call_names` below.
             // Adapters surface call events
             // with whatever syntactic form the source used — bare
             // (`runPipeline(x)`), qualified (`Pipeline.runPipeline(x)`,
@@ -173,7 +176,7 @@ impl<'a> CalleeResolver for WorkspaceCalleeResolver<'a> {
             // narrowed receiver types, so any name match here is a
             // legitimate dispatch target.
             if let Some(decl_name) = self.func_to_name.get(&edge.to) {
-                let mut matched = exact_site_match || names_match_for_callee(decl_name, callee_name);
+                let mut matched = names_match_for_callee(decl_name, callee_name);
                 if !matched {
                     // Alias-aware fallback: each FuncId tracks
                     // every textual name it can be called as,
@@ -773,14 +776,23 @@ where
     for (func, name) in &maps.func_to_name {
         name_to_funcs.entry(name.clone()).or_default().push(*func);
     }
+    let module_prefixes = module_prefixes_by_file(global);
+    let module_default_exports = module_default_export_funcs_by_module(global, &module_prefixes);
     for file in global.all_files() {
         let aliases = aliases_for_file(file);
+        let caller_module = module_prefixes.get(&file).map(String::as_str);
         for (alias, original) in aliases {
             if let Some(funcs) = name_to_funcs.get(&original) {
                 for func in funcs {
-                    let entry = func_to_call_names.entry(*func).or_default();
-                    if !entry.contains(&alias) {
-                        entry.push(alias.clone());
+                    add_func_call_alias(&mut func_to_call_names, *func, &alias);
+                }
+            }
+            if let Some(caller_module) = caller_module {
+                for module_name in import_module_candidates(caller_module, &original) {
+                    if let Some(funcs) = module_default_exports.get(&module_name) {
+                        for func in funcs {
+                            add_func_call_alias(&mut func_to_call_names, *func, &alias);
+                        }
                     }
                 }
             }
@@ -798,10 +810,7 @@ where
     let local_callable_bindings = bonsai_callgraph::collect_workspace_local_callable_bindings(global);
     for bindings in local_callable_bindings.values() {
         for (alias, func) in bindings {
-            let entry = func_to_call_names.entry(*func).or_default();
-            if !entry.contains(alias) {
-                entry.push(alias.clone());
-            }
+            add_func_call_alias(&mut func_to_call_names, *func, alias);
         }
     }
     let alias_count: usize = func_to_call_names.values().map(Vec::len).sum();
@@ -884,6 +893,139 @@ where
         ws.field_flow().len()
     ));
     ws
+}
+
+fn add_func_call_alias(func_to_call_names: &mut AHashMap<FuncId, Vec<String>>, func: FuncId, alias: &str) {
+    if alias.is_empty() {
+        return;
+    }
+    let entry = func_to_call_names.entry(func).or_default();
+    if !entry.iter().any(|existing| existing == alias) {
+        entry.push(alias.to_string());
+    }
+}
+
+fn module_prefixes_by_file(global: &GlobalIndex) -> AHashMap<FileId, String> {
+    let mut prefixes = AHashMap::new();
+    for file in global.all_files() {
+        if let Some(prefix) = global
+            .decls_in(file)
+            .iter()
+            .find(|decl| decl.name == "__module__")
+            .and_then(qname_module_prefix)
+        {
+            prefixes.insert(file, prefix.to_string());
+            continue;
+        }
+        let mut best: Option<&str> = None;
+        for decl in global.decls_in(file) {
+            if decl.parent.is_some() {
+                continue;
+            }
+            let Some(prefix) = qname_module_prefix(decl) else {
+                continue;
+            };
+            let is_better = match best {
+                Some(current) => prefix.split('.').count() < current.split('.').count(),
+                None => true,
+            };
+            if is_better {
+                best = Some(prefix);
+            }
+        }
+        if let Some(prefix) = best {
+            prefixes.insert(file, prefix.to_string());
+        }
+    }
+    prefixes
+}
+
+fn qname_module_prefix(decl: &bonsai_lang_api::Decl) -> Option<&str> {
+    let qname = decl.qualified_name.as_deref()?;
+    let (prefix, tail) = qname.rsplit_once('.')?;
+    if prefix.is_empty() || tail != decl.name {
+        return None;
+    }
+    Some(prefix)
+}
+
+fn module_default_export_funcs_by_module(
+    global: &GlobalIndex,
+    module_prefixes: &AHashMap<FileId, String>,
+) -> AHashMap<String, Vec<FuncId>> {
+    let mut by_module: AHashMap<String, Vec<FuncId>> = AHashMap::new();
+    for file in global.all_files() {
+        let Some(module_prefix) = module_prefixes.get(&file) else {
+            continue;
+        };
+        for decl in global.functions_in(file) {
+            if matches!(decl.name.as_str(), "default" | "exports") {
+                by_module
+                    .entry(module_prefix.clone())
+                    .or_default()
+                    .push(FuncId::new(decl.symbol.raw()));
+            }
+        }
+    }
+    by_module
+}
+
+fn import_module_candidates(caller_module: &str, original: &str) -> Vec<String> {
+    let target = original
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
+        .trim();
+    if target.is_empty() || target == "default" || !looks_like_module_path(target) {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    if target.starts_with('.') {
+        let mut parts: Vec<String> = caller_module
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect();
+        parts.pop();
+        for segment in target.split(['/', '\\']) {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                segment => parts.push(strip_known_source_extension(segment).to_string()),
+            }
+        }
+        if !parts.is_empty() {
+            out.push(parts.join("."));
+        }
+    } else {
+        let mut parts = Vec::new();
+        for segment in target.split(['/', '\\']) {
+            if !segment.is_empty() {
+                parts.push(strip_known_source_extension(segment));
+            }
+        }
+        if !parts.is_empty() {
+            out.push(parts.join("."));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn looks_like_module_path(value: &str) -> bool {
+    value.starts_with('.') || value.contains('/') || value.contains('\\')
+}
+
+fn strip_known_source_extension(segment: &str) -> &str {
+    for suffix in [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"] {
+        if let Some(stripped) = segment.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    segment
 }
 
 fn idg_build_enabled() -> bool {

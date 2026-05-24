@@ -4,9 +4,9 @@ use bonsai_common::FileId;
 use bonsai_lang_api::{
     collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CapabilityLevel, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary,
-    Visibility,
+    AdapterContext, AdapterError, CapabilityLevel, DeclIndex, FieldWrite, FlowEvent, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    TypeAliasVocabulary, Visibility,
 };
 
 const RUST_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -204,6 +204,7 @@ impl LanguageAdapter for RustAdapter {
                 isolate_rust_spawn_bodies(&mut decl.flow_events, &spawn_body_spans);
                 enrich_rust_format_macro_operands(&mut decl.flow_events);
                 enrich_rust_tail_return_sources(&mut decl.flow_events, &decl.params);
+                enrich_rust_constructor_field_writes(decl);
             }
         }
         // Rust module_path: relative file path under workspace root,
@@ -384,6 +385,65 @@ fn rust_tail_return_source_name(text: &str, params: &[String]) -> Option<String>
         return Some(expr.to_string());
     }
     rust_single_param_struct_literal_source(expr, params)
+}
+
+fn enrich_rust_constructor_field_writes(decl: &mut bonsai_lang_api::Decl) {
+    if decl.name != "new" || decl.params.is_empty() {
+        return;
+    }
+    for event in &decl.flow_events {
+        let FlowEvent::Return {
+            span,
+            value_text: Some(value_text),
+            ..
+        } = event
+        else {
+            continue;
+        };
+        for (field, value) in rust_struct_literal_field_values(value_text) {
+            let Some(source_idx) = decl.params.iter().position(|param| param == &value) else {
+                continue;
+            };
+            decl.receiver_field_writes.push(FieldWrite {
+                span: *span,
+                target: format!("self.{field}"),
+                source_param_indices: vec![source_idx],
+            });
+        }
+    }
+    decl.receiver_field_writes
+        .sort_by_key(|write| (write.span.start, write.target.clone()));
+    decl.receiver_field_writes.dedup_by(|a, b| {
+        a.span == b.span && a.target == b.target && a.source_param_indices == b.source_param_indices
+    });
+}
+
+fn rust_struct_literal_field_values(expr: &str) -> Vec<(String, String)> {
+    let expr = strip_rust_reference_prefix(expr.trim());
+    let Some(open) = expr.find('{') else {
+        return Vec::new();
+    };
+    let Some(close) = expr.rfind('}') else {
+        return Vec::new();
+    };
+    if close <= open || !expr[close + 1..].trim().is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for field in expr[open + 1..close]
+        .split(',')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+    {
+        let (target, value) = field
+            .split_once(':')
+            .map(|(target, value)| (target.trim(), value.trim()))
+            .unwrap_or((field, field));
+        if rust_bare_identifier(target) && rust_bare_identifier(value) {
+            out.push((target.to_string(), value.to_string()));
+        }
+    }
+    out
 }
 
 fn strip_rust_reference_prefix(mut expr: &str) -> &str {

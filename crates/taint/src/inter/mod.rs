@@ -865,37 +865,38 @@ fn propagate_taint_through_events(
         let adjacent_source_call_args = adjacent_call_args_for_assignment(events, event_index);
         let split_call_assignment = split_call_assignment_event(events, event_index);
         let destructure_index = destructuring_target_index(events, event_index, event, ctx.db);
-        let return_tainted_assignment = if let Some(synthetic) = split_call_assignment.as_ref() {
-            apply_return_taint(
-                synthetic,
-                &[],
-                destructure_index,
-                state,
-                ctx.config,
-                ctx.db,
-                ctx.aliases,
-                ctx.alias_targets,
-                ctx.local_bindings,
-                ctx.caller,
-                summary_cache,
-                suppress_container_taint,
-            )
-        } else {
-            apply_return_taint(
-                event,
-                &adjacent_source_call_args,
-                destructure_index,
-                state,
-                ctx.config,
-                ctx.db,
-                ctx.aliases,
-                ctx.alias_targets,
-                ctx.local_bindings,
-                ctx.caller,
-                summary_cache,
-                suppress_container_taint,
-            )
-        };
+        let return_tainted_assignment =
+            if let Some((synthetic, split_call_args)) = split_call_assignment.as_ref() {
+                apply_return_taint(
+                    synthetic,
+                    split_call_args,
+                    destructure_index,
+                    state,
+                    ctx.config,
+                    ctx.db,
+                    ctx.aliases,
+                    ctx.alias_targets,
+                    ctx.local_bindings,
+                    ctx.caller,
+                    summary_cache,
+                    suppress_container_taint,
+                )
+            } else {
+                apply_return_taint(
+                    event,
+                    &adjacent_source_call_args,
+                    destructure_index,
+                    state,
+                    ctx.config,
+                    ctx.db,
+                    ctx.aliases,
+                    ctx.alias_targets,
+                    ctx.local_bindings,
+                    ctx.caller,
+                    summary_cache,
+                    suppress_container_taint,
+                )
+            };
 
         match event {
             FlowEvent::Call {
@@ -1074,7 +1075,7 @@ fn propagate_taint_through_events(
         }
 
         if !return_tainted_assignment {
-            if split_call_assignment.as_ref().is_some_and(|synthetic| {
+            if split_call_assignment.as_ref().is_some_and(|(synthetic, _)| {
                 split_call_assignment_consumes_all_tainted_sources(synthetic, state)
                     && !assignment_event_is_iteration_binding(event, ctx.db)
             }) {
@@ -1089,6 +1090,12 @@ fn propagate_taint_through_events(
                 ctx.local_bindings,
                 ctx.caller,
             ) && !assignment_event_is_iteration_binding(event, ctx.db)
+                && !source_call_assignment_has_independent_tainted_source(
+                    event,
+                    state,
+                    Some(ctx.db),
+                    Some(ctx.caller),
+                )
             {
                 continue;
             }
@@ -1145,6 +1152,7 @@ fn child_lineage_history(
 struct EffectiveCallArg {
     value_text: String,
     name: Option<String>,
+    source_names: Vec<String>,
 }
 
 impl EffectiveCallArg {
@@ -1152,6 +1160,15 @@ impl EffectiveCallArg {
         Self {
             value_text,
             name: None,
+            source_names: Vec::new(),
+        }
+    }
+
+    fn from_call_arg(arg: &CallArg) -> Self {
+        Self {
+            value_text: arg.value_text.clone(),
+            name: arg.name.clone(),
+            source_names: arg.source_names.clone(),
         }
     }
 }
@@ -1188,21 +1205,17 @@ fn adjacent_call_args_for_assignment(events: &[FlowEvent], event_index: usize) -
                         || args.len() > source_call_args.len()
                         || args.iter().any(|arg| arg.name.is_some())) =>
             {
-                Some(
-                    args.iter()
-                        .map(|arg| EffectiveCallArg {
-                            value_text: arg.value_text.clone(),
-                            name: arg.name.clone(),
-                        })
-                        .collect(),
-                )
+                Some(args.iter().map(EffectiveCallArg::from_call_arg).collect())
             }
             _ => None,
         })
         .unwrap_or_default()
 }
 
-fn split_call_assignment_event(events: &[FlowEvent], event_index: usize) -> Option<FlowEvent> {
+fn split_call_assignment_event(
+    events: &[FlowEvent],
+    event_index: usize,
+) -> Option<(FlowEvent, Vec<EffectiveCallArg>)> {
     let FlowEvent::Assign {
         target,
         source_call,
@@ -1231,15 +1244,20 @@ fn split_call_assignment_event(events: &[FlowEvent], event_index: usize) -> Opti
                 || args.len() > source_call_args.len()
                 || args.iter().any(|arg| arg.name.is_some()))
             && call_matches_assignment(name))
-        .then(|| FlowEvent::Assign {
-            span: *assign_span,
-            target: target.clone(),
-            source_name: None,
-            source_call: Some(name.to_string()),
-            source_call_args: args.iter().map(|arg| arg.value_text.clone()).collect(),
-            source_names: source_names.clone(),
-            declares_new_binding: false,
-            value_kind: None,
+        .then(|| {
+            (
+                FlowEvent::Assign {
+                    span: *assign_span,
+                    target: target.clone(),
+                    source_name: None,
+                    source_call: Some(name.to_string()),
+                    source_call_args: args.iter().map(|arg| arg.value_text.clone()).collect(),
+                    source_names: source_names.clone(),
+                    declares_new_binding: false,
+                    value_kind: None,
+                },
+                args.iter().map(EffectiveCallArg::from_call_arg).collect(),
+            )
         })
     };
 
@@ -2263,10 +2281,7 @@ fn propagate_call_event(
     let effective_call_args = call
         .args
         .iter()
-        .map(|arg| EffectiveCallArg {
-            value_text: arg.value_text.clone(),
-            name: arg.name.clone(),
-        })
+        .map(EffectiveCallArg::from_call_arg)
         .collect::<Vec<_>>();
     let candidates =
         narrow_overload_candidates_by_arg_types(candidates, &effective_call_args, ctx.db, ctx.caller);
@@ -3040,37 +3055,38 @@ fn walk_events_for_sink(
         let adjacent_source_call_args = adjacent_call_args_for_assignment(events, event_index);
         let split_call_assignment = split_call_assignment_event(events, event_index);
         let destructure_index = destructuring_target_index(events, event_index, event, ctx.db);
-        let return_tainted_assignment = if let Some(synthetic) = split_call_assignment.as_ref() {
-            apply_return_taint(
-                synthetic,
-                &[],
-                destructure_index,
-                &mut state,
-                ctx.config,
-                ctx.db,
-                ctx.aliases,
-                ctx.alias_targets,
-                ctx.local_bindings,
-                ctx.caller,
-                summary_cache,
-                suppress_container_taint,
-            )
-        } else {
-            apply_return_taint(
-                event,
-                &adjacent_source_call_args,
-                destructure_index,
-                &mut state,
-                ctx.config,
-                ctx.db,
-                ctx.aliases,
-                ctx.alias_targets,
-                ctx.local_bindings,
-                ctx.caller,
-                summary_cache,
-                suppress_container_taint,
-            )
-        };
+        let return_tainted_assignment =
+            if let Some((synthetic, split_call_args)) = split_call_assignment.as_ref() {
+                apply_return_taint(
+                    synthetic,
+                    split_call_args,
+                    destructure_index,
+                    &mut state,
+                    ctx.config,
+                    ctx.db,
+                    ctx.aliases,
+                    ctx.alias_targets,
+                    ctx.local_bindings,
+                    ctx.caller,
+                    summary_cache,
+                    suppress_container_taint,
+                )
+            } else {
+                apply_return_taint(
+                    event,
+                    &adjacent_source_call_args,
+                    destructure_index,
+                    &mut state,
+                    ctx.config,
+                    ctx.db,
+                    ctx.aliases,
+                    ctx.alias_targets,
+                    ctx.local_bindings,
+                    ctx.caller,
+                    summary_cache,
+                    suppress_container_taint,
+                )
+            };
         if event_at_sink_receives_taint(event, ctx.sink_span, &state) {
             return (state, true);
         }
@@ -3156,7 +3172,7 @@ fn walk_events_for_sink(
             _ => {}
         }
         if !return_tainted_assignment {
-            if split_call_assignment.as_ref().is_some_and(|synthetic| {
+            if split_call_assignment.as_ref().is_some_and(|(synthetic, _)| {
                 split_call_assignment_consumes_all_tainted_sources(synthetic, &state)
                     && !assignment_event_is_iteration_binding(event, ctx.db)
             }) {
@@ -3187,6 +3203,12 @@ fn walk_events_for_sink(
                 ctx.local_bindings,
                 ctx.caller,
             ) && !assignment_event_is_iteration_binding(event, ctx.db)
+                && !source_call_assignment_has_independent_tainted_source(
+                    event,
+                    &state,
+                    Some(ctx.db),
+                    Some(ctx.caller),
+                )
             {
                 continue;
             }
@@ -3536,9 +3558,9 @@ fn apply_return_taint(
         }
     }
     candidates = narrow_overload_candidates_by_arg_types(candidates, effective_source_call_args, db, caller);
-    let tainted_call_arg = effective_source_call_arg_values
-        .iter()
-        .any(|arg| arg_text_is_tainted(arg, state) || actual_has_descendant_taint(arg, state));
+    let tainted_call_arg = effective_source_call_args.iter().any(|arg| {
+        effective_call_arg_is_tainted(arg, state) || effective_call_arg_has_descendant_taint(arg, state)
+    });
     let has_named_field_args = source_call_args_have_named_fields(&effective_source_call_arg_values);
     let constructs_container = class_like_constructor_call(callee_name, db, caller, alias_targets)
         || (has_named_field_args && call_name_looks_type_constructor(callee_name))
@@ -3598,9 +3620,9 @@ fn apply_return_taint(
         let callee_decl = global.decl_of(SymbolId::new(candidate.func.raw()));
         let call_operand_tainted = source_names_tainted
             || source_call_rhs_tainted
-            || effective_source_call_arg_values
+            || effective_source_call_args
                 .iter()
-                .any(|arg| arg_text_is_tainted(arg, state));
+                .any(|arg| effective_call_arg_is_tainted(arg, state));
         let independent_rhs_operand_tainted = source_names_tainted
             && effective_source_call_arg_values.is_empty()
             && source_names
@@ -3633,9 +3655,8 @@ fn apply_return_taint(
                 config,
             )
         });
-        let constructor_has_receiver_field_writes = callee_decl.is_some_and(|decl| {
-            decl.receiver_param_index.is_some() && !decl.receiver_field_writes.is_empty()
-        });
+        let constructor_has_receiver_field_writes =
+            callee_decl.is_some_and(|decl| !decl.receiver_field_writes.is_empty());
         let value_tainted_transits = source_call_name_is_seeded(callee_name, state)
             || independent_rhs_operand_tainted
             || call_projection_tainted
@@ -3670,7 +3691,14 @@ fn apply_return_taint(
                                                 call_arg_is_directly_tainted(receiver, state)
                                             }))
                         })
-            });
+            })
+            || higher_order_callback_return_taints_value(
+                callee_decl,
+                effective_source_call_args,
+                &resolve_scope,
+                summary_cache,
+                state,
+            );
         let access_path_tainted_transits = summary.returns_access_paths.iter().any(|returned| {
             effective_arg_value_for_param(effective_source_call_args, callee_decl, returned.param)
                 .map(|arg_text| returned_access_path_is_tainted(arg_text, &returned.path, state))
@@ -3794,17 +3822,137 @@ fn apply_return_taint(
     tainted
 }
 
+fn higher_order_callback_return_taints_value(
+    callee_decl: Option<&Decl>,
+    effective_source_call_args: &[EffectiveCallArg],
+    resolve_scope: &CallResolveScope<'_>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
+    state: &TokenSet,
+) -> bool {
+    let Some(callee_decl) = callee_decl else {
+        return false;
+    };
+    let Some(FlowEvent::Call { name, args, .. }) = terminal_callback_call_event(&callee_decl.flow_events)
+    else {
+        return false;
+    };
+    let Some(callback_param_idx) = callee_decl
+        .params
+        .iter()
+        .position(|param| call_names_match(param, name) || same_identifier_name(param, name))
+    else {
+        return false;
+    };
+    let Some(callback_actual) =
+        effective_arg_for_param(effective_source_call_args, Some(callee_decl), callback_param_idx)
+    else {
+        return false;
+    };
+    let callback_name = callback_actual.value_text.trim();
+    if callback_name.is_empty() || is_quoted_literal(callback_name) {
+        return false;
+    }
+    let callback_candidates = resolve_call_candidates_with_caller_at(callback_name, resolve_scope, &[], None);
+    if callback_candidates.is_empty() {
+        return false;
+    }
+    let callback_call_args: Vec<EffectiveCallArg> =
+        args.iter().map(EffectiveCallArg::from_call_arg).collect();
+    let global = resolve_scope.db.global_index();
+    callback_candidates.iter().any(|candidate| {
+        let callback_decl = global.decl_of(SymbolId::new(candidate.func.raw()));
+        let callback_summary = cache_or_insert_with(summary_cache, candidate.func, || {
+            callback_decl.map(compute_function_summary).unwrap_or_default()
+        });
+        callback_summary.returns_taint_of.iter().any(|&returned_idx| {
+            callback_returned_param_maps_to_tainted_actual(
+                &callback_call_args,
+                callback_decl,
+                returned_idx,
+                callee_decl,
+                effective_source_call_args,
+                state,
+                false,
+            )
+        }) || callback_summary
+            .returns_descendant_taint_of
+            .iter()
+            .any(|&returned_idx| {
+                callback_returned_param_maps_to_tainted_actual(
+                    &callback_call_args,
+                    callback_decl,
+                    returned_idx,
+                    callee_decl,
+                    effective_source_call_args,
+                    state,
+                    true,
+                )
+            })
+    })
+}
+
+fn terminal_callback_call_event(events: &[FlowEvent]) -> Option<&FlowEvent> {
+    match events.last()? {
+        call @ FlowEvent::Call { .. } => Some(call),
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => terminal_callback_call_event(then_events).or_else(|| terminal_callback_call_event(else_events)),
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => terminal_callback_call_event(body)
+            .or_else(|| terminal_callback_call_event(catch_events))
+            .or_else(|| terminal_callback_call_event(finally_events)),
+        FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => terminal_callback_call_event(body),
+        _ => None,
+    }
+}
+
+fn callback_returned_param_maps_to_tainted_actual(
+    callback_call_args: &[EffectiveCallArg],
+    callback_decl: Option<&Decl>,
+    returned_idx: usize,
+    wrapper_decl: &Decl,
+    wrapper_actual_args: &[EffectiveCallArg],
+    state: &TokenSet,
+    descendant: bool,
+) -> bool {
+    let Some(wrapper_arg_text) =
+        effective_arg_value_for_param(callback_call_args, callback_decl, returned_idx)
+    else {
+        return false;
+    };
+    let Some(wrapper_param_idx) = wrapper_decl.params.iter().position(|param| {
+        call_names_match(param, wrapper_arg_text) || same_identifier_name(param, wrapper_arg_text)
+    }) else {
+        return false;
+    };
+    let Some(actual) = effective_arg_for_param(wrapper_actual_args, Some(wrapper_decl), wrapper_param_idx)
+    else {
+        return false;
+    };
+    if descendant {
+        effective_call_arg_has_descendant_taint(actual, state)
+    } else {
+        effective_call_arg_has_direct_value_taint(actual, state)
+    }
+}
+
 fn source_call_args_have_named_fields(args: &[String]) -> bool {
     args.iter().any(|arg| !named_field_initializers(arg).is_empty())
 }
 
-fn effective_arg_value_for_param<'a>(
+fn effective_arg_for_param<'a>(
     args: &'a [EffectiveCallArg],
     decl: Option<&Decl>,
     param_idx: usize,
-) -> Option<&'a str> {
+) -> Option<&'a EffectiveCallArg> {
     let Some(decl) = decl else {
-        return args.get(param_idx).map(|arg| arg.value_text.as_str());
+        return args.get(param_idx);
     };
     if let Some(param_name) = decl.params.get(param_idx).map(|param| param.trim()) {
         if !param_name.is_empty() {
@@ -3812,7 +3960,7 @@ fn effective_arg_value_for_param<'a>(
                 .iter()
                 .find(|arg| arg.name.as_deref().is_some_and(|name| name.trim() == param_name))
             {
-                return Some(named.value_text.as_str());
+                return Some(named);
             }
         }
     }
@@ -3826,10 +3974,15 @@ fn effective_arg_value_for_param<'a>(
         .receiver_param_index
         .filter(|receiver_idx| *receiver_idx < param_idx)
         .map_or(param_idx, |_| param_idx.saturating_sub(1));
-    args.iter()
-        .filter(|arg| arg.name.is_none())
-        .nth(positional_idx)
-        .map(|arg| arg.value_text.as_str())
+    args.iter().filter(|arg| arg.name.is_none()).nth(positional_idx)
+}
+
+fn effective_arg_value_for_param<'a>(
+    args: &'a [EffectiveCallArg],
+    decl: Option<&Decl>,
+    param_idx: usize,
+) -> Option<&'a str> {
+    effective_arg_for_param(args, decl, param_idx).map(|arg| arg.value_text.as_str())
 }
 
 fn narrow_overload_candidates_by_arg_types(
@@ -3951,39 +4104,64 @@ fn apply_constructor_receiver_field_taint(
     db: &AnalyzerDb,
     config: &InterTaintConfig,
 ) -> bool {
-    let Some(receiver_idx) = decl.receiver_param_index else {
-        return false;
-    };
     let writes = constructor_receiver_field_writes_for_decl(decl, db, config);
     if writes.is_empty() {
         return false;
     }
-    let Some(receiver_name) = decl.params.get(receiver_idx).map(String::as_str) else {
-        return false;
-    };
     let target = normalise_target_text(target);
     if target.is_empty() {
         return false;
     }
+    let receiver_names = constructor_receiver_names_for_decl(decl);
+    if receiver_names.is_empty() {
+        return false;
+    }
     let mut changed = false;
     for write in &writes {
-        let Some(field_tail) = receiver_field_write_tail(&write.target, receiver_name) else {
+        let Some(field_tail) = receiver_names
+            .iter()
+            .find_map(|receiver_name| receiver_field_write_tail(&write.target, receiver_name))
+        else {
             continue;
         };
         let field_target = format!("{target}.{field_tail}");
         for source_param in &write.source_param_indices {
-            let Some(arg_text) = effective_arg_value_for_param(args, Some(decl), *source_param) else {
+            let Some(arg) = effective_arg_for_param(args, Some(decl), *source_param) else {
                 continue;
             };
-            if call_arg_is_directly_tainted(arg_text, state) {
+            if effective_call_arg_has_direct_value_taint(arg, state) {
                 let before = state.len();
                 insert_value_target_taint(state, &field_target);
                 changed |= state.len() != before;
             }
-            changed |= copy_descendant_taint_to_target(state, &field_target, arg_text);
+            changed |= copy_descendant_taint_to_target(state, &field_target, &arg.value_text);
+            for source_name in &arg.source_names {
+                changed |= copy_descendant_taint_to_target(state, &field_target, source_name);
+            }
         }
     }
     changed
+}
+
+fn constructor_receiver_names_for_decl(decl: &Decl) -> Vec<String> {
+    if let Some(receiver_idx) = decl.receiver_param_index {
+        return decl
+            .params
+            .get(receiver_idx)
+            .map(|receiver| vec![receiver.clone()])
+            .unwrap_or_default();
+    }
+    let mut names = decl.implicit_receiver_names.clone();
+    for write in &decl.receiver_field_writes {
+        let target = normalise_target_text(&write.target);
+        let Some((base, _)) = target.split_once('.') else {
+            continue;
+        };
+        if !base.trim().is_empty() && !names.iter().any(|existing| existing == base) {
+            names.push(base.to_string());
+        }
+    }
+    names
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4167,10 +4345,7 @@ fn collect_super_constructor_call_receiver_field_writes(
     }
     let effective_args = args
         .iter()
-        .map(|arg| EffectiveCallArg {
-            value_text: arg.value_text.clone(),
-            name: arg.name.clone(),
-        })
+        .map(EffectiveCallArg::from_call_arg)
         .collect::<Vec<_>>();
     let global = db.global_index();
     for candidate in candidates {
@@ -4395,6 +4570,8 @@ fn named_field_initializers(text: &str) -> Vec<(String, String)> {
         (body, true)
     } else if let Some(body) = struct_literal_body(trimmed) {
         (body, true)
+    } else if let Some(body) = type_constructor_arg_body(trimmed) {
+        (body, false)
     } else if let Some(body) = strip_balanced_outer(trimmed, '(', ')') {
         (body, false)
     } else {
@@ -4516,6 +4693,39 @@ fn struct_literal_body(text: &str) -> Option<&str> {
         return None;
     }
     strip_balanced_outer(text[open..].trim(), '{', '}')
+}
+
+fn type_constructor_arg_body(text: &str) -> Option<&str> {
+    let mut text = text.trim();
+    for keyword in ["return ", "yield ", "new ", "const "] {
+        if let Some(rest) = text.strip_prefix(keyword) {
+            text = rest.trim_start();
+        }
+    }
+    let open = text.find('(')?;
+    let candidate = text[..open].trim();
+    if !type_constructor_prefix_looks_like_type(candidate) {
+        return None;
+    }
+    strip_balanced_outer(text[open..].trim(), '(', ')')
+}
+
+fn type_constructor_prefix_looks_like_type(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.contains(char::is_whitespace) {
+        return false;
+    }
+    candidate
+        .split("::")
+        .flat_map(|part| part.split('.'))
+        .map(|part| part.split('<').next().unwrap_or(part).trim())
+        .any(|part| {
+            part == "Self"
+                || part
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+        })
 }
 
 fn shorthand_field_initializer(part: &str) -> Option<String> {
@@ -4860,6 +5070,32 @@ fn resolved_source_call_assignment(
         config,
     )
     .is_empty()
+}
+
+fn source_call_assignment_has_independent_tainted_source(
+    event: &FlowEvent,
+    state: &TokenSet,
+    db: Option<&AnalyzerDb>,
+    caller: Option<FuncId>,
+) -> bool {
+    let FlowEvent::Assign {
+        source_call: Some(callee_name),
+        source_call_args,
+        source_names,
+        span,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if !source_call_args.is_empty() {
+        return false;
+    }
+    let qualified_bases = synthetic_qualified_source_bases(source_names, *span, db);
+    source_names.iter().any(|name| {
+        !call_names_match(name, callee_name)
+            && assignment_source_name_is_value_tainted(name, &qualified_bases, db, caller, state)
+    })
 }
 
 /// Apply state changes that follow an unresolved call when one of
@@ -5250,6 +5486,30 @@ fn call_arg_has_direct_value_taint(arg: &CallArg, state: &TokenSet) -> bool {
             .source_names
             .iter()
             .any(|operand| call_arg_source_operand_is_tainted(&arg.value_text, operand, state))
+}
+
+fn effective_call_arg_is_tainted(arg: &EffectiveCallArg, state: &TokenSet) -> bool {
+    arg_text_is_tainted(&arg.value_text, state)
+        || arg
+            .source_names
+            .iter()
+            .any(|operand| call_arg_source_operand_is_tainted(&arg.value_text, operand, state))
+}
+
+fn effective_call_arg_has_direct_value_taint(arg: &EffectiveCallArg, state: &TokenSet) -> bool {
+    call_arg_is_directly_tainted(&arg.value_text, state)
+        || arg
+            .source_names
+            .iter()
+            .any(|operand| call_arg_source_operand_is_tainted(&arg.value_text, operand, state))
+}
+
+fn effective_call_arg_has_descendant_taint(arg: &EffectiveCallArg, state: &TokenSet) -> bool {
+    actual_has_descendant_taint(&arg.value_text, state)
+        || arg
+            .source_names
+            .iter()
+            .any(|operand| actual_has_descendant_taint(operand, state))
 }
 
 fn call_arg_source_operand_is_tainted(value_text: &str, operand: &str, state: &TokenSet) -> bool {

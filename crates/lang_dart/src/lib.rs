@@ -2,9 +2,12 @@
 use bonsai_common::FileId;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    kit::{
+        collect_kinds, first_named_child, first_named_child_of_kind, language_from_pack, node_text,
+        parse_with, span_of,
+    },
+    AdapterContext, AdapterError, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -142,6 +145,31 @@ impl LanguageAdapter for DartAdapter {
                     decl.bases = bases.clone();
                 }
             }
+            let signature_formals_by_span = collect_dart_signature_formals(&tree, file, source_bytes);
+            let expression_returns_by_span = collect_dart_expression_body_returns(&tree, file, source_bytes);
+            for decl in &mut decl_index.defs {
+                if let Some((params, writes)) = dart_formals_for_decl(decl, &signature_formals_by_span) {
+                    if !params.is_empty() {
+                        decl.params = params.clone();
+                    }
+                    if decl.kind == DeclKind::Constructor {
+                        decl.receiver_field_writes.extend(writes.clone());
+                    }
+                }
+                if let Some(return_event) = dart_expression_return_for_decl(decl, &expression_returns_by_span)
+                {
+                    if !decl.flow_events.iter().any(|event| {
+                        matches!(
+                            (event, return_event),
+                            (FlowEvent::Return { span: existing, .. }, FlowEvent::Return { span: added, .. })
+                                if existing == added
+                        )
+                    }) {
+                        decl.flow_events.push(return_event.clone());
+                        decl.has_implicit_returns = true;
+                    }
+                }
+            }
         }
         // Recognised Dart lifecycle transitions — `close` for streams /
         // sinks / files, `cancel` for stream subscriptions and timers,
@@ -178,6 +206,288 @@ impl LanguageAdapter for DartAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn dart_expression_return_for_decl<'a>(
+    decl: &bonsai_lang_api::Decl,
+    returns_by_span: &'a [(bonsai_common::Span, FlowEvent)],
+) -> Option<&'a FlowEvent> {
+    returns_by_span
+        .iter()
+        .find(|(span, _)| span.file == decl.span.file && span.start == decl.span.start)
+        .map(|(_, event)| event)
+        .or_else(|| {
+            returns_by_span
+                .iter()
+                .find(|(span, _)| {
+                    span.file == decl.span.file && span.start <= decl.span.start && decl.span.end <= span.end
+                })
+                .map(|(_, event)| event)
+        })
+}
+
+fn dart_formals_for_decl<'a>(
+    decl: &bonsai_lang_api::Decl,
+    formals_by_span: &'a [(bonsai_common::Span, Vec<String>, Vec<FieldWrite>)],
+) -> Option<(&'a Vec<String>, &'a Vec<FieldWrite>)> {
+    let same_file = |span: &bonsai_common::Span| span.file == decl.span.file;
+    let exact_start = |span: &bonsai_common::Span| same_file(span) && span.start == decl.span.start;
+    let contains_decl = |span: &bonsai_common::Span| {
+        same_file(span) && span.start <= decl.span.start && decl.span.end <= span.end
+    };
+
+    if decl.kind == DeclKind::Constructor {
+        if let Some((_, params, writes)) = formals_by_span
+            .iter()
+            .find(|(span, _, writes)| exact_start(span) && !writes.is_empty())
+        {
+            return Some((params, writes));
+        }
+    }
+    if let Some((_, params, writes)) = formals_by_span.iter().find(|(span, _, _)| exact_start(span)) {
+        return Some((params, writes));
+    }
+
+    if decl.kind == DeclKind::Constructor {
+        if let Some((_, params, writes)) = formals_by_span
+            .iter()
+            .find(|(span, _, writes)| contains_decl(span) && !writes.is_empty())
+        {
+            return Some((params, writes));
+        }
+    }
+    if let Some((_, params, writes)) = formals_by_span.iter().find(|(span, _, _)| contains_decl(span)) {
+        return Some((params, writes));
+    }
+
+    if decl.kind != DeclKind::Constructor {
+        return None;
+    }
+    formals_by_span
+        .iter()
+        .find(|(span, params, writes)| {
+            same_file(span) && !writes.is_empty() && params.as_slice() == decl.params.as_slice()
+        })
+        .map(|(_, params, writes)| (params, writes))
+}
+
+fn collect_dart_expression_body_returns(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, FlowEvent)> {
+    let mut out = Vec::new();
+    for signature in collect_kinds(
+        tree,
+        &[
+            "function_signature",
+            "getter_signature",
+            "setter_signature",
+            "method_signature",
+            "constructor_signature",
+            "factory_constructor_signature",
+        ],
+    ) {
+        let signature = dart_signature_node_for_formals(signature);
+        let Some(body) = dart_signature_body_node(signature) else {
+            continue;
+        };
+        if !dart_function_body_is_expression(&body) {
+            continue;
+        }
+        let Some(value_text) = dart_expression_body_text(&body, src) else {
+            continue;
+        };
+        let value_name = first_named_child_of_kind(&body, "identifier")
+            .map(|identifier| node_text(&identifier, src).trim().to_string())
+            .filter(|name| !name.is_empty());
+        out.push((
+            span_of(file, &signature),
+            FlowEvent::Return {
+                span: span_of(file, &body),
+                value_text: Some(value_text),
+                value_name,
+            },
+        ));
+    }
+    out
+}
+
+fn dart_signature_body_node(signature: Node<'_>) -> Option<Node<'_>> {
+    signature
+        .next_named_sibling()
+        .filter(|node| node.kind() == "function_body")
+        .or_else(|| {
+            let parent = signature.parent()?;
+            parent
+                .next_named_sibling()
+                .filter(|node| node.kind() == "function_body")
+        })
+}
+
+fn dart_function_body_is_expression(body: &Node<'_>) -> bool {
+    first_named_child_of_kind(body, "block").is_none()
+}
+
+fn dart_expression_body_text(body: &Node<'_>, src: &[u8]) -> Option<String> {
+    let text = node_text(body, src).trim();
+    let text = text.strip_prefix("=>").unwrap_or(text).trim();
+    let text = text.strip_suffix(';').unwrap_or(text).trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn collect_dart_signature_formals(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, Vec<String>, Vec<FieldWrite>)> {
+    let mut out = Vec::new();
+    for signature in collect_kinds(
+        tree,
+        &[
+            "function_signature",
+            "getter_signature",
+            "setter_signature",
+            "method_signature",
+            "constructor_signature",
+            "factory_constructor_signature",
+        ],
+    ) {
+        let signature = dart_signature_node_for_formals(signature);
+        let Some(params) = first_named_child_of_kind(&signature, "formal_parameter_list") else {
+            continue;
+        };
+        let mut formals = Vec::new();
+        collect_dart_constructor_formal_params(params, file, src, &mut formals);
+        let param_names = formals
+            .iter()
+            .map(|formal| formal.name.clone())
+            .collect::<Vec<_>>();
+        let mut writes = Vec::new();
+        for (idx, formal) in formals.iter().enumerate() {
+            if let Some(field_span) = formal.field_formal_span {
+                writes.push(FieldWrite {
+                    span: field_span,
+                    target: format!("this.{}", formal.name),
+                    source_param_indices: vec![idx],
+                });
+            }
+        }
+        if !param_names.is_empty() || !writes.is_empty() {
+            out.push((span_of(file, &signature), param_names, writes));
+        }
+    }
+    out
+}
+
+fn dart_signature_node_for_formals(signature: Node<'_>) -> Node<'_> {
+    if signature.kind() == "method_signature" {
+        if let Some(inner) = first_named_child_of_kind(&signature, "function_signature") {
+            return inner;
+        }
+    }
+    if signature.kind() == "declaration" {
+        if let Some(inner) = first_named_child(&signature) {
+            if matches!(
+                inner.kind(),
+                "function_signature"
+                    | "getter_signature"
+                    | "setter_signature"
+                    | "method_signature"
+                    | "constructor_signature"
+                    | "factory_constructor_signature"
+            ) {
+                return dart_signature_node_for_formals(inner);
+            }
+        }
+    }
+    signature
+}
+
+struct DartConstructorFormal {
+    name: String,
+    field_formal_span: Option<bonsai_common::Span>,
+}
+
+fn collect_dart_constructor_formal_params(
+    node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<DartConstructorFormal>,
+) {
+    if matches!(
+        node.kind(),
+        "formal_parameter"
+            | "normal_formal_parameter"
+            | "simple_formal_parameter"
+            | "default_formal_parameter"
+            | "default_named_parameter"
+    ) {
+        if let Some(formal) = dart_constructor_formal(node, file, src) {
+            out.push(formal);
+            return;
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_dart_constructor_formal_params(child, file, src, out);
+    }
+}
+
+fn dart_constructor_formal(
+    parameter_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+) -> Option<DartConstructorFormal> {
+    if let Some(field_formal) = first_descendant_of_kind(parameter_node, "constructor_param") {
+        let field_name = first_named_child_of_kind(&field_formal, "identifier")
+            .map(|identifier| node_text(&identifier, src).trim().to_string())
+            .filter(|field_name| !field_name.is_empty())?;
+        return Some(DartConstructorFormal {
+            name: field_name,
+            field_formal_span: Some(span_of(file, &field_formal)),
+        });
+    }
+    let name = dart_parameter_binding_name(parameter_node, src)?;
+    Some(DartConstructorFormal {
+        name,
+        field_formal_span: None,
+    })
+}
+
+fn dart_parameter_binding_name(parameter_node: Node<'_>, src: &[u8]) -> Option<String> {
+    if let Some(name_node) = parameter_node.child_by_field_name("name") {
+        let name = node_text(&name_node, src).trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    let mut last_identifier: Option<Node<'_>> = None;
+    let mut cursor = parameter_node.walk();
+    for child in parameter_node.named_children(&mut cursor) {
+        if child.kind() == "identifier" {
+            last_identifier = Some(child);
+        }
+    }
+    last_identifier
+        .map(|identifier| node_text(&identifier, src).trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn first_descendant_of_kind<'tree>(
+    node: tree_sitter::Node<'tree>,
+    kind: &str,
+) -> Option<tree_sitter::Node<'tree>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = first_descendant_of_kind(child, kind) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Extract Dart `import` directives into the canonical `ImportSpec` shape
