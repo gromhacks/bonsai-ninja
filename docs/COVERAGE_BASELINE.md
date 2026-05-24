@@ -12,7 +12,7 @@ of `Partial`s.
 
 > **Reading this alongside [`TAINT_COVERAGE_MATRIX.md`](TAINT_COVERAGE_MATRIX.md)?**
 > The taint matrix shows every applicable cell as `pass` — that's the
-> per-scenario behavioural truth (1365 tests run the real engine on
+> per-scenario behavioural truth (1267 tests run the real engine on
 > each scenario × language and assert the right answer). This doc is
 > the *modeling-level declaration* — `Partial` here means "common
 > case is semantic, rare shapes are marked incomplete/unsupported," not
