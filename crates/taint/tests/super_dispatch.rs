@@ -3,10 +3,10 @@
 //! resolves the call to the parent class's method via
 //! `resolve_super_method_candidates`.
 //!
-//! Verified across the languages where the doc previously claimed
-//! `super_dispatch = partial`: Python (`super().method()`), C# (`base.
-//! method()`), Scala (`super.method()`), Swift (`super.method()`),
-//! Dart (`super.method()`), Objective-C (`[super method]`).
+//! Verified across languages with explicit super receivers: Python
+//! (`super().method()`), JavaScript/TypeScript (`super.method()`),
+//! C# (`base.method()`), Dart (`super.method()`), and others covered
+//! by the matrix.
 
 use bonsai_common::{FuncId, SymbolId};
 use bonsai_db::AnalyzerDb;
@@ -61,6 +61,30 @@ fn super_target_in_chain(
         .call_records
         .iter()
         .any(|c| parent_funcs.contains(&SymbolId::new(c.callee.raw())))
+}
+
+fn super_target_in_class_chain(
+    result: &bonsai_taint::InterTaintResult,
+    db: &AnalyzerDb,
+    method_name: &str,
+    class_name: &str,
+) -> bool {
+    let g = db.global_index();
+    result.call_records.iter().any(|record| {
+        g.decl_of(SymbolId::new(record.callee.raw())).is_some_and(|decl| {
+            decl.name == method_name
+                && decl
+                    .parent
+                    .and_then(|parent| g.decl_of(parent))
+                    .is_some_and(|parent| {
+                        parent.name == class_name
+                            || parent
+                                .qualified_name
+                                .as_deref()
+                                .is_some_and(|qn| qn.contains(class_name))
+                    })
+        })
+    })
 }
 
 #[test]
@@ -191,5 +215,53 @@ class Child extends Parent {
     assert!(
         super_target_in_chain(&result, &db, "handle"),
         "Dart super.handle() must resolve to parent's `handle`"
+    );
+}
+
+#[test]
+fn javascript_super_resolves_to_parent_method() {
+    let src = "
+class Parent {
+  handle(data) { sink(data); }
+}
+
+class Child extends Parent {
+  handle(data) { super.handle(data); }
+}
+";
+    let db = ws(
+        Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
+        &[("a.js", src)],
+    );
+    let entry = func_in_class(&db, "handle", "Child");
+    let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
+    assert!(
+        super_target_in_class_chain(&result, &db, "handle", "Parent"),
+        "JavaScript super.handle() must resolve to Parent.handle instead of name-only fallback; records={:#?}",
+        result.call_records
+    );
+}
+
+#[test]
+fn typescript_super_resolves_aliased_parent_method_across_files() {
+    let db = ws(
+        Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
+        &[
+            (
+                "base.ts",
+                "export class BaseHandler {\n  handle(data: string) { sink(data); }\n}\n",
+            ),
+            (
+                "child.ts",
+                "import { BaseHandler as ParentHandler } from './base';\n\nexport class Child extends ParentHandler {\n  handle(data: string) { super.handle(data); }\n}\n",
+            ),
+        ],
+    );
+    let entry = func_in_file(&db, "handle", "child.ts");
+    let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
+    assert!(
+        super_target_in_class_chain(&result, &db, "handle", "BaseHandler"),
+        "TypeScript aliased cross-file super.handle() must resolve to BaseHandler.handle; records={:#?}",
+        result.call_records
     );
 }
