@@ -56,7 +56,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_kinds: GENERIC_HANDLER.method_kinds,
     method_context_kinds: &["class_definition"],
     constructor_method_kinds: GENERIC_HANDLER.constructor_method_kinds,
-    constructor_names: GENERIC_HANDLER.constructor_names,
+    constructor_names: &["__init__"],
     if_kinds: GENERIC_HANDLER.if_kinds,
     for_kinds: GENERIC_HANDLER.for_kinds,
     foreach_kinds: GENERIC_HANDLER.foreach_kinds,
