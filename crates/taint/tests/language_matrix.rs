@@ -336,16 +336,21 @@ fn dangerous_sink_call_needles(lang: &str) -> &'static [&'static str] {
     }
 }
 
-fn sink_site_arg_visibility_supported(lang: &str) -> bool {
-    // The C micro sink formats `cmd` into a local buffer via source-
-    // unavailable `sprintf` before `system(buf)`. That requires a
-    // source-derived external side-effect model; do not satisfy it
-    // with a hidden `sprintf` arg-to-arg table in the taint engine.
-    !matches!(lang, "c")
-}
-
-fn taint_config_for_lang(_lang: &str) -> InterTaintConfig {
-    InterTaintConfig::default()
+fn taint_config_for_lang(lang: &str) -> InterTaintConfig {
+    let mut config = InterTaintConfig::default();
+    if lang == "c" {
+        // Mirrors the rulepack's explicit `sprintf` transfer:
+        // formatted value args flow into the first, addressable output
+        // buffer. Keeping this in config preserves engine purity while
+        // making the C micro fixture exercise the real sink argument.
+        config.output_arg_flows.push(bonsai_taint::OutputArgFlow {
+            callee: "sprintf".to_string(),
+            output_arg_index: 0,
+            value_start_arg_index: Some(1),
+            value_arg_indices: Vec::new(),
+        });
+    }
+    config
 }
 
 fn matching_call_spans(
@@ -471,9 +476,6 @@ fn interproc_false_path_clean_seed_does_not_propagate() {
 #[test]
 fn sink_site_receives_tainted_param_for_every_language() {
     for row in matrix() {
-        if !sink_site_arg_visibility_supported(row.lang) {
-            continue;
-        }
         let db = open_fixture(row.ws_subdir);
         let sink = func_id(&db, row.sink);
         let global = db.global_index();
@@ -509,9 +511,6 @@ fn sink_site_receives_tainted_param_for_every_language() {
 #[test]
 fn sink_site_rejects_disjoint_seed_for_every_language() {
     for row in matrix() {
-        if !sink_site_arg_visibility_supported(row.lang) {
-            continue;
-        }
         let db = open_fixture(row.ws_subdir);
         let sink = func_id(&db, row.sink);
         let global = db.global_index();
@@ -543,9 +542,6 @@ fn sink_site_rejects_disjoint_seed_for_every_language() {
 #[test]
 fn sink_site_param_mapping_is_precise_for_every_language_with_multiple_params() {
     for row in matrix() {
-        if !sink_site_arg_visibility_supported(row.lang) {
-            continue;
-        }
         if dangerous_sink_call_needles(row.lang).is_empty() {
             continue;
         }
@@ -596,9 +592,6 @@ fn sink_site_param_mapping_is_precise_for_every_language_with_multiple_params() 
 #[test]
 fn interproc_token_side_does_not_taint_command_sink_for_every_language() {
     for row in matrix() {
-        if !sink_site_arg_visibility_supported(row.lang) {
-            continue;
-        }
         if dangerous_sink_call_needles(row.lang).is_empty() {
             continue;
         }
