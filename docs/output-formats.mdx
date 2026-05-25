@@ -65,7 +65,7 @@ Training or evaluation pipelines usually consume native JSON because it preserve
 
 SARIF 2.1.0 is available from `security taint-analysis`. Results include standard locations, code flows, rules, CWE properties, and bonsai-specific metadata under `properties.bonsai`. Security code flows are built from the same source-specific propagation used by text `TAINT FLOW` output.
 
-SARIF also includes exact source-independent findings by default, such as weak crypto, weak random, JWT, TLS, cookie, CORS, memory, and race API misuse rules. These results intentionally omit `codeFlows` and use a synthetic `pattern:<sink-rule-id>` source id so consumers do not mistake a local API misuse for a proven source-to-sink taint path.
+SARIF also includes exact source-independent findings by default, such as weak crypto, weak random, JWT, TLS, cookie, CORS, and memory API misuse rules. These results intentionally omit `codeFlows` and use a synthetic `pattern:<sink-rule-id>` source id so consumers do not mistake a local API misuse for a proven source-to-sink taint path. Lifecycle-audit transition sites are excluded from SARIF/taint findings until the engine proves the later same-value use.
 
 `security source-analysis` is source-flow mapping, not vulnerability finding output; use `--format json` for its structured `SOURCE FLOW` data.
 

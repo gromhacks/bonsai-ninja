@@ -296,7 +296,8 @@ Three:
   GitHub code scanning, and the CVEBench-SAST harness. SARIF includes
   exact source-independent API/config misuse findings by default; those
   rows have no `codeFlows` and use `pattern:<sink-rule-id>` as their
-  source id.
+  source id. Lifecycle-audit transition sites are not emitted as
+  findings until later same-value use is proved.
 
 Finding JSON and SARIF are content-stable: the same workspace produces
 the same bytes (sorted findings, deterministic `finding_id`s, no

@@ -267,6 +267,42 @@ def handler(user_input):
 }
 
 #[test]
+fn lifecycle_audit_sink_does_not_emit_taint_or_pattern_findings() {
+    let ws = workspace(
+        "app.py",
+        r#"
+def handler(user_input, conn):
+    conn.commit()
+    return user_input
+"#,
+    );
+    let mut sink = call_regex_rule(
+        "python",
+        "python.test.lifecycle_audit_commit",
+        "race",
+        r"^[A-Za-z_$][A-Za-z0-9_$]*\.commit$",
+    );
+    sink.category = Some("lifecycle-audit".to_string());
+    let pack = pack_for("python", vec![sink]);
+
+    let report = run_taint_analysis(
+        &ws,
+        &pack,
+        TaintAnalysisOptions {
+            include_inferred_sources: true,
+            include_pattern_only: true,
+            ..Default::default()
+        },
+    )
+    .expect("analysis");
+    assert!(
+        report.findings.is_empty(),
+        "lifecycle-audit rules are matcher/audit evidence only, not taint or pattern findings: {:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn taint_constrained_sink_does_not_report_without_taint() {
     let ws = workspace(
         "app.py",
