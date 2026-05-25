@@ -9,7 +9,7 @@
 use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FileId, Span};
-use bonsai_lang_api::{AliasTarget, CallArg, CallKind, DeclKind, FlowEvent, RefKind, TypeAliasBinding};
+use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent, RefKind, TypeAliasBinding};
 use bonsai_taint::{TaintedCall, TaintedCallKind};
 use bonsai_workspace::Workspace;
 use regex::Regex;
@@ -1163,21 +1163,6 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
     let file_packages = file_package_set(ws, file);
     let alias_map = file_alias_map(ws, file);
     for decl in global.decls_in(file) {
-        // Resolve the enclosing-class name AND its declared bases for
-        // kind:param `in_class:` rules. Decl.parent points at the
-        // class decl when the adapter populated it (Java/Kotlin/Scala/
-        // TS/C# methods, Python class-bodied function_definitions,
-        // Swift instance methods, etc.). For top-level free functions
-        // the parent is None and the rule's `in_class` (if any)
-        // rejects.
-        let enclosing_class = decl.parent.and_then(|sym| global.decl_of(sym)).filter(|p| {
-            matches!(
-                p.kind,
-                DeclKind::Class | DeclKind::Struct | DeclKind::Interface | DeclKind::Trait
-            )
-        });
-        let enclosing_class_name: Option<String> = enclosing_class.map(|p| p.name.clone());
-        let enclosing_class_bases: &[String] = enclosing_class.map(|p| p.bases.as_slice()).unwrap_or(&[]);
         for (idx, param) in decl.params.iter().enumerate() {
             // T204: per-param annotations are parallel-indexed with
             // `params`. Empty if the adapter doesn't surface them.
@@ -1189,34 +1174,8 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                 // empty (no constraint applied); when populated,
                 // require an exact match.
                 let target = prepared.rule.match_spec.target.as_ref();
-                if let Some(t) = target {
-                    if !t.decl_kind_in.is_empty() && !t.decl_kind_in.iter().any(|want| want == &decl.kind) {
-                        continue;
-                    }
-                    if !t.visibility_in.is_empty()
-                        && !t.visibility_in.iter().any(|want| want == &decl.visibility)
-                    {
-                        continue;
-                    }
-                    if !t.in_class.is_empty() {
-                        let direct_match = enclosing_class_name
-                            .as_deref()
-                            .is_some_and(|n| t.in_class.iter().any(|want| want == n));
-                        let base_match = enclosing_class_bases
-                            .iter()
-                            .any(|base| t.in_class.iter().any(|want| want == base));
-                        if !(direct_match || base_match) {
-                            continue;
-                        }
-                    }
-                    if !t.in_method.is_empty() && !t.in_method.iter().any(|want| want == &decl.name) {
-                        continue;
-                    }
-                    if !t.param_index_in.is_empty()
-                        && !t.param_index_in.iter().any(|want| *want == idx as u32)
-                    {
-                        continue;
-                    }
+                if !decl_target_context_allows(global.as_ref(), Some(decl), target, Some(idx)) {
+                    continue;
                 }
                 let want_annotation = target.and_then(|t| t.annotation.as_deref());
                 let matched = if let Some(want) = want_annotation {
@@ -1419,6 +1378,61 @@ fn tokens_read_param(tokens: &[String], param: &str) -> bool {
         .any(|token| normalize_param_name(token) == normalize_param_name(param))
 }
 
+fn decl_target_context_allows(
+    global: &bonsai_index::GlobalIndex,
+    decl: Option<&Decl>,
+    target: Option<&RuleTarget>,
+    param_index: Option<usize>,
+) -> bool {
+    let Some(target) = target else {
+        return true;
+    };
+    if target.decl_kind_in.is_empty()
+        && target.visibility_in.is_empty()
+        && target.in_class.is_empty()
+        && target.in_method.is_empty()
+        && (param_index.is_none() || target.param_index_in.is_empty())
+    {
+        return true;
+    }
+    let Some(decl) = decl else {
+        return false;
+    };
+    if !target.decl_kind_in.is_empty() && !target.decl_kind_in.iter().any(|want| want == &decl.kind) {
+        return false;
+    }
+    if !target.visibility_in.is_empty() && !target.visibility_in.iter().any(|want| want == &decl.visibility) {
+        return false;
+    }
+    if !target.in_method.is_empty() && !target.in_method.iter().any(|want| want == &decl.name) {
+        return false;
+    }
+    if let Some(idx) = param_index {
+        if !target.param_index_in.is_empty() && !target.param_index_in.iter().any(|want| *want == idx as u32)
+        {
+            return false;
+        }
+    }
+    if target.in_class.is_empty() {
+        return true;
+    }
+
+    let enclosing_class = decl.parent.and_then(|sym| global.decl_of(sym)).filter(|p| {
+        matches!(
+            p.kind,
+            DeclKind::Class | DeclKind::Struct | DeclKind::Interface | DeclKind::Trait
+        )
+    });
+    let Some(enclosing_class) = enclosing_class else {
+        return false;
+    };
+    target.in_class.iter().any(|want| want == &enclosing_class.name)
+        || enclosing_class
+            .bases
+            .iter()
+            .any(|base| target.in_class.iter().any(|want| want == base))
+}
+
 fn scan_calls_batch(
     ws: &Workspace,
     file: FileId,
@@ -1443,6 +1457,14 @@ fn scan_calls_batch(
         for call in &facts.calls {
             decl_call_keys.insert((call.callee.clone(), call.span.start));
             for prepared in rules {
+                if !decl_target_context_allows(
+                    global.as_ref(),
+                    Some(decl),
+                    prepared.rule.match_spec.callee.as_ref(),
+                    None,
+                ) {
+                    continue;
+                }
                 let Some(matched_callee) = callee_or_alias_matches(
                     &call.callee,
                     &call.receiver_types,
@@ -2299,6 +2321,14 @@ fn scan_refs_batch(
             r.span.start >= body.start && r.span.start < body.end
         });
         for prepared in rules {
+            if !decl_target_context_allows(
+                global.as_ref(),
+                enclosing_decl,
+                prepared.rule.match_spec.target.as_ref(),
+                None,
+            ) {
+                continue;
+            }
             if !callee_matches(
                 &r.name,
                 prepared.name,
@@ -2355,6 +2385,14 @@ fn scan_flow_reads_batch(
         collect_flow_read_sites(&decl.flow_events, &mut reads);
         for (span, tokens) in reads {
             for prepared in rules {
+                if !decl_target_context_allows(
+                    global.as_ref(),
+                    Some(decl),
+                    prepared.rule.match_spec.target.as_ref(),
+                    None,
+                ) {
+                    continue;
+                }
                 let Some(match_text) = flow_read_rule_match(prepared, &tokens) else {
                     continue;
                 };
