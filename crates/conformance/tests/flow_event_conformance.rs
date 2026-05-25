@@ -551,10 +551,7 @@ sub G { }
 1;
 "#,
             function_name: "shapes",
-            // Perl emits `$y = $x` as a Compound assign with
-            // `source_names: ["x"]` rather than `source_name`. Skip
-            // the bare-rename assertion.
-            skip: &[CanonicalShape::BareRename],
+            skip: &[],
         },
         "php" => Conformance {
             lang: "php",

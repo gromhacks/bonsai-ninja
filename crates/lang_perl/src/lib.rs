@@ -153,6 +153,7 @@ impl LanguageAdapter for PerlAdapter {
         for decl in &mut idx.defs {
             rewrite_perl_call_arg_texts(&mut decl.flow_events, &source);
             normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source);
+            normalize_perl_simple_scalar_renames(&mut decl.flow_events, &source);
             augment_perl_collection_flow_events(&mut decl.flow_events, &source);
             inject_perl_coderef_aliases(&mut decl.flow_events, &source);
             normalize_perl_eval_exception_flow_events(&mut decl.flow_events, &source);
@@ -1015,6 +1016,72 @@ fn perl_assignment_rhs_is_dollar_at(source: &str, span: Span) -> bool {
     assignment_rhs_text(source, span)
         .map(|rhs| rhs.trim().trim_end_matches(';').trim() == "$@")
         .unwrap_or(false)
+}
+
+/// Rewrite exact Perl scalar/array/hash renames (`my $y = $x`) from
+/// generic compound-token assignments into `source_name` assignments.
+/// This keeps true compound/deref RHSs (`$obj->{k}`, `$x . $y`,
+/// function calls) on the broader `source_names` path while making the
+/// simple rename case exact.
+fn normalize_perl_simple_scalar_renames(events: &mut [FlowEvent], source: &str) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } => {
+                if source_call.is_some() || !source_call_args.is_empty() {
+                    continue;
+                }
+                if let Some(rhs) =
+                    assignment_rhs_text(source, *span).and_then(|rhs| perl_exact_variable_rhs(&rhs))
+                {
+                    *source_name = Some(rhs);
+                    source_names.clear();
+                    *value_kind = None;
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_perl_simple_scalar_renames(then_events, source);
+                normalize_perl_simple_scalar_renames(else_events, source);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_perl_simple_scalar_renames(body, source);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_perl_simple_scalar_renames(body, source);
+                normalize_perl_simple_scalar_renames(catch_events, source);
+                normalize_perl_simple_scalar_renames(finally_events, source);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn perl_exact_variable_rhs(rhs: &str) -> Option<String> {
+    let rhs = rhs.trim().trim_end_matches(';').trim();
+    if rhs == "@_" || rhs == "$@" {
+        return None;
+    }
+    let vars = perl_sigiled_identifiers(rhs, ['$', '@', '%']);
+    if vars.len() == 1 && vars[0] == rhs {
+        return Some(vars[0].clone());
+    }
+    None
 }
 
 /// Rewrite Perl hash-deref expressions like `$h->{k}` into the
