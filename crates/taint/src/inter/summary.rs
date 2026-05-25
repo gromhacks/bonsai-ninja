@@ -32,6 +32,14 @@ pub struct FunctionSummary {
     /// lifecycle-tainted `client`, but `return repo.data.cmd` should
     /// transit when the caller had proven `repo.*` tainted.
     pub returns_descendant_taint_of: Vec<usize>,
+    /// Parameter indices that transit to a `yield` value. This is
+    /// narrower than `returns_taint_of`: call-site block parameters
+    /// should only receive taint when the callee actually yielded
+    /// that parameter, not merely because the callee returned it.
+    pub yields_taint_of: Vec<usize>,
+    /// Parameter indices whose tainted descendants transit to a
+    /// `yield` value.
+    pub yields_descendant_taint_of: Vec<usize>,
     /// Parameter indices whose direct value is embedded into a newly
     /// returned container. `return {"value": param0}` should make the
     /// caller's LHS carry descendant taint (`lhs.*`) without making every

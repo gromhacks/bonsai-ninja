@@ -15,8 +15,6 @@ fn r_12_javascript() {
 fn r_12_typescript() {
     run_positive_cell("R_12", LangFixture { lang:"typescript", adapter:Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()), files:&[("a.ts","function* gen(args: string): Generator<string> { yield args; }\nfunction entry(args: string) { for (const v of gen(args)) sink(v); }\n")], entry:"entry", seed:&["args"], sink:"sink" });
 }
-// R_12 ruby: yield→block binding plus Enumerable.each block-arg both
-// gap. Ruby coroutines/yield modeling is on the adapter backlog.
 #[test]
 fn r_12_ruby() {
     run_positive_cell(
@@ -24,7 +22,10 @@ fn r_12_ruby() {
         LangFixture {
             lang: "ruby",
             adapter: Arc::new(bonsai_lang_ruby::RubyAdapter::new()),
-            files: &[("a.rb", "def entry(args)\n  v = args\n  sink(v)\nend\n")],
+            files: &[(
+                "a.rb",
+                "def gen(args)\n  yield args\nend\n\ndef entry(args)\n  gen(args) do |v|\n    sink(v)\n  end\nend\n",
+            )],
             entry: "entry",
             seed: &["args"],
             sink: "sink",
