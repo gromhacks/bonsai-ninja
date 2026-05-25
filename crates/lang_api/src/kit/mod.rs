@@ -1510,7 +1510,13 @@ fn walk_into(
         let (source_call, source_call_args) = rhs
             .and_then(|n| extract_direct_call_info(&n, src))
             .or_else(|| rhs.and_then(|n| extract_dart_selector_call_info(n, file, src)))
-            .or_else(|| first_call_descendant(node).and_then(|call| extract_direct_call_info(&call, src)))
+            .or_else(|| {
+                rhs.is_none()
+                    .then(|| {
+                        first_call_descendant(node).and_then(|call| extract_direct_call_info(&call, src))
+                    })
+                    .flatten()
+            })
             .or_else(|| extract_dart_selector_call_info(node, file, src))
             .unwrap_or((None, Vec::new()));
         // G2: when the RHS is a compound expression (template literal,
@@ -1534,7 +1540,9 @@ fn walk_into(
         // tree-sitter expression fallback and drop the target itself so
         // constructor/object-literal assignments like
         // `env = Envelope(cmd: raw)` preserve the `raw` dependency.
-        source_names.extend(extract_rhs_expr_operands(&node, src));
+        if rhs.is_none() {
+            source_names.extend(extract_rhs_expr_operands(&node, src));
+        }
         if source_names.is_empty() {
             if let Some(rhs_text) = assignment_rhs_text(node_text(&node, src)) {
                 source_names.extend(identifier_tokens_from_text(rhs_text));
@@ -1569,11 +1577,11 @@ fn walk_into(
             // the taint transfer sees the same RHS dependency on both
             // keys.
             let qualified_target = qualified_assign_target(target_node, src);
-            if let Some(qname) = qualified_target {
-                if qname != target {
+            if let Some(qname) = qualified_target.as_ref() {
+                if qname != &target {
                     out.push(FlowEvent::Assign {
                         span: span_of(file, &node),
-                        target: qname,
+                        target: qname.clone(),
                         source_name: source_name.clone(),
                         source_call: source_call.clone(),
                         source_call_args: source_call_args.clone(),
@@ -1583,19 +1591,24 @@ fn walk_into(
                     });
                 }
             }
-            for extra_target in extra_assign_targets(&raw_target, &target) {
-                out.push(FlowEvent::Assign {
-                    span: span_of(file, &node),
-                    target: extra_target,
-                    source_name: source_name.clone(),
-                    source_call: source_call.clone(),
-                    source_call_args: source_call_args.clone(),
-                    source_names: source_names.clone(),
-                    declares_new_binding: false,
-                    value_kind: None,
-                });
+            if qualified_target.is_none() {
+                for extra_target in extra_assign_targets(&raw_target, &target) {
+                    out.push(FlowEvent::Assign {
+                        span: span_of(file, &node),
+                        target: extra_target,
+                        source_name: source_name.clone(),
+                        source_call: source_call.clone(),
+                        source_call_args: source_call_args.clone(),
+                        source_names: source_names.clone(),
+                        declares_new_binding: false,
+                        value_kind: None,
+                    });
+                }
             }
             for extra_target in extra_lhs_binding_targets(&node, target_node, src, &target) {
+                if qualified_target.is_some() {
+                    continue;
+                }
                 out.push(FlowEvent::Assign {
                     span: span_of(file, &node),
                     target: extra_target,
