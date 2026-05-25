@@ -75,6 +75,19 @@ pub enum PointKind {
     Other,
 }
 
+/// Assignment target written from a call site's synthetic
+/// `Place::CallRet`. This is the precise `target = call(...)`
+/// binding the transfer pass emitted, not a name lookup heuristic.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CallRetAssignmentTarget {
+    /// Adapter-normalized storage name written by the call return.
+    pub name: String,
+    /// Source span of the assignment target write.
+    pub span: Span,
+    /// Workspace-global node id for the target write.
+    pub node: WsNodeId,
+}
+
 /// Workspace-global node identifier. Identifies a `(SegmentId,
 /// segment_local_node_id)` pair via a flat u32 mapping the service
 /// computes on first query.
@@ -651,6 +664,75 @@ impl IdgQueryService {
             return Self::ws_node_for(&unified, seg_id, local_node);
         }
         None
+    }
+
+    /// Return every write target fed directly by the call site's
+    /// `CallRet` node. Used by semantic call-result transfer to prove
+    /// a concrete assignment target before seeding a constructed
+    /// receiver object.
+    pub fn call_ret_assignment_targets_at_site(
+        &self,
+        func: FuncId,
+        call_span: Span,
+    ) -> Vec<CallRetAssignmentTarget> {
+        let unified = self.ensure_unified();
+        let Some(seg_id) = self.workspace.segment_for_func(func) else {
+            return Vec::new();
+        };
+        let Some(segment) = self.workspace.segment(seg_id) else {
+            return Vec::new();
+        };
+        let mut ret_node = None;
+        for (pid_idx, place) in segment.places.places.iter().enumerate() {
+            let Place::CallRet { site } = place else {
+                continue;
+            };
+            if site.0 != call_span {
+                continue;
+            }
+            let pid = crate::node::PlaceId(pid_idx as u32);
+            ret_node = segment.nodes.lookup(func, pid);
+            break;
+        }
+        let Some(ret_node) = ret_node else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        for edge in &segment.edges {
+            if edge.from != ret_node || !edge.meta.kind.is_intra() {
+                continue;
+            }
+            let Some(to_node) = segment.nodes.get(edge.to) else {
+                continue;
+            };
+            if to_node.func != func {
+                continue;
+            }
+            let Some(to_place) = segment.places.get(to_node.place) else {
+                continue;
+            };
+            if !matches!(to_place, Place::Write { .. }) {
+                continue;
+            }
+            let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.to) else {
+                continue;
+            };
+            let point = self.build_point_ref(func, to_place);
+            if point.name.trim().is_empty() {
+                continue;
+            }
+            out.push(CallRetAssignmentTarget {
+                name: point.name,
+                span: point.span,
+                node: ws_node,
+            });
+        }
+        out.sort_by(|a, b| {
+            (a.name.as_str(), a.span.start, a.node.0).cmp(&(b.name.as_str(), b.span.start, b.node.0))
+        });
+        out.dedup();
+        out
     }
 
     /// Functions whose synthetic `Place::Return` node is in a

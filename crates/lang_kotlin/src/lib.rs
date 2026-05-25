@@ -556,10 +556,11 @@ fn extract_kotlin_package(root: tree_sitter::Node<'_>, src: &[u8]) -> Option<Vec
     None
 }
 
-/// Walk Kotlin function declarations and collect parameter
-/// `name: Type` bindings as `TypeAliasBinding`. Used by the
-/// resolver to narrow `[Type, method]` rule dispatch through
-/// adapter facts instead of local receiver-name guesses.
+/// Walk Kotlin function declarations and collect local receiver type
+/// evidence (`name: Type` parameters and constructor-shaped
+/// `val name = Type(...)` locals) as `TypeAliasBinding`. Used by the
+/// resolver to narrow `[Type, method]` rule dispatch through adapter
+/// facts instead of local receiver-name guesses.
 fn collect_kotlin_type_aliases(
     tree: &Tree,
     file: bonsai_common::FileId,
@@ -573,7 +574,21 @@ fn collect_kotlin_type_aliases(
         // their parameters extracted).
         let mut work_stack = vec![fn_node];
         while let Some(node) = work_stack.pop() {
-            if node.kind() == "parameter" || node.kind() == "class_parameter" {
+            if node != fn_node
+                && matches!(
+                    node.kind(),
+                    "function_declaration"
+                        | "class_declaration"
+                        | "object_declaration"
+                        | "interface_declaration"
+                )
+            {
+                continue;
+            }
+            if matches!(
+                node.kind(),
+                "parameter" | "class_parameter" | "property_declaration"
+            ) {
                 if let Some(binding) = kotlin_param_alias(node, src) {
                     if !aliases.contains(&binding) {
                         aliases.push(binding);
