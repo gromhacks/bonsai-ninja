@@ -277,7 +277,9 @@ For tokens that are language-shaped rather than truly cross-language
 `LanguageCapabilities` exposes the per-adapter slice and an
 `effective_*()` accessor that falls through to the
 `bonsai_common::*_TOKENS` constant when the adapter declares an
-empty slice:
+empty slice. Mature adapters should not rely on that fallback; if a
+language has no super-receiver token, set
+`bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS`:
 
 ```rust
 LanguageCapabilities::effective_constructor_method_names()

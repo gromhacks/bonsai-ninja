@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Sentinel for mature adapters whose language has no super-receiver
+/// token. The string is intentionally not a valid identifier tail in
+/// any supported grammar; it lets adapters distinguish "no token" from
+/// the legacy empty-slice fallback.
+pub const NO_SUPER_RECEIVER_TOKENS: &[&str] = &["<no-super-receiver>"];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityLevel {
@@ -48,7 +54,9 @@ pub struct LanguageCapabilities {
     /// Receiver tokens that resolve to "the supertype's method"
     /// (e.g. JS `super`, PHP `parent`, Python `super()` is a call
     /// not a token). Empty defaults fall through to the cross-
-    /// language `bonsai_common::SUPER_RECEIVER_TOKENS`.
+    /// language `bonsai_common::SUPER_RECEIVER_TOKENS` for legacy
+    /// adapters. Mature adapters whose language has no such token
+    /// should set [`NO_SUPER_RECEIVER_TOKENS`].
     pub super_receiver_tokens: &'static [&'static str],
     /// Receiver tokens that bind to the enclosing instance/class
     /// (e.g. `self`, `this`, `me`). Empty defaults fall through to

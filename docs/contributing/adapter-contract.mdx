@@ -138,13 +138,16 @@ where adapters declare per-language behaviour the engine consults:
   the slice is empty (the cross-language fallback).
 - **`super_receiver_tokens`** / **`implicit_receiver_tokens`** — same
   shape: per-adapter override with cross-language fall-through.
+  Languages with no super receiver token must set
+  `bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS` so ordinary variables
+  named `super`, `parent`, `base`, or `SUPER` are not treated as
+  superclass dispatch.
 
 When the adapter narrows these, ambiguous engine-side fallbacks stop
 firing for the adapter's language. Until an adapter populates them,
-the cross-language constants are used; this preserves correctness at
-the cost of recall (a Python method named `init` is mis-recognised
-as a constructor by the cross-language fallback because
-`lang_python` hasn't yet narrowed `constructor_method_names`).
+the cross-language constants are used for legacy compatibility; this
+preserves recall at the cost of precision. Mature adapters should not
+leave these slices empty.
 
 The `Decl`-field population matrix in
 [adapter-capabilities.mdx](./adapter-capabilities.mdx) is the
