@@ -360,6 +360,154 @@ pub fn node_at_span<'a>(root: Node<'a>, span: Span, expected_kinds: &[&str]) -> 
     exact_typed.or(exact_any).or(tightest_container)
 }
 
+/// Normalize `target = callee(args...)` assignment facts so dataflow
+/// crosses the call edge instead of also treating the callee and
+/// argument tokens as direct assignment RHS carriers.
+///
+/// Adapters often synthesize call-result assignments from a broad CST
+/// expression node, which can leave `source_name = Some(callee)` and
+/// `source_names = [callee, arg, ...]`. That duplicates the
+/// source-to-target path and can fabricate self-loop or overtainted
+/// chains. Keep semantic receiver tokens because method receivers can
+/// be data-bearing (`target.call(payload)`), and keep uppercase
+/// receiver factory tails (`Logger.getLogger`) for existing type
+/// inference heuristics.
+pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent]) {
+    for event in events {
+        match event {
+            crate::FlowEvent::Assign {
+                source_name,
+                source_call: Some(source_call),
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                *source_name = None;
+                prune_call_result_source_names(source_call, source_call_args, source_names);
+            }
+            crate::FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_call_result_assignment_sources(then_events);
+                normalize_call_result_assignment_sources(else_events);
+            }
+            crate::FlowEvent::Loop { body, .. }
+            | crate::FlowEvent::Defer { body, .. }
+            | crate::FlowEvent::Using { body, .. } => {
+                normalize_call_result_assignment_sources(body);
+            }
+            crate::FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_call_result_assignment_sources(body);
+                normalize_call_result_assignment_sources(catch_events);
+                normalize_call_result_assignment_sources(finally_events);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn prune_call_result_source_names(
+    source_call: &str,
+    source_call_args: &[String],
+    source_names: &mut Vec<String>,
+) {
+    let call = source_call.trim();
+    if call.is_empty() {
+        return;
+    }
+    let receiver_and_tail = call_receiver_and_tail(call);
+    let arg_texts = source_call_args
+        .iter()
+        .map(|arg| arg.trim())
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+    let arg_identifiers = source_call_args
+        .iter()
+        .flat_map(|arg| call_result_identifier_tokens(arg))
+        .collect::<Vec<_>>();
+
+    source_names.retain(|name| {
+        let name = name.trim();
+        if name.is_empty() || name == call || arg_texts.iter().any(|arg| name == *arg) {
+            return false;
+        }
+        let Some((receiver, tail, receiver_is_type)) = receiver_and_tail else {
+            return !arg_identifiers.iter().any(|arg| arg == name);
+        };
+        if name == receiver {
+            return true;
+        }
+        if name == tail {
+            return receiver_is_type;
+        }
+        !arg_identifiers.iter().any(|arg| arg == name)
+    });
+    dedup_call_result_source_names(source_names);
+}
+
+fn call_receiver_and_tail(call: &str) -> Option<(&str, &str, bool)> {
+    [".", "::", "->"].into_iter().find_map(|separator| {
+        let (receiver, tail) = call.rsplit_once(separator)?;
+        let receiver = receiver.trim();
+        let tail = tail.trim();
+        if receiver.is_empty() || tail.is_empty() {
+            return None;
+        }
+        Some((
+            receiver,
+            tail,
+            receiver.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()),
+        ))
+    })
+}
+
+fn call_result_identifier_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            push_unique_call_result_identifier(&mut out, &current);
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        push_unique_call_result_identifier(&mut out, &current);
+    }
+    out
+}
+
+fn push_unique_call_result_identifier(out: &mut Vec<String>, token: &str) {
+    if token
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && !out.iter().any(|existing| existing == token)
+    {
+        out.push(token.to_string());
+    }
+}
+
+fn dedup_call_result_source_names(source_names: &mut Vec<String>) {
+    let mut seen = Vec::<String>::new();
+    source_names.retain(|name| {
+        if seen.iter().any(|existing| existing == name) {
+            false
+        } else {
+            seen.push(name.clone());
+            true
+        }
+    });
+}
+
 /// Strip generics and qualified prefixes from a type-name string,
 /// leaving the bare class name. `java.io.IOException` → `IOException`.
 /// `List<Foo>` → `List`. `kotlin.collections.MutableList<E>` →
