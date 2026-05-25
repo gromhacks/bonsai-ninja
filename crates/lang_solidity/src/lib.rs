@@ -257,7 +257,7 @@ impl LanguageAdapter for SolidityAdapter {
             },
         ];
         for decl in &mut idx.defs {
-            normalize_solidity_call_result_assignments(&mut decl.flow_events);
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, SOLIDITY_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
@@ -271,132 +271,6 @@ impl LanguageAdapter for SolidityAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
-}
-
-fn normalize_solidity_call_result_assignments(events: &mut [FlowEvent]) {
-    for event in events {
-        match event {
-            FlowEvent::Assign {
-                source_name,
-                source_call: Some(source_call),
-                source_call_args,
-                source_names,
-                ..
-            } => {
-                *source_name = None;
-                prune_solidity_call_source_names(source_call, source_call_args, source_names);
-            }
-            FlowEvent::Branch {
-                then_events,
-                else_events,
-                ..
-            } => {
-                normalize_solidity_call_result_assignments(then_events);
-                normalize_solidity_call_result_assignments(else_events);
-            }
-            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                normalize_solidity_call_result_assignments(body);
-            }
-            FlowEvent::Try {
-                body,
-                catch_events,
-                finally_events,
-                ..
-            } => {
-                normalize_solidity_call_result_assignments(body);
-                normalize_solidity_call_result_assignments(catch_events);
-                normalize_solidity_call_result_assignments(finally_events);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn prune_solidity_call_source_names(
-    source_call: &str,
-    source_call_args: &[String],
-    source_names: &mut Vec<String>,
-) {
-    let call = source_call.trim();
-    if call.is_empty() {
-        return;
-    }
-    let receiver_and_tail = call.rsplit_once('.').map(|(receiver, tail)| {
-        let receiver = receiver.trim();
-        let tail = tail.trim();
-        (
-            receiver,
-            tail,
-            receiver.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()),
-        )
-    });
-    let arg_texts = source_call_args
-        .iter()
-        .map(|arg| arg.trim())
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>();
-    let arg_identifiers = source_call_args
-        .iter()
-        .flat_map(|arg| solidity_identifier_tokens(arg))
-        .collect::<Vec<_>>();
-
-    source_names.retain(|name| {
-        let name = name.trim();
-        if name.is_empty() || name == call || arg_texts.iter().any(|arg| name == *arg) {
-            return false;
-        }
-        let Some((receiver, tail, receiver_is_type)) = receiver_and_tail else {
-            return !arg_identifiers.iter().any(|arg| arg == name);
-        };
-        if name == receiver {
-            return true;
-        }
-        if name == tail {
-            return receiver_is_type;
-        }
-        !arg_identifiers.iter().any(|arg| arg == name)
-    });
-    dedup_solidity_source_names(source_names);
-}
-
-fn solidity_identifier_tokens(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            current.push(ch);
-        } else if !current.is_empty() {
-            push_unique_solidity_identifier(&mut out, &current);
-            current.clear();
-        }
-    }
-    if !current.is_empty() {
-        push_unique_solidity_identifier(&mut out, &current);
-    }
-    out
-}
-
-fn push_unique_solidity_identifier(out: &mut Vec<String>, token: &str) {
-    if token
-        .chars()
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-        && !out.iter().any(|existing| existing == token)
-    {
-        out.push(token.to_string());
-    }
-}
-
-fn dedup_solidity_source_names(source_names: &mut Vec<String>) {
-    let mut seen = Vec::<String>::new();
-    source_names.retain(|name| {
-        if seen.iter().any(|existing| existing == name) {
-            false
-        } else {
-            seen.push(name.clone());
-            true
-        }
-    });
 }
 
 /// Walk every `assembly` / `yul_block` node and synthesise a Call
