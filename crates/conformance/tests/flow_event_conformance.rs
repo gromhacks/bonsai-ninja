@@ -777,9 +777,7 @@ void G(const char *a) {}
 "#,
             function_name: "shapes",
             // C has no try/catch — skip catch-bind.
-            // C `for (i=0; i<n; i++) G(items[i])` indexing prevents the
-            // single-callee assertion against bare `items` — skip loop.
-            skip: &[CanonicalShape::CatchBind, CanonicalShape::LoopBody],
+            skip: &[CanonicalShape::CatchBind],
         },
         "cpp" => Conformance {
             lang: "cpp",

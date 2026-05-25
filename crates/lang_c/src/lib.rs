@@ -6,8 +6,9 @@ use bonsai_lang_api::{
         collect_kinds, collect_param_type_aliases, first_named_child_of_kind, language_from_pack, node_text,
         parse_with, span_of,
     },
-    with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary, Visibility,
+    with_fn_kinds, AdapterContext, AdapterError, DeclIndex, FlowEvent, GrammarHandler, ImportIndex,
+    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasVocabulary,
+    Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -127,6 +128,7 @@ impl LanguageAdapter for CAdapter {
             }
         }
         for decl in &mut decl_index.defs {
+            normalize_c_call_result_assignments(&mut decl.flow_events);
             inject_c_lifecycle_events(&mut decl.flow_events);
         }
         decl_index
@@ -134,6 +136,110 @@ impl LanguageAdapter for CAdapter {
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
     }
+}
+
+fn normalize_c_call_result_assignments(events: &mut [FlowEvent]) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                source_name,
+                source_call: Some(source_call),
+                source_call_args,
+                source_names,
+                ..
+            } => {
+                *source_name = None;
+                prune_c_call_source_names(source_call, source_call_args, source_names);
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_c_call_result_assignments(then_events);
+                normalize_c_call_result_assignments(else_events);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_c_call_result_assignments(body);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_c_call_result_assignments(body);
+                normalize_c_call_result_assignments(catch_events);
+                normalize_c_call_result_assignments(finally_events);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn prune_c_call_source_names(source_call: &str, source_call_args: &[String], source_names: &mut Vec<String>) {
+    let call = source_call.trim();
+    if call.is_empty() {
+        return;
+    }
+    let arg_texts = source_call_args
+        .iter()
+        .map(|arg| arg.trim())
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+    let arg_identifiers = source_call_args
+        .iter()
+        .flat_map(|arg| c_identifier_tokens(arg))
+        .collect::<Vec<_>>();
+
+    source_names.retain(|name| {
+        let name = name.trim();
+        !(name.is_empty()
+            || name == call
+            || arg_texts.iter().any(|arg| name == *arg)
+            || arg_identifiers.iter().any(|arg| arg == name))
+    });
+    dedup_c_source_names(source_names);
+}
+
+fn c_identifier_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            push_unique_c_identifier(&mut out, &current);
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        push_unique_c_identifier(&mut out, &current);
+    }
+    out
+}
+
+fn push_unique_c_identifier(out: &mut Vec<String>, token: &str) {
+    if token
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && !out.iter().any(|existing| existing == token)
+    {
+        out.push(token.to_string());
+    }
+}
+
+fn dedup_c_source_names(source_names: &mut Vec<String>) {
+    let mut seen = Vec::<String>::new();
+    source_names.retain(|name| {
+        if seen.iter().any(|existing| existing == name) {
+            false
+        } else {
+            seen.push(name.clone());
+            true
+        }
+    });
 }
 
 /// Tree-sitter can recover from macro-heavy C headers by stretching a
