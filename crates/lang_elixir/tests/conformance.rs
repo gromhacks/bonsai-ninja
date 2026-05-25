@@ -1,5 +1,5 @@
 use bonsai_conformance::run_language_suite;
-use bonsai_lang_api::FlowEvent;
+use bonsai_lang_api::{AssignValueKind, FlowEvent};
 use std::sync::Arc;
 
 #[test]
@@ -51,6 +51,49 @@ fn macro_control_flow_is_structured() {
         "expected Elixir if macro to emit Branch: {:?}",
         decl.flow_events
     );
+}
+
+#[test]
+fn if_expression_assignment_uses_branch_values_not_condition_call() {
+    let adapter: Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        Arc::new(bonsai_lang_elixir::ElixirAdapter::new());
+    let runner = bonsai_conformance::ConformanceRunner::new(
+        adapter,
+        vec![(
+            "main.ex".to_string(),
+            "defmodule Main do\n  def cond_(), do: true\n  def run(args) do\n    x = args\n    x = if cond_() do \"clean1\" else \"clean2\" end\n    sink(x)\n  end\nend\n".to_string(),
+        )],
+    );
+    let ws = runner.workspace();
+    let file = ws.vfs().all_files()[0];
+    let idx = ws.db().decl_index(file).expect("decl index should exist");
+    let decl = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "run")
+        .expect("run decl should exist");
+
+    let clean_overwrite = decl
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } if target == "x" && value_kind == &Some(AssignValueKind::Literal) => {
+                Some((source_call, source_call_args, source_names))
+            }
+            _ => None,
+        })
+        .expect("if expression assignment should be normalized as a clean overwrite");
+
+    assert_eq!(clean_overwrite.0, &None);
+    assert!(clean_overwrite.1.is_empty());
+    assert!(clean_overwrite.2.is_empty());
 }
 
 fn contains_branch(events: &[FlowEvent]) -> bool {
