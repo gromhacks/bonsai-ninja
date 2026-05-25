@@ -75,3 +75,46 @@ fn coderef_assignment_emits_clean_callable_alias() {
         } if target == "$cb" && source == "helper" && source_names.is_empty()
     ));
 }
+
+#[test]
+fn direct_array_argv_binding_infers_perl_param() {
+    let src = "my @items = @_;";
+    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let event = FlowEvent::Assign {
+        span,
+        target: "items".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["_".to_string()],
+        declares_new_binding: true,
+        value_kind: None,
+    };
+
+    let (_, vars) = perl_list_binding_at(&event, src).expect("direct @_ binding");
+
+    assert_eq!(vars, vec!["@items".to_string()]);
+}
+
+#[test]
+fn map_grep_topic_call_rewrites_topic_arg_to_collection() {
+    let src = "sub handle { my @items = @_; map { step($_); } @items; }";
+    let language = language_from_pack(PACK_NAME).expect("perl grammar");
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).expect("set perl grammar");
+    let tree = parser.parse(src.as_bytes(), None).expect("parse perl source");
+
+    let events = synthesize_map_grep_topic_call_events(&tree, src.as_bytes(), FileId::new(0));
+
+    assert!(events.iter().any(|(_, event)| {
+        matches!(
+            event,
+            FlowEvent::Call { name, args, .. }
+                if name == "step"
+                    && args
+                        .iter()
+                        .any(|arg| arg.value_text == "@items"
+                            && arg.source_names == vec!["@items".to_string(), "items".to_string()])
+        )
+    }));
+}

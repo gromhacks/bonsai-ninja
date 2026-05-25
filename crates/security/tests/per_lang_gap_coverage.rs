@@ -900,9 +900,10 @@ macro_rules! g9_test {
     };
 }
 
-/// Best-effort G9 for grammars where destructuring emission still
-/// needs adapter work (Rust `let Ok(x) = res`, Swift tuple bindings,
-/// Kotlin destructuring `val (a, b)`). Tests assert no crash.
+/// G9 variants for destructuring / multi-bind syntax across the
+/// remaining language set. These used to be no-crash probes; they now
+/// assert the semantic contract that every destructured binding gets
+/// RHS taint when the RHS is tainted.
 macro_rules! g9_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
@@ -911,7 +912,11 @@ macro_rules! g9_best_effort_test {
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
-            let _ = flows_count(&tmp, &rules);
+            assert!(
+                flows_count(&tmp, &rules) >= 1,
+                "G9 ({}): destructuring LHS must inherit RHS taint",
+                $lang,
+            );
             cleanup(&tmp);
         }
     };
@@ -1031,10 +1036,11 @@ macro_rules! g3_test {
     };
 }
 
-/// Best-effort G3 variant for langs whose field-taint propagation is
-/// still adapter-dependent (primarily native-compiled OOP langs where
-/// the resolver lacks receiver-type info). Asserts no crash; coverage
-/// grows as adapters fill in qualified-Assign emission.
+/// G3 variant for native-compiled / typed OOP languages. These used
+/// to be best-effort while adapters filled in qualified-Assign
+/// emission; the assignment-chain and receiver-type audits now require
+/// field flow for every listed language, so keep these as hard
+/// regression checks too.
 macro_rules! g3_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
@@ -1043,7 +1049,11 @@ macro_rules! g3_best_effort_test {
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
-            let _ = flows_count(&tmp, &rules);
+            assert!(
+                flows_count(&tmp, &rules) >= 1,
+                "G3 ({}): same-method qualified write+read must fire",
+                $lang,
+            );
             cleanup(&tmp);
         }
     };
@@ -1158,10 +1168,10 @@ macro_rules! g7_test {
     };
 }
 
-/// Best-effort G7 for langs whose HOF support is still adapter-
-/// dependent (method-reference passing, receiver-typed closures).
-/// Asserts no crash; coverage grows as adapters / resolver fill in
-/// the callee-reference → callee-decl link.
+/// G7 variants for higher-order callbacks across the remaining
+/// language set. These used to be best-effort while callable-reference
+/// links were being filled in; they now assert that callback parameters
+/// inherit receiver/collection taint.
 macro_rules! g7_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
@@ -1170,7 +1180,11 @@ macro_rules! g7_best_effort_test {
             let tmp = fresh_tmp($tag);
             let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
             write_fixture(&tmp, $file, $contents);
-            let _ = flows_count(&tmp, &rules);
+            assert!(
+                flows_count(&tmp, &rules) >= 1,
+                "G7 ({}): HOF callback must inherit receiver taint",
+                $lang,
+            );
             cleanup(&tmp);
         }
     };
@@ -1253,7 +1267,8 @@ macro_rules! g8_test {
 
 /// Best-effort G8: lang-specific grammars where we don't yet guarantee
 /// catch-param extraction (compact forms like Ruby's `rescue => e` that
-/// bind without a field). Test allows 0 findings but asserts no crash.
+/// bind without a field, exception-message accessors, etc.). Test allows
+/// 0 findings but asserts no crash.
 macro_rules! g8_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]

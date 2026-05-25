@@ -138,6 +138,11 @@ impl LanguageAdapter for PerlAdapter {
                         ));
                         calls.extend(synthesize_match_regex_call_events(&tree, source.as_bytes(), file));
                         calls.extend(synthesize_coderef_invocation_events(source.as_bytes(), file));
+                        calls.extend(synthesize_map_grep_topic_call_events(
+                            &tree,
+                            source.as_bytes(),
+                            file,
+                        ));
                         if !calls.is_empty() {
                             attach_synthesized_calls_to_decls(&mut idx, calls);
                         }
@@ -911,6 +916,14 @@ fn assignment_lhs_rhs_text(source: &str, span: Span) -> Option<(String, String)>
     ))
 }
 
+fn split_perl_assignment_text(text: &str) -> Option<(&str, &str)> {
+    let (separator_idx, separator_len) = find_top_level_assignment_separator(text)?;
+    Some((
+        text[..separator_idx].trim(),
+        text[separator_idx + separator_len..].trim(),
+    ))
+}
+
 fn source_span_text(source: &str, span: Span) -> Option<&str> {
     let start = usize::try_from(span.start).ok()?.min(source.len());
     let end = usize::try_from(span.end).ok()?.min(source.len());
@@ -1434,6 +1447,28 @@ fn perl_list_binding_at(event: &FlowEvent, source: &str) -> Option<(bonsai_commo
             } else {
                 Some(vars)
             }
+        })
+        .or_else(|| {
+            source
+                .get(span.start as usize..span.end as usize)
+                .and_then(|text| {
+                    if !text.contains("@_") {
+                        return None;
+                    }
+                    let (lhs, rhs) = split_perl_assignment_text(text)?;
+                    if !rhs.contains("@_") {
+                        return None;
+                    }
+                    let vars = perl_sigiled_identifiers(lhs, ['$', '@', '%'])
+                        .into_iter()
+                        .filter(|var| var != "@_")
+                        .collect::<Vec<_>>();
+                    if vars.is_empty() {
+                        None
+                    } else {
+                        Some(vars)
+                    }
+                })
         })
         .unwrap_or_else(|| {
             // Fallback for shapes where the source slice is missing —
@@ -2163,6 +2198,104 @@ fn perl_text_args(src: &[u8], start: usize, end: usize, file: FileId) -> Vec<Cal
         }
     }
     args
+}
+
+/// Perl's `map { ... } @items` / `grep { ... } @items` binds each
+/// element to the implicit topic variable `$_` inside the callback
+/// block. The generic walker sees calls inside the block (`step($_)`)
+/// but does not have a scoped variable binding for `$_`. Instead of
+/// globally tainting `$_`, synthesize a parallel callback call whose
+/// topic argument is the mapped collection expression.
+fn synthesize_map_grep_topic_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Span, FlowEvent)> {
+    let mut events = Vec::new();
+    for map_node in collect_kinds(tree, &["map_grep_expression"]) {
+        let Some(callback) = map_node.child_by_field_name("callback") else {
+            continue;
+        };
+        let Some(list) = map_node.child_by_field_name("list") else {
+            continue;
+        };
+        let list_span = span_of(file, &list);
+        let source_names = perl_collection_source_names(node_text(&list, src));
+        let Some(primary_source) = source_names.first().cloned() else {
+            continue;
+        };
+        for call_node in descendant_nodes_of_kind(callback, "function_call_expression") {
+            let Some(function) = call_node.child_by_field_name("function") else {
+                continue;
+            };
+            let name = node_text(&function, src).trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let Some(arguments) = call_node.child_by_field_name("arguments") else {
+                continue;
+            };
+            let mut args = perl_list_args(&arguments, src, file);
+            let mut rewrote_topic_arg = false;
+            for arg in &mut args {
+                if perl_arg_uses_topic_var(&arg.value_text) {
+                    arg.span = list_span;
+                    arg.value_text = primary_source.clone();
+                    arg.place = Some(primary_source.clone());
+                    arg.source_names = source_names.clone();
+                    rewrote_topic_arg = true;
+                }
+            }
+            if !rewrote_topic_arg {
+                continue;
+            }
+            let span = span_of(file, &call_node);
+            events.push((
+                span,
+                FlowEvent::Call {
+                    span,
+                    name,
+                    receiver: None,
+                    receiver_types: Vec::new(),
+                    call_kind: CallKind::Function,
+                    args,
+                },
+            ));
+        }
+    }
+    events
+}
+
+fn descendant_nodes_of_kind<'tree>(
+    root: tree_sitter::Node<'tree>,
+    kind: &str,
+) -> Vec<tree_sitter::Node<'tree>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node != root && node.kind() == kind {
+            out.push(node);
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+fn perl_collection_source_names(text: &str) -> Vec<String> {
+    let mut source_names = Vec::new();
+    for name in perl_sigiled_identifiers(text, ['$', '@', '%']) {
+        push_unique_string(&mut source_names, name.clone());
+        push_unique_string(
+            &mut source_names,
+            name.trim_start_matches(['$', '@', '%']).to_string(),
+        );
+    }
+    source_names
+}
+
+fn perl_arg_uses_topic_var(text: &str) -> bool {
+    text.split(|ch: char| !(ch == '_' || ch == '$' || ch.is_ascii_alphanumeric()))
+        .any(|part| matches!(part, "$_" | "_"))
 }
 
 /// Attach each synthesized (span, event) pair to the decl whose
