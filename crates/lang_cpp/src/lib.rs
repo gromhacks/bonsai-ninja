@@ -126,6 +126,7 @@ impl LanguageAdapter for CppAdapter {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             // C++ constructors are class-named; the kind-based
             // `DeclKind::Constructor` lookup is authoritative.
+            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
         }

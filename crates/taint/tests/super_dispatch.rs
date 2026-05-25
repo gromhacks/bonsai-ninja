@@ -88,6 +88,47 @@ fn super_target_in_class_chain(
 }
 
 #[test]
+fn every_adapter_declares_super_receiver_tokens_without_legacy_fallback() {
+    let adapters: Vec<(&str, Arc<dyn LanguageAdapter>)> = vec![
+        ("c", Arc::new(bonsai_lang_c::CAdapter::new())),
+        ("cpp", Arc::new(bonsai_lang_cpp::CppAdapter::new())),
+        ("csharp", Arc::new(bonsai_lang_csharp::CSharpAdapter::new())),
+        ("dart", Arc::new(bonsai_lang_dart::DartAdapter::new())),
+        ("elixir", Arc::new(bonsai_lang_elixir::ElixirAdapter::new())),
+        ("erlang", Arc::new(bonsai_lang_erlang::ErlangAdapter::new())),
+        ("go", Arc::new(bonsai_lang_go::GoAdapter::new())),
+        ("java", Arc::new(bonsai_lang_java::JavaAdapter::new())),
+        (
+            "javascript",
+            Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
+        ),
+        ("kotlin", Arc::new(bonsai_lang_kotlin::KotlinAdapter::new())),
+        ("lua", Arc::new(bonsai_lang_lua::LuaAdapter::new())),
+        ("objc", Arc::new(bonsai_lang_objc::ObjCAdapter::new())),
+        ("perl", Arc::new(bonsai_lang_perl::PerlAdapter::new())),
+        ("php", Arc::new(bonsai_lang_php::PhpAdapter::new())),
+        ("python", Arc::new(bonsai_lang_python::PythonAdapter::new())),
+        ("ruby", Arc::new(bonsai_lang_ruby::RubyAdapter::new())),
+        ("rust", Arc::new(bonsai_lang_rust::RustAdapter::new())),
+        ("scala", Arc::new(bonsai_lang_scala::ScalaAdapter::new())),
+        ("solidity", Arc::new(bonsai_lang_solidity::SolidityAdapter::new())),
+        ("swift", Arc::new(bonsai_lang_swift::SwiftAdapter::new())),
+        (
+            "typescript",
+            Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
+        ),
+    ];
+
+    for (lang, adapter) in adapters {
+        let caps = adapter.capabilities();
+        assert!(
+            !caps.super_receiver_tokens.is_empty(),
+            "{lang} must declare super_receiver_tokens explicitly or use NO_SUPER_RECEIVER_TOKENS"
+        );
+    }
+}
+
+#[test]
 fn python_super_resolves_to_parent_method() {
     let src = "
 class Parent:
@@ -238,6 +279,29 @@ class Child extends Parent {
     assert!(
         super_target_in_class_chain(&result, &db, "handle", "Parent"),
         "JavaScript super.handle() must resolve to Parent.handle instead of name-only fallback; records={:#?}",
+        result.call_records
+    );
+}
+
+#[test]
+fn cpp_super_identifier_is_not_treated_as_super_receiver() {
+    let src = r#"
+class Parent {
+public:
+  void handle(const char *data) { sink(data); }
+};
+
+class Child : public Parent {
+public:
+  void handle(const char *data) { super.handle(data); }
+};
+"#;
+    let db = ws(Arc::new(bonsai_lang_cpp::CppAdapter::new()), &[("a.cpp", src)]);
+    let entry = func_in_class(&db, "handle", "Child");
+    let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
+    assert!(
+        !super_target_in_class_chain(&result, &db, "handle", "Parent"),
+        "C++ has no super receiver token; `super` must stay an ordinary receiver name; records={:#?}",
         result.call_records
     );
 }

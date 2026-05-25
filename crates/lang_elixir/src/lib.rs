@@ -55,7 +55,10 @@ impl LanguageAdapter for ElixirAdapter {
         language_from_pack(PACK_NAME)
     }
     fn capabilities(&self) -> LanguageCapabilities {
-        LanguageCapabilities::partial_baseline()
+        LanguageCapabilities {
+            super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
+            ..LanguageCapabilities::partial_baseline()
+        }
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);

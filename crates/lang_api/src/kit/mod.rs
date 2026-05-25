@@ -9096,7 +9096,7 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
 /// security matching, inspect, and export consume the same receiver
 /// type evidence without receiver-name allowlists.
 pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
-    apply_call_receiver_types_with_super_tokens(idx, &["super"]);
+    apply_call_receiver_types_with_super_tokens(idx, crate::capabilities::NO_SUPER_RECEIVER_TOKENS);
 }
 
 pub fn apply_call_receiver_types_with_super_tokens(
