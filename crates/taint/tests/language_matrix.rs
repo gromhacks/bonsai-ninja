@@ -337,16 +337,11 @@ fn dangerous_sink_call_needles(lang: &str) -> &'static [&'static str] {
 }
 
 fn sink_site_arg_visibility_supported(lang: &str) -> bool {
-    // The Go adapter currently emits chained external calls such as
-    // `exec.Command("notify-admin", cmd).Run()` as one method call
-    // without `CallArg`s. Keep that adapter gap explicit instead of
-    // reintroducing raw-text fallback in the taint engine.
-    //
     // The C micro sink formats `cmd` into a local buffer via source-
     // unavailable `sprintf` before `system(buf)`. That requires a
     // source-derived external side-effect model; do not satisfy it
     // with a hidden `sprintf` arg-to-arg table in the taint engine.
-    !matches!(lang, "go" | "c")
+    !matches!(lang, "c")
 }
 
 fn taint_config_for_lang(_lang: &str) -> InterTaintConfig {
