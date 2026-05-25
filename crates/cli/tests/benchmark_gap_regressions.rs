@@ -503,6 +503,86 @@ module.exports = { save };
 }
 
 #[test]
+fn javascript_route_query_reaches_cross_file_html_return_sink() {
+    let ws = temp_workspace("js-cross-file-html-return");
+    write_file(
+        &ws,
+        "src/server.js",
+        r#"const express = require("express");
+const { renderResults } = require("./render");
+
+function search(req, res) {
+  const q = req.query.q;
+  return res.end(renderResults(q));
+}
+
+module.exports = { search };
+"#,
+    );
+    write_file(
+        &ws,
+        "src/render.js",
+        r#"function renderResults(q) {
+  return `<html><body>${q}</body></html>`;
+}
+
+module.exports = { renderResults };
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^javascript\\.source\\.express_req_query$",
+        "^javascript\\.xss\\.html_return$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "javascript.source.express_req_query",
+            "javascript.xss.html_return",
+            "src/server.js",
+            "src/render.js",
+            "search",
+            "renderResults",
+            "req.query",
+        ],
+    );
+
+    let clean = temp_workspace("js-cross-file-html-return-clean");
+    write_file(
+        &clean,
+        "src/server.js",
+        r#"const express = require("express");
+const { renderResults } = require("./render");
+
+function search(req, res) {
+  const unused = req.query.q;
+  return res.end(renderResults("ok"));
+}
+
+module.exports = { search };
+"#,
+    );
+    write_file(
+        &clean,
+        "src/render.js",
+        r#"function renderResults(q) {
+  return `<html><body>${q}</body></html>`;
+}
+
+module.exports = { renderResults };
+"#,
+    );
+
+    let rows = run_taint_json(
+        &clean,
+        "^javascript\\.source\\.express_req_query$",
+        "^javascript\\.xss\\.html_return$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
 fn typescript_framework_source_requires_matching_package_evidence() {
     let ws = temp_workspace("ts-framework-source-package-gate");
     write_file(
@@ -941,6 +1021,80 @@ export function search(term: string) {
         &ws,
         "^typescript\\.source\\.graphql_args_field$",
         "^typescript\\.sqli\\.method_query_concat$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
+fn typescript_route_query_reaches_cross_file_html_return_sink() {
+    let ws = temp_workspace("ts-cross-file-html-return");
+    write_file(
+        &ws,
+        "src/server.ts",
+        r#"import express from "express";
+import { renderResults } from "./render";
+
+export function search(req: any, res: any) {
+  express;
+  const q = req.query.q;
+  return res.end(renderResults(q));
+}
+"#,
+    );
+    write_file(
+        &ws,
+        "src/render.ts",
+        r#"export function renderResults(q: string): string {
+  return `<html><body>${q}</body></html>`;
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^typescript\\.source\\.express_req_query$",
+        "^typescript\\.xss\\.html_return$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "typescript.source.express_req_query",
+            "typescript.xss.html_return",
+            "src/server.ts",
+            "src/render.ts",
+            "search",
+            "renderResults",
+            "req.query",
+        ],
+    );
+
+    let clean = temp_workspace("ts-cross-file-html-return-clean");
+    write_file(
+        &clean,
+        "src/server.ts",
+        r#"import express from "express";
+import { renderResults } from "./render";
+
+export function search(req: any, res: any) {
+  express;
+  const unused = req.query.q;
+  return res.end(renderResults("ok"));
+}
+"#,
+    );
+    write_file(
+        &clean,
+        "src/render.ts",
+        r#"export function renderResults(q: string): string {
+  return `<html><body>${q}</body></html>`;
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &clean,
+        "^typescript\\.source\\.express_req_query$",
+        "^typescript\\.xss\\.html_return$",
     );
     assert_no_finding(&rows);
 }
