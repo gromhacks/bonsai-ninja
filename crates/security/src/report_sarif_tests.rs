@@ -344,6 +344,44 @@ fn sarif_codeflows_include_concrete_taint_path_hops() {
 }
 
 #[test]
+fn sarif_codeflows_collapse_adjacent_same_line_locations() {
+    let mut f = sample_finding();
+    f.source.file = "app.py".to_string();
+    f.source.line = 20;
+    f.source.column = 5;
+    f.sink.file = "app.py".to_string();
+    f.sink.line = 20;
+    f.sink.column = 27;
+    f.taint_path = vec![
+        TaintPropagationStep {
+            caller: "handle_request".to_string(),
+            callee: "normalize".to_string(),
+            file: "app.py".to_string(),
+            line: 20,
+            column: 9,
+            tainted_args: Vec::new(),
+        },
+        TaintPropagationStep {
+            caller: "normalize".to_string(),
+            callee: "os.system".to_string(),
+            file: "app.py".to_string(),
+            line: 20,
+            column: 27,
+            tainted_args: Vec::new(),
+        },
+    ];
+    let report = SecurityReport::new(vec![f]);
+    let s = render_sarif_json(&report);
+    let v: Value = serde_json::from_str(&s).unwrap();
+    let tflows = &v["runs"][0]["results"][0]["codeFlows"][0]["threadFlows"][0]["locations"];
+    let arr = tflows.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    let kinds = arr[0]["kinds"].as_array().unwrap();
+    assert!(kinds.iter().any(|kind| kind == "source"));
+    assert!(kinds.iter().any(|kind| kind == "sink"));
+}
+
+#[test]
 fn sarif_rule_descriptors_carry_cwe_metadata() {
     let report = SecurityReport::new(vec![sample_finding()]);
     let s = render_sarif_json(&report);

@@ -722,11 +722,14 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
     // `finding.taint_path`, which preserves the concrete call site
     // and argument propagation evidence the taint engine used.
     let mut thread_flow_locations: Vec<serde_json::Value> = Vec::new();
-    thread_flow_locations.push(thread_flow_location(
-        match_to_sarif_location(&finding.source, "source", workspace_root),
-        &["source", "taint"],
-        "essential",
-    ));
+    push_thread_flow_location(
+        &mut thread_flow_locations,
+        thread_flow_location(
+            match_to_sarif_location(&finding.source, "source", workspace_root),
+            &["source", "taint"],
+            "essential",
+        ),
+    );
 
     let mut sanitizers_by_step: Vec<Vec<&crate::finding::FindingMatch>> =
         vec![Vec::new(); finding.taint_path.len()];
@@ -741,18 +744,24 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
 
     for (idx, step) in finding.taint_path.iter().enumerate() {
         if !taint_step_matches_match(step, &finding.sink) {
-            thread_flow_locations.push(thread_flow_location(
-                taint_step_to_sarif_location(step, workspace_root),
-                &["taint", "call"],
-                "important",
-            ));
+            push_thread_flow_location(
+                &mut thread_flow_locations,
+                thread_flow_location(
+                    taint_step_to_sarif_location(step, workspace_root),
+                    &["taint", "call"],
+                    "important",
+                ),
+            );
         }
         for sanitizer in &sanitizers_by_step[idx] {
-            thread_flow_locations.push(thread_flow_location(
-                match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
-                &["sanitizer"],
-                "important",
-            ));
+            push_thread_flow_location(
+                &mut thread_flow_locations,
+                thread_flow_location(
+                    match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
+                    &["sanitizer"],
+                    "important",
+                ),
+            );
         }
     }
     unmatched_sanitizers.sort_by(|a, b| {
@@ -763,18 +772,24 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
     for sanitizer in unmatched_sanitizers {
-        thread_flow_locations.push(thread_flow_location(
-            match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
-            &["sanitizer"],
-            "important",
-        ));
+        push_thread_flow_location(
+            &mut thread_flow_locations,
+            thread_flow_location(
+                match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
+                &["sanitizer"],
+                "important",
+            ),
+        );
     }
 
-    thread_flow_locations.push(thread_flow_location(
-        match_to_sarif_location(&finding.sink, "sink", workspace_root),
-        &["sink"],
-        "essential",
-    ));
+    push_thread_flow_location(
+        &mut thread_flow_locations,
+        thread_flow_location(
+            match_to_sarif_location(&finding.sink, "sink", workspace_root),
+            &["sink"],
+            "essential",
+        ),
+    );
     let flow_summary = if finding.taint_path.is_empty() {
         format!("{} -> {}", finding.source.rule_id, finding.sink.rule_id)
     } else {
@@ -816,6 +831,77 @@ fn thread_flow_location(location: serde_json::Value, kinds: &[&str], importance:
         "kinds": kinds,
         "importance": importance,
     })
+}
+
+fn push_thread_flow_location(locations: &mut Vec<serde_json::Value>, next: serde_json::Value) {
+    if let Some(previous) = locations.last_mut() {
+        if same_thread_flow_site(previous, &next) {
+            merge_thread_flow_location(previous, next);
+            return;
+        }
+    }
+    locations.push(next);
+}
+
+fn same_thread_flow_site(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    if thread_flow_has_kind(left, "sanitizer") || thread_flow_has_kind(right, "sanitizer") {
+        return false;
+    }
+    match (
+        thread_flow_uri(left),
+        thread_flow_start_line(left),
+        thread_flow_uri(right),
+        thread_flow_start_line(right),
+    ) {
+        (Some(left_uri), Some(left_line), Some(right_uri), Some(right_line)) => {
+            left_uri == right_uri && left_line == right_line
+        }
+        _ => false,
+    }
+}
+
+fn thread_flow_has_kind(location: &serde_json::Value, kind: &str) -> bool {
+    location
+        .get("kinds")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|kinds| kinds.iter().any(|value| value.as_str() == Some(kind)))
+}
+
+fn thread_flow_uri(location: &serde_json::Value) -> Option<&str> {
+    location
+        .get("location")?
+        .get("physicalLocation")?
+        .get("artifactLocation")?
+        .get("uri")?
+        .as_str()
+}
+
+fn thread_flow_start_line(location: &serde_json::Value) -> Option<u64> {
+    location
+        .get("location")?
+        .get("physicalLocation")?
+        .get("region")?
+        .get("startLine")?
+        .as_u64()
+}
+
+fn merge_thread_flow_location(previous: &mut serde_json::Value, next: serde_json::Value) {
+    let mut kinds: Vec<serde_json::Value> = previous
+        .get("kinds")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(next_kinds) = next.get("kinds").and_then(serde_json::Value::as_array) {
+        for kind in next_kinds {
+            if !kinds.iter().any(|existing| existing == kind) {
+                kinds.push(kind.clone());
+            }
+        }
+    }
+    previous["kinds"] = serde_json::Value::Array(kinds);
+    if next.get("importance").and_then(serde_json::Value::as_str) == Some("essential") {
+        previous["importance"] = serde_json::Value::String("essential".to_string());
+    }
 }
 
 fn taint_step_matches_match(
