@@ -8,7 +8,7 @@
   match:
     kind: write
     target:
-      regex: ^[^\.\s]+\.innerHTML$
+      regex: ^.+\.innerHTML$
   constraints:
   - arg_tainted:
       index: 0
@@ -29,7 +29,7 @@
   match:
     kind: write
     target:
-      regex: ^[^\.\s]+\.outerHTML$
+      regex: ^.+\.outerHTML$
   constraints:
   - arg_tainted:
       index: 0
