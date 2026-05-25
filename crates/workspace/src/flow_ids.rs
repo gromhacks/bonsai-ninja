@@ -388,7 +388,7 @@ impl FlowIdCache {
             return cg;
         }
         let global = db.global_index();
-        let built = ResolvedCallGraph::build_with_file_info(
+        let built = ResolvedCallGraph::build_with_file_info_and_super_tokens(
             global.as_ref(),
             |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
             |file| {
@@ -408,6 +408,11 @@ impl FlowIdCache {
                     .unwrap_or(&[])
             },
             |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+            |file| {
+                db.adapter_for(file)
+                    .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                    .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+            },
         );
         let arc = Arc::new(built);
         let mut inner = self.inner.write();

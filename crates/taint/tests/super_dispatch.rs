@@ -243,6 +243,30 @@ class Child extends Parent {
 }
 
 #[test]
+fn javascript_base_identifier_is_not_treated_as_super_receiver() {
+    let src = "
+class Parent {
+  handle(data) { sink(data); }
+}
+
+class Child extends Parent {
+  handle(data) { base.handle(data); }
+}
+";
+    let db = ws(
+        Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new()),
+        &[("a.js", src)],
+    );
+    let entry = func_in_class(&db, "handle", "Child");
+    let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
+    assert!(
+        !super_target_in_class_chain(&result, &db, "handle", "Parent"),
+        "JavaScript receiver `base` is an ordinary identifier, not a super receiver; records={:#?}",
+        result.call_records
+    );
+}
+
+#[test]
 fn typescript_super_resolves_aliased_parent_method_across_files() {
     let db = ws(
         Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
@@ -262,6 +286,30 @@ fn typescript_super_resolves_aliased_parent_method_across_files() {
     assert!(
         super_target_in_class_chain(&result, &db, "handle", "BaseHandler"),
         "TypeScript aliased cross-file super.handle() must resolve to BaseHandler.handle; records={:#?}",
+        result.call_records
+    );
+}
+
+#[test]
+fn typescript_parent_identifier_is_not_treated_as_super_receiver() {
+    let src = "
+class BaseHandler {
+  handle(data: string) { sink(data); }
+}
+
+class Child extends BaseHandler {
+  handle(data: string) { parent.handle(data); }
+}
+";
+    let db = ws(
+        Arc::new(bonsai_lang_typescript::TypeScriptAdapter::new()),
+        &[("a.ts", src)],
+    );
+    let entry = func_in_class(&db, "handle", "Child");
+    let result = interprocedural_taint(entry, &seed(&["data"]), &config(&[]), &db);
+    assert!(
+        !super_target_in_class_chain(&result, &db, "handle", "BaseHandler"),
+        "TypeScript receiver `parent` is an ordinary identifier, not a super receiver; records={:#?}",
         result.call_records
     );
 }
