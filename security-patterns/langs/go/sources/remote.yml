@@ -1700,7 +1700,8 @@
   match:
     kind: read
     target:
-      regex: "^(p|params|resolveParams)\\.Args$"
+      regex: "^[A-Za-z_][A-Za-z0-9_]*\\.Args$"
+      receiver_type_in: [ResolveParams]
   match_examples:
   - name: graphql resolve params args
     code: |
@@ -1710,7 +1711,23 @@
         return p.Args["id"]
       }
     expect_match_text: [p.Args]
-  description: "graphql ResolveParams.Args — resolver arguments supplied by the client query."
+  - name: graphql arbitrary var resolve params args
+    code: |
+      package main
+      import "github.com/graphql-go/graphql"
+      func resolve(rp graphql.ResolveParams) any {
+        return rp.Args["id"]
+      }
+    expect_match_text: [rp.Args]
+  - name: non graphql args helper negative
+    code: |
+      package main
+      import "github.com/graphql-go/graphql"
+      func helper(rp map[string]any) any {
+        return rp.Args
+      }
+    expect_no_match: true
+  description: "graphql ResolveParams.Args — resolver arguments supplied by the client query. The receiver type gate avoids depending on local variable names."
 
 - id: go.graphql.gqlgen_fieldcontext_args
   enabled: true
