@@ -38,16 +38,19 @@ generate_table() {
         [[ "$name" == "lang_api" ]] && continue
         src="$adapter/src/lib.rs"
         [[ -f "$src" ]] || continue
+        semantic_src="$(grep -vE '^\s*//' "$src" 2>/dev/null || true)"
         bases=$(grep -cE 'decl\.bases\s*=|\.bases\s*=' "$src" 2>/dev/null)
         aliases=$(grep -cE 'type_aliases' "$src" 2>/dev/null)
         # `receiver_field_writes` is populated automatically by the kit
-        # whenever the adapter declares `implicit_receiver_names`
-        # (every OO adapter). Counting `implicit_receiver_names` here
-        # rather than the literal field name reflects what actually
-        # gates population. The smoke test
+        # whenever the adapter declares implicit receiver names or an
+        # explicit receiver parameter index. Go uses the receiver-param
+        # path (`func (h *Handler) Set(...)`), while class-shaped
+        # languages usually use implicit names such as `this` / `self`.
+        # Adapter-specific lowerings that write the field directly are
+        # counted too. The smoke test
         # `crates/taint/tests/receiver_field_writes_smoke.rs` verifies
-        # the behavioural truth across Java, C#, Python, JS, TS.
-        rfw=$(grep -cE 'implicit_receiver_names\s*[:=]|with_fn_kinds_and_implicit_receivers' "$src" 2>/dev/null)
+        # the behavioural truth across the supported receiver shapes.
+        rfw=$(printf '%s\n' "$semantic_src" | grep -cE 'implicit_receiver_names\s*:\s*&\["|method_receiver_param_index\s*:\s*Some|with_fn_kinds_and_implicit_receivers|collect_receiver_field_writes|enrich_[[:alnum:]_]*receiver_field_writes|decl\.receiver_field_writes\.(push|extend|append|sort|dedup)|let (mut )?receiver_field_writes')
         # `param_annotations` is populated by the kit's
         # `extract_param_annotations` (called from
         # `decl_index_with_handler`) for every adapter. Counting the
