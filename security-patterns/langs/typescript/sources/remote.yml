@@ -822,6 +822,7 @@
       function demo(input, req, obj) {
         return document.referrer;
       }
+    expect_match_text: [document.referrer]
   description: "document.referrer — attacker can set via Referer header."
 
 - id: typescript.source.postmessage_event
