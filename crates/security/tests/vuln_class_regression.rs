@@ -194,6 +194,82 @@ def handler(user_input):
     assert_tag_not_reported(&outcome, "sql-injection", "sqli parameterised");
 }
 
+#[test]
+fn sqli_js_graphql_resolver_args_reports_without_inferred_sources() {
+    let src = r#"
+const _gql = require("graphql");
+const _mysql = require("mysql");
+function resolver(parent, args, context, info) {
+    const sql = "SELECT * FROM users WHERE name='" + args.filter + "'";
+    return db.query(sql);
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("resolver.js", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_reported(&outcome, "sql-injection", "JS GraphQL resolver args param");
+}
+
+#[test]
+fn sqli_js_first_args_helper_clean_without_inferred_sources() {
+    let src = r#"
+const _gql = require("graphql");
+const _mysql = require("mysql");
+function helper(args, other) {
+    const sql = "SELECT * FROM users WHERE name='" + args.filter + "'";
+    return db.query(sql);
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("helper.js", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "first-argument helper named args must stay clean",
+    );
+}
+
+#[test]
+fn sqli_ts_graphql_resolver_args_reports_without_inferred_sources() {
+    let src = r#"
+const _gql = require("graphql");
+const _sql = require("typeorm");
+function resolver(parent: unknown, args: { filter: string }, context: unknown, info: unknown) {
+    const sql = "SELECT * FROM users WHERE name='" + args.filter + "'";
+    return db.query(sql);
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("resolver.ts", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_reported(&outcome, "sql-injection", "TS GraphQL resolver args param");
+}
+
+#[test]
+fn sqli_ts_first_args_helper_clean_without_inferred_sources() {
+    let src = r#"
+const _gql = require("graphql");
+const _sql = require("typeorm");
+function helper(args: { filter: string }, other: unknown) {
+    const sql = "SELECT * FROM users WHERE name='" + args.filter + "'";
+    return db.query(sql);
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("helper.ts", src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "TS first-argument helper named args must stay clean",
+    );
+}
+
 // ===========================================================================
 // 2. NoSQL injection (Mongo $where vs filtered query)
 // ===========================================================================
