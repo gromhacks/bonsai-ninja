@@ -1265,24 +1265,6 @@ macro_rules! g8_test {
     };
 }
 
-/// Best-effort G8 for language-specific exception idioms that do not
-/// yet surface a `Try` / `Throw` pair in HIR. Perl's `eval { die ... };
-/// if ($@) { ... }` currently indexes as a call plus branch, not as a
-/// catch binding.
-macro_rules! g8_best_effort_test {
-    ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
-        #[test]
-        fn $name() {
-            let Some(_) = bin_path() else { return };
-            let tmp = fresh_tmp($tag);
-            let rules = write_sink_rule(&tmp, $lang, $rule_id, $sink);
-            write_fixture(&tmp, $file, $contents);
-            let _ = flows_count(&tmp, &rules);
-            cleanup(&tmp);
-        }
-    };
-}
-
 g8_test!(g8_python_throw, "g8-py", "python", "app.py",
     "def handle(token):\n    try:\n        raise token\n    except Exception as e:\n        sink(e)\n\ndef sink(s): pass\n",
     "py.sink", "sink");
@@ -1333,7 +1315,7 @@ g8_test!(g8_dart_throw, "g8-dart", "dart", "app.dart",
 g8_test!(g8_cpp_throw, "g8-cpp", "cpp", "app.cpp",
     "#include <stdexcept>\nvoid sink(const char* s);\nvoid handle(const char* token) { try { throw std::runtime_error(token); } catch (const std::exception& e) { sink(e.what()); } }\n",
     "cpp.sink", "sink");
-g8_best_effort_test!(g8_perl_throw, "g8-perl", "perl", "app.pl",
+g8_test!(g8_perl_throw, "g8-perl", "perl", "app.pl",
     "sub handle { my $token = shift; eval { die $token; }; if ($@) { my $e = $@; sink($e); } }\nsub sink { my ($s) = @_; }\n",
     "perl.sink", "sink");
 

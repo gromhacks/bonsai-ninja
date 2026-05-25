@@ -551,13 +551,10 @@ sub G { }
 1;
 "#,
             function_name: "shapes",
-            // Perl `eval { ... }; if ($@) { ... }` doesn't lower to a
-            // single Try with catch_param — adapter emits the eval as
-            // an isolated body. Skip the catch-bind assertion.
             // Perl emits `$y = $x` as a Compound assign with
             // `source_names: ["x"]` rather than `source_name`. Skip
             // the bare-rename assertion.
-            skip: &[CanonicalShape::CatchBind, CanonicalShape::BareRename],
+            skip: &[CanonicalShape::BareRename],
         },
         "php" => Conformance {
             lang: "php",

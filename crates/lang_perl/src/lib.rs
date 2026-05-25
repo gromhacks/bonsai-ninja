@@ -155,6 +155,7 @@ impl LanguageAdapter for PerlAdapter {
             normalize_perl_hash_deref_flow_events(&mut decl.flow_events, &source);
             augment_perl_collection_flow_events(&mut decl.flow_events, &source);
             inject_perl_coderef_aliases(&mut decl.flow_events, &source);
+            normalize_perl_eval_exception_flow_events(&mut decl.flow_events, &source);
         }
         bonsai_lang_api::apply_file_stem_semantic_identity(&mut idx, ctx);
         apply_perl_package_semantic_identity(&mut idx);
@@ -658,6 +659,362 @@ fn perl_coderef_rhs_source(rhs: &str) -> Option<String> {
         return None;
     }
     Some(name.to_string())
+}
+
+/// Lower Perl's exception idiom `eval { die ... }; if ($@) { ... }`
+/// into a structural Try/Throw region. Tree-sitter-perl exposes the
+/// eval block's body as ordinary calls and the `$@` handler as an
+/// unrelated branch, so downstream taint cannot otherwise connect the
+/// thrown value to the handler binding.
+fn normalize_perl_eval_exception_flow_events(events: &mut Vec<FlowEvent>, source: &str) {
+    let eval_blocks = perl_eval_block_ranges(source);
+    if eval_blocks.is_empty() {
+        return;
+    }
+    rewrite_perl_eval_exception_regions(events, source, &eval_blocks);
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PerlEvalBlockRange {
+    start: usize,
+    body_start: usize,
+    body_end: usize,
+}
+
+fn perl_eval_block_ranges(source: &str) -> Vec<PerlEvalBlockRange> {
+    let mut out = Vec::new();
+    let bytes = source.as_bytes();
+    let mut search = 0usize;
+    while search + 4 <= bytes.len() {
+        let Some(relative) = find_bytes(&bytes[search..], b"eval") else {
+            break;
+        };
+        let start = search + relative;
+        let after_eval = start + 4;
+        if !perl_keyword_boundary(bytes, start, after_eval) {
+            search = after_eval;
+            continue;
+        }
+        let mut open = after_eval;
+        while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+            open += 1;
+        }
+        if bytes.get(open).copied() != Some(b'{') {
+            search = after_eval;
+            continue;
+        }
+        let body_start = open + 1;
+        let Some(close_relative) = find_matching_perl_brace(&source[body_start..]) else {
+            search = after_eval;
+            continue;
+        };
+        let body_end = body_start + close_relative;
+        out.push(PerlEvalBlockRange {
+            start,
+            body_start,
+            body_end,
+        });
+        search = body_end.saturating_add(1);
+    }
+    out
+}
+
+fn perl_keyword_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let before = start.checked_sub(1).and_then(|idx| bytes.get(idx)).copied();
+    let after = bytes.get(end).copied();
+    !before.is_some_and(perl_identifier_byte) && !after.is_some_and(perl_identifier_byte)
+}
+
+fn perl_identifier_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+fn rewrite_perl_eval_exception_regions(
+    events: &mut Vec<FlowEvent>,
+    source: &str,
+    eval_blocks: &[PerlEvalBlockRange],
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_perl_eval_exception_regions(then_events, source, eval_blocks);
+                rewrite_perl_eval_exception_regions(else_events, source, eval_blocks);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_perl_eval_exception_regions(body, source, eval_blocks);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_perl_eval_exception_regions(body, source, eval_blocks);
+                rewrite_perl_eval_exception_regions(catch_events, source, eval_blocks);
+                rewrite_perl_eval_exception_regions(finally_events, source, eval_blocks);
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = Vec::with_capacity(events.len());
+    let mut idx = 0usize;
+    while idx < events.len() {
+        let Some(block) = event_span(&events[idx])
+            .and_then(|span| {
+                eval_blocks
+                    .iter()
+                    .find(|block| span_inside_eval_body(span, **block))
+            })
+            .copied()
+        else {
+            rewritten.push(events[idx].clone());
+            idx += 1;
+            continue;
+        };
+
+        let mut body_end = idx;
+        while body_end < events.len() {
+            let Some(span) = event_span(&events[body_end]) else {
+                break;
+            };
+            if !span_inside_eval_body(span, block) {
+                break;
+            }
+            body_end += 1;
+        }
+        if body_end == idx || body_end >= events.len() {
+            rewritten.extend(events[idx..body_end].iter().cloned());
+            idx = body_end;
+            continue;
+        }
+
+        let FlowEvent::Branch {
+            span: branch_span,
+            condition,
+            then_events,
+            ..
+        } = &events[body_end]
+        else {
+            rewritten.extend(events[idx..body_end].iter().cloned());
+            idx = body_end;
+            continue;
+        };
+        if !perl_condition_is_dollar_at(condition.as_deref()) {
+            rewritten.extend(events[idx..body_end].iter().cloned());
+            idx = body_end;
+            continue;
+        }
+
+        let mut body = events[idx..body_end].to_vec();
+        body = lower_perl_die_calls_to_throws(body);
+        let (catch_param, catch_events) = perl_dollar_at_catch_events(then_events, source);
+        let file = branch_span.file;
+        let try_span = Span::new(
+            file,
+            u64::try_from(block.start).unwrap_or(branch_span.start),
+            branch_span.end,
+        );
+        rewritten.push(FlowEvent::Try {
+            span: try_span,
+            body,
+            catch_events,
+            finally_events: Vec::new(),
+            catch_param,
+            catch_types: Vec::new(),
+        });
+        idx = body_end + 1;
+    }
+    *events = rewritten;
+}
+
+fn event_span(event: &FlowEvent) -> Option<Span> {
+    match event {
+        FlowEvent::Call { span, .. }
+        | FlowEvent::Branch { span, .. }
+        | FlowEvent::Loop { span, .. }
+        | FlowEvent::Assign { span, .. }
+        | FlowEvent::Return { span, .. }
+        | FlowEvent::Throw { span, .. }
+        | FlowEvent::Try { span, .. }
+        | FlowEvent::Break { span, .. }
+        | FlowEvent::Continue { span, .. }
+        | FlowEvent::Yield { span, .. }
+        | FlowEvent::Await { span, .. }
+        | FlowEvent::Defer { span, .. }
+        | FlowEvent::Using { span, .. }
+        | FlowEvent::Lifecycle { span, .. } => Some(*span),
+    }
+}
+
+fn span_inside_eval_body(span: Span, block: PerlEvalBlockRange) -> bool {
+    let Ok(start) = usize::try_from(span.start) else {
+        return false;
+    };
+    let Ok(end) = usize::try_from(span.end) else {
+        return false;
+    };
+    start >= block.body_start && end <= block.body_end
+}
+
+fn perl_condition_is_dollar_at(condition: Option<&str>) -> bool {
+    condition
+        .map(str::trim)
+        .is_some_and(|condition| matches!(condition, "$@" | "($@)"))
+}
+
+fn lower_perl_die_calls_to_throws(events: Vec<FlowEvent>) -> Vec<FlowEvent> {
+    let mut out = Vec::with_capacity(events.len());
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span,
+                name,
+                receiver,
+                receiver_types,
+                call_kind,
+                args,
+            } if name == "die" => {
+                out.push(FlowEvent::Throw {
+                    span: perl_die_throw_span(span, &args),
+                    value_name: perl_die_value_name(&args),
+                    thrown_type: None,
+                });
+                out.push(FlowEvent::Call {
+                    span,
+                    name,
+                    receiver,
+                    receiver_types,
+                    call_kind,
+                    args,
+                });
+            }
+            FlowEvent::Branch {
+                span,
+                condition,
+                then_events,
+                else_events,
+            } => out.push(FlowEvent::Branch {
+                span,
+                condition,
+                then_events: lower_perl_die_calls_to_throws(then_events),
+                else_events: lower_perl_die_calls_to_throws(else_events),
+            }),
+            FlowEvent::Loop {
+                span,
+                loop_kind,
+                body,
+            } => out.push(FlowEvent::Loop {
+                span,
+                loop_kind,
+                body: lower_perl_die_calls_to_throws(body),
+            }),
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                catch_param,
+                catch_types,
+            } => out.push(FlowEvent::Try {
+                span,
+                body: lower_perl_die_calls_to_throws(body),
+                catch_events: lower_perl_die_calls_to_throws(catch_events),
+                finally_events: lower_perl_die_calls_to_throws(finally_events),
+                catch_param,
+                catch_types,
+            }),
+            FlowEvent::Defer { span, body } => out.push(FlowEvent::Defer {
+                span,
+                body: lower_perl_die_calls_to_throws(body),
+            }),
+            FlowEvent::Using { span, body } => out.push(FlowEvent::Using {
+                span,
+                body: lower_perl_die_calls_to_throws(body),
+            }),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn perl_die_throw_span(span: Span, args: &[CallArg]) -> Span {
+    let end = args
+        .iter()
+        .map(|arg| arg.span.end)
+        .max()
+        .unwrap_or(span.end)
+        .max(span.end);
+    Span::new(span.file, span.start, end)
+}
+
+fn perl_die_value_name(args: &[CallArg]) -> Option<String> {
+    let arg = args.first()?;
+    if let Some(place) = arg
+        .place
+        .as_deref()
+        .map(str::trim)
+        .filter(|place| !place.is_empty())
+    {
+        return Some(place.to_string());
+    }
+    if let Some(source) = arg
+        .source_names
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .find(|source| !source.is_empty())
+    {
+        return Some(source.to_string());
+    }
+    let value = arg.value_text.trim();
+    if perl_sigiled_identifiers(value, ['$', '@', '%'])
+        .first()
+        .is_some_and(|identifier| identifier == value)
+    {
+        return Some(value.to_string());
+    }
+    (!value.is_empty() && value.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
+        .then(|| value.to_string())
+}
+
+fn perl_dollar_at_catch_events(events: &[FlowEvent], source: &str) -> (Option<String>, Vec<FlowEvent>) {
+    let mut aliases = Vec::new();
+    for event in events {
+        if let FlowEvent::Assign { span, target, .. } = event {
+            if perl_assignment_rhs_is_dollar_at(source, *span) {
+                push_unique_string(&mut aliases, target.clone());
+            }
+        }
+    }
+    let catch_param = aliases
+        .iter()
+        .find(|alias| alias.starts_with('$'))
+        .cloned()
+        .or_else(|| aliases.first().cloned())
+        .or_else(|| Some("$@".to_string()));
+
+    let catch_events = events
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event,
+                FlowEvent::Assign { span, .. } if perl_assignment_rhs_is_dollar_at(source, *span)
+            )
+        })
+        .cloned()
+        .collect();
+    (catch_param, catch_events)
+}
+
+fn perl_assignment_rhs_is_dollar_at(source: &str, span: Span) -> bool {
+    assignment_rhs_text(source, span)
+        .map(|rhs| rhs.trim().trim_end_matches(';').trim() == "$@")
+        .unwrap_or(false)
 }
 
 /// Rewrite Perl hash-deref expressions like `$h->{k}` into the

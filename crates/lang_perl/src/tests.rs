@@ -118,3 +118,55 @@ fn map_grep_topic_call_rewrites_topic_arg_to_collection() {
         )
     }));
 }
+
+#[test]
+fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
+    let src = "sub handle { my $token = shift; eval { die $token; }; if ($@) { my $e = $@; sink($e); } }\nsub sink { my ($s) = @_; }\n";
+    let adapter: std::sync::Arc<dyn bonsai_lang_api::LanguageAdapter> =
+        std::sync::Arc::new(PerlAdapter::new());
+    let ws = bonsai_testkit::workspace_with(vec![adapter], &[("app.pl", src)]);
+    let global = ws.db().global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle decl");
+
+    let (body, catch_events, catch_param) = handle
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Try {
+                body,
+                catch_events,
+                catch_param,
+                ..
+            } => Some((body, catch_events, catch_param)),
+            _ => None,
+        })
+        .expect("eval/die should lower to Try");
+
+    assert_eq!(catch_param.as_deref(), Some("$e"));
+    assert!(
+        body.iter().any(|event| matches!(
+            event,
+            FlowEvent::Throw {
+                value_name: Some(value),
+                ..
+            } if value == "$token"
+        )),
+        "try body should contain a Throw carrying $token: {body:#?}"
+    );
+    assert!(
+        catch_events
+            .iter()
+            .all(|event| !matches!(event, FlowEvent::Assign { span, .. } if perl_assignment_rhs_is_dollar_at(src, *span))),
+        "the `$@` alias assignment should become the catch binding: {catch_events:#?}"
+    );
+    assert!(
+        catch_events
+            .iter()
+            .any(|event| matches!(event, FlowEvent::Call { name, .. } if name == "sink")),
+        "catch body should retain the sink call: {catch_events:#?}"
+    );
+}
