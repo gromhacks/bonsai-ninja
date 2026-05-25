@@ -44,10 +44,9 @@ enum Expected {
 
 const LANG_TABLE: &[(&str, Expected)] = &[
     ("perl", Expected::Pass),
-    // Ruby fires on `eval $tainted` (1 finding), but NOT on backtick
-    // `cmd #{interp}` or `%x{...}`. Counted as Pass at the audit
-    // level because at least one syntactic form works; the
-    // backtick-specific gap is captured under Task #284.
+    // Ruby must surface `subshell` syntax as one semantic command
+    // argument so backtick and `%x{}` command execution rules see the
+    // tainted interpolation operand at arg 0.
     ("ruby", Expected::Pass),
     ("php", Expected::Pass),
     ("erlang", Expected::Pass),
@@ -171,4 +170,33 @@ fn lang_syntax_audit_per_language() {
         }
         panic!("{msg}");
     }
+}
+
+#[test]
+fn ruby_subshell_forms_emit_command_injection_findings() {
+    let report = run_taint_for("ruby").expect("ruby fixture taint report");
+
+    let mut backtick_lines = Vec::new();
+    for combined in &report.findings {
+        for sink in std::iter::once(&combined.finding.sink).chain(combined.additional_sinks.iter()) {
+            if sink.rule_id != "ruby.cmdi.kernel_backtick" {
+                continue;
+            }
+            backtick_lines.push(sink.line);
+            assert!(
+                sink.tainted_args
+                    .iter()
+                    .any(|arg| arg.index == 0 && arg.value_text.contains("tainted")),
+                "ruby subshell sink at line {} did not carry command arg taint evidence: {:?}",
+                sink.line,
+                sink.tainted_args
+            );
+        }
+    }
+    backtick_lines.sort_unstable();
+    assert_eq!(
+        backtick_lines,
+        vec![9, 16],
+        "expected both Ruby backtick and %x{{}} command forms to fire"
+    );
 }
