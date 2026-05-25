@@ -170,3 +170,59 @@ fn eval_die_dollar_at_rewrites_to_try_throw_alias_catch() {
         "catch body should retain the sink call: {catch_events:#?}"
     );
 }
+
+#[test]
+fn simple_scalar_assignment_rewrites_to_exact_source_name() {
+    let src = "my $y = $x;";
+    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let mut events = vec![FlowEvent::Assign {
+        span,
+        target: "$y".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["x".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    }];
+
+    normalize_perl_simple_scalar_renames(&mut events, src);
+
+    assert!(matches!(
+        &events[0],
+        FlowEvent::Assign {
+            source_name: Some(source),
+            source_names,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            ..
+        } if source == "$x" && source_names.is_empty()
+    ));
+}
+
+#[test]
+fn scalar_deref_assignment_stays_compound() {
+    let src = "my $y = $obj->{token};";
+    let span = Span::new(FileId::new(0), 0, u64::try_from(src.len()).unwrap());
+    let mut events = vec![FlowEvent::Assign {
+        span,
+        target: "$y".to_string(),
+        source_name: None,
+        source_call: None,
+        source_call_args: Vec::new(),
+        source_names: vec!["$obj".to_string(), "$obj.token".to_string()],
+        declares_new_binding: true,
+        value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+    }];
+
+    normalize_perl_simple_scalar_renames(&mut events, src);
+
+    assert!(matches!(
+        &events[0],
+        FlowEvent::Assign {
+            source_name: None,
+            source_names,
+            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            ..
+        } if !source_names.is_empty()
+    ));
+}
