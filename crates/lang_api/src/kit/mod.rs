@@ -9096,6 +9096,13 @@ fn classify_assign_value_kinds(events: &mut [FlowEvent]) {
 /// security matching, inspect, and export consume the same receiver
 /// type evidence without receiver-name allowlists.
 pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
+    apply_call_receiver_types_with_super_tokens(idx, &["super"]);
+}
+
+pub fn apply_call_receiver_types_with_super_tokens(
+    idx: &mut crate::DeclIndex,
+    super_receiver_tokens: &[&str],
+) {
     // Two parallel indexes over the file's class-like decls:
     //
     //   * `by_symbol` keys on the SymbolId so the implicit-receiver
@@ -9157,6 +9164,7 @@ pub fn apply_call_receiver_types(idx: &mut crate::DeclIndex) {
             &aliases,
             implicit_receiver_types.as_deref(),
             &class_facts,
+            super_receiver_tokens,
         );
     }
 }
@@ -9176,6 +9184,7 @@ fn apply_call_receiver_types_to_events(
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
     class_facts: &ClassFactsIndex<'_>,
+    super_receiver_tokens: &[&str],
 ) {
     for event in events {
         match event {
@@ -9185,8 +9194,13 @@ fn apply_call_receiver_types_to_events(
                 ..
             } => {
                 if let Some(receiver) = receiver.as_deref() {
-                    for ty in receiver_types_for_expr(receiver, aliases, implicit_receiver_types, class_facts)
-                    {
+                    for ty in receiver_types_for_expr(
+                        receiver,
+                        aliases,
+                        implicit_receiver_types,
+                        class_facts,
+                        super_receiver_tokens,
+                    ) {
                         push_unique_receiver_type(receiver_types, ty);
                     }
                 } else if let Some(types) = implicit_receiver_types {
@@ -9221,16 +9235,24 @@ fn apply_call_receiver_types_to_events(
                     aliases,
                     implicit_receiver_types,
                     class_facts,
+                    super_receiver_tokens,
                 );
                 apply_call_receiver_types_to_events(
                     else_events,
                     aliases,
                     implicit_receiver_types,
                     class_facts,
+                    super_receiver_tokens,
                 );
             }
             FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
-                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types, class_facts);
+                apply_call_receiver_types_to_events(
+                    body,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                    super_receiver_tokens,
+                );
             }
             FlowEvent::Try {
                 body,
@@ -9238,18 +9260,26 @@ fn apply_call_receiver_types_to_events(
                 finally_events,
                 ..
             } => {
-                apply_call_receiver_types_to_events(body, aliases, implicit_receiver_types, class_facts);
+                apply_call_receiver_types_to_events(
+                    body,
+                    aliases,
+                    implicit_receiver_types,
+                    class_facts,
+                    super_receiver_tokens,
+                );
                 apply_call_receiver_types_to_events(
                     catch_events,
                     aliases,
                     implicit_receiver_types,
                     class_facts,
+                    super_receiver_tokens,
                 );
                 apply_call_receiver_types_to_events(
                     finally_events,
                     aliases,
                     implicit_receiver_types,
                     class_facts,
+                    super_receiver_tokens,
                 );
             }
             FlowEvent::Assign { .. }
@@ -9269,12 +9299,19 @@ fn receiver_types_for_expr(
     aliases: &[crate::TypeAliasBinding],
     implicit_receiver_types: Option<&[String]>,
     class_facts: &ClassFactsIndex<'_>,
+    super_receiver_tokens: &[&str],
 ) -> Vec<String> {
     let normalized = normalize_receiver_type_expr(receiver);
     let tail = short_name_of(&normalized);
     let mut out = Vec::new();
     if let Some(inner) = receiver_class_object_inner_expr(&normalized) {
-        for ty in receiver_types_for_expr(inner, aliases, implicit_receiver_types, class_facts) {
+        for ty in receiver_types_for_expr(
+            inner,
+            aliases,
+            implicit_receiver_types,
+            class_facts,
+            super_receiver_tokens,
+        ) {
             push_unique_receiver_type(&mut out, ty);
         }
         if !out.is_empty() {
@@ -9304,7 +9341,7 @@ fn receiver_types_for_expr(
                 push_receiver_type_and_bases(&mut out, ty.clone(), class_facts);
             }
         }
-    } else if matches!(tail, "super" | "parent" | "base") {
+    } else if super_receiver_tokens.contains(&tail) {
         if let Some(types) = implicit_receiver_types {
             for ty in types.iter().skip(1) {
                 push_receiver_type_and_bases(&mut out, ty.clone(), class_facts);

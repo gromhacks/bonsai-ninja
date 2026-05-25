@@ -21,7 +21,7 @@ use bonsai_lang_api::{
 };
 use bonsai_resolve::{
     callee_without_call_args, collect_method_candidates_for_class, enclosing_class_for_decl,
-    export_name_variants, extend_alias_targets_with_declared_types, is_super_receiver,
+    export_name_variants, extend_alias_targets_with_declared_types, is_super_receiver_with_tokens,
     module_target_matches_decl_module_path, module_target_matches_path, namespace_alias_target_tail,
     prune_receiver_type_names_for_dispatch, push_unique_func, push_unique_string,
     qualified_module_alias_call, resolve_callable_with_context, resolve_class, split_qualified_head_tail,
@@ -589,8 +589,8 @@ impl ResolvedCallGraph {
     /// (e.g. JS/TS expose `exports.<n>` and `module.exports.<n>`).
     pub fn build_with_file_info<F, T, P, L, G>(
         global: &GlobalIndex,
-        mut aliases_for_file: F,
-        mut alias_targets_for_file: T,
+        aliases_for_file: F,
+        alias_targets_for_file: T,
         path_for_file: P,
         export_aliases_for_file: L,
         language_for_file: G,
@@ -601,6 +601,39 @@ impl ResolvedCallGraph {
         P: Fn(FileId) -> Option<String>,
         L: Fn(FileId) -> &'static [&'static str],
         G: Fn(FileId) -> Option<&'static str>,
+    {
+        Self::build_with_file_info_and_super_tokens(
+            global,
+            aliases_for_file,
+            alias_targets_for_file,
+            path_for_file,
+            export_aliases_for_file,
+            language_for_file,
+            |_| bonsai_common::SUPER_RECEIVER_TOKENS,
+        )
+    }
+
+    /// Build with path, export-aliases, and adapter-specific
+    /// super-receiver callbacks. Production callers should use this
+    /// variant so ordinary variables named `base` / `parent` are not
+    /// treated as super receivers in languages where only `super` is
+    /// meaningful.
+    pub fn build_with_file_info_and_super_tokens<F, T, P, L, G, S>(
+        global: &GlobalIndex,
+        mut aliases_for_file: F,
+        mut alias_targets_for_file: T,
+        path_for_file: P,
+        export_aliases_for_file: L,
+        language_for_file: G,
+        super_receiver_tokens_for_file: S,
+    ) -> Self
+    where
+        F: FnMut(FileId) -> AHashMap<String, String>,
+        T: FnMut(FileId) -> AHashMap<String, AliasTarget>,
+        P: Fn(FileId) -> Option<String>,
+        L: Fn(FileId) -> &'static [&'static str],
+        G: Fn(FileId) -> Option<&'static str>,
+        S: Fn(FileId) -> &'static [&'static str],
     {
         let mut cg = CallGraph::new();
         let alias_index = WorkspaceAliasIndex::build(global);
@@ -616,6 +649,7 @@ impl ResolvedCallGraph {
             let aliases = aliases_for_file(file);
             let file_alias_targets = alias_targets_for_file(file);
             let export_aliases = export_aliases_for_file(file);
+            let super_receiver_tokens = super_receiver_tokens_for_file(file);
             let caller_language = language_for_file(file);
             for decl in global.decls_in(file) {
                 if !matches!(
@@ -643,6 +677,7 @@ impl ResolvedCallGraph {
                     &local_bindings,
                     &path_lookup,
                     export_aliases,
+                    super_receiver_tokens,
                     caller_language,
                     &language_for_file,
                     &alias_index,
@@ -687,6 +722,7 @@ fn add_resolved_call_edges(
     local_bindings: &AHashMap<String, FuncId>,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     caller_export_aliases: &[&'static str],
+    caller_super_receiver_tokens: &[&'static str],
     caller_language: Option<&'static str>,
     language_for_file: &dyn Fn(FileId) -> Option<&'static str>,
     alias_index: &WorkspaceAliasIndex,
@@ -738,6 +774,7 @@ fn add_resolved_call_edges(
                         *call_kind,
                         name,
                         *span,
+                        caller_super_receiver_tokens,
                     );
                 }
                 if candidates.is_empty() {
@@ -904,6 +941,7 @@ fn add_resolved_call_edges(
                         *span,
                         alias_qualified_call,
                         path_for_file,
+                        caller_super_receiver_tokens,
                         &mut candidates,
                     );
                 }
@@ -1023,6 +1061,7 @@ fn add_resolved_call_edges(
                         *span,
                         alias_qualified_call,
                         path_for_file,
+                        caller_super_receiver_tokens,
                         &mut candidates,
                     );
                 }
@@ -1092,6 +1131,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
@@ -1108,6 +1148,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
@@ -1126,6 +1167,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
@@ -1149,6 +1191,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
@@ -1165,6 +1208,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
@@ -1181,6 +1225,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
@@ -1199,6 +1244,7 @@ fn add_resolved_call_edges(
                     local_bindings,
                     path_for_file,
                     caller_export_aliases,
+                    caller_super_receiver_tokens,
                     caller_language,
                     language_for_file,
                     alias_index,
@@ -2405,6 +2451,7 @@ fn collect_receiver_method_targets(
     call_kind: CallKind,
     call_name: &str,
     call_span: Span,
+    super_receiver_tokens: &[&str],
 ) -> Vec<FuncId> {
     if call_kind != CallKind::Method {
         return Vec::new();
@@ -2413,7 +2460,7 @@ fn collect_receiver_method_targets(
         return Vec::new();
     };
     let method_name = short_callee(call_name);
-    if is_super_receiver(receiver) {
+    if is_super_receiver_with_tokens(receiver, super_receiver_tokens) {
         return collect_super_method_targets(global, caller_decl, alias_targets, method_name);
     }
     let assigned_type_names =
@@ -3038,6 +3085,7 @@ fn retain_semantic_receiver_evidenced_candidates(
     call_span: Span,
     alias_qualified_call: bool,
     path_for_file: &dyn Fn(FileId) -> Option<String>,
+    super_receiver_tokens: &[&str],
     candidates: &mut Vec<FuncId>,
 ) {
     if candidates.is_empty() || call_kind != CallKind::Method || alias_qualified_call {
@@ -3049,7 +3097,7 @@ fn retain_semantic_receiver_evidenced_candidates(
     else {
         return;
     };
-    if is_super_receiver(&receiver) {
+    if is_super_receiver_with_tokens(&receiver, super_receiver_tokens) {
         return;
     }
     let Some(caller_file) = caller_decl_file(global, caller_decl) else {
@@ -3857,6 +3905,37 @@ pub fn collect_call_event_targets_with_context_and_aliases(
     path_for_file: &dyn Fn(FileId) -> Option<String>,
     caller_export_aliases: &[&'static str],
 ) -> Vec<FuncId> {
+    collect_call_event_targets_with_context_aliases_and_super_tokens(
+        global,
+        name,
+        receiver,
+        receiver_types,
+        call_kind,
+        call_span,
+        args,
+        caller_decl,
+        alias_targets,
+        path_for_file,
+        caller_export_aliases,
+        bonsai_common::SUPER_RECEIVER_TOKENS,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Public resolver hook mirrors FlowEvent::Call plus workspace callbacks.
+pub fn collect_call_event_targets_with_context_aliases_and_super_tokens(
+    global: &GlobalIndex,
+    name: &str,
+    receiver: Option<&str>,
+    receiver_types: &[String],
+    call_kind: CallKind,
+    call_span: Span,
+    args: &[CallArg],
+    caller_decl: &Decl,
+    alias_targets: &AHashMap<String, AliasTarget>,
+    path_for_file: &dyn Fn(FileId) -> Option<String>,
+    caller_export_aliases: &[&'static str],
+    caller_super_receiver_tokens: &[&'static str],
+) -> Vec<FuncId> {
     let folded_receiver = receiver_name_from_call_name(name)
         .filter(|candidate| folded_call_name_receiver_is_instance(name, candidate, receiver_types));
     let semantic_receiver = receiver.or(folded_receiver);
@@ -3875,6 +3954,7 @@ pub fn collect_call_event_targets_with_context_and_aliases(
             call_kind,
             name,
             call_span,
+            caller_super_receiver_tokens,
         );
     }
     if targets.is_empty() {

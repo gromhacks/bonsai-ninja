@@ -120,7 +120,7 @@ use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent}
 use bonsai_resolve::{
     alias_map_for_file, callee_without_call_args, collect_method_candidates_for_class,
     enclosing_class_for_decl, export_name_variants, extend_alias_targets_with_declared_types,
-    is_super_receiver, module_target_matches_decl_module_path, module_target_matches_path,
+    is_super_receiver_with_tokens, module_target_matches_decl_module_path, module_target_matches_path,
     namespace_alias_target_tail, prune_receiver_type_names_for_dispatch, push_unique_func,
     qualified_module_alias_call, resolve_callable_with_context, resolve_class, short_tail,
     split_qualified_head_tail, visibility_allows, ResolveContext,
@@ -2151,14 +2151,18 @@ fn propagate_call_event(
     apply_configured_source_output_args(call.name, call.args, ctx.config, state);
     apply_configured_output_arg_flows(call.name, call.args, ctx.config, state);
     let semantic_taint_added = apply_variadic_runtime_call_semantics(call.name, call.args, state);
-    let implicit_receiver = implicit_receiver_from_call_name(call.name, call.call_kind);
+    let implicit_receiver = implicit_receiver_from_call_name(
+        call.name,
+        call.call_kind,
+        super_receiver_tokens_for_caller(ctx.db, ctx.caller),
+    );
     let effective_receiver = call.receiver.or(implicit_receiver.as_deref());
     let tainted_receiver = effective_receiver
         .filter(|receiver| receiver_expr_is_tainted(receiver, state))
         .map(Cow::Borrowed)
         .or_else(|| {
             effective_receiver
-                .filter(|receiver| is_super_receiver(receiver))
+                .filter(|receiver| is_super_receiver_for_caller(ctx.db, ctx.caller, receiver))
                 .and_then(|_| caller_implicit_receiver_taint_binding(ctx, state).map(Cow::Owned))
         })
         .or_else(|| {
@@ -2511,7 +2515,12 @@ fn resolve_call_event_candidates_via_callgraph(
         .and_then(|file| ctx.db.adapter_for(file))
         .map(|adapter| adapter.capabilities().module_export_aliases)
         .unwrap_or(&[]);
-    let targets = bonsai_callgraph::collect_call_event_targets_with_context_and_aliases(
+    let caller_super_receiver_tokens = global
+        .declaring_file(caller_sym)
+        .and_then(|file| ctx.db.adapter_for(file))
+        .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+        .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS);
+    let targets = bonsai_callgraph::collect_call_event_targets_with_context_aliases_and_super_tokens(
         &global,
         call.name,
         call.receiver,
@@ -2529,6 +2538,7 @@ fn resolve_call_event_candidates_via_callgraph(
                 .map(|path| path.to_string_lossy().into_owned())
         },
         caller_export_aliases,
+        caller_super_receiver_tokens,
     );
     let receiver_dispatch = call.call_kind == CallKind::Method
         && (call.receiver.is_some()
@@ -4318,7 +4328,7 @@ fn collect_super_constructor_call_receiver_field_writes(
     let Some(receiver) = receiver else {
         return;
     };
-    if !is_super_receiver(receiver) {
+    if !is_super_receiver_for_decl(db, decl, receiver) {
         return;
     }
     let Some(current_receiver_idx) = decl.receiver_param_index else {
@@ -5024,6 +5034,30 @@ fn configured_constructor_method_for_caller(db: &AnalyzerDb, caller: FuncId, met
         .unwrap_or_else(|| bonsai_common::CONSTRUCTOR_METHOD_NAMES.contains(&method_name))
 }
 
+fn super_receiver_tokens_for_caller(db: &AnalyzerDb, caller: FuncId) -> &'static [&'static str] {
+    db.global_index()
+        .declaring_file(SymbolId::new(caller.raw()))
+        .and_then(|file| db.adapter_for(file))
+        .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+        .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+}
+
+fn super_receiver_tokens_for_decl(db: &AnalyzerDb, decl: &Decl) -> &'static [&'static str] {
+    db.global_index()
+        .declaring_file(decl.symbol)
+        .and_then(|file| db.adapter_for(file))
+        .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+        .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+}
+
+fn is_super_receiver_for_caller(db: &AnalyzerDb, caller: FuncId, receiver: &str) -> bool {
+    is_super_receiver_with_tokens(receiver, super_receiver_tokens_for_caller(db, caller))
+}
+
+fn is_super_receiver_for_decl(db: &AnalyzerDb, decl: &Decl, receiver: &str) -> bool {
+    is_super_receiver_with_tokens(receiver, super_receiver_tokens_for_decl(db, decl))
+}
+
 fn constructor_method_names_for_class(db: &AnalyzerDb, caller: FuncId, class_name: &str) -> Vec<String> {
     let mut out = vec![class_name.to_string()];
     let configured = db
@@ -5225,15 +5259,20 @@ pub(super) fn call_receiver_from_name(name: &str) -> Option<String> {
     (!receiver.is_empty()).then(|| receiver.to_string())
 }
 
-fn implicit_receiver_from_call_name(name: &str, call_kind: bonsai_lang_api::CallKind) -> Option<String> {
+fn implicit_receiver_from_call_name(
+    name: &str,
+    call_kind: bonsai_lang_api::CallKind,
+    super_receiver_tokens: &[&str],
+) -> Option<String> {
     if call_kind != bonsai_lang_api::CallKind::Method {
         return None;
     }
     let receiver = call_receiver_from_name(name)?;
     let scoped_call = name.contains("::");
-    (matches!(receiver.as_str(), "super" | "parent" | "base")
+    (is_super_receiver_with_tokens(&receiver, super_receiver_tokens)
         || (!scoped_call && matches!(receiver.as_str(), "self" | "this"))
-        || (!scoped_call && receiver_projects_implicit_receiver(&format!("{receiver}."))))
+        || (!scoped_call
+            && receiver_projects_implicit_receiver(&format!("{receiver}."), super_receiver_tokens)))
     .then_some(receiver)
 }
 
@@ -5738,6 +5777,7 @@ fn resolve_call_candidates_with_caller_at_uncached(
     call_span: Option<Span>,
 ) -> Vec<ResolvedCallee> {
     let mut saw_expression_receiver = false;
+    let mut saw_super_token_collision_receiver = false;
     let variants = callable_reference_variants(name);
     let original_has_receiver = variants.iter().any(|variant| {
         let normalised = normalise_qualified_text(variant);
@@ -5797,7 +5837,7 @@ fn resolve_call_candidates_with_caller_at_uncached(
         }
         if !receiver_types.is_empty() {
             if let Some(receiver) = call_receiver_from_name(lookup_name) {
-                let targets = if is_super_receiver(&receiver) {
+                let targets = if is_super_receiver_for_caller(scope.db, scope.caller, &receiver) {
                     resolve_super_method_candidates(scope.db, scope.caller, scope.alias_targets, tail)
                 } else {
                     resolve_receiver_method_candidates(
@@ -5850,12 +5890,13 @@ fn resolve_call_candidates_with_caller_at_uncached(
                 }
             }
         }
-        let exact_targets = resolve_contextual_call_name(lookup_name, scope);
-        if !exact_targets.is_empty() {
-            return exact_targets;
-        }
         if let Some(receiver) = call_receiver_from_name(lookup_name) {
-            let targets = if is_super_receiver(&receiver) {
+            if is_super_receiver_with_tokens(&receiver, bonsai_common::SUPER_RECEIVER_TOKENS)
+                && !is_super_receiver_for_caller(scope.db, scope.caller, &receiver)
+            {
+                saw_super_token_collision_receiver = true;
+            }
+            let targets = if is_super_receiver_for_caller(scope.db, scope.caller, &receiver) {
                 resolve_super_method_candidates(scope.db, scope.caller, scope.alias_targets, tail)
             } else {
                 resolve_receiver_method_candidates(
@@ -5917,6 +5958,13 @@ fn resolve_call_candidates_with_caller_at_uncached(
             saw_expression_receiver = true;
             continue;
         }
+        let exact_targets = resolve_contextual_call_name(lookup_name, scope);
+        if !exact_targets.is_empty() {
+            return exact_targets;
+        }
+    }
+    if saw_super_token_collision_receiver {
+        return Vec::new();
     }
     if saw_expression_receiver {
         if let Some(method_name) = expression_receiver_method_name(name) {
@@ -6236,7 +6284,7 @@ fn resolve_receiver_method_candidates(
             push_unique_string(&mut type_names, class_decl.name.clone());
         }
     }
-    if receiver_projects_implicit_receiver(receiver) {
+    if receiver_projects_implicit_receiver(receiver, super_receiver_tokens_for_caller(db, caller)) {
         if let Some(class_decl) = enclosing_class_for_decl(&global, caller_decl) {
             for base in &class_decl.bases {
                 push_unique_string(&mut type_names, base.clone());
@@ -6330,13 +6378,13 @@ fn type_alias_targets_for_receiver(
     out
 }
 
-fn receiver_projects_implicit_receiver(receiver: &str) -> bool {
-    use bonsai_common::{IMPLICIT_RECEIVER_PREFIXES, SUPER_RECEIVER_TOKENS};
+fn receiver_projects_implicit_receiver(receiver: &str, super_receiver_tokens: &[&str]) -> bool {
+    use bonsai_common::IMPLICIT_RECEIVER_PREFIXES;
     let receiver = normalise_qualified_text(receiver);
     IMPLICIT_RECEIVER_PREFIXES
         .iter()
         .any(|prefix| receiver.starts_with(*prefix))
-        || SUPER_RECEIVER_TOKENS
+        || super_receiver_tokens
             .iter()
             .any(|token| receiver.starts_with(&format!("{token}.")))
 }

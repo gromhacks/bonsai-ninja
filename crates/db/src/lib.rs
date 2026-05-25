@@ -223,7 +223,10 @@ impl AnalyzerDb {
         let adapter = self.adapter_for(file)?;
         let value = Arc::new(self.adapter_context_with(|ctx| {
             let mut index = adapter.extract_declarations(file, ctx);
-            bonsai_lang_api::apply_call_receiver_types(&mut index);
+            bonsai_lang_api::apply_call_receiver_types_with_super_tokens(
+                &mut index,
+                adapter.capabilities().effective_super_receiver_tokens(),
+            );
             bonsai_lang_api::apply_assign_value_kind(&mut index);
             bonsai_lang_api::apply_assign_call_result_types(&mut index);
             index

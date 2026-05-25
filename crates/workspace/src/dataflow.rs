@@ -1230,7 +1230,7 @@ fn map_factstore_io(err: bonsai_factstore::FactStoreError) -> std::io::Error {
 
 fn snapshot_call_graph(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
     let global = db.global_index();
-    bonsai_callgraph::ResolvedCallGraph::build_with_file_info(
+    bonsai_callgraph::ResolvedCallGraph::build_with_file_info_and_super_tokens(
         global.as_ref(),
         |file| bonsai_resolve::alias_map_for_file(&db.imports_for(file)),
         |file| {
@@ -1250,6 +1250,11 @@ fn snapshot_call_graph(db: &AnalyzerDb) -> bonsai_callgraph::ResolvedCallGraph {
                 .unwrap_or(&[])
         },
         |file| db.adapter_for(file).map(|adapter| adapter.language_id().as_str()),
+        |file| {
+            db.adapter_for(file)
+                .map(|adapter| adapter.capabilities().effective_super_receiver_tokens())
+                .unwrap_or(bonsai_common::SUPER_RECEIVER_TOKENS)
+        },
     )
 }
 
