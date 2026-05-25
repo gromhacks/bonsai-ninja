@@ -759,6 +759,7 @@
     kind: param
     target:
       name: args
+      in_method: [resolve, resolve_field, resolve_user, resolver]
   match_examples:
   - name: ariadne resolver args
     code: |
@@ -766,4 +767,10 @@
       def resolve_user(obj, info, args):
           return args
     expect_match_text: [args]
-  description: "GraphQL resolver `args` parameter in Graphene/Ariadne-style handlers — field arguments supplied by the client."
+  - name: non resolver args helper negative
+    code: |
+      import graphene
+      def helper(args, other):
+          return args
+    expect_no_match: true
+  description: "GraphQL resolver `args` parameter in Graphene/Ariadne-style handlers — field arguments supplied by the client. Resolver-name scoping keeps ordinary helpers named `args` quiet."

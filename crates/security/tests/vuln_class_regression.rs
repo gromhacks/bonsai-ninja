@@ -270,6 +270,38 @@ function helper(args: { filter: string }, other: unknown) {
     );
 }
 
+#[test]
+fn sqli_python_graphql_resolver_args_reports_without_inferred_sources() {
+    let src = r#"
+import graphene
+import sqlite3
+
+def resolve_user(parent, info, args):
+    sql = "SELECT * FROM users WHERE name='" + args["filter"] + "'"
+    return sqlite3.connect(":memory:").cursor().execute(sql)
+"#;
+    let outcome = analyse_with_options(&python_ws(src), TaintAnalysisOptions::default());
+    assert_tag_reported(&outcome, "sql-injection", "Python GraphQL resolver args param");
+}
+
+#[test]
+fn sqli_python_first_args_helper_clean_without_inferred_sources() {
+    let src = r#"
+import graphene
+import sqlite3
+
+def helper(args, other):
+    sql = "SELECT * FROM users WHERE name='" + args["filter"] + "'"
+    return sqlite3.connect(":memory:").cursor().execute(sql)
+"#;
+    let outcome = analyse_with_options(&python_ws(src), TaintAnalysisOptions::default());
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "Python first-argument helper named args must stay clean",
+    );
+}
+
 // ===========================================================================
 // 2. NoSQL injection (Mongo $where vs filtered query)
 // ===========================================================================
