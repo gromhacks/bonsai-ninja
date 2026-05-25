@@ -609,19 +609,34 @@
   description: "Subsumed by typescript.source.nestjs_message_body_decorator — same `@MessageBody()` decorator shape; the canonical rule already covers `@SubscribeMessage` handlers."
 
 - id: typescript.source.graphql_resolver_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: typescript
   trust: remote
-  tag: http-input
-  category: http-input
-  packages: [graphql, "@nestjs/graphql", "type-graphql"]
+  tag: graphql-input
+  category: graphql-input
+  payload_types: [graphql]
+  packages: [graphql, "@nestjs/graphql", "type-graphql", "@apollo/server", graphql-yoga, "@graphql-yoga/node", express-graphql]
   match:
     kind: param
     target:
-      name: Args
-  description: "Disabled — matcher only sees parameter identifiers, not GraphQL decorator names."
+      name: args
+      param_index_in: [1]
+  match_examples:
+  - name: graphql resolver args param
+    code: |
+      const _u = require("graphql");
+      function resolver(parent: unknown, args: any, context: unknown, info: unknown) {
+        return args;
+      }
+    expect_match_text: [args]
+  - name: graphql first args helper negative
+    code: |
+      const _u = require("graphql");
+      function helper(args: any, other: any) {
+        return args;
+      }
+    expect_no_match: true
+  description: "GraphQL resolver `(parent, args, ...)` parameter — client-supplied field arguments. The zero-based index gate avoids tainting ordinary first-argument helpers named `args`."
 
 - id: typescript.source.hapi_request_payload
   enabled: true
@@ -1479,7 +1494,8 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.[A-Za-z_$][A-Za-z0-9_$]*$"
-      base_name_in: [args, variables]
+      base_name_in: [args]
+      base_param_index_in: [1]
   match_examples:
   - name: graphql args input
     code: |
@@ -1516,7 +1532,7 @@
         return user.id;
       }
     expect_no_match: true
-  description: "GraphQL resolver args.<field> / variables.<field> — attacker-controlled resolver arguments. Receiver names are exact to avoid tainting unrelated objects such as user.id."
+  description: "GraphQL resolver args.<field> — attacker-controlled resolver arguments. Receiver name and second-parameter position are both required to avoid tainting unrelated helper objects."
 
 - id: typescript.source.graphql_info_context_args
   enabled: true
@@ -1529,6 +1545,7 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.args(\\.[A-Za-z_$][A-Za-z0-9_$]*)?$"
+      base_param_index_in: [3]
   match_examples:
   - name: graphql info context args
     code: |

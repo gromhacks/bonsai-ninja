@@ -225,6 +225,16 @@ pub struct RuleTarget {
     /// the enclosing decl's `name`. Case-sensitive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_method: Vec<String>,
+    /// Restrict a `kind: param` rule to zero-based parameter indexes.
+    /// This keeps framework signature rules precise when the parameter
+    /// name alone is common, e.g. GraphQL resolver `(parent, args, ...)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_index_in: Vec<u32>,
+    /// Restrict receiver/base-shaped targets such as `args.filter` to
+    /// cases where the base identifier is a formal parameter at one of
+    /// these zero-based indexes in the enclosing declaration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_param_index_in: Vec<u32>,
     /// Restrict a `kind: param` rule to declarations with one of the
     /// adapter-emitted declaration kinds (`method`, `function`,
     /// `constructor`, ...). This is adapter metadata, not a source-text
@@ -250,6 +260,8 @@ impl RuleTarget {
             && self.base_name_in.is_empty()
             && self.in_class.is_empty()
             && self.in_method.is_empty()
+            && self.param_index_in.is_empty()
+            && self.base_param_index_in.is_empty()
             && self.decl_kind_in.is_empty()
             && self.visibility_in.is_empty()
     }

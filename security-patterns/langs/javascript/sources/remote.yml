@@ -1132,11 +1132,9 @@
       name: payload
   description: "Disabled — Socket.IO `socket.on(event, (payload) => ...)` payload param; bare param `payload` is ubiquitous and would over-match. Enable with consumer-class matching (or framework-aware decorator) when available."
 
-# ── GraphQL / raw-HTTP (bare names; disabled) ───────────────────────────────
+# ── GraphQL / raw-HTTP ─────────────────────────────────────────────────────
 - id: javascript.source.graphql_resolver_args
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: javascript
   trust: remote
   tag: graphql-input
@@ -1145,7 +1143,23 @@
     kind: param
     target:
       name: args
-  description: "Disabled — `args` is a very common param name; enable in resolver-focused audits (or narrow via @Arg decorator)."
+      param_index_in: [1]
+  match_examples:
+  - name: graphql resolver args param
+    code: |
+      const _u = require("graphql");
+      function resolver(parent, args, context, info) {
+        return args;
+      }
+    expect_match_text: [args]
+  - name: graphql first args helper negative
+    code: |
+      const _u = require("graphql");
+      function helper(args, other) {
+        return args;
+      }
+    expect_no_match: true
+  description: "GraphQL resolver `(parent, args, ...)` parameter — client-supplied field arguments. The zero-based index gate keeps common helper params named `args` quiet."
 
 - id: javascript.source.graphql_args_field
   enabled: true
@@ -1158,7 +1172,8 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.[A-Za-z_$][A-Za-z0-9_$]*$"
-      base_name_in: [args, variables]
+      base_name_in: [args]
+      base_param_index_in: [1]
   match_examples:
   - name: graphql args input
     code: |
@@ -1195,7 +1210,7 @@
         return user.id;
       }
     expect_no_match: true
-  description: "GraphQL resolver args.<field> / variables.<field> — attacker-controlled resolver arguments. Receiver names are exact to avoid tainting unrelated objects such as user.id."
+  description: "GraphQL resolver args.<field> — attacker-controlled resolver arguments. Receiver name and second-parameter position are both required to avoid tainting unrelated helper objects."
 
 - id: javascript.source.graphql_info_context_args
   enabled: true
@@ -1208,6 +1223,7 @@
     kind: read
     target:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.context\\.args(\\.[A-Za-z_$][A-Za-z0-9_$]*)?$"
+      base_param_index_in: [3]
   match_examples:
   - name: graphql info context args
     code: |

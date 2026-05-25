@@ -1212,6 +1212,11 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                     if !t.in_method.is_empty() && !t.in_method.iter().any(|want| want == &decl.name) {
                         continue;
                     }
+                    if !t.param_index_in.is_empty()
+                        && !t.param_index_in.iter().any(|want| *want == idx as u32)
+                    {
+                        continue;
+                    }
                 }
                 let want_annotation = target.and_then(|t| t.annotation.as_deref());
                 let matched = if let Some(want) = want_annotation {
@@ -2286,6 +2291,10 @@ fn scan_refs_batch(
         if r.kind != want_kind {
             continue;
         }
+        let enclosing_decl = decls.iter().find(|d| {
+            let body = d.body_span.unwrap_or(d.span);
+            r.span.start >= body.start && r.span.start < body.end
+        });
         for prepared in rules {
             if !callee_matches(
                 &r.name,
@@ -2298,6 +2307,9 @@ fn scan_refs_batch(
             if !prepared.base_name_allows(&r.name) {
                 continue;
             }
+            if !base_param_index_allows(prepared, enclosing_decl, &r.name) {
+                continue;
+            }
             // Receiver-agnostic read regexes (`^[A-Za-z_]\w*\.body$`)
             // would otherwise fire on any `<ident>.body` shape across
             // every workspace file — koa's request_body matching
@@ -2308,13 +2320,7 @@ fn scan_refs_batch(
                 continue;
             }
             let (file_path, line, col) = resolve_span(ws, file, r.span);
-            let enclosing_fn = decls
-                .iter()
-                .find(|d| {
-                    let body = d.body_span.unwrap_or(d.span);
-                    r.span.start >= body.start && r.span.start < body.end
-                })
-                .map(|d| d.name.clone());
+            let enclosing_fn = enclosing_decl.map(|d| d.name.clone());
             out.push(RuleMatch {
                 rule_id: prepared.rule.id.clone(),
                 language: prepared.rule.language.clone(),
@@ -2346,6 +2352,9 @@ fn scan_flow_reads_batch(
                 let Some(match_text) = flow_read_rule_match(prepared, &tokens) else {
                     continue;
                 };
+                if !base_param_index_allows(prepared, Some(decl), &match_text) {
+                    continue;
+                }
                 // Same package-signal gate that `scan_refs_batch`
                 // applies; without it a receiver-agnostic read
                 // regex would fire on any file regardless of the
@@ -2408,6 +2417,29 @@ fn flow_read_rule_match(prepared: &PreparedRule<'_>, tokens: &[String]) -> Optio
         }
     }
     None
+}
+
+fn base_param_index_allows(
+    prepared: &PreparedRule<'_>,
+    decl: Option<&bonsai_lang_api::Decl>,
+    match_text: &str,
+) -> bool {
+    let Some(target) = prepared.rule.match_spec.target.as_ref() else {
+        return true;
+    };
+    if target.base_param_index_in.is_empty() {
+        return true;
+    }
+    let Some(decl) = decl else {
+        return false;
+    };
+    let Some(base) = match_base_name(match_text) else {
+        return false;
+    };
+    target
+        .base_param_index_in
+        .iter()
+        .any(|idx| decl.params.get(*idx as usize).is_some_and(|param| param == base))
 }
 
 /// Flow-read facts are often attached to the enclosing expression that
