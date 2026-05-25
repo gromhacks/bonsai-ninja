@@ -16,4 +16,11 @@ public static class App
         var safe = HttpUtility.HtmlEncode(t);
         Process.Start("sh", "-c " + safe);
     }
+
+    public static void EncodedXss()
+    {
+        var t = Console.ReadLine();
+        var safe = HttpUtility.HtmlEncode(t);
+        Response.Write(safe);
+    }
 }

@@ -258,3 +258,49 @@ fn sanitizer_credit_audit_per_language() {
         panic!("{msg}");
     }
 }
+
+#[test]
+fn java_and_csharp_html_encoders_credit_xss_sinks() {
+    for lang in ["java", "csharp"] {
+        let report = run_taint_for(lang).unwrap_or_else(|err| panic!("{lang}: {err}"));
+        let encoded_statuses: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding
+                    .finding
+                    .chain_display
+                    .iter()
+                    .any(|hop| hop.to_ascii_lowercase().replace('_', "").contains("encodedxss"))
+            })
+            .map(|finding| {
+                (
+                    finding.finding.status,
+                    finding
+                        .finding
+                        .sanitizers_seen
+                        .iter()
+                        .map(|sanitizer| sanitizer.rule_id.as_str())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+
+        assert!(
+            !encoded_statuses.is_empty(),
+            "{lang}: expected encoded XSS fixture to produce a sanitizer-credit finding"
+        );
+        assert!(
+            encoded_statuses
+                .iter()
+                .all(|(status, _)| *status == bonsai_security::FindingStatus::Sanitized),
+            "{lang}: encoded XSS fixture should be sanitized, got {encoded_statuses:?}"
+        );
+        assert!(
+            encoded_statuses
+                .iter()
+                .all(|(_, sanitizers)| !sanitizers.is_empty()),
+            "{lang}: encoded XSS fixture should carry sanitizer evidence, got {encoded_statuses:?}"
+        );
+    }
+}
