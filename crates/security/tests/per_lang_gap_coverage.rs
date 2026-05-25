@@ -640,12 +640,10 @@ fn g8_javascript_throw_catch() {
         "app.js",
         "function handle(token) { try { throw token; } catch (e) { sink(e); } }\n",
     );
-    // G8 requires adapter to populate `value_name` on Throw and
-    // `catch_param` on Try. The tree-sitter-javascript grammar does
-    // expose these, but our adapter's kit path may still default to
-    // None; if the test is currently at 0, it documents the gap for
-    // a follow-up adapter-level wiring rather than asserting.
-    let _ = flows_count(&tmp, &rules);
+    assert!(
+        flows_count(&tmp, &rules) >= 1,
+        "G8 js: catch parameter must inherit tainted thrown value"
+    );
     cleanup(&tmp);
 }
 
