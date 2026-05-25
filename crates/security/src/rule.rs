@@ -235,6 +235,11 @@ pub struct RuleTarget {
     /// these zero-based indexes in the enclosing declaration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_param_index_in: Vec<u32>,
+    /// Restrict receiver/base-shaped read/write targets to cases where
+    /// the base identifier has one of these adapter-emitted semantic
+    /// receiver types in the enclosing declaration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receiver_type_in: Vec<String>,
     /// Restrict a `kind: param` rule to declarations with one of the
     /// adapter-emitted declaration kinds (`method`, `function`,
     /// `constructor`, ...). This is adapter metadata, not a source-text
@@ -262,6 +267,7 @@ impl RuleTarget {
             && self.in_method.is_empty()
             && self.param_index_in.is_empty()
             && self.base_param_index_in.is_empty()
+            && self.receiver_type_in.is_empty()
             && self.decl_kind_in.is_empty()
             && self.visibility_in.is_empty()
     }

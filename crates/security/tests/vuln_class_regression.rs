@@ -302,6 +302,45 @@ def helper(args, other):
     );
 }
 
+#[test]
+fn sqli_go_graphql_resolveparams_args_reports_without_inferred_sources() {
+    let src = r#"
+package main
+import (
+  "database/sql"
+  "github.com/graphql-go/graphql"
+)
+func resolve(rp graphql.ResolveParams, db *sql.DB) {
+  q := "SELECT * FROM users WHERE name='" + rp.Args["name"].(string) + "'"
+  db.Query(q)
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("main.go", src), TaintAnalysisOptions::default());
+    assert_tag_reported(&outcome, "sql-injection", "Go GraphQL ResolveParams.Args");
+}
+
+#[test]
+fn sqli_go_local_args_field_clean_without_inferred_sources() {
+    let src = r#"
+package main
+import (
+  "database/sql"
+  "github.com/graphql-go/graphql"
+)
+type local struct { Args map[string]string }
+func helper(rp local, db *sql.DB) {
+  q := "SELECT * FROM users WHERE name='" + rp.Args["name"] + "'"
+  db.Query(q)
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("main.go", src), TaintAnalysisOptions::default());
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "Go local Args field must not be a GraphQL source",
+    );
+}
+
 // ===========================================================================
 // 2. NoSQL injection (Mongo $where vs filtered query)
 // ===========================================================================

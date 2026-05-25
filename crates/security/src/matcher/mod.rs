@@ -2310,6 +2310,9 @@ fn scan_refs_batch(
             if !base_param_index_allows(prepared, enclosing_decl, &r.name) {
                 continue;
             }
+            if !base_receiver_type_allows(prepared, enclosing_decl, &r.name) {
+                continue;
+            }
             // Receiver-agnostic read regexes (`^[A-Za-z_]\w*\.body$`)
             // would otherwise fire on any `<ident>.body` shape across
             // every workspace file — koa's request_body matching
@@ -2353,6 +2356,9 @@ fn scan_flow_reads_batch(
                     continue;
                 };
                 if !base_param_index_allows(prepared, Some(decl), &match_text) {
+                    continue;
+                }
+                if !base_receiver_type_allows(prepared, Some(decl), &match_text) {
                     continue;
                 }
                 // Same package-signal gate that `scan_refs_batch`
@@ -2440,6 +2446,35 @@ fn base_param_index_allows(
         .base_param_index_in
         .iter()
         .any(|idx| decl.params.get(*idx as usize).is_some_and(|param| param == base))
+}
+
+fn base_receiver_type_allows(
+    prepared: &PreparedRule<'_>,
+    decl: Option<&bonsai_lang_api::Decl>,
+    match_text: &str,
+) -> bool {
+    let Some(target) = prepared.rule.match_spec.target.as_ref() else {
+        return true;
+    };
+    if target.receiver_type_in.is_empty() {
+        return true;
+    }
+    let Some(decl) = decl else {
+        return false;
+    };
+    let Some(base) = match_base_name(match_text) else {
+        return false;
+    };
+    decl.type_aliases
+        .iter()
+        .filter(|alias| alias.name == base)
+        .any(|alias| receiver_type_matches_wanted(&alias.type_name, &target.receiver_type_in))
+}
+
+fn receiver_type_matches_wanted(actual: &str, wanted: &[String]) -> bool {
+    wanted
+        .iter()
+        .any(|want| actual == want || actual.rsplit('.').next() == Some(want.as_str()))
 }
 
 /// Flow-read facts are often attached to the enclosing expression that
