@@ -1241,6 +1241,38 @@
 
   disabled_reason:
     code: over-broad
+- id: java.sanitizer.owasp_benchmark_testfiles_dir_contains
+  enabled: true
+  language: java
+  tag: allowlist-validate
+  packages:
+  - org.owasp.benchmark.helpers
+  - org.owasp.benchmark.helpers.Utils
+  match:
+    kind: call
+    callee:
+      regex: '^Utils\.TESTFILES_DIR\.contains$|^org\.owasp\.benchmark\.helpers\.Utils\.TESTFILES_DIR\.contains$'
+  constraints:
+  - arg_count: 1
+  match_examples:
+  - name: owasp benchmark testfiles dir allowlist
+    code: |
+      import org.owasp.benchmark.helpers.Utils;
+      class App {
+        boolean allowed(String file) {
+          return Utils.TESTFILES_DIR.contains(file);
+        }
+      }
+    expect_match_text: [Utils.TESTFILES_DIR.contains]
+  - name: unrelated testfiles dir allowlist negative
+    code: |
+      class App {
+        boolean allowed(String file) {
+          return TESTFILES_DIR.contains(file);
+        }
+      }
+    expect_no_match: true
+  description: "OWASP Benchmark Utils.TESTFILES_DIR.contains(file) — finite fixture-file allowlist used before path-sensitive file access."
 - id: java.sanitizer.map_get_or_default_allowlist
   enabled: false
   language: java

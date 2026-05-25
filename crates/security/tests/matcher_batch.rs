@@ -341,7 +341,7 @@ fn target_attr_rule(id: &str, kind: MatchKind, attr: &[&str]) -> Rule {
 }
 
 #[test]
-fn param_rule_location_uses_first_body_read() {
+fn param_rule_location_uses_declaration_site() {
     let ws = python_ws(
         r#"
 def handler(user_input):
@@ -357,8 +357,40 @@ def handler(user_input):
         .unwrap_or_else(|| panic!("expected param match, got {hits:?}"));
     assert_eq!(hit.match_text, "user_input");
     assert_eq!(
+        hit.line, 2,
+        "param source should point at the declaration, not the first body read"
+    );
+}
+
+#[test]
+fn annotated_java_param_rule_location_uses_declaration_site() {
+    let ws = java_ws(
+        r#"
+import jakarta.ws.rs.QueryParam;
+class App {
+    void read(@QueryParam("file") String file) throws Exception {
+        new FileInputStream(file);
+    }
+}
+"#,
+    );
+    let mut rule = base_rule("java.test.jaxrs_queryparam", RuleKind::Source, MatchKind::Param);
+    rule.language = "java".to_string();
+    rule.packages = vec!["jakarta.ws.rs".to_string()];
+    rule.match_spec.target = Some(RuleTarget {
+        annotation: Some("QueryParam".to_string()),
+        ..Default::default()
+    });
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    let hit = hits
+        .iter()
+        .find(|hit| hit.rule_id == "java.test.jaxrs_queryparam")
+        .unwrap_or_else(|| panic!("expected annotated param match, got {hits:?}"));
+    assert_eq!(hit.match_text, "file");
+    assert_eq!(
         hit.line, 4,
-        "param source should point at first body read, not function declaration"
+        "annotated Java param source should point at the signature parameter"
     );
 }
 
