@@ -109,7 +109,7 @@
     callee:
       regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForSQL$'
   taint_semantics:
-    call_result_passthrough_args: [0]
+    call_result_passthrough_args: [0, 1]
   match_examples:
   - name: generated shape example
     code: |
@@ -542,6 +542,198 @@
       }
     expect_match_text: [ESAPI.encoder().encodeForXML]
   description: "OWASP ESAPI Encoder.encodeForXML — XML text encoder."
+
+- id: java.sanitizer.esapi_encode_for_html_attribute
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForHTMLAttribute$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: esapi html attribute encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForHTMLAttribute(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForHTMLAttribute]
+  - name: esapi fluent html attribute encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForHTMLAttribute(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForHTMLAttribute]
+  description: "OWASP ESAPI Encoder.encodeForHTMLAttribute — escapes attacker input for HTML attribute context."
+
+- id: java.sanitizer.esapi_encode_for_css
+  enabled: true
+  language: java
+  tag: css-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForCSS$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: esapi css encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForCSS(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForCSS]
+  - name: esapi fluent css encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForCSS(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForCSS]
+  description: "OWASP ESAPI Encoder.encodeForCSS — escapes attacker input for CSS string/property context."
+
+- id: java.sanitizer.esapi_encode_for_xml_attribute
+  enabled: true
+  language: java
+  tag: html-encode
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForXMLAttribute$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: esapi xml attribute encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForXMLAttribute(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForXMLAttribute]
+  - name: esapi fluent xml attribute encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForXMLAttribute(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForXMLAttribute]
+  description: "OWASP ESAPI Encoder.encodeForXMLAttribute — escapes attacker input for XML attribute context."
+
+- id: java.sanitizer.esapi_encode_for_dn
+  enabled: true
+  language: java
+  tag: ldap-escape
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForDN$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: esapi dn encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForDN(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForDN]
+  - name: esapi fluent dn encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForDN(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForDN]
+  description: "OWASP ESAPI Encoder.encodeForDN — escapes LDAP distinguished-name metacharacters."
+
+- id: java.sanitizer.esapi_encode_for_xpath
+  enabled: true
+  language: java
+  tag: xpath-parameter
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForXPath$'
+  taint_semantics:
+    call_result_passthrough_args: [0]
+  match_examples:
+  - name: esapi xpath encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          Encoder.encodeForXPath(input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForXPath]
+  - name: esapi fluent xpath encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input) throws Exception {
+          ESAPI.encoder().encodeForXPath(input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForXPath]
+  description: "OWASP ESAPI Encoder.encodeForXPath — escapes attacker input for XPath literal context."
+
+- id: java.sanitizer.esapi_encode_for_os
+  enabled: true
+  language: java
+  tag: shell-escape
+  packages: ["org.owasp.esapi"]
+  match:
+    kind: call
+    callee:
+      regex: '^(Encoder|ESAPI\.encoder\(\))\.encodeForOS$'
+  taint_semantics:
+    call_result_passthrough_args: [0, 1]
+  match_examples:
+  - name: esapi os encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input, Codec codec) throws Exception {
+          Encoder.encodeForOS(codec, input);
+        }
+      }
+    expect_match_text: [Encoder.encodeForOS]
+  - name: esapi fluent os encoder
+    code: |
+      import org.owasp.esapi.*;
+      class App {
+        void handle(String input, Codec codec) throws Exception {
+          ESAPI.encoder().encodeForOS(codec, input);
+        }
+      }
+    expect_match_text: [ESAPI.encoder().encodeForOS]
+  description: "OWASP ESAPI Encoder.encodeForOS — escapes attacker input for a specific OS command argument context."
 
 # Auth / crypto ------------------------------------------------------
 - id: java.sanitizer.bcrypt_matches
@@ -1455,6 +1647,41 @@
       }
     expect_match_text: [ps.setBoolean]
   description: "PreparedStatement.setBoolean binds a boolean parameter."
+
+- id: java.sanitizer.prepared_statement_settyped
+  enabled: true
+  language: java
+  tag: sql-parameter
+  packages: ["java.sql"]
+  match:
+    kind: call
+    callee:
+      regex: '(^|\.)set(NString|Bytes|BigDecimal|Date|Time|Timestamp|Double|Float|Short|Byte|Null)$'
+  constraints:
+  - receiver_type_in: [PreparedStatement]
+  - min_args: 1
+  match_examples:
+  - name: prepared statement timestamp bind
+    code: |
+      import java.sql.*;
+      class App {
+        void bind(PreparedStatement ps, Timestamp input) throws Exception {
+          ps.setTimestamp(1, input);
+        }
+      }
+    expect_match_text: [ps.setTimestamp]
+  - name: same method name on non prepared statement negative
+    code: |
+      class NotStatement {
+        void setTimestamp(Object index, Object value) {}
+      }
+      class App {
+        void bind(NotStatement ps, Object input) {
+          ps.setTimestamp(1, input);
+        }
+      }
+    expect_no_match: true
+  description: "PreparedStatement typed setX calls bind values as JDBC parameters rather than SQL text."
 
 - id: java.sanitizer.jdbctemplate_query_rowmapper_params
   enabled: true
