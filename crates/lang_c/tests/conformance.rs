@@ -149,3 +149,56 @@ fn c_adapter_emits_function_pointer_callable_alias() {
         entry.flow_events
     );
 }
+
+#[test]
+fn c_adapter_call_result_assignment_uses_call_metadata_only() {
+    use bonsai_diagnostics::DiagnosticSink;
+    use bonsai_lang_api::{AdapterContext, FlowEvent, LanguageAdapter};
+    use bonsai_vfs::Vfs;
+    use parking_lot::RwLock;
+
+    let adapter = bonsai_lang_c::CAdapter::new();
+    let vfs = Vfs::new();
+    let file = vfs.write(
+        std::path::Path::new("call_result.c"),
+        "const char *f(const char *a) { return a; }\n\
+         const char *entry(const char *x) { const char *z = f(x); return z; }\n",
+    );
+    let diagnostics = RwLock::new(DiagnosticSink::default());
+    let ctx = AdapterContext {
+        vfs: &vfs,
+        diagnostics: &diagnostics,
+        workspace_root: None,
+    };
+    let idx = adapter.extract_declarations(file, &ctx);
+    let entry = idx
+        .defs
+        .iter()
+        .find(|decl| decl.name == "entry")
+        .expect("entry decl present");
+
+    let assign = entry
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } if target == "z" => Some((source_name, source_call, source_call_args, source_names)),
+            _ => None,
+        })
+        .expect("assignment to z present");
+
+    assert_eq!(assign.0.as_deref(), None);
+    assert_eq!(assign.1.as_deref(), Some("f"));
+    assert_eq!(assign.2.as_slice(), ["x"]);
+    assert!(
+        assign.3.is_empty(),
+        "call-result assignment should not duplicate callee/arg sources; events: {:?}",
+        entry.flow_events
+    );
+}
