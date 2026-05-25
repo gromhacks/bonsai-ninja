@@ -40,13 +40,16 @@
   - '@adonisjs/http-server'
   cwe:
   - CWE-209
-  - CWE-79
   match:
     kind: call
     callee:
       attribute:
       - res
       - send
+  constraints:
+  - arg_matches_regex:
+      index: 0
+      regex: '(?i)\b(?:err|error|exception|e)\s*\.\s*(?:stack|message)\b|\b(?:stackTrace|stack_trace|errorStack|errStack)\b'
   match_examples:
   - name: response send error stack
     code: |
@@ -56,11 +59,14 @@
       }
     expect_match_text:
     - res.send
-  description: "Express res.send(error.stack/message) — exposes internal exception details to the response body. Merged collision aliases: typescript.xss.http_res_send_html, typescript.xss.fastify_reply_send_html, typescript.xss.adonis_response_send_html."
-  aliases:
-  - typescript.xss.http_res_send_html
-  - typescript.xss.fastify_reply_send_html
-  - typescript.xss.adonis_response_send_html
+  - name: response send normal template negative
+    code: |
+      const _u = require("express");
+      function handler(req: Request, res: Response, html: string) {
+        return res.send(html);
+      }
+    expect_no_match: true
+  description: "Express res.send(error.stack/message) — exposes internal exception details to the response body."
 - id: typescript.info_disclosure.response_render_error_page
   enabled: true
   language: typescript

@@ -1100,6 +1100,94 @@ export function search(req: any, res: any) {
 }
 
 #[test]
+fn javascript_response_send_error_stack_rule_requires_error_operand() {
+    let ws = temp_workspace("js-response-send-error-stack");
+    write_file(
+        &ws,
+        "src/server.js",
+        r#"const express = require("express");
+
+function leak(req, res, err) {
+  express;
+  return res.send(err.stack);
+}
+"#,
+    );
+
+    let rows = run_sinks_json(&ws, "^javascript\\.info_disclosure\\.response_send_error_stack$");
+    assert_has_row(
+        &rows,
+        &[
+            "javascript.info_disclosure.response_send_error_stack",
+            "src/server.js",
+            "res.send",
+        ],
+    );
+
+    let clean = temp_workspace("js-response-send-error-stack-clean");
+    write_file(
+        &clean,
+        "src/server.js",
+        r#"const express = require("express");
+
+function page(req, res, html) {
+  express;
+  return res.send(html);
+}
+"#,
+    );
+    let rows = run_sinks_json(
+        &clean,
+        "^javascript\\.info_disclosure\\.response_send_error_stack$",
+    );
+    assert_rows_do_not_contain(&rows, &["response_send_error_stack"]);
+}
+
+#[test]
+fn typescript_response_send_error_stack_rule_requires_error_operand() {
+    let ws = temp_workspace("ts-response-send-error-stack");
+    write_file(
+        &ws,
+        "src/server.ts",
+        r#"import express from "express";
+
+export function leak(req: any, res: any, err: Error) {
+  express;
+  return res.send(err.stack);
+}
+"#,
+    );
+
+    let rows = run_sinks_json(&ws, "^typescript\\.info_disclosure\\.response_send_error_stack$");
+    assert_has_row(
+        &rows,
+        &[
+            "typescript.info_disclosure.response_send_error_stack",
+            "src/server.ts",
+            "res.send",
+        ],
+    );
+
+    let clean = temp_workspace("ts-response-send-error-stack-clean");
+    write_file(
+        &clean,
+        "src/server.ts",
+        r#"import express from "express";
+
+export function page(req: any, res: any, html: string) {
+  express;
+  return res.send(html);
+}
+"#,
+    );
+    let rows = run_sinks_json(
+        &clean,
+        "^typescript\\.info_disclosure\\.response_send_error_stack$",
+    );
+    assert_rows_do_not_contain(&rows, &["response_send_error_stack"]);
+}
+
+#[test]
 fn python_graphql_args_reach_untyped_connection_execute_sql_sink() {
     let ws = temp_workspace("py-graphql-conn-execute");
     write_file(
