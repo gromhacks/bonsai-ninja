@@ -628,7 +628,16 @@ fn nested_sanitizer_inside_sink_arg_can_attach_after_sink_callee_token() {
         value_text: "[\"ping \", uri_string:quote(Input)]".to_string(),
     }];
 
-    assert!(sanitizer_can_attach(&src, &san, &snk, &sink_tainted_args));
+    let func = FuncId::new(1);
+    assert!(sanitizer_can_attach(
+        &src,
+        func,
+        &san,
+        func,
+        &snk,
+        func,
+        &sink_tainted_args
+    ));
 }
 
 #[test]
