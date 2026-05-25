@@ -13,6 +13,7 @@ use bonsai_lang_api::{
     with_fn_kinds, AdapterContext, AdapterError, DeclIndex, GrammarHandler, ImportIndex, ImportScope,
     ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Visibility,
 };
+use bonsai_lang_api::{AssignValueKind, FlowEvent};
 use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("elixir");
@@ -81,6 +82,10 @@ impl LanguageAdapter for ElixirAdapter {
                     decl.params = params;
                 }
                 bonsai_lang_api::kit::inject_callable_reference_aliases_from_source(
+                    &mut decl.flow_events,
+                    snapshot.text.as_ref(),
+                );
+                normalize_elixir_control_expression_assignments(
                     &mut decl.flow_events,
                     snapshot.text.as_ref(),
                 );
@@ -316,6 +321,186 @@ fn elixir_variable_name(text: &str) -> bool {
     (first == '_' || first.is_ascii_lowercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
         && !matches!(text, "do" | "end" | "fn" | "true" | "false" | "nil")
+}
+
+fn normalize_elixir_control_expression_assignments(events: &mut [FlowEvent], src: &str) {
+    for event in events {
+        match event {
+            FlowEvent::Assign {
+                span,
+                source_call,
+                source_call_args,
+                source_names,
+                value_kind,
+                ..
+            } if source_call
+                .as_deref()
+                .is_some_and(elixir_control_expression_macro) =>
+            {
+                if let Some(branch_sources) = elixir_control_expression_value_sources(src, *span) {
+                    *source_call = None;
+                    source_call_args.clear();
+                    *source_names = branch_sources;
+                    *value_kind = Some(if source_names.is_empty() {
+                        AssignValueKind::Literal
+                    } else {
+                        AssignValueKind::Compound
+                    });
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_elixir_control_expression_assignments(then_events, src);
+                normalize_elixir_control_expression_assignments(else_events, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_elixir_control_expression_assignments(body, src);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_elixir_control_expression_assignments(body, src);
+                normalize_elixir_control_expression_assignments(catch_events, src);
+                normalize_elixir_control_expression_assignments(finally_events, src);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn elixir_control_expression_macro(name: &str) -> bool {
+    matches!(name, "if" | "unless")
+}
+
+fn elixir_control_expression_value_sources(src: &str, span: bonsai_common::Span) -> Option<Vec<String>> {
+    let text = elixir_span_text(src, span)?;
+    let rhs = text.split_once('=').map_or(text, |(_, rhs)| rhs).trim();
+    let body = elixir_do_else_body(rhs)?;
+    let mut out = Vec::new();
+    collect_elixir_branch_value_names(body.then_body, &mut out);
+    if let Some(else_body) = body.else_body {
+        collect_elixir_branch_value_names(else_body, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
+#[derive(Copy, Clone)]
+struct ElixirDoElseBody<'a> {
+    then_body: &'a str,
+    else_body: Option<&'a str>,
+}
+
+fn elixir_do_else_body(text: &str) -> Option<ElixirDoElseBody<'_>> {
+    let mut scanner = ElixirKeywordScanner::new(text);
+    let mut do_end = None;
+    let mut else_range = None;
+    let mut end_start = None;
+    let mut depth = 0usize;
+    while let Some((word, start, end)) = scanner.next_word() {
+        match word {
+            "do" => {
+                depth = depth.saturating_add(1);
+                do_end.get_or_insert(end);
+            }
+            "else" if depth == 1 => {
+                else_range = Some((start, end));
+            }
+            "end" if depth > 0 => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end_start = Some(start);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let do_end = do_end?;
+    let end_start = end_start?;
+    let (then_end, else_body) = if let Some((else_start, else_end)) = else_range {
+        (else_start, Some(text[else_end..end_start].trim()))
+    } else {
+        (end_start, None)
+    };
+    Some(ElixirDoElseBody {
+        then_body: text[do_end..then_end].trim(),
+        else_body,
+    })
+}
+
+struct ElixirKeywordScanner<'a> {
+    text: &'a str,
+    offset: usize,
+    quote: Option<char>,
+    escaped: bool,
+}
+
+impl<'a> ElixirKeywordScanner<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            offset: 0,
+            quote: None,
+            escaped: false,
+        }
+    }
+
+    fn next_word(&mut self) -> Option<(&'a str, usize, usize)> {
+        while self.offset < self.text.len() {
+            let rest = &self.text[self.offset..];
+            let mut chars = rest.char_indices();
+            let (_, ch) = chars.next()?;
+            let ch_len = ch.len_utf8();
+            if let Some(open_quote) = self.quote {
+                self.offset += ch_len;
+                if self.escaped {
+                    self.escaped = false;
+                } else if ch == '\\' {
+                    self.escaped = true;
+                } else if ch == open_quote {
+                    self.quote = None;
+                }
+                continue;
+            }
+            if matches!(ch, '"' | '\'') {
+                self.quote = Some(ch);
+                self.offset += ch_len;
+                continue;
+            }
+            if !elixir_ident_char(ch) {
+                self.offset += ch_len;
+                continue;
+            }
+            let start = self.offset;
+            let mut end = self.offset + ch_len;
+            for (relative_idx, next) in chars {
+                if !elixir_ident_char(next) {
+                    break;
+                }
+                end = self.offset + relative_idx + next.len_utf8();
+            }
+            self.offset = end;
+            return Some((&self.text[start..end], start, end));
+        }
+        None
+    }
+}
+
+fn collect_elixir_branch_value_names(text: &str, out: &mut Vec<String>) {
+    let mut scanner = ElixirKeywordScanner::new(text);
+    while let Some((word, _, _)) = scanner.next_word() {
+        if elixir_variable_name(word) && !out.iter().any(|existing| existing == word) {
+            out.push(word.to_string());
+        }
+    }
 }
 
 fn find_matching_elixir_delim(text: &str, open_idx: usize, open: char, close: char) -> Option<usize> {
