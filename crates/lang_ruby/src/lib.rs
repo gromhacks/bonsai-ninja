@@ -4,8 +4,9 @@ use bonsai_lang_api::kit::with_fn_kinds_and_implicit_receivers;
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, DeclKind, FlowEvent, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref, RefKind,
+    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModulePath, Ref,
+    RefKind,
 };
 use tree_sitter::{Language, Tree};
 
@@ -84,6 +85,7 @@ impl LanguageAdapter for RubyAdapter {
                         snapshot.text.as_ref(),
                     );
                     inject_ruby_raise_throw_events(&mut decl.flow_events);
+                    normalize_ruby_subshell_events(&mut decl.flow_events, snapshot.text.as_bytes());
                 }
             }
             // Per-class `bases`: `class Echo < Base` → ["Base"].
@@ -183,6 +185,7 @@ impl LanguageAdapter for RubyAdapter {
         let root = tree.root_node();
         let mut root_events = bonsai_lang_api::kit::walk_flow_events(root, file, src, &HANDLER, &[]);
         inject_ruby_raise_throw_events(&mut root_events);
+        normalize_ruby_subshell_events(&mut root_events, src);
         let has_actionable_event = root_events.iter().any(|event| {
             matches!(
                 event,
@@ -327,6 +330,82 @@ fn ruby_raise_throw_event(event: &FlowEvent) -> Option<FlowEvent> {
             .or_else(|| first_arg.map(|arg| arg.value_text.clone())),
         thrown_type: None,
     })
+}
+
+fn normalize_ruby_subshell_events(events: &mut [FlowEvent], src: &[u8]) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                name,
+                args,
+                span,
+                call_kind,
+                ..
+            } if name == "`" => {
+                let source_names = ruby_subshell_arg_source_names(args);
+                let value_text = ruby_span_text(src, *span)
+                    .filter(|text| !text.trim().is_empty())
+                    .map(|text| text.trim().to_string())
+                    .unwrap_or_else(|| {
+                        args.iter()
+                            .map(|arg| arg.value_text.trim())
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    });
+                *call_kind = CallKind::Function;
+                *args = vec![CallArg {
+                    span: *span,
+                    name: None,
+                    value_text,
+                    place: None,
+                    source_names,
+                }];
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                normalize_ruby_subshell_events(then_events, src);
+                normalize_ruby_subshell_events(else_events, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                normalize_ruby_subshell_events(body, src);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                normalize_ruby_subshell_events(body, src);
+                normalize_ruby_subshell_events(catch_events, src);
+                normalize_ruby_subshell_events(finally_events, src);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn ruby_subshell_arg_source_names(args: &[CallArg]) -> Vec<String> {
+    let mut source_names = Vec::new();
+    for arg in args {
+        for name in &arg.source_names {
+            if name.is_empty() || source_names.iter().any(|seen| seen == name) {
+                continue;
+            }
+            source_names.push(name.clone());
+        }
+    }
+    source_names
+}
+
+fn ruby_span_text(src: &[u8], span: Span) -> Option<&str> {
+    let start = usize::try_from(span.start).ok()?;
+    let end = usize::try_from(span.end).ok()?;
+    let bytes = src.get(start..end)?;
+    std::str::from_utf8(bytes).ok()
 }
 
 fn apply_ruby_class_semantic_identity(idx: &mut DeclIndex) {
