@@ -63,6 +63,7 @@ type GoRangeAssignmentsByDecl = Vec<(Span, GoRangeLoopAssignments)>;
 const HANDLER: GrammarHandler = GrammarHandler {
     fn_kinds: &["function_declaration", "method_declaration"],
     call_kinds: GO_CALL_KINDS,
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     method_receiver_param_index: Some(0),
     ..bonsai_lang_api::kit::GENERIC_HANDLER
 };
@@ -95,6 +96,7 @@ impl LanguageAdapter for GoAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
             ..LanguageCapabilities::partial_baseline()
         }

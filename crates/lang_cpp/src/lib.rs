@@ -88,6 +88,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // `Base::method()` is a qualified call that the resolver
     // already narrows by qualified-name matching, so the explicit
     // implicit-receiver list stays at `this`.
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     ..with_fn_kinds_and_implicit_receivers(&["function_definition"], &["this"], &[])
 };
 
@@ -126,6 +127,7 @@ impl LanguageAdapter for CppAdapter {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
             // C++ constructors are class-named; the kind-based
             // `DeclKind::Constructor` lookup is authoritative.
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()

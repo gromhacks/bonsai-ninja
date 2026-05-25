@@ -53,11 +53,14 @@ const JAVA_LIFECYCLE_TRANSITIONS: &[bonsai_lang_api::LifecycleTransition] = &[
     },
 ];
 
-const HANDLER: GrammarHandler = with_fn_kinds_and_implicit_receivers(
-    &["method_declaration", "constructor_declaration"],
-    &["this", "super"],
-    &[],
-);
+const HANDLER: GrammarHandler = GrammarHandler {
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    ..with_fn_kinds_and_implicit_receivers(
+        &["method_declaration", "constructor_declaration"],
+        &["this", "super"],
+        &[],
+    )
+};
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct JavaAdapter;
@@ -102,6 +105,7 @@ impl LanguageAdapter for JavaAdapter {
             // Java constructors are class-named, so the kind-based
             // `DeclKind::Constructor` lookup is authoritative; the
             // name-list fallback is intentionally empty.
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()

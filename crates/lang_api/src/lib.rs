@@ -9,7 +9,9 @@ pub mod kit;
 pub mod registry;
 pub mod types;
 
-pub use capabilities::{CapabilityLevel, LanguageCapabilities, NO_SUPER_RECEIVER_TOKENS};
+pub use capabilities::{
+    CapabilityLevel, LanguageCapabilities, NO_CONSTRUCTOR_METHOD_NAMES, NO_SUPER_RECEIVER_TOKENS,
+};
 pub use kit::{
     alias_map_from_import_specs, alias_map_from_imports, apply_assign_call_result_types,
     apply_assign_value_kind, apply_call_receiver_types, apply_call_receiver_types_with_super_tokens,

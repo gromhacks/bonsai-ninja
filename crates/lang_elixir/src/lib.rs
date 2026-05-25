@@ -27,6 +27,7 @@ const PACK_NAME: &str = "elixir";
 // filtering by target.
 const HANDLER: GrammarHandler = GrammarHandler {
     assignment_kinds: &["binary_operator"],
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     ..with_fn_kinds(&["call"])
 };
 
@@ -56,6 +57,7 @@ impl LanguageAdapter for ElixirAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
             ..LanguageCapabilities::partial_baseline()
         }

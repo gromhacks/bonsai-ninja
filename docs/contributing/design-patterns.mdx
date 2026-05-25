@@ -279,7 +279,9 @@ For tokens that are language-shaped rather than truly cross-language
 `bonsai_common::*_TOKENS` constant when the adapter declares an
 empty slice. Mature adapters should not rely on that fallback; if a
 language has no super-receiver token, set
-`bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS`:
+`bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS`. If constructors are
+class-named or grammar-node-only, set
+`bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES`:
 
 ```rust
 LanguageCapabilities::effective_constructor_method_names()

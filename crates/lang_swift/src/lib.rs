@@ -51,8 +51,10 @@ use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("swift");
 const PACK_NAME: &str = "swift";
-const HANDLER: GrammarHandler =
-    with_fn_kinds_and_implicit_receivers(&["function_declaration"], &["self", "super"], &[]);
+const HANDLER: GrammarHandler = GrammarHandler {
+    constructor_names: &["init"],
+    ..with_fn_kinds_and_implicit_receivers(&["function_declaration"], &["self", "super"], &[])
+};
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct SwiftAdapter;

@@ -23,7 +23,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_kinds: &[],
     method_context_kinds: &[],
     constructor_method_kinds: &[],
-    constructor_names: &[],
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_expr", "case_expr"],
     for_kinds: &[],
     foreach_kinds: &["lc_expr", "bc_expr"],
@@ -76,6 +76,7 @@ impl LanguageAdapter for ErlangAdapter {
     }
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
             ..LanguageCapabilities::partial_baseline()
         }
