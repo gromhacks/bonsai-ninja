@@ -1233,7 +1233,8 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
                 if !prepared.call_context_allows(param, &[], &alias_map, file_packages.as_ref()) {
                     continue;
                 }
-                let (file_path, line, col, span) = first_param_read_site(ws, file, decl, param)
+                let (file_path, line, col, span) = param_decl_site(ws, file, decl, param)
+                    .or_else(|| first_param_read_site(ws, file, decl, param))
                     .unwrap_or_else(|| {
                         let (file_path, line, col) = resolve_span(ws, file, decl.name_span);
                         (file_path, line, col, decl.name_span)
@@ -1251,6 +1252,116 @@ fn scan_params_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>], 
             }
         }
     }
+}
+
+fn param_decl_site(
+    ws: &Workspace,
+    file: FileId,
+    decl: &bonsai_lang_api::Decl,
+    param: &str,
+) -> Option<(String, u32, u32, Span)> {
+    let snapshot = ws.db().vfs().snapshot(file).ok()?;
+    let text = snapshot.text.as_ref();
+    let start = decl.span.start.min(decl.span.end) as usize;
+    let mut upper_bounds = Vec::new();
+    if let Some(body) = decl.body_span {
+        upper_bounds.push(body.start);
+    }
+    if let Some(first_event) = first_flow_event_start(&decl.flow_events) {
+        upper_bounds.push(first_event);
+    }
+    upper_bounds.push(decl.span.end);
+    let Some(body_start) = upper_bounds
+        .into_iter()
+        .filter(|bound| *bound > decl.span.start)
+        .map(|bound| bound.min(decl.span.end) as usize)
+        .filter(|bound| *bound <= text.len() && *bound > start)
+        .min()
+    else {
+        return None;
+    };
+    let signature = text.get(start..body_start)?;
+    let mut best_start = None;
+    for (offset, _) in signature.match_indices(param) {
+        let absolute = start + offset;
+        let end = absolute + param.len();
+        if identifier_boundary(text, absolute, end) {
+            best_start = Some(absolute);
+        }
+    }
+    let absolute_start = best_start?;
+    let span = Span::new(file, absolute_start as u64, (absolute_start + param.len()) as u64);
+    let (file_path, line, col) = resolve_span(ws, file, span);
+    Some((file_path, line, col, span))
+}
+
+fn first_flow_event_start(events: &[FlowEvent]) -> Option<u64> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            FlowEvent::Call { span, .. }
+            | FlowEvent::Assign { span, .. }
+            | FlowEvent::Return { span, .. }
+            | FlowEvent::Throw { span, .. }
+            | FlowEvent::Break { span, .. }
+            | FlowEvent::Continue { span, .. }
+            | FlowEvent::Yield { span, .. }
+            | FlowEvent::Await { span, .. }
+            | FlowEvent::Lifecycle { span, .. } => Some(span.start),
+            FlowEvent::Branch {
+                span,
+                then_events,
+                else_events,
+                ..
+            } => Some(
+                [
+                    Some(span.start),
+                    first_flow_event_start(then_events),
+                    first_flow_event_start(else_events),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(span.start),
+            ),
+            FlowEvent::Loop { span, body, .. }
+            | FlowEvent::Defer { span, body }
+            | FlowEvent::Using { span, body, .. } => Some(
+                [Some(span.start), first_flow_event_start(body)]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .unwrap_or(span.start),
+            ),
+            FlowEvent::Try {
+                span,
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => Some(
+                [
+                    Some(span.start),
+                    first_flow_event_start(body),
+                    first_flow_event_start(catch_events),
+                    first_flow_event_start(finally_events),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
+                .unwrap_or(span.start),
+            ),
+        })
+        .min()
+}
+
+fn identifier_boundary(text: &str, start: usize, end: usize) -> bool {
+    fn is_ident_byte(byte: u8) -> bool {
+        byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
+    }
+    let before_ok = start == 0 || !is_ident_byte(text.as_bytes()[start - 1]);
+    let after_ok = end >= text.len() || !is_ident_byte(text.as_bytes()[end]);
+    before_ok && after_ok
 }
 
 fn first_param_read_site(
