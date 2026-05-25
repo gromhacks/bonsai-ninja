@@ -2558,8 +2558,11 @@ pub(crate) enum SecurityAction {
         /// Include exact local source-independent findings in
         /// taint-analysis text/JSON output. SARIF enables this
         /// automatically so code-scanning and benchmark consumers get
-        /// crypto, random, JWT, TLS, cookie, CORS, memory, and race API
-        /// misuse results even when no source-to-sink path is required.
+        /// crypto, random, JWT, TLS, cookie, CORS, and other exact
+        /// source-independent API misuse results even when no
+        /// source-to-sink path is required. Lifecycle-audit transition
+        /// sites remain matcher/audit evidence until the engine can
+        /// prove the later same-value use.
         #[arg(long = "include-pattern-only", default_value_t = false)]
         include_pattern_only: bool,
         /// Drop findings whose source OR sink lives in a conventional

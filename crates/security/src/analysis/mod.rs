@@ -682,6 +682,12 @@ where
         && options.source.is_none()
         && options.trust.is_none()
         && options.category.is_none();
+    let non_taint_sink_ids: AHashSet<String> = sinks
+        .iter()
+        .copied()
+        .filter(|rule| rule_is_non_taint_sink(rule))
+        .map(|rule| rule.id.clone())
+        .collect();
     let pattern_only_sink_ids: AHashSet<String> = sinks
         .iter()
         .copied()
@@ -699,7 +705,7 @@ where
     };
     let source_languages: AHashSet<&str> = source_hits.iter().map(|hit| hit.language.as_str()).collect();
     sinks.retain(|rule| {
-        !pattern_only_sink_ids.contains(&rule.id) && source_languages.contains(rule.language.as_str())
+        !non_taint_sink_ids.contains(&rule.id) && source_languages.contains(rule.language.as_str())
     });
     sanitizers.retain(|rule| source_languages.contains(rule.language.as_str()));
 
@@ -5616,6 +5622,14 @@ fn rule_is_pattern_only_finding(rule: &Rule) -> bool {
         && !rule_has_taint_predicate(rule)
         && (rule.category.as_deref() == Some("source-independent")
             || rule.match_spec.kind == MatchKind::Missing)
+}
+
+fn rule_is_non_taint_sink(rule: &Rule) -> bool {
+    rule_is_pattern_only_finding(rule)
+        || (rule.kind == RuleKind::Sink
+            && rule.enabled
+            && !rule_has_taint_predicate(rule)
+            && rule.category.as_deref() == Some("lifecycle-audit"))
 }
 
 fn rule_has_taint_predicate(rule: &Rule) -> bool {

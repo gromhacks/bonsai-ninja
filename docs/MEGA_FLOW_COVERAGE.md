@@ -16,7 +16,9 @@ default rulepack has no source-to-sink rule firing for that fixture;
 pattern-only and no-path matches are intentionally excluded from default
 taint-analysis text/JSON output. SARIF enables exact source-independent
 API/config misuse findings automatically and omits `codeFlows` for those
-local pattern rows. Each fixture must also include an explicit
+local pattern rows; lifecycle-audit transition sites stay out of
+taint/SARIF findings until the later same-value use is proved. Each
+fixture must also include an explicit
 `NEGATIVE` clean-twin sink of the same sink kind that receives only a
 constant value; the exact finding count fails if that decoy starts
 reporting. The same test suite also exports each fixture and verifies the
