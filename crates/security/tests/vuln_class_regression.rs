@@ -912,6 +912,68 @@ class App {
 }
 
 #[test]
+fn weak_crypto_java_strong_static_final_algorithm_clean() {
+    let src = r#"
+import java.security.MessageDigest;
+import javax.crypto.Cipher;
+class App {
+  static final String CIPHER_ALG = "AES/GCM/NoPadding";
+  static final String DIGEST_ALG = "SHA-256";
+  void handle() throws Exception {
+    Cipher.getInstance(CIPHER_ALG);
+    MessageDigest.getInstance(DIGEST_ALG);
+  }
+}
+"#;
+    let outcome = analyse_pattern_only(&ws_for_language("App.java", src));
+    assert_tag_absent(
+        &outcome,
+        "weak-crypto",
+        "weak-crypto Java strong static final algorithm constants",
+    );
+}
+
+#[test]
+fn weak_crypto_java_static_final_algorithm_shadowed_by_param_reports() {
+    let src = r#"
+import javax.crypto.Cipher;
+class App {
+  static final String CIPHER_ALG = "AES/GCM/NoPadding";
+  void handle(String CIPHER_ALG) throws Exception {
+    Cipher.getInstance(CIPHER_ALG);
+  }
+}
+"#;
+    let outcome = analyse_pattern_only(&ws_for_language("App.java", src));
+    assert_tag_reported(
+        &outcome,
+        "weak-crypto",
+        "weak-crypto Java static final algorithm shadowed by dynamic parameter",
+    );
+}
+
+#[test]
+fn weak_crypto_java_block_local_final_algorithm_not_field_reports() {
+    let src = r#"
+import javax.crypto.Cipher;
+class App {
+  static {
+    final String CIPHER_ALG = "AES/GCM/NoPadding";
+  }
+  void handle() throws Exception {
+    Cipher.getInstance(CIPHER_ALG);
+  }
+}
+"#;
+    let outcome = analyse_pattern_only(&ws_for_language("App.java", src));
+    assert_tag_reported(
+        &outcome,
+        "weak-crypto",
+        "weak-crypto Java block-local final algorithm is not a visible field constant",
+    );
+}
+
+#[test]
 fn weak_crypto_java_weak_algorithm_assignment_reports() {
     let src = r#"
 import java.security.MessageDigest;
