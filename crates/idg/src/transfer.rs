@@ -42,8 +42,10 @@
 //!   `CallArg(site, idx) → callee.Param(idx)` cross edge.
 //! - `Return { value_name: Some(name) }` → `Read(name) → Return`
 //! - `Throw { value_name: Some(name), thrown_type }` →
-//!   `Read(name) → Throw(ty)`. Phase 3 stitches the inter-function
-//!   `callee.Throw(ty) → caller.Catch(ty)` edges.
+//!   `Read(name) → Throw(ty)`. Compound throw expressions whose
+//!   adapters emit an inner constructor/call also bridge the inner
+//!   argument carriers into `Throw(ty)`. Phase 3 stitches the
+//!   inter-function `callee.Throw(ty) → caller.Catch(ty)` edges.
 //! - `Try { body, catch_events, catch_param, catch_types }`:
 //!   - Walk body to collect any `Throw` events.
 //!   - For each (catch_type, recorded throw of matching type) pair,
@@ -327,6 +329,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         out: &mut out,
         options,
         last_writer: ahash::AHashMap::new(),
+        catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
         field_precise_container_assigns: collect_field_precise_container_assigns(&decl.flow_events),
     };
@@ -492,6 +495,9 @@ struct TransferCtx<'a> {
     /// way a clean overwrite later in the function "kills" the
     /// earlier writer's bridge into subsequent reads.
     last_writer: ahash::AHashMap<StrId, smallvec::SmallVec<[NodeId; 4]>>,
+    /// Catch parameters whose member projections should be treated as
+    /// exception-value reads while walking the active catch body.
+    catch_projection_receivers: ahash::AHashSet<StrId>,
     /// Exact duplicate edge suppression for this transfer output.
     /// Loop-carried modeling and compound-call bridging can revisit
     /// the same source event; retaining one edge is enough for all
@@ -1694,6 +1700,7 @@ fn walk_call(
             }
             ctx.bridge_read(source, arg_node, arg_meta);
         }
+        bridge_projection_receiver_to_node(arg, arg_node, arg_meta, &mut emitted, ctx);
         // Tokenise `value_text` to extract bare identifiers from
         // compound expressions (`"-c " + tmp`, `[obj method:tmp]`).
         // Scala / Solidity / obj-c adapters don't always populate
@@ -1958,7 +1965,141 @@ fn bridge_call_arg_value_to_node(
             ctx.bridge_read(source, node, meta);
         }
     }
+    bridge_projection_receiver_to_node(arg, node, meta, &mut emitted, ctx);
     bridge_value_expr_to_node(&arg.value_text, node, span, IdgEdgeKind::IntraAssign, ctx);
+}
+
+fn bridge_projection_receiver_to_node(
+    arg: &CallArg,
+    node: NodeId,
+    meta: crate::edge::EdgeMeta,
+    emitted: &mut ahash::AHashSet<StrId>,
+    ctx: &mut TransferCtx<'_>,
+) {
+    for receiver in projection_receiver_candidates(arg) {
+        let method_projection = arg_has_method_projection_for_receiver(arg, &receiver);
+        let catch_projection = catch_projection_receiver_matches(ctx, &receiver);
+        if receiver.is_empty()
+            || (!method_projection && !catch_projection)
+            || !arg_sources_mention_projection_receiver(arg, &receiver)
+        {
+            continue;
+        }
+        let sid = ctx.intern_name(&receiver);
+        if emitted.insert(sid) {
+            ctx.bridge_read(&receiver, node, meta);
+        }
+        let stripped = receiver.trim_start_matches(['$', '@', '%', '&']);
+        if !stripped.is_empty()
+            && stripped != receiver
+            && arg_sources_mention_projection_receiver(arg, stripped)
+        {
+            let sid = ctx.intern_name(stripped);
+            if emitted.insert(sid) {
+                ctx.bridge_read(stripped, node, meta);
+            }
+        }
+    }
+}
+
+fn catch_projection_receiver_matches(ctx: &mut TransferCtx<'_>, receiver: &str) -> bool {
+    let receiver = receiver.trim();
+    if receiver.is_empty() {
+        return false;
+    }
+    let sid = ctx.intern_name(receiver);
+    if ctx.catch_projection_receivers.contains(&sid) {
+        return true;
+    }
+    let stripped = receiver.trim_start_matches(['$', '@', '%', '&']);
+    if stripped.is_empty() || stripped == receiver {
+        return false;
+    }
+    let stripped_sid = ctx.intern_name(stripped);
+    ctx.catch_projection_receivers.contains(&stripped_sid)
+}
+
+fn arg_has_method_projection_for_receiver(arg: &CallArg, receiver: &str) -> bool {
+    std::iter::once(arg.value_text.as_str())
+        .chain(arg.place.as_deref())
+        .chain(arg.source_names.iter().map(String::as_str))
+        .any(|text| text.contains('(') && projection_receiver_from_text(text).as_deref() == Some(receiver))
+}
+
+fn projection_receiver_candidates(arg: &CallArg) -> Vec<String> {
+    let mut out = Vec::new();
+    for text in std::iter::once(arg.value_text.as_str())
+        .chain(arg.place.as_deref())
+        .chain(arg.source_names.iter().map(String::as_str))
+    {
+        if let Some(receiver) = projection_receiver_from_text(text) {
+            push_unique_string(&mut out, receiver);
+        }
+    }
+    out
+}
+
+fn projection_receiver_from_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let normalised = text.replace("->", ".").replace("::", ".");
+    let before_call = normalised
+        .find('(')
+        .map_or(normalised.as_str(), |idx| &normalised[..idx])
+        .trim_end();
+    let start = before_call
+        .char_indices()
+        .rev()
+        .find(|&(_, ch)| {
+            !(ch == '.'
+                || ch == '_'
+                || ch == '$'
+                || ch == '@'
+                || ch == '%'
+                || ch == '&'
+                || ch.is_ascii_alphanumeric())
+        })
+        .map_or(0, |(idx, ch)| idx + ch.len_utf8());
+    let candidate = before_call[start..].trim();
+    let (receiver, member) = candidate.rsplit_once('.')?;
+    let receiver = receiver.trim();
+    let member = member.trim();
+    if receiver.is_empty() || member.is_empty() {
+        return None;
+    }
+    Some(receiver.to_string())
+}
+
+fn arg_sources_mention_projection_receiver(arg: &CallArg, receiver: &str) -> bool {
+    let receiver = receiver.trim();
+    if receiver.is_empty() {
+        return false;
+    }
+    let receiver_bare = receiver.trim_start_matches(['$', '@', '%', '&']);
+    let source_matches = |source: &str| {
+        let source = source.trim();
+        let source_bare = source.trim_start_matches(['$', '@', '%', '&']);
+        source == receiver
+            || (!receiver_bare.is_empty() && source == receiver_bare)
+            || source_bare == receiver
+            || (!receiver_bare.is_empty() && source_bare == receiver_bare)
+            || source
+                .strip_prefix(receiver)
+                .is_some_and(|rest| rest.starts_with('.'))
+            || (!receiver_bare.is_empty()
+                && source_bare
+                    .strip_prefix(receiver_bare)
+                    .is_some_and(|rest| rest.starts_with('.')))
+    };
+    arg.place.as_deref().is_some_and(source_matches) || arg.source_names.iter().any(|s| source_matches(s))
+}
+
+fn push_unique_string(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
 }
 
 fn configured_name_match(configured: &str, observed: &str) -> bool {
@@ -2083,6 +2224,7 @@ fn walk_try(
     let throws_before = ctx.out.throw_sites.len();
     walk_events(body, ctx);
     let body_throws = ctx.out.throw_sites[throws_before..].to_vec();
+    bridge_compound_throw_sources(body, &body_throws, ctx);
     let after_body = std::mem::replace(&mut ctx.last_writer, entry_writers);
 
     for catch_type in catch_types {
@@ -2093,15 +2235,7 @@ fn walk_try(
         let catch_node = ctx.intern_node(Place::Catch { ty: catch_ty });
 
         for throw in &body_throws {
-            // Match by type id. Adapter-emitted thrown types are
-            // already canonicalised; same type → same id.
-            // Untyped throws use the "*" sentinel which never
-            // matches a concrete catch type — fall back to the
-            // catch-all branch below.
-            let matches = match throw.thrown_type {
-                Some(thrown) => thrown == catch_ty,
-                None => false,
-            };
+            let matches = thrown_type_matches_catch(throw.thrown_type, catch_ty, catch_type);
             if matches {
                 ctx.emit(IdgEdge {
                     from: throw.throw_node,
@@ -2169,7 +2303,15 @@ fn walk_try(
         }
     }
 
+    let previous_catch_projection_receivers = ctx.catch_projection_receivers.clone();
+    if let Some(param) = catch_param {
+        if !param.is_empty() {
+            let sid = ctx.intern_name(param);
+            ctx.catch_projection_receivers.insert(sid);
+        }
+    }
     walk_events(catch_events, ctx);
+    ctx.catch_projection_receivers = previous_catch_projection_receivers;
     // Merge after_body into ctx.last_writer (which now holds the
     // post-catch state). Per-name union: each name's writer set
     // is the union of body-end writers and catch-end writers, so
@@ -2184,6 +2326,105 @@ fn walk_try(
         }
     }
     walk_events(finally_events, ctx);
+}
+
+fn bridge_compound_throw_sources(body: &[FlowEvent], throws: &[ThrowSite], ctx: &mut TransferCtx<'_>) {
+    for throw in throws {
+        bridge_call_args_inside_throw(body, throw.span, throw.throw_node, ctx);
+    }
+}
+
+fn bridge_call_args_inside_throw(
+    events: &[FlowEvent],
+    throw_span: Span,
+    throw_node: NodeId,
+    ctx: &mut TransferCtx<'_>,
+) {
+    for event in events {
+        match event {
+            FlowEvent::Call { span, args, .. } if span_contains_or_equal(throw_span, *span) => {
+                for arg in args {
+                    bridge_call_arg_value_to_throw(arg, throw_node, throw_span, ctx);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                bridge_call_args_inside_throw(then_events, throw_span, throw_node, ctx);
+                bridge_call_args_inside_throw(else_events, throw_span, throw_node, ctx);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                bridge_call_args_inside_throw(body, throw_span, throw_node, ctx);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                bridge_call_args_inside_throw(body, throw_span, throw_node, ctx);
+                bridge_call_args_inside_throw(catch_events, throw_span, throw_node, ctx);
+                bridge_call_args_inside_throw(finally_events, throw_span, throw_node, ctx);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn bridge_call_arg_value_to_throw(arg: &CallArg, throw_node: NodeId, span: Span, ctx: &mut TransferCtx<'_>) {
+    let meta = crate::edge::EdgeMeta {
+        precision: Precision::Exact,
+        kind: IdgEdgeKind::IntraThrow,
+        call_kind: bonsai_callgraph::EdgeKind::Direct,
+        via_span: span,
+    };
+    let source_filter = SemanticSourceFilter::from_sources(arg.place.as_deref(), &arg.source_names);
+    let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
+    if let Some(place) = arg.place.as_deref() {
+        if !place.is_empty() && !source_filter.is_structural_base_token(place) {
+            let sid = ctx.intern_name(place);
+            if emitted.insert(sid) {
+                ctx.bridge_read(place, throw_node, meta);
+            }
+        }
+    }
+    for source in &arg.source_names {
+        if source.is_empty() || source_filter.is_structural_base_token(source) {
+            continue;
+        }
+        let sid = ctx.intern_name(source);
+        if emitted.insert(sid) {
+            ctx.bridge_read(source, throw_node, meta);
+        }
+    }
+    bridge_value_expr_to_node(&arg.value_text, throw_node, span, IdgEdgeKind::IntraThrow, ctx);
+}
+
+fn thrown_type_matches_catch(thrown_type: Option<TypeId>, catch_ty: TypeId, catch_type_name: &str) -> bool {
+    match thrown_type {
+        Some(thrown) if thrown == catch_ty => true,
+        Some(_) => is_root_exception_catch_type(catch_type_name),
+        None => is_root_exception_catch_type(catch_type_name),
+    }
+}
+
+fn is_root_exception_catch_type(name: &str) -> bool {
+    matches!(
+        normalise_exception_type_name(name).as_str(),
+        "exception" | "throwable" | "error" | "object"
+    )
+}
+
+fn normalise_exception_type_name(name: &str) -> String {
+    name.trim()
+        .trim_start_matches('\\')
+        .replace("::", ".")
+        .rsplit('.')
+        .find(|part| !part.is_empty())
+        .unwrap_or(name)
+        .to_ascii_lowercase()
 }
 
 /// Build the destination Place for an assignment target. Returns

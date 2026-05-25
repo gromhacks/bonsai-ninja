@@ -1265,10 +1265,10 @@ macro_rules! g8_test {
     };
 }
 
-/// Best-effort G8: lang-specific grammars where we don't yet guarantee
-/// catch-param extraction (compact forms like Ruby's `rescue => e` that
-/// bind without a field, exception-message accessors, etc.). Test allows
-/// 0 findings but asserts no crash.
+/// Best-effort G8 for language-specific exception idioms that do not
+/// yet surface a `Try` / `Throw` pair in HIR. Perl's `eval { die ... };
+/// if ($@) { ... }` currently indexes as a call plus branch, not as a
+/// catch binding.
 macro_rules! g8_best_effort_test {
     ($name:ident, $tag:expr, $lang:expr, $file:expr, $contents:expr, $rule_id:expr, $sink:expr) => {
         #[test]
@@ -1289,10 +1289,10 @@ g8_test!(g8_python_throw, "g8-py", "python", "app.py",
 g8_test!(g8_ts_throw, "g8-ts", "typescript", "app.ts",
     "function handle(token: string): void { try { throw token; } catch (e) { sink(e); } }\nfunction sink(s: unknown): void {}\n",
     "ts.sink", "sink");
-g8_best_effort_test!(g8_php_throw, "g8-php", "php", "app.php",
+g8_test!(g8_php_throw, "g8-php", "php", "app.php",
     "<?php\nfunction handle($token) { try { throw new Exception($token); } catch (Exception $e) { sink($e->getMessage()); } }\nfunction sink($s) {}\n",
     "php.sink", "sink");
-g8_best_effort_test!(
+g8_test!(
     g8_ruby_throw,
     "g8-rb",
     "ruby",
@@ -1301,7 +1301,7 @@ g8_best_effort_test!(
     "rb.sink",
     "sink"
 );
-g8_best_effort_test!(g8_java_throw, "g8-java", "java", "App.java",
+g8_test!(g8_java_throw, "g8-java", "java", "App.java",
     "class App { void handle(String token) throws Exception { try { throw new RuntimeException(token); } catch (Exception e) { sink(e.getMessage()); } } void sink(String s) {} }\n",
     "java.sink", "sink");
 
@@ -1315,22 +1315,22 @@ g8_test!(
     "js.sink",
     "sink"
 );
-g8_best_effort_test!(g8_kotlin_throw, "g8-kt", "kotlin", "App.kt",
+g8_test!(g8_kotlin_throw, "g8-kt", "kotlin", "App.kt",
     "fun handle(token: String) { try { throw RuntimeException(token) } catch (e: Exception) { sink(e.message ?: \"\") } }\nfun sink(s: String) {}\n",
     "kt.sink", "sink");
-g8_best_effort_test!(g8_csharp_throw, "g8-cs", "csharp", "App.cs",
+g8_test!(g8_csharp_throw, "g8-cs", "csharp", "App.cs",
     "class App { void Handle(string token) { try { throw new System.Exception(token); } catch (System.Exception e) { Sink(e.Message); } }\n void Sink(string s) {} }\n",
     "cs.sink", "Sink");
-g8_best_effort_test!(g8_scala_throw, "g8-scala", "scala", "App.scala",
+g8_test!(g8_scala_throw, "g8-scala", "scala", "App.scala",
     "object App { def handle(token: String): Unit = { try { throw new RuntimeException(token) } catch { case e: Exception => sink(e.getMessage) } }\n def sink(s: String): Unit = {} }\n",
     "scala.sink", "sink");
-g8_best_effort_test!(g8_swift_throw, "g8-swift", "swift", "App.swift",
+g8_test!(g8_swift_throw, "g8-swift", "swift", "App.swift",
     "enum AppError: Error { case boom(String) }\nfunc handle(_ token: String) throws { do { throw AppError.boom(token) } catch let e { sink(\"\\(e)\") } }\nfunc sink(_ s: String) {}\n",
     "swift.sink", "sink");
-g8_best_effort_test!(g8_dart_throw, "g8-dart", "dart", "app.dart",
+g8_test!(g8_dart_throw, "g8-dart", "dart", "app.dart",
     "void handle(String token) { try { throw Exception(token); } catch (e) { sink(e.toString()); } }\nvoid sink(String s) {}\n",
     "dart.sink", "sink");
-g8_best_effort_test!(g8_cpp_throw, "g8-cpp", "cpp", "app.cpp",
+g8_test!(g8_cpp_throw, "g8-cpp", "cpp", "app.cpp",
     "#include <stdexcept>\nvoid sink(const char* s);\nvoid handle(const char* token) { try { throw std::runtime_error(token); } catch (const std::exception& e) { sink(e.what()); } }\n",
     "cpp.sink", "sink");
 g8_best_effort_test!(g8_perl_throw, "g8-perl", "perl", "app.pl",
