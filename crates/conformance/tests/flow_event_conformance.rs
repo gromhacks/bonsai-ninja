@@ -751,10 +751,8 @@ contract Shape {
 "#,
             function_name: "shapes",
             // Solidity has no try/catch in the catch-bind form used
-            // here. The C-style `for (uint i = 0; ...)` won't expose a
-            // single `G` callee against a bare-name LHS — adapter
-            // wraps it as an indexed access.
-            skip: &[CanonicalShape::CatchBind, CanonicalShape::LoopBody],
+            // here.
+            skip: &[CanonicalShape::CatchBind],
         },
         "c" => Conformance {
             lang: "c",
