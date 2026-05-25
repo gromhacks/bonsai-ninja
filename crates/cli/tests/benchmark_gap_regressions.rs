@@ -1549,6 +1549,116 @@ class AuditVerticle {
 }
 
 #[test]
+fn java_vertx_routing_context_request_param_flows_to_runtime_exec() {
+    let ws = temp_workspace("java-vertx-routingcontext-request");
+    write_file(
+        &ws,
+        "src/AuditVerticle.java",
+        r#"import io.vertx.ext.web.RoutingContext;
+
+class AuditVerticle {
+  void handle(RoutingContext ctx, Runtime runtime) throws Exception {
+    String cmd = ctx.request().getParam("cmd");
+    runtime.exec(cmd);
+  }
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^java\\.source\\.vertx_routingcontext_request_getparam$",
+        "^java\\.cmdi\\.runtime_exec_local$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "java.source.vertx_routingcontext_request_getparam",
+            "java.cmdi.runtime_exec_local",
+            "AuditVerticle.java",
+            "handle",
+            "ctx.request().getParam",
+        ],
+    );
+
+    let clean = temp_workspace("java-vertx-routingcontext-request-clean");
+    write_file(
+        &clean,
+        "src/AuditVerticle.java",
+        r#"import io.vertx.ext.web.RoutingContext;
+
+class AuditVerticle {
+  void handle(RoutingContext ctx, Runtime runtime) throws Exception {
+    String unused = ctx.request().getParam("cmd");
+    runtime.exec("status");
+  }
+}
+"#,
+    );
+    let rows = run_taint_json(
+        &clean,
+        "^java\\.source\\.vertx_routingcontext_request_getparam$",
+        "^java\\.cmdi\\.runtime_exec_local$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
+fn java_vertx_routing_context_body_json_flows_to_runtime_exec() {
+    let ws = temp_workspace("java-vertx-routingcontext-body-json");
+    write_file(
+        &ws,
+        "src/AuditVerticle.java",
+        r#"import io.vertx.ext.web.RoutingContext;
+
+class AuditVerticle {
+  void handle(RoutingContext ctx, Runtime runtime) throws Exception {
+    Object body = ctx.getBodyAsJson();
+    runtime.exec(body);
+  }
+}
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^java\\.source\\.vertx_routingcontext_getbodyasjson$",
+        "^java\\.cmdi\\.runtime_exec_local$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "java.source.vertx_routingcontext_getbodyasjson",
+            "java.cmdi.runtime_exec_local",
+            "AuditVerticle.java",
+            "handle",
+            "ctx.getBodyAsJson",
+        ],
+    );
+
+    let clean = temp_workspace("java-vertx-routingcontext-body-json-clean");
+    write_file(
+        &clean,
+        "src/AuditVerticle.java",
+        r#"import io.vertx.ext.web.RoutingContext;
+
+class AuditVerticle {
+  void handle(RoutingContext ctx, Runtime runtime) throws Exception {
+    Object unused = ctx.getBodyAsJson();
+    runtime.exec("status");
+  }
+}
+"#,
+    );
+    let rows = run_taint_json(
+        &clean,
+        "^java\\.source\\.vertx_routingcontext_getbodyasjson$",
+        "^java\\.cmdi\\.runtime_exec_local$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
 fn java_esapi_html_encoder_marks_xss_flow_sanitized() {
     let ws = temp_workspace("java-esapi-html-sanitized");
     write_file(

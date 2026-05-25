@@ -723,6 +723,7 @@
         void handle(@QueryParam String value) {
         }
       }
+    expect_match_text: [value]
   description: "JAX-RS / Quarkus @QueryParam annotated parameter — query value bound from the HTTP request."
 
 - id: java.source.jaxrs_pathparam
@@ -1463,6 +1464,44 @@
     expect_match_text: [request.getParam]
   description: "Vert.x HttpServerRequest.getParam(name) — query/form parameter supplied by the HTTP caller."
 
+- id: java.source.vertx_routingcontext_request_getparam
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [query]
+  packages: ["io.vertx"]
+  match:
+    kind: call
+    callee:
+      regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request\\(\\)\\.getParam$"
+  constraints:
+  - min_args: 1
+  match_examples:
+  - name: vertx routing context request get param
+    code: |
+      import io.vertx.ext.web.RoutingContext;
+      class App {
+        Object handle(RoutingContext ctx, String name) {
+          return ctx.request().getParam(name);
+        }
+      }
+    expect_match_text: [ctx.request().getParam]
+  - name: non request chained get param negative
+    code: |
+      import io.vertx.ext.web.RoutingContext;
+      class App {
+        Object handle(RoutingContext ctx, Map map, String name) {
+          return map.getParam(name);
+        }
+      }
+      class Map {
+        Object getParam(Object... args) { return null; }
+      }
+    expect_no_match: true
+  description: "Vert.x RoutingContext.request().getParam(name) — query/form parameter from the current HTTP request."
+
 - id: java.source.vertx_request_getheader
   enabled: true
   language: java
@@ -1491,6 +1530,41 @@
       }
     expect_match_text: [req.getHeader]
   description: "Vert.x HttpServerRequest.getHeader(name) — client-supplied header."
+
+- id: java.source.vertx_routingcontext_getbodyasjson
+  enabled: true
+  language: java
+  trust: remote
+  tag: http-input
+  category: http-input
+  payload_types: [json]
+  packages: ["io.vertx"]
+  match:
+    kind: call
+    callee:
+      attribute: [RoutingContext, getBodyAsJson]
+  constraints:
+  - max_args: 0
+  match_examples:
+  - name: vertx routing context get body as json
+    code: |
+      import io.vertx.ext.web.RoutingContext;
+      class App {
+        Object handle(RoutingContext ctx) {
+          return ctx.getBodyAsJson();
+        }
+      }
+    expect_match_text: [ctx.getBodyAsJson]
+  - name: get body as json with args negative
+    code: |
+      import io.vertx.ext.web.RoutingContext;
+      class App {
+        Object handle(RoutingContext ctx, String key) {
+          return ctx.getBodyAsJson(key);
+        }
+      }
+    expect_no_match: true
+  description: "Vert.x RoutingContext.getBodyAsJson() — parsed JSON request body for the current HTTP request."
 
 - id: java.source.vertx_json_body_getstring
   enabled: true
