@@ -1162,6 +1162,50 @@ fn javascript_document_url_reaches_innerhtml_without_document_title_overtaint() 
 }
 
 #[test]
+fn javascript_document_referrer_and_cookie_reach_innerhtml() {
+    let ws = temp_workspace("js-document-referrer-cookie");
+    write_file(
+        &ws,
+        "dom.js",
+        r#"function renderReferrer(el) {
+  const html = document.referrer;
+  el.innerHTML = html;
+}
+
+function renderCookie(el) {
+  const html = document.cookie;
+  el.innerHTML = html;
+}
+"#,
+    );
+    let rows = run_taint_json(
+        &ws,
+        "^javascript\\.source\\.document_(referrer|cookie)$",
+        "^javascript\\.xss\\.innerhtml$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "javascript.source.document_referrer",
+            "javascript.xss.innerhtml",
+            "dom.js",
+            "renderReferrer",
+            "document.referrer",
+        ],
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "javascript.source.document_cookie",
+            "javascript.xss.innerhtml",
+            "dom.js",
+            "renderCookie",
+            "document.cookie",
+        ],
+    );
+}
+
+#[test]
 fn javascript_browser_storage_getitem_reaches_innerhtml() {
     let ws = temp_workspace("js-browser-storage-domxss");
     write_file(
@@ -1298,6 +1342,50 @@ fn typescript_location_hash_reaches_innerhtml_without_sibling_overtaint() {
         "^typescript\\.xss\\.innerhtml$",
     );
     assert_no_finding(&rows);
+}
+
+#[test]
+fn typescript_document_referrer_and_cookie_reach_innerhtml() {
+    let ws = temp_workspace("ts-document-referrer-cookie");
+    write_file(
+        &ws,
+        "dom.ts",
+        r#"function renderReferrer(el: any): void {
+  const html = document.referrer;
+  el.innerHTML = html;
+}
+
+function renderCookie(el: any): void {
+  const html = document.cookie;
+  el.innerHTML = html;
+}
+"#,
+    );
+    let rows = run_taint_json(
+        &ws,
+        "^typescript\\.source\\.document_(referrer|cookie)$",
+        "^typescript\\.xss\\.innerhtml$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "typescript.source.document_referrer",
+            "typescript.xss.innerhtml",
+            "dom.ts",
+            "renderReferrer",
+            "document.referrer",
+        ],
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "typescript.source.document_cookie",
+            "typescript.xss.innerhtml",
+            "dom.ts",
+            "renderCookie",
+            "document.cookie",
+        ],
+    );
 }
 
 #[test]
