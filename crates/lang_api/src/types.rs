@@ -510,6 +510,11 @@ pub enum AssignValueKind {
     /// depends on the callee's return-value summary; the engine
     /// routes through CallRet → Write.
     CallResult,
+    /// RHS is delivered to a call-site block / closure by the
+    /// callee's `yield`, not by the callee's ordinary return value.
+    /// Engines should require a resolved yield summary rather than
+    /// treating tainted call arguments as enough evidence.
+    YieldResult,
     /// RHS is a compound expression (member access, binary op,
     /// template literal, ternary, conditional, …). Engine
     /// tokenises identifiers and bridges every carrier.

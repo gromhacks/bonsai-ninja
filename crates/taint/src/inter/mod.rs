@@ -116,7 +116,7 @@ use bonsai_common::{callable_reference_variants, FileId, FuncId, Precision, Span
 use bonsai_db::AnalyzerDb;
 use bonsai_lang_api::kit::{callable_param_names_from_text, SYNTHETIC_VARARGS_PARAM};
 use bonsai_lang_api::ModulePath;
-use bonsai_lang_api::{AliasTarget, CallArg, CallKind, Decl, DeclKind, FlowEvent};
+use bonsai_lang_api::{AliasTarget, AssignValueKind, CallArg, CallKind, Decl, DeclKind, FlowEvent};
 use bonsai_resolve::{
     alias_map_for_file, callee_without_call_args, collect_method_candidates_for_class,
     enclosing_class_for_decl, export_name_variants, extend_alias_targets_with_declared_types,
@@ -3508,6 +3508,7 @@ fn apply_return_taint(
         source_call_args,
         source_names,
         span,
+        value_kind,
         ..
     } = event
     else {
@@ -3595,11 +3596,15 @@ fn apply_return_taint(
         source_names,
         state,
     );
+    let requires_yield_summary = matches!(value_kind, Some(AssignValueKind::YieldResult));
     let source_names_tainted =
         assignment_source_names_any_tainted(source_names, *span, Some(db), Some(caller), state);
     let call_projection_tainted = source_names
         .iter()
         .any(|name| call_names_match(name, callee_name) && rhs_operand_is_tainted(name, state));
+    if requires_yield_summary && candidates.is_empty() {
+        return false;
+    }
     if candidates.is_empty()
         && (unresolved_call_return_is_tainted(callee_name, state)
             || source_call_rhs_tainted
@@ -3667,121 +3672,142 @@ fn apply_return_taint(
         });
         let constructor_has_receiver_field_writes =
             callee_decl.is_some_and(|decl| !decl.receiver_field_writes.is_empty());
-        let value_tainted_transits = source_call_name_is_seeded(callee_name, state)
-            || independent_rhs_operand_tainted
-            || call_projection_tainted
-            || implicit_receiver_return_tainted
-            || implicit_receiver_param_return_tainted
-            || (summary.returns_taint_of.is_empty()
-                && !constructs_container
-                && callee_decl.is_some_and(|decl| decl.flow_events.is_empty())
-                && (call_operand_tainted || receiver_tainted))
-            // The callee is a security-source-bearing function (a
-            // source rule fires somewhere in its body). Closes the
-            // cross-file recall regression where source-bearing
-            // helpers silently dropped their return value (#95).
-            // Engine never invents this set on its own — the
-            // security layer populates it from matched source rules,
-            // so empty-seed runs (the engine-level invariant) still
-            // produce zero propagation records.
-            || config.source_bearing_functions.contains(&candidate.func)
-            || summary.returns_taint_of.iter().any(|&idx| {
+        let value_tainted_transits = if requires_yield_summary {
+            summary.yields_taint_of.iter().any(|&idx| {
                 effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
                     .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
+                    .unwrap_or(false)
+            })
+        } else {
+            source_call_name_is_seeded(callee_name, state)
+                || independent_rhs_operand_tainted
+                || call_projection_tainted
+                || implicit_receiver_return_tainted
+                || implicit_receiver_param_return_tainted
+                || (summary.returns_taint_of.is_empty()
+                    && !constructs_container
+                    && callee_decl.is_some_and(|decl| decl.flow_events.is_empty())
+                    && (call_operand_tainted || receiver_tainted))
+                // The callee is a security-source-bearing function (a
+                // source rule fires somewhere in its body). Closes the
+                // cross-file recall regression where source-bearing
+                // helpers silently dropped their return value (#95).
+                // Engine never invents this set on its own — the
+                // security layer populates it from matched source rules,
+                // so empty-seed runs (the engine-level invariant) still
+                // produce zero propagation records.
+                || config.source_bearing_functions.contains(&candidate.func)
+                || summary.returns_taint_of.iter().any(|&idx| {
+                    effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
+                        .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
+                        .unwrap_or(false)
+                        || global
+                            .decl_of(SymbolId::new(candidate.func.raw()))
+                            .and_then(|decl| decl.receiver_param_index)
+                            .is_some_and(|receiver_idx| {
+                                receiver_idx == idx
+                                    && (source_names_tainted
+                                        || call_receiver_from_name(callee_name)
+                                                .as_deref()
+                                                .is_some_and(|receiver| {
+                                                    call_arg_is_directly_tainted(receiver, state)
+                                                }))
+                            })
+                })
+                || higher_order_callback_return_taints_value(
+                    callee_decl,
+                    effective_source_call_args,
+                    &resolve_scope,
+                    summary_cache,
+                    state,
+                )
+        };
+        let access_path_tainted_transits = !requires_yield_summary
+            && summary.returns_access_paths.iter().any(|returned| {
+                effective_arg_value_for_param(effective_source_call_args, callee_decl, returned.param)
+                    .map(|arg_text| returned_access_path_is_tainted(arg_text, &returned.path, state))
+                    .unwrap_or(false)
+                    || global
+                        .decl_of(SymbolId::new(candidate.func.raw()))
+                        .and_then(|decl| decl.receiver_param_index)
+                        .is_some_and(|receiver_idx| {
+                            receiver_idx == returned.param
+                                && call_receiver_from_name(callee_name)
+                                    .as_deref()
+                                    .is_some_and(|receiver| {
+                                        returned_access_path_is_tainted(receiver, &returned.path, state)
+                                    })
+                        })
+            });
+        let mut field_tainted_transits = false;
+        if !requires_yield_summary {
+            for returned in &summary.returns_field_taint_of {
+                let Some(arg_text) =
+                    effective_arg_value_for_param(effective_source_call_args, callee_decl, returned.param)
+                else {
+                    continue;
+                };
+                let source_path_tainted = returned
+                    .source_path
+                    .as_deref()
+                    .is_some_and(|path| returned_access_path_is_tainted(arg_text, path, state));
+                if !call_arg_is_directly_tainted(arg_text, state)
+                    && !returned_access_path_is_tainted(arg_text, &returned.field, state)
+                    && !source_path_tainted
+                {
+                    continue;
+                }
+                let field_target = format!("{}.{}", normalise_target_text(target), returned.field);
+                insert_value_target_taint(state, &field_target);
+                field_tainted_transits = true;
+            }
+        }
+        let element_tainted_transits = !requires_yield_summary
+            && target_destructure_index.is_some_and(|target_index| {
+                summary.returns_element_taint_of.iter().any(|returned| {
+                    returned.index == target_index
+                        && (effective_arg_value_for_param(
+                            effective_source_call_args,
+                            callee_decl,
+                            returned.param,
+                        )
+                        .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
+                        .unwrap_or(false)
+                            || global
+                                .decl_of(SymbolId::new(candidate.func.raw()))
+                                .and_then(|decl| decl.receiver_param_index)
+                                .is_some_and(|receiver_idx| {
+                                    receiver_idx == returned.param
+                                        && call_receiver_from_name(callee_name).as_deref().is_some_and(
+                                            |receiver| call_arg_is_directly_tainted(receiver, state),
+                                        )
+                                }))
+                })
+            });
+        let descendant_tainted_transits = if requires_yield_summary {
+            summary.yields_descendant_taint_of.iter().any(|&idx| {
+                effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
+                    .map(|arg_text| actual_has_descendant_taint(arg_text, state))
+                    .unwrap_or(false)
+            })
+        } else {
+            summary.returns_descendant_taint_of.iter().any(|&idx| {
+                effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
+                    .map(|arg_text| actual_has_descendant_taint(arg_text, state))
                     .unwrap_or(false)
                     || global
                         .decl_of(SymbolId::new(candidate.func.raw()))
                         .and_then(|decl| decl.receiver_param_index)
                         .is_some_and(|receiver_idx| {
                             receiver_idx == idx
-                                && (source_names_tainted
-                                    || call_receiver_from_name(callee_name)
-                                            .as_deref()
-                                            .is_some_and(|receiver| {
-                                                call_arg_is_directly_tainted(receiver, state)
-                                            }))
+                                && call_receiver_from_name(callee_name)
+                                    .as_deref()
+                                    .is_some_and(|receiver| actual_has_descendant_taint(receiver, state))
                         })
             })
-            || higher_order_callback_return_taints_value(
-                callee_decl,
-                effective_source_call_args,
-                &resolve_scope,
-                summary_cache,
-                state,
-            );
-        let access_path_tainted_transits = summary.returns_access_paths.iter().any(|returned| {
-            effective_arg_value_for_param(effective_source_call_args, callee_decl, returned.param)
-                .map(|arg_text| returned_access_path_is_tainted(arg_text, &returned.path, state))
-                .unwrap_or(false)
-                || global
-                    .decl_of(SymbolId::new(candidate.func.raw()))
-                    .and_then(|decl| decl.receiver_param_index)
-                    .is_some_and(|receiver_idx| {
-                        receiver_idx == returned.param
-                            && call_receiver_from_name(callee_name)
-                                .as_deref()
-                                .is_some_and(|receiver| {
-                                    returned_access_path_is_tainted(receiver, &returned.path, state)
-                                })
-                    })
-        });
-        let mut field_tainted_transits = false;
-        for returned in &summary.returns_field_taint_of {
-            let Some(arg_text) =
-                effective_arg_value_for_param(effective_source_call_args, callee_decl, returned.param)
-            else {
-                continue;
-            };
-            let source_path_tainted = returned
-                .source_path
-                .as_deref()
-                .is_some_and(|path| returned_access_path_is_tainted(arg_text, path, state));
-            if !call_arg_is_directly_tainted(arg_text, state)
-                && !returned_access_path_is_tainted(arg_text, &returned.field, state)
-                && !source_path_tainted
-            {
-                continue;
-            }
-            let field_target = format!("{}.{}", normalise_target_text(target), returned.field);
-            insert_value_target_taint(state, &field_target);
-            field_tainted_transits = true;
-        }
-        let element_tainted_transits = target_destructure_index.is_some_and(|target_index| {
-            summary.returns_element_taint_of.iter().any(|returned| {
-                returned.index == target_index
-                    && (effective_arg_value_for_param(
-                        effective_source_call_args,
-                        callee_decl,
-                        returned.param,
-                    )
-                    .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
-                    .unwrap_or(false)
-                        || global
-                            .decl_of(SymbolId::new(candidate.func.raw()))
-                            .and_then(|decl| decl.receiver_param_index)
-                            .is_some_and(|receiver_idx| {
-                                receiver_idx == returned.param
-                                    && call_receiver_from_name(callee_name)
-                                        .as_deref()
-                                        .is_some_and(|receiver| call_arg_is_directly_tainted(receiver, state))
-                            }))
-            })
-        });
-        let descendant_tainted_transits = summary.returns_descendant_taint_of.iter().any(|&idx| {
-            effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
-                .map(|arg_text| actual_has_descendant_taint(arg_text, state))
-                .unwrap_or(false)
-                || global
-                    .decl_of(SymbolId::new(candidate.func.raw()))
-                    .and_then(|decl| decl.receiver_param_index)
-                    .is_some_and(|receiver_idx| {
-                        receiver_idx == idx
-                            && call_receiver_from_name(callee_name)
-                                .as_deref()
-                                .is_some_and(|receiver| actual_has_descendant_taint(receiver, state))
-                    })
-        });
-        let container_tainted_transits = target_destructure_index.is_none()
+        };
+        let container_tainted_transits = !requires_yield_summary
+            && target_destructure_index.is_none()
             && summary.returns_container_taint_of.iter().any(|&idx| {
                 effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
                     .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))

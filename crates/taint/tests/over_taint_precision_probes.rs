@@ -173,3 +173,79 @@ def entry(args):
         result.tainted_calls,
     );
 }
+
+#[test]
+fn probe_ruby_block_param_uses_callee_yield_not_call_args() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_ruby::RubyAdapter::new());
+    let src = "
+def helper(args)
+  yield 'safe'
+end
+
+def entry(args)
+  helper(args) do |value|
+    sink(value)
+  end
+end
+";
+    let db = build_db(adapter, &[("a.rb", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &cfg(), &db);
+    assert!(
+        !sink_reached(&result, "sink"),
+        "ruby block param was tainted from call args instead of yielded value; calls: {:?}",
+        result.tainted_calls,
+    );
+}
+
+#[test]
+fn probe_ruby_call_result_uses_return_not_yield() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_ruby::RubyAdapter::new());
+    let src = "
+def helper(args)
+  yield args
+  'safe'
+end
+
+def entry(args)
+  out = helper(args) do |value|
+    'ignored'
+  end
+  sink(out)
+end
+";
+    let db = build_db(adapter, &[("a.rb", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &cfg(), &db);
+    assert!(
+        !sink_reached(&result, "sink"),
+        "ruby call result was tainted by a yielded value instead of the returned value; calls: {:?}",
+        result.tainted_calls,
+    );
+}
+
+#[test]
+fn probe_ruby_call_result_still_uses_return_after_yield() {
+    let adapter: AdapterArc = Arc::new(bonsai_lang_ruby::RubyAdapter::new());
+    let src = "
+def helper(args)
+  yield 'safe'
+  args
+end
+
+def entry(args)
+  out = helper(args) do |value|
+    'ignored'
+  end
+  sink(out)
+end
+";
+    let db = build_db(adapter, &[("a.rb", src)]);
+    let entry = func_id_or_none(&db, "entry").expect("entry");
+    let result = interprocedural_taint(entry, &seed(&["args"]), &cfg(), &db);
+    assert!(
+        sink_reached(&result, "sink"),
+        "ruby call result must still follow the method's returned value after a yield; calls: {:?}",
+        result.tainted_calls,
+    );
+}

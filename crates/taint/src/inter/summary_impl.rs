@@ -80,6 +80,8 @@ use super::{
 pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
     let mut returns_taint_of = Vec::new();
     let mut returns_descendant_taint_of = Vec::new();
+    let mut yields_taint_of = Vec::new();
+    let mut yields_descendant_taint_of = Vec::new();
     let mut returns_container_taint_of = Vec::new();
     let mut returns_field_taint_of = Vec::new();
     let mut returns_element_taint_of = Vec::new();
@@ -88,6 +90,8 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         return FunctionSummary {
             returns_taint_of,
             returns_descendant_taint_of,
+            yields_taint_of,
+            yields_descendant_taint_of,
             returns_container_taint_of,
             returns_field_taint_of,
             returns_element_taint_of,
@@ -103,6 +107,7 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
     // carries a value_name (adapter hasn't wired the field yet for
     // this grammar).
     let return_names = collect_return_value_names(&decl.flow_events);
+    let yield_names = collect_yield_value_names(&decl.flow_events);
     let has_precise_returns = !return_names.is_empty();
     let allow_terminal_tail_return = decl.has_implicit_returns;
     // Methods that return `self`-style state need an extra check:
@@ -133,6 +138,11 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         if value_contributes {
             returns_taint_of.push(param_idx);
         }
+        if yield_names.iter().any(|name| value_tainted_at_end.contains(name))
+            || contains_tainted_yield(&decl.flow_events, &value_tainted_at_end)
+        {
+            yields_taint_of.push(param_idx);
+        }
         // Descendant transit — seed `param.*` so `return param.cmd` is flagged
         // even when the bare `param` itself doesn't contribute.
         let mut descendant_seed = TokenSet::default();
@@ -152,6 +162,14 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
         };
         if descendant_contributes {
             returns_descendant_taint_of.push(param_idx);
+        }
+        if yield_names.iter().any(|name| {
+            descendant_tainted_at_end.contains(name)
+                || arg_text_is_tainted(name, &descendant_tainted_at_end)
+                || return_name_has_descendant_taint(name, &descendant_tainted_at_end)
+        }) || contains_tainted_yield(&decl.flow_events, &descendant_tainted_at_end)
+        {
+            yields_descendant_taint_of.push(param_idx);
         }
         // Container transit: `return {"k": param}` builds a fresh
         // container, so the caller should see descendant taint.
@@ -175,6 +193,8 @@ pub(crate) fn compute_function_summary(decl: &Decl) -> FunctionSummary {
     FunctionSummary {
         returns_taint_of,
         returns_descendant_taint_of,
+        yields_taint_of,
+        yields_descendant_taint_of,
         returns_container_taint_of,
         returns_field_taint_of,
         returns_element_taint_of,
@@ -235,10 +255,6 @@ fn collect_return_field_taints_with_aliases(
                 }
             }
             FlowEvent::Return {
-                value_text: Some(text),
-                ..
-            }
-            | FlowEvent::Yield {
                 value_text: Some(text),
                 ..
             } => {
@@ -362,10 +378,6 @@ fn collect_return_element_taints(
             FlowEvent::Return {
                 value_text: Some(text),
                 ..
-            }
-            | FlowEvent::Yield {
-                value_text: Some(text),
-                ..
             } => {
                 for (index, element) in return_positional_elements(text).into_iter().enumerate() {
                     if call_arg_is_directly_tainted(&element, tainted) {
@@ -485,26 +497,6 @@ fn walk_return_access_path_events(
                     // Returning an aliased target yields all access paths bound to that alias.
                     for (alias, alias_paths) in aliases.iter() {
                         if identifier_value_occurs(return_value, alias) {
-                            for path in alias_paths {
-                                push_return_access_path(access_paths, param_idx, path);
-                            }
-                        }
-                    }
-                    for path in direct_paths {
-                        push_return_access_path(access_paths, param_idx, &path);
-                    }
-                }
-            }
-            FlowEvent::Yield { value_text, .. } => {
-                // Yields are "returns over time" for our purposes — same handling.
-                if let Some(yield_value) = value_text.as_deref() {
-                    if return_text_constructs_container(terminal_return_expression_text(yield_value)) {
-                        continue;
-                    }
-                    let mut direct_paths = Vec::new();
-                    collect_source_access_paths(yield_value, param, aliases, &mut direct_paths);
-                    for (alias, alias_paths) in aliases.iter() {
-                        if identifier_value_occurs(yield_value, alias) {
                             for path in alias_paths {
                                 push_return_access_path(access_paths, param_idx, path);
                             }
@@ -807,6 +799,12 @@ fn collect_return_value_names(events: &[FlowEvent]) -> Vec<String> {
     let mut return_names = Vec::new();
     walk_return_names(events, &mut return_names);
     return_names
+}
+
+fn collect_yield_value_names(events: &[FlowEvent]) -> Vec<String> {
+    let mut yield_names = Vec::new();
+    walk_yield_names(events, &mut yield_names);
+    yield_names
 }
 
 /// True when the callee returns its receiver / receiver state —
@@ -1133,7 +1131,7 @@ fn push_receiver_marker_candidate(out: &mut Vec<String>, token: &str) {
     }
 }
 
-/// Recursively collect `value_name` from every Return / Yield event,
+/// Recursively collect `value_name` from every Return event,
 /// including those nested in branches / loops / try blocks.
 fn walk_return_names(events: &[FlowEvent], out: &mut Vec<String>) {
     for event in events {
@@ -1150,14 +1148,6 @@ fn walk_return_names(events: &[FlowEvent], out: &mut Vec<String>) {
                     continue;
                 }
                 out.push(name.clone());
-            }
-            FlowEvent::Yield {
-                value_text: Some(name),
-                ..
-            } => {
-                if !return_text_constructs_container(name) {
-                    out.push(name.clone());
-                }
             }
             FlowEvent::Branch {
                 then_events,
@@ -1185,7 +1175,44 @@ fn walk_return_names(events: &[FlowEvent], out: &mut Vec<String>) {
     }
 }
 
-/// True when any `Return` or `Yield` in `events` (recursively
+fn walk_yield_names(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Yield {
+                value_text: Some(name),
+                ..
+            } => {
+                if !return_text_constructs_container(name) {
+                    out.push(name.clone());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                walk_yield_names(then_events, out);
+                walk_yield_names(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                walk_yield_names(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                walk_yield_names(body, out);
+                walk_yield_names(catch_events, out);
+                walk_yield_names(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// True when any `Return` in `events` (recursively
 /// through nested control structures) carries a tainted value.
 /// Adapters that expose a richer `Return { value_name }` can replace
 /// this with a direct check later; for now, being conservative and
@@ -1195,10 +1222,6 @@ fn contains_tainted_return(events: &[FlowEvent], tainted: &TokenSet) -> bool {
     for event in events {
         match event {
             FlowEvent::Return {
-                value_text: Some(text),
-                ..
-            }
-            | FlowEvent::Yield {
                 value_text: Some(text),
                 ..
             } if return_value_text_is_tainted(text, tainted) => return true,
@@ -1225,6 +1248,45 @@ fn contains_tainted_return(events: &[FlowEvent], tainted: &TokenSet) -> bool {
             }
             FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
                 if contains_tainted_return(body, tainted) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn contains_tainted_yield(events: &[FlowEvent], tainted: &TokenSet) -> bool {
+    for event in events {
+        match event {
+            FlowEvent::Yield {
+                value_text: Some(text),
+                ..
+            } if return_value_text_is_tainted(text, tainted) => return true,
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } if contains_tainted_yield(then_events, tainted)
+                || contains_tainted_yield(else_events, tainted) =>
+            {
+                return true;
+            }
+            FlowEvent::Loop { body, .. } if contains_tainted_yield(body, tainted) => return true,
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } if contains_tainted_yield(body, tainted)
+                || contains_tainted_yield(catch_events, tainted)
+                || contains_tainted_yield(finally_events, tainted) =>
+            {
+                return true;
+            }
+            FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. }
+                if contains_tainted_yield(body, tainted) =>
             {
                 return true;
             }
@@ -1283,7 +1345,7 @@ fn split_terminal_return_segment(text: &str) -> &str {
     &text[last_split..]
 }
 
-/// True when any `Return`/`Yield` in `events` builds a fresh
+/// True when any `Return` in `events` builds a fresh
 /// container (object literal / array / tuple) whose contents include
 /// a tainted value. Used to classify "container transit" — taint
 /// flows into the caller via the returned aggregate, not by direct
@@ -1292,10 +1354,6 @@ fn contains_tainted_container_return(events: &[FlowEvent], tainted: &TokenSet) -
     for event in events {
         match event {
             FlowEvent::Return {
-                value_text: Some(text),
-                ..
-            }
-            | FlowEvent::Yield {
                 value_text: Some(text),
                 ..
             } if return_text_constructs_container(text)
@@ -1613,10 +1671,6 @@ fn terminal_event_returns_taint(events: &[FlowEvent], tainted: &TokenSet) -> boo
         // Calls in tail position produce a return value, but we
         // can't see through the callee here — leave to the inter pass.
         FlowEvent::Call { .. } => false,
-        FlowEvent::Yield {
-            value_text: Some(text),
-            ..
-        } => arg_text_is_tainted(text, tainted),
         FlowEvent::Assign {
             target,
             source_name,

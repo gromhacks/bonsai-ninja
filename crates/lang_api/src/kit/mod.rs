@@ -1580,7 +1580,17 @@ fn walk_into(
                 if !walked_closures.insert(child.id()) {
                     continue;
                 }
-                emit_inline_closure_param_bindings(child, file, src, &closure_source_names, out);
+                if ruby_call_block_uses_yield_result(&node, &child, src) {
+                    emit_inline_closure_param_bindings_from_yield_call(
+                        child,
+                        file,
+                        src,
+                        call_event.as_ref(),
+                        out,
+                    );
+                } else {
+                    emit_inline_closure_param_bindings(child, file, src, &closure_source_names, out);
+                }
                 walk_lambda_body(child, file, src, handler, class_names, out);
             }
         }
@@ -1589,10 +1599,12 @@ fn walk_into(
         // `call` nodes whose body lives in a `do_block` direct child.
         // Without this descent, calls inside those bodies wouldn't
         // surface in the enclosing function's flow events.
-        if let Some(do_block) = first_named_child_of_kind(&node, "do_block") {
-            let mut do_cursor = do_block.walk();
-            for child in do_block.named_children(&mut do_cursor) {
-                walk_into(child, file, src, handler, class_names, out, false);
+        if elixir_call_name(&node, src).is_some() {
+            if let Some(do_block) = first_named_child_of_kind(&node, "do_block") {
+                let mut do_cursor = do_block.walk();
+                for child in do_block.named_children(&mut do_cursor) {
+                    walk_into(child, file, src, handler, class_names, out, false);
+                }
             }
         }
         // Method-chain receivers. Rust / Swift / Kotlin / JS / TS
@@ -8009,6 +8021,44 @@ fn emit_inline_closure_param_bindings(
             value_kind: None,
         });
     }
+}
+
+fn emit_inline_closure_param_bindings_from_yield_call(
+    lambda: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    call_event: Option<&FlowEvent>,
+    out: &mut Vec<FlowEvent>,
+) {
+    let Some(FlowEvent::Call { name, args, .. }) = call_event else {
+        return;
+    };
+    let params = extract_param_names(&lambda, src);
+    if params.is_empty() {
+        return;
+    }
+    let source_call_args: Vec<String> = args.iter().map(|arg| arg.value_text.clone()).collect();
+    for param in params {
+        if param.is_empty() {
+            continue;
+        }
+        out.push(FlowEvent::Assign {
+            span: span_of(file, &lambda),
+            target: param,
+            source_name: None,
+            source_call: Some(name.clone()),
+            source_call_args: source_call_args.clone(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(crate::AssignValueKind::YieldResult),
+        });
+    }
+}
+
+fn ruby_call_block_uses_yield_result(call: &Node<'_>, block: &Node<'_>, src: &[u8]) -> bool {
+    call.kind() == "call"
+        && matches!(block.kind(), "block" | "do_block")
+        && elixir_call_name(call, src).is_none()
 }
 
 fn call_event_value_source_names(event: &FlowEvent) -> Vec<String> {
