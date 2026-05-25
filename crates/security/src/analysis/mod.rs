@@ -836,6 +836,7 @@ where
         // side wasn't pruned earlier (e.g. prod source → test sink).
         findings.retain(|combined| !combined.finding.from_test);
     }
+    drop_dominated_wrapper_findings(&mut findings);
     // Sort highest-severity-first, then by finding id so two runs
     // produce identical output ordering.
     findings.sort_by(|a, b| {
@@ -4100,6 +4101,110 @@ fn all_sink_matches(group: &CombinedFindingWithChain) -> Vec<FindingMatch> {
     sinks.push(group.finding.sink.clone());
     sinks.extend(group.additional_sinks.iter().cloned());
     sinks
+}
+
+/// Prefer the semantic sink inside a nested call over the transport
+/// wrapper that merely sends that nested result. Example:
+/// `res.end(renderResults(q))` and `renderResults -> return "<div>"+q`
+/// are both true facts, but reporting both makes cross-file cases look
+/// truncated when rankers read the first result. Drop the wrapper only
+/// when a same-source, same-class deeper flow starts at the nested
+/// callee on the same call-site line.
+fn drop_dominated_wrapper_findings(findings: &mut Vec<CombinedFindingWithChain>) {
+    if findings.len() < 2 {
+        return;
+    }
+    let mut dominated = AHashSet::new();
+    for (idx, candidate) in findings.iter().enumerate() {
+        if findings
+            .iter()
+            .enumerate()
+            .any(|(other_idx, other)| other_idx != idx && wrapper_finding_is_dominated(candidate, other))
+        {
+            dominated.insert(idx);
+        }
+    }
+    if dominated.is_empty() {
+        return;
+    }
+    let mut next_idx = 0usize;
+    findings.retain(|_| {
+        let keep = !dominated.contains(&next_idx);
+        next_idx = next_idx.saturating_add(1);
+        keep
+    });
+}
+
+fn wrapper_finding_is_dominated(
+    wrapper: &CombinedFindingWithChain,
+    deeper: &CombinedFindingWithChain,
+) -> bool {
+    let wrapper_finding = &wrapper.finding;
+    let deeper_finding = &deeper.finding;
+    if wrapper_finding.language != deeper_finding.language
+        || wrapper_finding.tag != deeper_finding.tag
+        || wrapper_finding.status != deeper_finding.status
+        || !same_source_site(&wrapper_finding.source, &deeper_finding.source)
+        || !cwe_sets_overlap_or_unknown(&wrapper_finding.cwe, &deeper_finding.cwe)
+        || deeper_finding.chain_display.len() <= wrapper_finding.chain_display.len()
+        || !chain_has_prefix(&deeper_finding.chain_display, &wrapper_finding.chain_display)
+        || wrapper_finding.taint_path.len() != 1
+        || deeper_finding.taint_path.is_empty()
+    {
+        return false;
+    }
+
+    let wrapper_step = &wrapper_finding.taint_path[0];
+    let deeper_entry = &deeper_finding.taint_path[0];
+    if wrapper_step.file != deeper_entry.file
+        || wrapper_step.line != deeper_entry.line
+        || wrapper_step.caller != deeper_entry.caller
+    {
+        return false;
+    }
+
+    let nested_callee = display_callee_tail(&deeper_entry.callee);
+    if nested_callee.is_empty() {
+        return false;
+    }
+    wrapper_finding
+        .sink
+        .tainted_args
+        .iter()
+        .any(|arg| argument_text_calls(&arg.value_text, &nested_callee))
+        || wrapper_step
+            .tainted_args
+            .iter()
+            .any(|arg| argument_text_calls(&arg.value_text, &nested_callee))
+}
+
+fn chain_has_prefix(chain: &[String], prefix: &[String]) -> bool {
+    !prefix.is_empty() && chain.len() > prefix.len() && chain.iter().zip(prefix).all(|(a, b)| a == b)
+}
+
+fn cwe_sets_overlap_or_unknown(left: &[String], right: &[String]) -> bool {
+    left.is_empty() || right.is_empty() || left.iter().any(|item| right.iter().any(|other| other == item))
+}
+
+fn display_callee_tail(name: &str) -> String {
+    let without_site = name.split('@').next().unwrap_or(name);
+    without_site
+        .rsplit(['.', ':'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(without_site)
+        .trim()
+        .trim_end_matches("()")
+        .to_string()
+}
+
+fn argument_text_calls(argument: &str, callee: &str) -> bool {
+    let callee = callee.trim();
+    if callee.is_empty() {
+        return false;
+    }
+    let compact_arg: String = argument.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let compact_callee: String = callee.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact_arg.contains(&format!("{compact_callee}("))
 }
 
 /// Pick the higher severity from two optionals, or the only present

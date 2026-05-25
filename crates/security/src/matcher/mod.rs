@@ -1111,6 +1111,7 @@ fn scan_returns_batch(ws: &Workspace, file: FileId, rules: &[&PreparedRule<'_>],
                 else {
                     continue;
                 };
+                let span = canonical_flow_read_match_span(ws, file, span, &match_text);
                 let (file_path, line, col) = resolve_span(ws, file, span);
                 out.push(RuleMatch {
                     rule_id: prepared.rule.id.clone(),
@@ -2241,6 +2242,7 @@ fn scan_flow_reads_batch(
                 if !prepared.call_context_allows(&match_text, &[], &alias_map, file_packages.as_ref()) {
                     continue;
                 }
+                let span = canonical_flow_read_match_span(ws, file, span, &match_text);
                 if out
                     .iter()
                     .any(|existing| existing.rule_id == prepared.rule.id && existing.span == span)
@@ -2295,6 +2297,42 @@ fn flow_read_rule_match(prepared: &PreparedRule<'_>, tokens: &[String]) -> Optio
         }
     }
     None
+}
+
+/// Flow-read facts are often attached to the enclosing expression that
+/// exposed the read (`const q = req.query`, `sink(req.query)`). When a
+/// source rule matches a specific token inside that expression, report
+/// the token span rather than the wrapper span so source endpoints point
+/// at the attacker-controlled read instead of an assignment target.
+fn canonical_flow_read_match_span(ws: &Workspace, file: FileId, span: Span, match_text: &str) -> Span {
+    let match_text = match_text.trim();
+    if match_text.is_empty() || match_text.contains(',') {
+        return span;
+    }
+    let Ok(snapshot) = ws.vfs().snapshot(file) else {
+        return span;
+    };
+    let source = snapshot.text.as_ref();
+    let start = span.start as usize;
+    let end = span.end as usize;
+    if start >= end || end > source.len() {
+        return span;
+    }
+    let raw = &source[start..end];
+    let preferred_start = raw.find('=').map_or(0, |idx| idx + 1);
+    let offset = raw[preferred_start..]
+        .find(match_text)
+        .map(|idx| preferred_start + idx)
+        .or_else(|| raw.find(match_text));
+    let Some(offset) = offset else {
+        return span;
+    };
+    let match_start = span.start.saturating_add(offset as u64);
+    Span::new(
+        file,
+        match_start,
+        match_start.saturating_add(match_text.len() as u64),
+    )
 }
 
 fn collect_return_sites(events: &[FlowEvent], out: &mut Vec<(Span, Option<String>, Option<String>)>) {
