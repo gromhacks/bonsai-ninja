@@ -7,6 +7,8 @@
     kind: call
     callee:
       attribute: [HtmlEncoder, Encode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -22,6 +24,8 @@
     kind: call
     callee:
       attribute: [WebUtility, HtmlEncode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -100,6 +104,8 @@
     kind: call
     callee:
       attribute: [Encoder, HtmlEncode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -134,6 +140,8 @@
     kind: call
     callee:
       attribute: [HtmlSanitizer, Sanitize]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -227,6 +235,8 @@
     kind: call
     callee:
       attribute: [JavaScriptEncoder, Encode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -257,6 +267,8 @@
     kind: call
     callee:
       attribute: [HttpUtility, JavaScriptStringEncode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -634,6 +646,8 @@
     kind: call
     callee:
       attribute: [AntiXssEncoder, HtmlEncode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -668,6 +682,8 @@
     kind: call
     callee:
       attribute: [AntiXssEncoder, JavaScriptStringEncode]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |
@@ -702,6 +718,8 @@
     kind: call
     callee:
       attribute: [HtmlSanitizer, SanitizeDocument]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: declared shape
     code: |

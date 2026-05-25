@@ -233,6 +233,8 @@
     kind: call
     callee:
       attribute: [StringEscapeUtils, escapeHtml4]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -254,6 +256,8 @@
     kind: call
     callee:
       attribute: [StringEscapeUtils, escapeXml10]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -275,6 +279,8 @@
     kind: call
     callee:
       attribute: [HtmlUtils, htmlEscape]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -296,6 +302,8 @@
     kind: call
     callee:
       attribute: [Encode, forHtml]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -317,6 +325,8 @@
     kind: call
     callee:
       attribute: [Encode, forJavaScript]
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -338,6 +348,8 @@
     kind: call
     callee:
       regex: "^PolicyFactory\\.sanitize$"
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -362,6 +374,8 @@
     kind: call
     callee:
       regex: "^HtmlPolicyBuilder\\.sanitize$"
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
@@ -386,6 +400,8 @@
     kind: call
     callee:
       regex: "^Jsoup\\.clean$"
+  taint_semantics:
+    call_result_passthrough_args: [0]
   match_examples:
   - name: generated shape example
     code: |
