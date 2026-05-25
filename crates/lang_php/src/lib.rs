@@ -215,6 +215,12 @@ fn augment_php_qualified_source_names(events: &mut [FlowEvent], source: &str) {
                         *source_name = Some(rhs.clone());
                         *value_kind = Some(AssignValueKind::Literal);
                     }
+                    if let Some(rhs) = php_exact_variable_rhs(&rhs) {
+                        *source_name = Some(rhs);
+                        source_names.clear();
+                        *value_kind = None;
+                        continue;
+                    }
                     for access in php_qualified_accesses(&rhs) {
                         push_unique_source(source_names, access.clone());
                         let bare = access.trim_start_matches(['$', '@', '%']).to_string();
@@ -276,6 +282,23 @@ fn php_quoted_bare_callable_literal(value: &str) -> Option<&str> {
         return None;
     }
     Some(inner)
+}
+
+fn php_exact_variable_rhs(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches(';').trim();
+    let mut chars = value.chars();
+    if chars.next()? != '$' {
+        return None;
+    }
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
+        Some(value.to_string())
+    } else {
+        None
+    }
 }
 
 fn php_assignment_rhs_text(source: &str, span: Span) -> Option<String> {

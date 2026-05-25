@@ -572,11 +572,7 @@ function F($a) {}
 function G($a) {}
 "#,
             function_name: "shapes",
-            // PHP classifies `$y = $x` as a Compound assign with
-            // `source_names: ["$x", "x"]`; the bare-rename
-            // `source_name` slot stays empty. Adapter improvement —
-            // skip for now.
-            skip: &[CanonicalShape::BareRename],
+            skip: &[],
         },
         "dart" => Conformance {
             lang: "dart",
