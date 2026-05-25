@@ -1362,9 +1362,12 @@ fn has_taint_predicate(rule: &Rule) -> bool {
     })
 }
 
-fn declares_taint_reachability_or_source_independent(rule: &Rule) -> bool {
+fn declares_taint_reachability_or_non_taint_category(rule: &Rule) -> bool {
     has_taint_predicate(rule)
-        || rule.category.as_deref() == Some("source-independent")
+        || matches!(
+            rule.category.as_deref(),
+            Some("source-independent" | "lifecycle-audit")
+        )
         || (rule.match_spec.kind == MatchKind::Return
             && rule
                 .description
@@ -1411,11 +1414,11 @@ fn enabled_injection_data_sinks_declare_taint_or_source_independent_category() {
         if !dataflow_tags.contains(tag) {
             continue;
         }
-        if declares_taint_reachability_or_source_independent(rule) {
+        if declares_taint_reachability_or_non_taint_category(rule) {
             continue;
         }
         offenders.push(format!(
-            "{} ({}) tag={tag} kind={:?} must either declare arg/receiver taint, document taint reachability for return sinks, or be marked category: source-independent",
+            "{} ({}) tag={tag} kind={:?} must either declare arg/receiver taint, document taint reachability for return sinks, or be marked category: source-independent/lifecycle-audit",
             rule.id, rule.source_path, rule.match_spec.kind
         ));
     }
@@ -1457,11 +1460,11 @@ fn enabled_audited_sink_families_declare_taint_or_source_independent_category() 
         if !audited_tags.contains(tag) {
             continue;
         }
-        if declares_taint_reachability_or_source_independent(rule) {
+        if declares_taint_reachability_or_non_taint_category(rule) {
             continue;
         }
         offenders.push(format!(
-            "{} ({}) tag={tag} kind={:?} must either declare arg/receiver taint, document taint reachability for return sinks, or be marked category: source-independent",
+            "{} ({}) tag={tag} kind={:?} must either declare arg/receiver taint, document taint reachability for return sinks, or be marked category: source-independent/lifecycle-audit",
             rule.id, rule.source_path, rule.match_spec.kind
         ));
     }
