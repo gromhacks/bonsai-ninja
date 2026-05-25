@@ -95,3 +95,53 @@ class Child extends Base {}
 
     assert_eq!(child.bases, vec!["Base"]);
 }
+
+#[test]
+fn simple_variable_assignment_uses_exact_source_name() {
+    let db = db_with("<?php\nfunction handle($x) { $y = $x; sink($y); }\nfunction sink($s) {}\n");
+    let global = db.global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle function should be indexed");
+
+    assert!(
+        handle.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_name: Some(source),
+                source_names,
+                ..
+            } if target == "$y" && source == "$x" && source_names.is_empty()
+        )),
+        "PHP simple variable rename should use exact source_name, got {:#?}",
+        handle.flow_events
+    );
+}
+
+#[test]
+fn member_access_assignment_stays_compound() {
+    let db = db_with("<?php\nfunction handle($obj) { $y = $obj->token; sink($y); }\nfunction sink($s) {}\n");
+    let global = db.global_index();
+    let handle = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle function should be indexed");
+
+    assert!(
+        handle.flow_events.iter().any(|event| matches!(
+            event,
+            FlowEvent::Assign {
+                target,
+                source_name: None,
+                source_names,
+                ..
+            } if target == "$y" && source_names.iter().any(|source| source == "$obj.token")
+        )),
+        "PHP member access should stay on qualified compound source_names, got {:#?}",
+        handle.flow_events
+    );
+}
