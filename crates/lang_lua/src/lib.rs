@@ -190,6 +190,7 @@ impl LanguageAdapter for LuaAdapter {
         for decl in &mut idx.defs {
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, LUA_LIFECYCLE_TRANSITIONS);
             enrich_lua_factory_receiver_field_writes(decl);
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-

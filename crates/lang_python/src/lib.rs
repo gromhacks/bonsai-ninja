@@ -272,6 +272,7 @@ impl LanguageAdapter for PythonAdapter {
         // resource transitions (`f.close()`, `task.cancel()`,
         // `lock.release()`, `cm.__exit__`).
         for decl in &mut idx.defs {
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PYTHON_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each class's

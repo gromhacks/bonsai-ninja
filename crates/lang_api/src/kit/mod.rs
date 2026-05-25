@@ -373,8 +373,9 @@ pub fn node_at_span<'a>(root: Node<'a>, span: Span, expected_kinds: &[&str]) -> 
 /// receiver factory tails (`Logger.getLogger`) for existing type
 /// inference heuristics.
 pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent]) {
-    for event in events {
-        match event {
+    for event_index in 0..events.len() {
+        let adjacent_call_args = adjacent_call_args_for_call_result_assignment(events, event_index);
+        match &mut events[event_index] {
             crate::FlowEvent::Assign {
                 source_name,
                 source_call: Some(source_call),
@@ -382,6 +383,11 @@ pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent])
                 source_names,
                 ..
             } => {
+                if !adjacent_call_args.is_empty()
+                    && (source_call_args.is_empty() || adjacent_call_args.len() > source_call_args.len())
+                {
+                    *source_call_args = adjacent_call_args;
+                }
                 *source_name = None;
                 prune_call_result_source_names(source_call, source_call_args, source_names);
             }
@@ -411,6 +417,39 @@ pub fn normalize_call_result_assignment_sources(events: &mut [crate::FlowEvent])
             _ => {}
         }
     }
+}
+
+fn adjacent_call_args_for_call_result_assignment(
+    events: &[crate::FlowEvent],
+    event_index: usize,
+) -> Vec<String> {
+    let Some(crate::FlowEvent::Assign {
+        source_call: Some(source_call),
+        source_call_args,
+        span: assign_span,
+        ..
+    }) = events.get(event_index)
+    else {
+        return Vec::new();
+    };
+
+    events
+        .iter()
+        .skip(event_index + 1)
+        .take(3)
+        .find_map(|event| match event {
+            crate::FlowEvent::Call { name, args, span, .. }
+                if call_result_names_match(source_call, name)
+                    && span.file == assign_span.file
+                    && span.start >= assign_span.start
+                    && !args.is_empty()
+                    && (source_call_args.is_empty() || args.len() > source_call_args.len()) =>
+            {
+                Some(args.iter().map(|arg| arg.value_text.clone()).collect())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn prune_call_result_source_names(
@@ -452,6 +491,15 @@ fn prune_call_result_source_names(
     dedup_call_result_source_names(source_names);
 }
 
+fn call_result_names_match(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    if left == right {
+        return true;
+    }
+    call_result_short_tail(left) == call_result_short_tail(right)
+}
+
 fn call_receiver_and_tail(call: &str) -> Option<(&str, &str, bool)> {
     [".", "::", "->"].into_iter().find_map(|separator| {
         let (receiver, tail) = call.rsplit_once(separator)?;
@@ -466,6 +514,10 @@ fn call_receiver_and_tail(call: &str) -> Option<(&str, &str, bool)> {
             receiver.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()),
         ))
     })
+}
+
+fn call_result_short_tail(name: &str) -> &str {
+    name.rsplit(['.', ':', '>']).next().unwrap_or(name).trim()
 }
 
 fn call_result_identifier_tokens(text: &str) -> Vec<String> {
@@ -1365,6 +1417,13 @@ fn walk_into(
             }
             return;
         }
+        if assignment_wrapper_has_variable_declarator(kind, &node) {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                walk_into(child, file, src, handler, class_names, out, false);
+            }
+            return;
+        }
         // Target-name extraction. Grammars disagree on field names, and
         // some emit keywords (`val`, `var`, `let`, `const`, `auto`) as
         // visible named children — skip those so the real identifier
@@ -1396,6 +1455,10 @@ fn walk_into(
             | "property_identifier"
             | "variable_declaration" => n
                 .child_by_field_name("name")
+                .or_else(|| {
+                    first_named_child_of_kind(&n, "variable_declarator")
+                        .and_then(|decl| decl.child_by_field_name("name"))
+                })
                 .or_else(|| first_non_keyword_named_child(&n, src))
                 .unwrap_or(n),
             _ => n,
@@ -8310,6 +8373,18 @@ fn last_named_child_excluding<'tree>(
         last = Some(child);
     }
     last
+}
+
+fn assignment_wrapper_has_variable_declarator(kind: &str, node: &Node<'_>) -> bool {
+    if kind == "variable_declaration" {
+        return first_named_child_of_kind(node, "variable_declarator").is_some();
+    }
+    if kind == "local_declaration_statement" {
+        return first_named_child_of_kind(node, "variable_declaration")
+            .and_then(|decl| first_named_child_of_kind(&decl, "variable_declarator"))
+            .is_some();
+    }
+    false
 }
 
 /// First named child whose text isn't a binding-declaration keyword

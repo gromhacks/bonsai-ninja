@@ -176,6 +176,7 @@ impl LanguageAdapter for JavaAdapter {
         // resource transitions (`Closeable.close`, `Future.cancel`,
         // `Lock.unlock`).
         for decl in &mut index.defs {
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, JAVA_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
