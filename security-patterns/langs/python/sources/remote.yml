@@ -602,6 +602,7 @@
       import tornado
       def example(user_input):
           return self.get_argument(user_input)
+    expect_match_text: [self.get_argument]
   description: "tornado self.get_argument(...). Signature `get_argument(name, default=_ARG_DEFAULT, strip=True)`; `min_args/max_args 1..3` matches the canonical signature and rejects same-name decoys."
 - id: python.tornado.get_body_argument
   enabled: true
@@ -625,6 +626,7 @@
       import tornado
       def example(user_input):
           return self.get_body_argument(user_input)
+    expect_match_text: [self.get_body_argument]
   description: "tornado self.get_body_argument(...). Signature `get_body_argument(name, default=_ARG_DEFAULT, strip=True)`; `min_args/max_args 1..3` matches canonical signature."
 
 - id: python.tornado.request_headers_get

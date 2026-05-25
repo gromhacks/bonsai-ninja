@@ -317,6 +317,7 @@
       def example():
           value = request.match_info
           return value
+    expect_match_text: [request.match_info]
   description: aiohttp request.match_info — URL path params bound by the router.
 
 # ---------------------------------------------------------------------------

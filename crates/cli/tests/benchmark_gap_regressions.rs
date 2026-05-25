@@ -1010,6 +1010,163 @@ def clone(args):
 }
 
 #[test]
+fn python_tornado_get_argument_flows_to_os_system_without_sibling_overtaint() {
+    let ws = temp_workspace("py-tornado-get-argument");
+    write_file(
+        &ws,
+        "app/handlers.py",
+        r#"import os
+import tornado.web
+
+class AdminHandler(tornado.web.RequestHandler):
+    def get(self):
+        cmd = self.get_argument("cmd")
+        return os.system(cmd)
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^python\\.tornado\\.get_argument$",
+        "^python\\.cmdi\\.os_system$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "python.tornado.get_argument",
+            "python.cmdi.os_system",
+            "app/handlers.py",
+            "get",
+            "self.get_argument",
+        ],
+    );
+
+    let clean = temp_workspace("py-tornado-get-argument-clean");
+    write_file(
+        &clean,
+        "app/handlers.py",
+        r#"import os
+import tornado.web
+
+class AdminHandler(tornado.web.RequestHandler):
+    def get(self):
+        unused = self.get_argument("cmd")
+        return os.system("status")
+"#,
+    );
+    let rows = run_taint_json(
+        &clean,
+        "^python\\.tornado\\.get_argument$",
+        "^python\\.cmdi\\.os_system$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
+fn python_falcon_get_param_flows_to_os_system_without_sibling_overtaint() {
+    let ws = temp_workspace("py-falcon-get-param");
+    write_file(
+        &ws,
+        "app/resources.py",
+        r#"import os
+import falcon
+
+class AdminResource:
+    def on_get(self, req, resp):
+        cmd = req.get_param("cmd")
+        return os.system(cmd)
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^python\\.falcon\\.get_param$",
+        "^python\\.cmdi\\.os_system$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "python.falcon.get_param",
+            "python.cmdi.os_system",
+            "app/resources.py",
+            "on_get",
+            "req.get_param",
+        ],
+    );
+
+    let clean = temp_workspace("py-falcon-get-param-clean");
+    write_file(
+        &clean,
+        "app/resources.py",
+        r#"import os
+import falcon
+
+class AdminResource:
+    def on_get(self, req, resp):
+        unused = req.get_param("cmd")
+        return os.system("status")
+"#,
+    );
+    let rows = run_taint_json(
+        &clean,
+        "^python\\.falcon\\.get_param$",
+        "^python\\.cmdi\\.os_system$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
+fn python_aiohttp_match_info_index_flows_to_os_system_without_sibling_overtaint() {
+    let ws = temp_workspace("py-aiohttp-match-info");
+    write_file(
+        &ws,
+        "app/routes.py",
+        r#"import os
+import aiohttp
+
+async def run(request):
+    cmd = request.match_info["cmd"]
+    return os.system(cmd)
+"#,
+    );
+
+    let rows = run_taint_json(
+        &ws,
+        "^python\\.aiohttp\\.request_match_info$",
+        "^python\\.cmdi\\.os_system$",
+    );
+    assert_has_finding(
+        &rows,
+        &[
+            "python.aiohttp.request_match_info",
+            "python.cmdi.os_system",
+            "app/routes.py",
+            "run",
+            "request.match_info",
+        ],
+    );
+
+    let clean = temp_workspace("py-aiohttp-match-info-clean");
+    write_file(
+        &clean,
+        "app/routes.py",
+        r#"import os
+import aiohttp
+
+async def run(request):
+    unused = request.match_info["cmd"]
+    return os.system("status")
+"#,
+    );
+    let rows = run_taint_json(
+        &clean,
+        "^python\\.aiohttp\\.request_match_info$",
+        "^python\\.cmdi\\.os_system$",
+    );
+    assert_no_finding(&rows);
+}
+
+#[test]
 fn go_graphql_resolveparams_args_reach_cross_file_sql_querycontext() {
     let ws = temp_workspace("go-graphql-cross-file-sqli");
     write_file(&ws, "go.mod", "module example.com/app\n\ngo 1.22\n");
