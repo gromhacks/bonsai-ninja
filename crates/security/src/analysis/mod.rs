@@ -959,7 +959,6 @@ where
     }
 
     let global = ws.db().global_index();
-    let func_ids = function_ids_by_lang_file_name(ws);
     let source_graph_config = InterTaintConfig {
         sanitizers: TokenSet::default(),
         budget: InterTaintConfig::default().budget,
@@ -1012,7 +1011,7 @@ where
         let Some(source_match) = source_finding_match(hit, pack) else {
             continue;
         };
-        let Some(start) = func_id_for_match(hit, &func_ids) else {
+        let Some(start) = func_id_for_match(ws, hit) else {
             continue;
         };
         hits_by_func.entry(start).or_default().push(SourceHitForFunction {
@@ -2961,35 +2960,44 @@ fn source_finding_match(hit: &RuleMatch, pack: &Rulepack) -> Option<FindingMatch
     }
 }
 
-fn function_ids_by_lang_file_name(ws: &Workspace) -> AHashMap<(String, String, String), FuncId> {
-    let global = ws.db().global_index();
-    let mut out = AHashMap::new();
-    for file in global.all_files() {
-        let Some(adapter) = ws.db().adapter_for(file) else {
-            continue;
-        };
-        let lang = adapter.language_id().as_str().to_string();
-        let file_path = ws
-            .vfs()
-            .path(file)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        for decl in global.decls_in(file) {
-            out.entry((lang.clone(), file_path.clone(), decl.name.clone()))
-                .or_insert_with(|| FuncId::new(decl.symbol.raw()));
+fn func_id_for_match(ws: &Workspace, hit: &RuleMatch) -> Option<FuncId> {
+    let expected_name = hit.enclosing_fn.as_deref();
+    if let Some(entry) = ws
+        .enclosing_index()
+        .enclosing_for(ws.db(), hit.span.file, hit.span.start)
+    {
+        if expected_name.is_none_or(|name| name == entry.name) {
+            return Some(FuncId::new(entry.symbol.raw()));
         }
     }
-    out
-}
 
-fn func_id_for_match(
-    hit: &RuleMatch,
-    func_ids: &AHashMap<(String, String, String), FuncId>,
-) -> Option<FuncId> {
-    let name = hit.enclosing_fn.as_ref()?;
-    func_ids
-        .get(&(hit.language.clone(), hit.file.clone(), name.clone()))
-        .copied()
+    let name = expected_name?;
+    let global = ws.db().global_index();
+    let decls = global.decls_in(hit.span.file);
+    let mut best_containing: Option<(u64, FuncId)> = None;
+    let mut unique_named: Option<FuncId> = None;
+    let mut named_count = 0usize;
+
+    for decl in decls {
+        if decl.name != name {
+            continue;
+        }
+        named_count = named_count.saturating_add(1);
+        let fid = FuncId::new(decl.symbol.raw());
+        unique_named = Some(fid);
+
+        let body_span = decl.body_span.unwrap_or(decl.span);
+        if span_contains(body_span, hit.span) || span_contains(decl.span, hit.span) {
+            let width = decl.span.end.saturating_sub(decl.span.start);
+            if best_containing.is_none_or(|(best_width, _)| width < best_width) {
+                best_containing = Some((width, fid));
+            }
+        }
+    }
+
+    best_containing
+        .map(|(_, fid)| fid)
+        .or_else(|| (named_count == 1).then_some(unique_named?))
 }
 
 struct SourceLineageEmission<'a> {
@@ -4263,9 +4271,9 @@ fn merge_finding_matches(dst: &mut Vec<FindingMatch>, src: Vec<FindingMatch>) {
 ///
 /// ## Pipeline phases
 ///
-/// 1. **Index funcs by (lang, file, name)** — per-FuncId sanitizer
-///    attribution avoids the cross-bridge over-counting that happens
-///    when sanitizers are indexed by bare name alone.
+/// 1. **Resolve matcher hits to FuncIds by span** — per-FuncId
+///    sanitizer and sink attribution avoids cross-bridging same-named
+///    functions or methods in the same file.
 /// 2. **Group sanitizers + sinks by enclosing FuncId** — one
 ///    `Vec<RuleMatch>` per function, ready for chain-hop attribution.
 /// 3. **Per-source seeding** (`source_work` building) — select
@@ -4314,55 +4322,24 @@ fn build_findings_chain_aware<F>(
 where
     F: FnMut(AnalysisProgress),
 {
-    // ---- Phase 1: index funcs by (lang, file, name) ----
+    // ---- Phase 1: resolve rule matches to enclosing FuncIds ----
     let global = ws.db().global_index();
-    // Index every decl by `(lang, file, name)` first so we can look
-    // up sanitizers by the SPECIFIC FuncId of their enclosing
-    // function. Indexing sanitizers by NAME alone (the previous
-    // behaviour) cross-bridged: jackson-core has `write()` in
-    // dozens of files; gin has `serveError()` in tests and prod;
-    // any sanitizer match in any function named `write` was being
-    // credited against every chain whose hops included a function
-    // also called `write`, regardless of file. That triggered
-    // huge "wrong-context" inflation against sinks whose tag was
-    // unrelated to the credited sanitizer.
-    let mut funcs_by_key: AHashMap<(String, String, String), FuncId> = AHashMap::new();
-    for file in global.all_files() {
-        let Some(adapter) = ws.db().adapter_for(file) else {
-            continue;
-        };
-        let lang = adapter.language_id().as_str().to_string();
-        let file_path = ws
-            .vfs()
-            .path(file)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        for decl in global.decls_in(file) {
-            let fid = FuncId::new(decl.symbol.raw());
-            let key = (lang.clone(), file_path.clone(), decl.name.clone());
-            funcs_by_key.entry(key).or_insert(fid);
-        }
-    }
+    // Use the concrete source span to resolve each matcher hit to the
+    // declaration that contains it. Name-only keys (`file + get`) can
+    // conflate unrelated methods such as `Handler.get` and
+    // `Helper.get`, then attach a source in one class to a sink in the
+    // other.
     let mut san_by_func: AHashMap<FuncId, Vec<&RuleMatch>> = AHashMap::new();
     for s in sanitizers {
-        let Some(fname) = s.enclosing_fn.as_deref() else {
-            continue;
-        };
-        let key = (s.language.clone(), s.file.clone(), fname.to_string());
-        if let Some(&fid) = funcs_by_key.get(&key) {
+        if let Some(fid) = func_id_for_match(ws, s) {
             san_by_func.entry(fid).or_default().push(s);
         }
     }
     let mut sink_by_func: AHashMap<FuncId, Vec<&RuleMatch>> = AHashMap::new();
     for snk in sinks {
-        let Some(snk_fn) = snk.enclosing_fn.as_deref() else {
-            continue;
-        };
-        let sink_key = (snk.language.clone(), snk.file.clone(), snk_fn.to_string());
-        let Some(&sink_func_id) = funcs_by_key.get(&sink_key) else {
-            continue;
-        };
-        sink_by_func.entry(sink_func_id).or_default().push(snk);
+        if let Some(sink_func_id) = func_id_for_match(ws, snk) {
+            sink_by_func.entry(sink_func_id).or_default().push(snk);
+        }
     }
     if source_hits.is_empty() || sink_by_func.is_empty() {
         return Vec::new();
@@ -4381,10 +4358,7 @@ where
     }
     let mut sources_by_func: AHashMap<FuncId, Vec<SourceForFunction<'_>>> = AHashMap::new();
     for (idx, src) in source_hits.iter().enumerate() {
-        let Some(src_key) = match_func_key(src) else {
-            continue;
-        };
-        let Some(&src_func_id) = funcs_by_key.get(&src_key) else {
+        let Some(src_func_id) = func_id_for_match(ws, src) else {
             continue;
         };
         sources_by_func
@@ -4585,7 +4559,7 @@ where
                     if snk.language != src.language {
                         continue;
                     }
-                    if !source_can_precede_sink(pack, src, snk) {
+                    if !source_can_precede_sink(pack, src, src_func_id, snk, call.caller) {
                         continue;
                     }
                     if any_span_match {
@@ -4658,6 +4632,8 @@ where
                         FindingBuildContext {
                             group_id: Some(evidence.group_id.clone()),
                             flow_id: Some(evidence.flow_id.clone()),
+                            source_func: src_func_id,
+                            sink_func: call.caller,
                             chain_funcs: &evidence.chain_funcs,
                             chain_names: evidence.chain_names.clone(),
                             san_by_func: &san_by_func,
@@ -4997,8 +4973,14 @@ fn exact_source_path_graph(
 /// flows must have the source statement BEFORE the sink, otherwise
 /// the supposed flow runs backwards in time. Cross-fn cases always
 /// pass since the call graph models the temporal order separately.
-fn source_can_precede_sink(pack: &Rulepack, src: &RuleMatch, snk: &RuleMatch) -> bool {
-    if src.file != snk.file || src.enclosing_fn != snk.enclosing_fn {
+fn source_can_precede_sink(
+    pack: &Rulepack,
+    src: &RuleMatch,
+    src_func: FuncId,
+    snk: &RuleMatch,
+    sink_func: FuncId,
+) -> bool {
+    if src_func != sink_func {
         return true;
     }
     if src.rule_id.starts_with("entry-point.") || rule_match_kind_is_param(pack, &src.rule_id) {
@@ -5034,15 +5016,17 @@ fn sanitizer_is_nested_in_tainted_sink_arg(san: &RuleMatch, sink_tainted_args: &
 /// this gate; the chain-hop check elsewhere handles inter-fn placement.
 fn sanitizer_can_attach(
     src: &RuleMatch,
+    source_func: FuncId,
     san: &RuleMatch,
+    sanitizer_func: FuncId,
     snk: &RuleMatch,
+    sink_func: FuncId,
     sink_tainted_args: &[TaintedArgInfo],
 ) -> bool {
-    if san.file == src.file && san.enclosing_fn == src.enclosing_fn && !match_precedes_or_same(src, san) {
+    if sanitizer_func == source_func && !match_precedes_or_same(src, san) {
         return false;
     }
-    if san.file == snk.file
-        && san.enclosing_fn == snk.enclosing_fn
+    if sanitizer_func == sink_func
         && !match_precedes_or_same(san, snk)
         && !sanitizer_is_nested_in_tainted_sink_arg(san, sink_tainted_args)
     {
@@ -5184,13 +5168,6 @@ fn prototype_key_compare_present(compact: &str, key: &str, dangerous: &str) -> b
     ]
     .iter()
     .any(|needle| compact.contains(needle))
-}
-
-/// Build the `(language, file, fn_name)` lookup key for a matcher
-/// hit. Returns `None` when the matcher couldn't resolve an
-/// enclosing function — those hits can't be mapped to a `FuncId`.
-fn match_func_key(hit: &RuleMatch) -> Option<(String, String, String)> {
-    Some((hit.language.clone(), hit.file.clone(), hit.enclosing_fn.clone()?))
 }
 
 /// True iff `rule_id` resolves to a rule whose match kind binds to
@@ -5645,7 +5622,6 @@ fn build_pattern_only_findings(
     pack: &Rulepack,
     taint_sink_sites: &AHashSet<(String, String, u32, u32)>,
 ) -> Vec<FindingWithChain> {
-    let func_ids = function_ids_by_lang_file_name(ws);
     let mut emitted: AHashSet<(String, String, u32, u32)> = AHashSet::new();
     let mut out = Vec::new();
     for snk in sinks {
@@ -5653,10 +5629,7 @@ fn build_pattern_only_findings(
         if taint_sink_sites.contains(&site_key) || !emitted.insert(site_key) {
             continue;
         }
-        let chain_funcs: Vec<FuncId> = match_func_key(snk)
-            .and_then(|key| func_ids.get(&key).copied())
-            .into_iter()
-            .collect();
+        let chain_funcs: Vec<FuncId> = func_id_for_match(ws, snk).into_iter().collect();
         if let Some(finding) = make_pattern_finding(snk, pack, &chain_funcs) {
             out.push(FindingWithChain { finding, chain_funcs });
         }
@@ -5751,6 +5724,8 @@ fn rule_has_taint_predicate(rule: &Rule) -> bool {
 struct FindingBuildContext<'a> {
     group_id: Option<String>,
     flow_id: Option<String>,
+    source_func: FuncId,
+    sink_func: FuncId,
     chain_funcs: &'a [FuncId],
     chain_names: Vec<String>,
     san_by_func: &'a AHashMap<FuncId, Vec<&'a RuleMatch>>,
@@ -5806,7 +5781,15 @@ fn make_finding(
             continue;
         };
         for sanitizer_match in sanitizer_hits {
-            if !sanitizer_can_attach(src, sanitizer_match, snk, &context.sink_tainted_args) {
+            if !sanitizer_can_attach(
+                src,
+                context.source_func,
+                sanitizer_match,
+                hop_func,
+                snk,
+                context.sink_func,
+                &context.sink_tainted_args,
+            ) {
                 continue;
             }
             // Data-flow-aware credit: the sanitizer's call site must

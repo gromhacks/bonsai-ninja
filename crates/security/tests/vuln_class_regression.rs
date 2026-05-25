@@ -385,6 +385,58 @@ class LocalRequest { String getParam(String n) { return "safe"; } }
     );
 }
 
+#[test]
+fn sqli_python_same_named_methods_do_not_cross_bridge_source_and_sink() {
+    let src = r#"import sqlite3
+import tornado.web
+
+class Handler(tornado.web.RequestHandler):
+    def get(self):
+        name = self.get_argument("name")
+        sql = "SELECT * FROM users WHERE name='" + name + "'"
+        sqlite3.connect(":memory:").cursor().execute(sql)
+
+class Helper:
+    def get(self):
+        name = self.get_argument("name")
+        sql = "SELECT * FROM users WHERE name='" + name + "'"
+        sqlite3.connect(":memory:").cursor().execute(sql)
+
+    def get_argument(self, name):
+        return "safe"
+"#;
+    let report = run_taint_analysis(&python_ws(src), rulepack(), TaintAnalysisOptions::default())
+        .expect("taint analysis");
+    let cross_method_pair = report.findings.iter().any(|finding| {
+        finding.finding.tag.as_deref() == Some("sql-injection")
+            && finding.finding.source.line == 6
+            && finding.finding.sink.line == 14
+    });
+    let helper_source = report.findings.iter().any(|finding| {
+        finding.finding.source.rule_id == "python.tornado.get_argument" && finding.finding.source.line == 12
+    });
+    let handler_pair = report.findings.iter().any(|finding| {
+        finding.finding.tag.as_deref() == Some("sql-injection")
+            && finding.finding.source.line == 6
+            && finding.finding.sink.line == 8
+    });
+    assert!(
+        handler_pair,
+        "real RequestHandler source-to-sink pair should still report: {:#?}",
+        report.findings
+    );
+    assert!(
+        !cross_method_pair,
+        "source in Handler.get must not be paired with sink in Helper.get: {:#?}",
+        report.findings
+    );
+    assert!(
+        !helper_source,
+        "helper self.get_argument must not be modeled as a Tornado source: {:#?}",
+        report.findings
+    );
+}
+
 // ===========================================================================
 // 2. NoSQL injection (Mongo $where vs filtered query)
 // ===========================================================================

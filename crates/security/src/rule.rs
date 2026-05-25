@@ -207,22 +207,21 @@ pub struct RuleTarget {
     /// `Decl.param_annotations` parallel-indexed with `params`. T204.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
-    /// Restrict a `kind: param` rule to parameters declared on a
-    /// method whose enclosing class equals one of the given names.
-    /// Lets rules like `WebSocketHandler.on_message(self, message)`
-    /// require the class shape so a bare `message` parameter doesn't
-    /// match every helper function in the workspace. Resolves
-    /// through the adapter's `Decl.parent` link to the enclosing
-    /// class decl. Case-sensitive — names are matched exactly
-    /// against the class decl's `name`.
+    /// Restrict a rule match to declarations whose enclosing class
+    /// equals or extends one of the given names. Lets rules like
+    /// `WebSocketHandler.on_message(self, message)` and
+    /// `RequestHandler.self.get_argument(...)` require the class
+    /// shape so same-name helpers do not match every framework-
+    /// importing file. Resolves through the adapter's `Decl.parent`
+    /// link to the enclosing class decl. Case-sensitive — names are
+    /// matched exactly against the class decl's `name` or `bases`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_class: Vec<String>,
-    /// Restrict a `kind: param` rule to parameters declared on a
-    /// method whose own name equals one of the given values
-    /// (`on_message`, `resolve_field`, `dispatch`). Combined with
-    /// `in_class`, this lets `[WebSocketHandler, on_message]`-style
-    /// param rules pin the framework signature precisely. Reads
-    /// the enclosing decl's `name`. Case-sensitive.
+    /// Restrict a rule match to declarations whose own name equals
+    /// one of the given values (`on_message`, `resolve_field`,
+    /// `dispatch`). Combined with `in_class`, this lets framework
+    /// source rules pin the host signature precisely. Reads the
+    /// enclosing decl's `name`. Case-sensitive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_method: Vec<String>,
     /// Restrict a `kind: param` rule to zero-based parameter indexes.
