@@ -238,6 +238,7 @@ impl LanguageAdapter for ObjCAdapter {
             // pattern without re-implementing the ObjC message-
             // syntax shape.
             tag_objc_alloc_receiver_types(&mut decl.flow_events);
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
         }
         // Repair catch-param bindings: the kit's generic extractor
         // returns the first identifier descendant of `@catch

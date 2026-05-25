@@ -182,6 +182,7 @@ impl LanguageAdapter for PhpAdapter {
                 &mut decl.flow_events,
                 &source,
             );
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, PHP_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each

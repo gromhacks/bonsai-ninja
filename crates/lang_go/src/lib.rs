@@ -193,6 +193,7 @@ impl LanguageAdapter for GoAdapter {
         // points at the receiver text.
         for decl in &mut idx.defs {
             augment_go_composite_literal_field_assignments(&mut decl.flow_events);
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, GO_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each

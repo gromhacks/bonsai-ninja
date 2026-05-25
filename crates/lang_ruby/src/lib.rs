@@ -134,6 +134,7 @@ impl LanguageAdapter for RubyAdapter {
                 },
             ];
             for decl in &mut idx.defs {
+                bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
                 bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
             }
             // Lift `@field = ParamType` writes captured during decl
@@ -255,6 +256,7 @@ impl LanguageAdapter for RubyAdapter {
             Vec::new()
         };
         for decl in &mut defs {
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUBY_LIFECYCLE_TRANSITIONS);
         }
         let mut refs = bonsai_lang_api::kit::extract_call_refs(&tree, file, src);

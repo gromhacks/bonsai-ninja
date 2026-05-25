@@ -273,6 +273,7 @@ impl LanguageAdapter for RustAdapter {
         // resource transitions (`drop`, `Box::from_raw`,
         // `mem::replace`, `mem::take`).
         for decl in &mut idx.defs {
+            bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, RUST_LIFECYCLE_TRANSITIONS);
         }
         // Precompute `self.<field> → Type` bindings from each
