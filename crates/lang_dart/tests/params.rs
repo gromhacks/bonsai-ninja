@@ -60,25 +60,163 @@ String handle(String x) {
         .find(|decl| decl.name == "handle")
         .expect("handle declaration should index");
 
-    let has_source_call = handle.flow_events.iter().any(|event| {
-        matches!(
-            event,
+    let assign = handle
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
             FlowEvent::Assign {
                 target,
-                source_call: Some(source_call),
+                source_name,
+                source_call,
                 source_call_args,
+                source_names,
                 ..
-            } if target == "y"
-                && source_call == "transform"
-                && source_call_args.as_slice() == ["x"]
-        )
-    });
+            } if target == "y" => Some((source_name, source_call, source_call_args, source_names)),
+            _ => None,
+        })
+        .expect("handle should contain assignment to y");
 
+    assert_eq!(assign.0.as_deref(), None);
+    assert_eq!(assign.1.as_deref(), Some("transform"));
+    assert_eq!(assign.2.as_slice(), ["x"]);
     assert!(
-        has_source_call,
-        "Dart assignment from a split selector call should retain source_call metadata; events: {:?}",
+        assign.3.is_empty(),
+        "direct call assignment should not duplicate callee or bare arg carriers in source_names; events: {:?}",
         handle.flow_events
     );
+}
+
+#[test]
+fn method_call_result_preserves_receiver_source_name() {
+    let db = db_for(
+        r#"
+class Normalizer {
+  String clean(String x) { return x; }
+}
+
+String handle(Normalizer normalizer, String x) {
+  final y = normalizer.clean(x);
+  return y;
+}
+"#,
+    );
+    let index = db.global_index();
+    let handle = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration should index");
+
+    let assign = handle
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } if target == "y" => Some((source_name, source_call, source_call_args, source_names)),
+            _ => None,
+        })
+        .expect("handle should contain assignment to y");
+
+    assert_eq!(assign.0.as_deref(), None);
+    assert_eq!(assign.1.as_deref(), Some("normalizer.clean"));
+    assert_eq!(assign.2.as_slice(), ["x"]);
+    assert_eq!(assign.3.as_slice(), ["normalizer"]);
+}
+
+#[test]
+fn direct_call_result_removes_argument_operands_from_assignment_sources() {
+    let db = db_for(
+        r#"
+class User {
+  String name = "";
+}
+
+String transform(String x) { return x; }
+
+String handle(User user) {
+  final y = transform(user.name);
+  return y;
+}
+"#,
+    );
+    let index = db.global_index();
+    let handle = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration should index");
+
+    let assign = handle
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } if target == "y" => Some((source_call, source_call_args, source_names)),
+            _ => None,
+        })
+        .expect("handle should contain assignment to y");
+
+    assert_eq!(assign.0.as_deref(), Some("transform"));
+    assert_eq!(assign.1.as_slice(), ["user.name"]);
+    assert!(
+        assign.2.is_empty(),
+        "argument operands should stay on source_call_args / Call.args, not assignment source_names; events: {:?}",
+        handle.flow_events
+    );
+}
+
+#[test]
+fn static_factory_call_result_preserves_type_receiver() {
+    let db = db_for(
+        r#"
+class Logger {
+  static Logger getLogger(String name) { return Logger(); }
+}
+
+Logger handle(String name) {
+  final logger = Logger.getLogger(name);
+  return logger;
+}
+"#,
+    );
+    let index = db.global_index();
+    let handle = index
+        .all_files()
+        .flat_map(|file| index.decls_in(file))
+        .find(|decl| decl.name == "handle")
+        .expect("handle declaration should index");
+
+    let assign = handle
+        .flow_events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_call_args,
+                source_names,
+                ..
+            } if target == "logger" => Some((source_name, source_call, source_call_args, source_names)),
+            _ => None,
+        })
+        .expect("handle should contain assignment to logger");
+
+    assert_eq!(assign.0.as_deref(), None);
+    assert_eq!(assign.1.as_deref(), Some("Logger.getLogger"));
+    assert_eq!(assign.2.as_slice(), ["name"]);
+    assert_eq!(assign.3.as_slice(), ["Logger", "getLogger"]);
 }
 
 #[test]

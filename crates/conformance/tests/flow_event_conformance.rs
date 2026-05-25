@@ -592,10 +592,7 @@ void F(String a) {}
 void G(String a) {}
 "#,
             function_name: "shapes",
-            // Dart adapter classifies `final z = f(x)` as a Compound
-            // assign with `source_name = Some("f")` rather than
-            // `source_call`. Adapter improvement — skip for now.
-            skip: &[CanonicalShape::DirectCall],
+            skip: &[],
         },
         "lua" => Conformance {
             lang: "lua",
