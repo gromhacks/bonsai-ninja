@@ -25,7 +25,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     method_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_kinds,
     method_context_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.method_context_kinds,
     constructor_method_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.constructor_method_kinds,
-    constructor_names: bonsai_lang_api::kit::GENERIC_HANDLER.constructor_names,
+    constructor_names: &["new"],
     if_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.if_kinds,
     for_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.for_kinds,
     foreach_kinds: bonsai_lang_api::kit::GENERIC_HANDLER.foreach_kinds,

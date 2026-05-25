@@ -41,6 +41,7 @@ pub const LANG_ID: LanguageId = LanguageId::new("typescript");
 const PACK_NAME: &str = "typescript";
 const HANDLER: GrammarHandler = GrammarHandler {
     call_kinds: &["new_expression"],
+    constructor_names: &["constructor"],
     // TypeScript exposes `abstract class Foo` under
     // `abstract_class_declaration` — the GENERIC_HANDLER default
     // only covers `class_declaration`, so without this override

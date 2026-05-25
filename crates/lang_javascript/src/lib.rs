@@ -15,6 +15,7 @@ pub const LANG_ID: LanguageId = LanguageId::new("javascript");
 const PACK_NAME: &str = "javascript";
 const HANDLER: GrammarHandler = GrammarHandler {
     call_kinds: &["new_expression"],
+    constructor_names: &["constructor"],
     ..with_fn_kinds_and_implicit_receivers(
         &[
             "function_declaration",

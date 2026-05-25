@@ -38,11 +38,14 @@ use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("php");
 const PACK_NAME: &str = "php";
-const HANDLER: GrammarHandler = with_fn_kinds_and_implicit_receivers(
-    &["function_definition", "method_declaration"],
-    &["$this", "this"],
-    &[],
-);
+const HANDLER: GrammarHandler = GrammarHandler {
+    constructor_names: &["__construct"],
+    ..with_fn_kinds_and_implicit_receivers(
+        &["function_definition", "method_declaration"],
+        &["$this", "this"],
+        &[],
+    )
+};
 
 /// Tree-sitter adapter for PHP.
 #[derive(Debug, Default, Copy, Clone)]

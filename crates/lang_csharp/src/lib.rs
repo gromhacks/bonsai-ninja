@@ -55,17 +55,20 @@ const PACK_NAME: &str = "csharp";
 // this the property collapses into a Field decl and accessor body
 // events disappear (audit task #131). `constructor_declaration` and
 // `destructor_declaration` join the set so RAII / dtor flows surface.
-const HANDLER: GrammarHandler = with_fn_kinds_and_implicit_receivers(
-    &[
-        "method_declaration",
-        "local_function_statement",
-        "accessor_declaration",
-        "constructor_declaration",
-        "destructor_declaration",
-    ],
-    &["this", "base"],
-    &[],
-);
+const HANDLER: GrammarHandler = GrammarHandler {
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    ..with_fn_kinds_and_implicit_receivers(
+        &[
+            "method_declaration",
+            "local_function_statement",
+            "accessor_declaration",
+            "constructor_declaration",
+            "destructor_declaration",
+        ],
+        &["this", "base"],
+        &[],
+    )
+};
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct CSharpAdapter;
@@ -101,6 +104,7 @@ impl LanguageAdapter for CSharpAdapter {
         LanguageCapabilities {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["base"],
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()

@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 /// the legacy empty-slice fallback.
 pub const NO_SUPER_RECEIVER_TOKENS: &[&str] = &["<no-super-receiver>"];
 
+/// Sentinel for mature adapters whose language has no constructor
+/// method name. Class-named constructors and constructor-specific
+/// grammar nodes are still handled separately; this only disables the
+/// legacy cross-language method-name fallback.
+pub const NO_CONSTRUCTOR_METHOD_NAMES: &[&str] = &["<no-constructor-method>"];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityLevel {
@@ -72,7 +78,8 @@ impl LanguageCapabilities {
     /// `bonsai_common::CONSTRUCTOR_METHOD_NAMES`. Adapters should
     /// override `constructor_method_names` with the narrowest
     /// correct set so the fallback only fires for not-yet-migrated
-    /// adapters.
+    /// adapters. Mature adapters whose language has no constructor
+    /// method name should set [`NO_CONSTRUCTOR_METHOD_NAMES`].
     #[must_use]
     pub fn effective_constructor_method_names(&self) -> &'static [&'static str] {
         if self.constructor_method_names.is_empty() {

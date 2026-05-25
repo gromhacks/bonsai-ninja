@@ -13,7 +13,10 @@ use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("c");
 const PACK_NAME: &str = "c";
-const HANDLER: GrammarHandler = with_fn_kinds(&["function_definition"]);
+const HANDLER: GrammarHandler = GrammarHandler {
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    ..with_fn_kinds(&["function_definition"])
+};
 
 /// C function parameters: every binding is `Type declarator`. The
 /// kit's `param_alias_from_node` consults `child_by_field_name("type")`
@@ -66,6 +69,7 @@ impl LanguageAdapter for CAdapter {
         LanguageCapabilities {
             macros: bonsai_lang_api::CapabilityLevel::Partial,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: bonsai_lang_api::NO_SUPER_RECEIVER_TOKENS,
             ..LanguageCapabilities::partial_baseline()
         }

@@ -34,8 +34,10 @@ use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("scala");
 const PACK_NAME: &str = "scala";
-const HANDLER: GrammarHandler =
-    with_fn_kinds_and_implicit_receivers(&["function_definition"], &["this", "super"], &[]);
+const HANDLER: GrammarHandler = GrammarHandler {
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    ..with_fn_kinds_and_implicit_receivers(&["function_definition"], &["this", "super"], &[])
+};
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ScalaAdapter;
@@ -71,6 +73,7 @@ impl LanguageAdapter for ScalaAdapter {
         LanguageCapabilities {
             pattern_matching: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()

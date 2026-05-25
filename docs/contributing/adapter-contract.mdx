@@ -135,7 +135,9 @@ where adapters declare per-language behaviour the engine consults:
   Adapters should override the empty default with the narrowest
   correct set; the engine's `effective_constructor_method_names()`
   falls through to `bonsai_common::CONSTRUCTOR_METHOD_NAMES` when
-  the slice is empty (the cross-language fallback).
+  the slice is empty (the cross-language fallback). Languages whose
+  constructors are class-named or grammar-node-only should set
+  `bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES`, not `&[]`.
 - **`super_receiver_tokens`** / **`implicit_receiver_tokens`** — same
   shape: per-adapter override with cross-language fall-through.
   Languages with no super receiver token must set

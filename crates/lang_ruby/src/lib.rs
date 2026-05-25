@@ -18,6 +18,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
     // explicit `return`. Surface that terminal expression as a normal
     // Return event so the shared semantic taint summaries can model
     // wrapper methods such as `def wrap(data); new(data); end`.
+    constructor_names: &["initialize", "new"],
     tail_expression_returns: true,
     ..BASE_HANDLER
 };

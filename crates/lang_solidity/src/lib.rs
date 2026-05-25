@@ -68,7 +68,7 @@ const HANDLER: GrammarHandler = GrammarHandler {
         "library_declaration",
     ],
     constructor_method_kinds: &["constructor_definition"],
-    constructor_names: &[],
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
     if_kinds: &["if_statement"],
     for_kinds: &["for_statement"],
     foreach_kinds: &[],
@@ -121,7 +121,7 @@ impl LanguageAdapter for SolidityAdapter {
     fn capabilities(&self) -> LanguageCapabilities {
         LanguageCapabilities {
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
-            constructor_method_names: &["constructor"],
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()

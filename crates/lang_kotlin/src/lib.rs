@@ -21,11 +21,14 @@ const PACK_NAME: &str = "kotlin";
 // is observed end-to-end. Without this, the whole property collapses
 // into a single Field decl and accessor body events disappear
 // (audit task #131).
-const HANDLER: GrammarHandler = with_fn_kinds_and_implicit_receivers(
-    &["function_declaration", "getter", "setter"],
-    &["this", "super"],
-    &[],
-);
+const HANDLER: GrammarHandler = GrammarHandler {
+    constructor_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
+    ..with_fn_kinds_and_implicit_receivers(
+        &["function_declaration", "getter", "setter"],
+        &["this", "super"],
+        &[],
+    )
+};
 
 const KOTLIN_VOCAB: ModifierVocabulary = ModifierVocabulary {
     decl_kinds: &[
@@ -78,6 +81,7 @@ impl LanguageAdapter for KotlinAdapter {
         LanguageCapabilities {
             exceptions: bonsai_lang_api::CapabilityLevel::Exact,
             receiver_types: bonsai_lang_api::CapabilityLevel::Partial,
+            constructor_method_names: bonsai_lang_api::NO_CONSTRUCTOR_METHOD_NAMES,
             super_receiver_tokens: &["super"],
             implicit_receiver_tokens: &["this"],
             ..LanguageCapabilities::partial_baseline()
