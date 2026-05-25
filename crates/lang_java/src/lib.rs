@@ -6,8 +6,9 @@ use bonsai_lang_api::{
         collect_kinds, language_from_pack, node_text, parse_with, span_of,
         with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FlowEvent, GrammarHandler,
+    ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -157,6 +158,8 @@ impl LanguageAdapter for JavaAdapter {
                 decl.bases = bases.clone();
             }
         }
+        let constants_by_class = collect_java_class_string_constants(&tree, file, src);
+        attach_java_class_string_constants(&mut index, &constants_by_class);
         // Java visibility from real syntax — `public`/`private`/
         // `protected` modifiers, and absence-of-modifier = package-private.
         let visibility_by_span = collect_java_visibility(tree.root_node(), file, src);
@@ -517,6 +520,203 @@ fn collect_java_class_bases(
         }
     }
     out
+}
+
+fn collect_java_class_string_constants(
+    tree: &Tree,
+    file: FileId,
+    src: &[u8],
+) -> Vec<(bonsai_common::Span, Vec<FlowEvent>)> {
+    let class_kinds = &[
+        "class_declaration",
+        "interface_declaration",
+        "record_declaration",
+        "enum_declaration",
+        "annotation_type_declaration",
+    ];
+    let mut out = Vec::new();
+    for class_node in collect_kinds(tree, class_kinds) {
+        let Some(body) = class_node.child_by_field_name("body") else {
+            continue;
+        };
+        let mut events = Vec::new();
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            if child.kind() == "field_declaration" {
+                collect_java_final_string_field_assigns(child, file, src, &mut events);
+            }
+        }
+        if !events.is_empty() {
+            out.push((span_of(file, &class_node), events));
+        }
+    }
+    out
+}
+
+fn collect_java_final_string_field_assigns(
+    field: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    out: &mut Vec<FlowEvent>,
+) {
+    if !java_field_has_modifier(field, src, "final") || !java_field_type_is_string(field, src) {
+        return;
+    }
+    let mut cursor = field.walk();
+    for child in field.named_children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value_node) = child.child_by_field_name("value") else {
+            continue;
+        };
+        if value_node.kind() != "string_literal" {
+            continue;
+        }
+        out.push(FlowEvent::Assign {
+            span: span_of(file, &child),
+            target: node_text(&name_node, src).trim().to_string(),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names: Vec::new(),
+            declares_new_binding: false,
+            value_kind: Some(AssignValueKind::Literal),
+        });
+    }
+}
+
+fn java_field_has_modifier(field: Node<'_>, src: &[u8], wanted: &str) -> bool {
+    let mut cursor = field.walk();
+    for child in field.named_children(&mut cursor) {
+        if child.kind() != "modifiers" {
+            continue;
+        }
+        if node_text(&child, src)
+            .split_ascii_whitespace()
+            .any(|modifier| modifier == wanted)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn java_field_type_is_string(field: Node<'_>, src: &[u8]) -> bool {
+    let Some(type_node) = field.child_by_field_name("type") else {
+        return false;
+    };
+    matches!(
+        canonical_java_type_name(node_text(&type_node, src)).as_deref(),
+        Some("String")
+    )
+}
+
+fn attach_java_class_string_constants(
+    index: &mut DeclIndex,
+    constants_by_class: &[(bonsai_common::Span, Vec<FlowEvent>)],
+) {
+    if constants_by_class.is_empty() {
+        return;
+    }
+    let parent_by_symbol: std::collections::HashMap<_, _> = index
+        .defs
+        .iter()
+        .filter_map(|decl| Some((decl.symbol, decl.parent?)))
+        .collect();
+    let class_symbol_by_span: std::collections::HashMap<_, _> = index
+        .defs
+        .iter()
+        .filter(|decl| is_class_like(decl.kind))
+        .map(|decl| (decl.span, decl.symbol))
+        .collect();
+    let constants_by_symbol: std::collections::HashMap<_, _> = constants_by_class
+        .iter()
+        .filter_map(|(span, events)| {
+            class_symbol_by_span
+                .get(span)
+                .copied()
+                .map(|symbol| (symbol, events))
+        })
+        .collect();
+
+    for decl in &mut index.defs {
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Method | DeclKind::Constructor
+        ) {
+            continue;
+        }
+        let mut ancestors = Vec::new();
+        let mut parent = decl.parent;
+        while let Some(symbol) = parent {
+            ancestors.push(symbol);
+            parent = parent_by_symbol.get(&symbol).copied();
+        }
+        if ancestors.is_empty() {
+            continue;
+        }
+
+        let mut visible_constants = Vec::new();
+        for symbol in ancestors.into_iter().rev() {
+            if let Some(events) = constants_by_symbol.get(&symbol) {
+                visible_constants.extend((*events).iter().cloned());
+            }
+        }
+        visible_constants.retain(|event| {
+            let FlowEvent::Assign { target, .. } = event else {
+                return false;
+            };
+            !decl.params.iter().any(|param| param == target)
+                && !decl
+                    .flow_events
+                    .iter()
+                    .any(|event| flow_event_assigns_target(event, target))
+        });
+        if !visible_constants.is_empty() {
+            visible_constants.extend(std::mem::take(&mut decl.flow_events));
+            decl.flow_events = visible_constants;
+        }
+    }
+}
+
+fn flow_event_assigns_target(event: &FlowEvent, wanted: &str) -> bool {
+    match event {
+        FlowEvent::Assign { target, .. } => target == wanted,
+        FlowEvent::Branch {
+            then_events,
+            else_events,
+            ..
+        } => {
+            then_events
+                .iter()
+                .any(|event| flow_event_assigns_target(event, wanted))
+                || else_events
+                    .iter()
+                    .any(|event| flow_event_assigns_target(event, wanted))
+        }
+        FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+            body.iter().any(|event| flow_event_assigns_target(event, wanted))
+        }
+        FlowEvent::Try {
+            body,
+            catch_events,
+            finally_events,
+            ..
+        } => {
+            body.iter().any(|event| flow_event_assigns_target(event, wanted))
+                || catch_events
+                    .iter()
+                    .any(|event| flow_event_assigns_target(event, wanted))
+                || finally_events
+                    .iter()
+                    .any(|event| flow_event_assigns_target(event, wanted))
+        }
+        _ => false,
+    }
 }
 
 /// Pull every `type_identifier` / `scoped_type_identifier` /
