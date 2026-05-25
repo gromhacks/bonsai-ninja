@@ -6,7 +6,7 @@
 //! [`crate::compile`]. The matcher just tells callers *which facts* in the
 //! workspace look like a source / sink / sanitizer.
 
-use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule};
+use crate::rule::{ArgTaintedSpec, ConstraintKind, MatchKind, Rule, RuleTarget};
 use ahash::{AHashMap, AHashSet};
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{AliasTarget, CallArg, CallKind, DeclKind, FlowEvent, RefKind, TypeAliasBinding};
@@ -1456,6 +1456,9 @@ fn scan_calls_batch(
                 if !prepared.base_name_allows(&matched_callee) {
                     continue;
                 }
+                if !base_receiver_type_allows(prepared, Some(decl), &matched_callee) {
+                    continue;
+                }
                 if !prepared.call_context_allows(
                     &call.callee,
                     &call.receiver_types,
@@ -2430,7 +2433,7 @@ fn base_param_index_allows(
     decl: Option<&bonsai_lang_api::Decl>,
     match_text: &str,
 ) -> bool {
-    let Some(target) = prepared.rule.match_spec.target.as_ref() else {
+    let Some(target) = rule_primary_target(prepared.rule) else {
         return true;
     };
     if target.base_param_index_in.is_empty() {
@@ -2453,7 +2456,7 @@ fn base_receiver_type_allows(
     decl: Option<&bonsai_lang_api::Decl>,
     match_text: &str,
 ) -> bool {
-    let Some(target) = prepared.rule.match_spec.target.as_ref() else {
+    let Some(target) = rule_primary_target(prepared.rule) else {
         return true;
     };
     if target.receiver_type_in.is_empty() {
@@ -2475,6 +2478,15 @@ fn receiver_type_matches_wanted(actual: &str, wanted: &[String]) -> bool {
     wanted
         .iter()
         .any(|want| actual == want || actual.rsplit('.').next() == Some(want.as_str()))
+}
+
+fn rule_primary_target(rule: &Rule) -> Option<&RuleTarget> {
+    match rule.match_spec.kind {
+        MatchKind::Call | MatchKind::New | MatchKind::Missing => rule.match_spec.callee.as_ref(),
+        MatchKind::Read | MatchKind::Write | MatchKind::Return | MatchKind::Param => {
+            rule.match_spec.target.as_ref()
+        }
+    }
 }
 
 /// Flow-read facts are often attached to the enclosing expression that

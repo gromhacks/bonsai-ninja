@@ -1476,6 +1476,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.request\\(\\)\\.getParam$"
+      receiver_type_in: [RoutingContext]
   constraints:
   - min_args: 1
   match_examples:
@@ -1497,6 +1498,21 @@
         }
       }
       class Map {
+        Object getParam(Object... args) { return null; }
+      }
+    expect_no_match: true
+  - name: local request get param helper negative
+    code: |
+      import io.vertx.ext.web.RoutingContext;
+      class App {
+        Object handle(LocalContext ctx, String name) {
+          return ctx.request().getParam(name);
+        }
+      }
+      class LocalContext {
+        LocalRequest request() { return new LocalRequest(); }
+      }
+      class LocalRequest {
         Object getParam(Object... args) { return null; }
       }
     expect_no_match: true

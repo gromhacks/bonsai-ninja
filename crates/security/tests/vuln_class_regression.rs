@@ -341,6 +341,50 @@ func helper(rp local, db *sql.DB) {
     );
 }
 
+#[test]
+fn sqli_java_vertx_routingcontext_request_getparam_reports() {
+    let src = r#"
+import io.vertx.ext.web.RoutingContext;
+import java.sql.Statement;
+class App {
+  void handle(RoutingContext ctx, Statement stmt) throws Exception {
+    String name = ctx.request().getParam("name");
+    String q = "SELECT * FROM users WHERE name='" + name + "'";
+    stmt.executeQuery(q);
+  }
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.java", src), TaintAnalysisOptions::default());
+    assert_tag_reported(
+        &outcome,
+        "sql-injection",
+        "Java Vert.x RoutingContext.request().getParam",
+    );
+}
+
+#[test]
+fn sqli_java_local_request_getparam_helper_clean() {
+    let src = r#"
+import io.vertx.ext.web.RoutingContext;
+import java.sql.Statement;
+class App {
+  void helper(LocalContext ctx, Statement stmt) throws Exception {
+    String name = ctx.request().getParam("name");
+    String q = "SELECT * FROM users WHERE name='" + name + "'";
+    stmt.executeQuery(q);
+  }
+}
+class LocalContext { LocalRequest request() { return new LocalRequest(); } }
+class LocalRequest { String getParam(String n) { return "safe"; } }
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.java", src), TaintAnalysisOptions::default());
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "Java local request().getParam must not be a Vert.x source",
+    );
+}
+
 // ===========================================================================
 // 2. NoSQL injection (Mongo $where vs filtered query)
 // ===========================================================================
