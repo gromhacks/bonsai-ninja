@@ -82,6 +82,12 @@ impl Outcome {
             .any(|f| f.tag == tag && f.status == FindingStatus::Unsanitized)
     }
 
+    fn sanitized_with_tag(&self, tag: &str) -> bool {
+        self.findings
+            .iter()
+            .any(|f| f.tag == tag && f.status == FindingStatus::Sanitized)
+    }
+
     fn any_with_tag(&self, tag: &str) -> bool {
         self.findings.iter().any(|f| f.tag == tag)
     }
@@ -147,6 +153,14 @@ fn assert_tag_not_reported(outcome: &Outcome, tag: &str, label: &str) {
     assert!(
         !outcome.unsanitized_with_tag(tag),
         "{label}: expected NO unsanitized `{tag}` finding; got {:?}",
+        outcome.tag_summary()
+    );
+}
+
+fn assert_tag_sanitized(outcome: &Outcome, tag: &str, label: &str) {
+    assert!(
+        outcome.sanitized_with_tag(tag),
+        "{label}: expected a sanitized `{tag}` finding; got {:?}",
         outcome.tag_summary()
     );
 }
@@ -382,6 +396,74 @@ class LocalRequest { String getParam(String n) { return "safe"; } }
         &outcome,
         "sql-injection",
         "Java local request().getParam must not be a Vert.x source",
+    );
+}
+
+#[test]
+fn sqli_java_esapi_encodeforsql_second_arg_sanitizes() {
+    let src = r#"
+import java.sql.Statement;
+import javax.servlet.http.HttpServletRequest;
+import org.owasp.esapi.ESAPI;
+import org.owasp.esapi.codecs.Codec;
+class App {
+  void handle(HttpServletRequest request, Statement stmt, Codec codec) throws Exception {
+    String name = request.getParameter("name");
+    String clean = ESAPI.encoder().encodeForSQL(codec, name);
+    String q = "SELECT * FROM users WHERE name='" + clean + "'";
+    stmt.executeQuery(q);
+  }
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("App.java", src),
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    );
+    assert_tag_not_reported(
+        &outcome,
+        "sql-injection",
+        "Java ESAPI encodeForSQL second arg must clear unsanitized SQL injection",
+    );
+    assert_tag_sanitized(
+        &outcome,
+        "sql-injection",
+        "Java ESAPI encodeForSQL second arg should be sanitizer evidence",
+    );
+}
+
+#[test]
+fn xss_java_esapi_html_attribute_sanitizes() {
+    let src = r#"
+import javax.servlet.http.HttpServletRequest;
+import org.owasp.esapi.ESAPI;
+import org.springframework.http.ResponseEntity;
+class App {
+  Object handle(HttpServletRequest request) {
+    String name = request.getParameter("name");
+    String clean = ESAPI.encoder().encodeForHTMLAttribute(name);
+    return ResponseEntity.ok("<p title=\"" + clean + "\">ok</p>");
+  }
+}
+"#;
+    let outcome = analyse_with_options(
+        &ws_for_language("App.java", src),
+        TaintAnalysisOptions {
+            show_sanitized: true,
+            ..TaintAnalysisOptions::default()
+        },
+    );
+    assert_tag_not_reported(
+        &outcome,
+        "xss",
+        "Java ESAPI encodeForHTMLAttribute must clear unsanitized XSS",
+    );
+    assert_tag_sanitized(
+        &outcome,
+        "xss",
+        "Java ESAPI encodeForHTMLAttribute should be sanitizer evidence",
     );
 }
 
