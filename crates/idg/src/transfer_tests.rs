@@ -1206,6 +1206,135 @@ fn try_catch_typed_match_emits_throw_to_catch_edge() {
 }
 
 #[test]
+fn try_catch_root_exception_matches_subtype_throw() {
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![FlowEvent::Try {
+        span: span(0, 80),
+        body: vec![FlowEvent::Throw {
+            span: span(10, 25),
+            value_name: Some("e".to_string()),
+            thrown_type: Some("RuntimeException".to_string()),
+        }],
+        catch_events: Vec::new(),
+        finally_events: Vec::new(),
+        catch_param: Some("ex".to_string()),
+        catch_types: vec!["Exception".to_string()],
+    }];
+    let out = transfer_function_for(&decl);
+    // 1 Read(e) -> Throw(RuntimeException), 1 Throw(RuntimeException)
+    // -> Catch(Exception) through root-exception assignability.
+    assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraThrow), 2);
+    assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraAssign), 1);
+}
+
+#[test]
+fn compound_throw_constructor_arg_bridges_to_throw_node() {
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![FlowEvent::Try {
+        span: span(0, 100),
+        body: vec![
+            FlowEvent::Throw {
+                span: span(10, 45),
+                value_name: None,
+                thrown_type: Some("RuntimeException".to_string()),
+            },
+            FlowEvent::Call {
+                span: span(20, 40),
+                name: "RuntimeException".to_string(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Constructor,
+                args: vec![CallArg {
+                    span: span(37, 44),
+                    name: None,
+                    value_text: "payload".to_string(),
+                    place: Some("payload".to_string()),
+                    source_names: vec!["payload".to_string()],
+                }],
+            },
+        ],
+        catch_events: Vec::new(),
+        finally_events: Vec::new(),
+        catch_param: Some("ex".to_string()),
+        catch_types: vec!["RuntimeException".to_string()],
+    }];
+    let out = transfer_function_for(&decl);
+    // 1 Read(payload) -> CallArg, 1 Read(payload) -> Throw,
+    // 1 Throw -> Catch, 1 Catch -> Write(ex).
+    assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraRead), 1);
+    assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraThrow), 2);
+    assert_eq!(count_edges_of(&out, IdgEdgeKind::IntraAssign), 1);
+}
+
+#[test]
+fn call_arg_method_projection_bridges_receiver_carrier() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["e".to_string()];
+    decl.flow_events = vec![FlowEvent::Call {
+        span: span(20, 45),
+        name: "sink".to_string(),
+        receiver: None,
+        receiver_types: Vec::new(),
+        call_kind: CallKind::Function,
+        args: vec![CallArg {
+            span: span(25, 42),
+            name: None,
+            value_text: "e.getMessage()".to_string(),
+            place: None,
+            source_names: vec!["e.getMessage".to_string(), "e".to_string()],
+        }],
+    }];
+    let out = transfer_function_for(&decl);
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "e"
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+        }),
+        "method projection should bridge the receiver carrier into the arg slot: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
+fn call_arg_property_projection_bridges_receiver_carrier() {
+    let mut decl = empty_decl(1, "f");
+    decl.flow_events = vec![FlowEvent::Try {
+        span: span(0, 80),
+        body: vec![FlowEvent::Throw {
+            span: span(10, 20),
+            value_name: Some("err".to_string()),
+            thrown_type: Some("Exception".to_string()),
+        }],
+        catch_events: vec![FlowEvent::Call {
+            span: span(30, 55),
+            name: "sink".to_string(),
+            receiver: None,
+            receiver_types: Vec::new(),
+            call_kind: CallKind::Function,
+            args: vec![CallArg {
+                span: span(35, 44),
+                name: None,
+                value_text: "e.Message".to_string(),
+                place: None,
+                source_names: vec!["e.Message".to_string(), "e".to_string()],
+            }],
+        }],
+        finally_events: Vec::new(),
+        catch_param: Some("e".to_string()),
+        catch_types: vec!["Exception".to_string()],
+    }];
+    let out = transfer_function_for(&decl);
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "e"
+                && rendered_place_name(&out, edge.to).starts_with("CallArg")
+        }),
+        "catch-param property projection should bridge the receiver carrier into the arg slot: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
 fn try_catch_all_matches_typed_throw_via_star_sentinel() {
     let mut decl = empty_decl(1, "f");
     decl.flow_events = vec![FlowEvent::Try {
