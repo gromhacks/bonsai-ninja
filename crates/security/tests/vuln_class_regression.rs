@@ -209,6 +209,59 @@ def handler(user_input):
 }
 
 #[test]
+fn sqli_python_falcon_get_param_reports_without_inferred_sources() {
+    let src = r#"
+import falcon
+import sqlite3
+
+def on_get(req, resp):
+    name = req.get_param("name")
+    cursor = sqlite3.connect(":memory:").cursor()
+    return cursor.execute("SELECT * FROM users WHERE name='" + name + "'")
+"#;
+    let outcome = analyse_with_options(&python_ws(src), TaintAnalysisOptions::default());
+    assert_tag_reported(&outcome, "sql-injection", "Python Falcon req.get_param");
+}
+
+#[test]
+fn sqli_python_falcon_local_get_param_helper_clean_without_inferred_sources() {
+    let src = r#"
+import falcon
+import sqlite3
+
+def helper(local, resp):
+    name = local.get_param("name")
+    cursor = sqlite3.connect(":memory:").cursor()
+    return cursor.execute("SELECT * FROM users WHERE name='" + name + "'")
+"#;
+    let outcome = analyse_with_options(&python_ws(src), TaintAnalysisOptions::default());
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "Python local get_param helper must not be treated as Falcon request input",
+    );
+}
+
+#[test]
+fn sqli_python_aiohttp_match_info_subscript_reports_without_inferred_sources() {
+    let src = r#"
+import aiohttp
+import sqlite3
+
+def handler(request):
+    name = request.match_info["name"]
+    cursor = sqlite3.connect(":memory:").cursor()
+    return cursor.execute("SELECT * FROM users WHERE name='" + name + "'")
+"#;
+    let outcome = analyse_with_options(&python_ws(src), TaintAnalysisOptions::default());
+    assert_tag_reported(
+        &outcome,
+        "sql-injection",
+        "Python aiohttp request.match_info subscript",
+    );
+}
+
+#[test]
 fn sqli_js_graphql_resolver_args_reports_without_inferred_sources() {
     let src = r#"
 const _gql = require("graphql");
