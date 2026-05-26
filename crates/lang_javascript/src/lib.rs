@@ -378,11 +378,19 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
     decl_index.defs.extend(aliases);
 }
 
-/// Surface `exports.name = function localName ...` and
-/// `module.exports.name = function localName ...` under the exported
-/// member name when that differs from the function's local name. The
-/// shared declaration walker owns duplicate suppression for same-name
-/// function expressions, so this only adds a real export alias.
+/// Surface JS/TS named exports under their public export member name
+/// when it differs from the local implementation name:
+///
+/// - `exports.name = function localName(...) { ... }`
+/// - `module.exports.name = function localName(...) { ... }`
+/// - `module.exports = { name: localName }`
+/// - `export { localName as name }`
+///
+/// The shared declaration walker owns duplicate suppression for
+/// same-name function expressions, so this only adds real export
+/// aliases. Without these aliases, cross-file import/require calls
+/// resolve only when the public export name happens to equal the local
+/// function name.
 pub fn apply_js_ts_commonjs_named_export_aliases(
     decl_index: &mut DeclIndex,
     tree: &Tree,
@@ -403,40 +411,169 @@ pub fn apply_js_ts_commonjs_named_export_aliases(
             continue;
         };
         let Some(export_name) = commonjs_named_export_member(&node_text(&left, src)) else {
+            if node_text(&left, src).trim() == "module.exports" {
+                collect_commonjs_object_export_aliases(
+                    decl_index,
+                    &mut aliases,
+                    &mut next_symbol,
+                    right,
+                    src,
+                );
+            }
             continue;
         };
         if export_name == "default" || export_name.is_empty() {
             continue;
         }
         let right_span = span_of(file, &right);
-        let Some(source) = decl_index.defs.iter().find(|decl| decl.span == right_span) else {
+        push_named_export_alias_for_span(
+            decl_index,
+            &mut aliases,
+            &mut next_symbol,
+            export_name,
+            right_span,
+        );
+    }
+    collect_es_named_export_aliases(decl_index, &mut aliases, &mut next_symbol, tree, src);
+    decl_index.defs.extend(aliases);
+}
+
+fn collect_commonjs_object_export_aliases(
+    decl_index: &DeclIndex,
+    aliases: &mut Vec<bonsai_lang_api::Decl>,
+    next_symbol: &mut u32,
+    right: Node<'_>,
+    src: &[u8],
+) {
+    if right.kind() != "object" {
+        return;
+    }
+    let mut cursor = right.walk();
+    for child in right.named_children(&mut cursor) {
+        if child.kind() != "pair" {
+            continue;
+        }
+        let Some(key) = child.child_by_field_name("key") else {
             continue;
         };
-        if source.name == export_name {
+        let Some(value) = child.child_by_field_name("value") else {
+            continue;
+        };
+        let export_name = node_text(&key, src).trim().to_string();
+        if export_name.is_empty() || export_name == "default" {
             continue;
         }
-        if !matches!(
-            source.kind,
-            bonsai_lang_api::DeclKind::Function
-                | bonsai_lang_api::DeclKind::Method
-                | bonsai_lang_api::DeclKind::Constructor
-                | bonsai_lang_api::DeclKind::Class
-        ) {
-            continue;
+        if value.kind() == "identifier" {
+            let local_name = node_text(&value, src).trim();
+            push_named_export_alias_for_name(decl_index, aliases, next_symbol, export_name, local_name);
+        } else {
+            push_named_export_alias_for_span(
+                decl_index,
+                aliases,
+                next_symbol,
+                export_name,
+                span_of(decl_index.file, &value),
+            );
         }
-        if decl_index.defs.iter().chain(aliases.iter()).any(|decl| {
-            decl.name == export_name && decl.span == source.span && decl.body_span == source.body_span
-        }) {
-            continue;
-        }
-        let mut alias = source.clone();
-        alias.symbol = SymbolId::new(next_symbol);
-        next_symbol = next_symbol.saturating_add(1);
-        alias.name = export_name;
-        alias.qualified_name = None;
-        aliases.push(alias);
     }
-    decl_index.defs.extend(aliases);
+}
+
+fn collect_es_named_export_aliases(
+    decl_index: &DeclIndex,
+    aliases: &mut Vec<bonsai_lang_api::Decl>,
+    next_symbol: &mut u32,
+    tree: &Tree,
+    src: &[u8],
+) {
+    for export_node in collect_kinds(tree, &["export_statement"]) {
+        let mut stack = vec![export_node];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "export_specifier" {
+                let local_name = current.child_by_field_name("name");
+                let export_name = current.child_by_field_name("alias");
+                if let (Some(local), Some(exported)) = (local_name, export_name) {
+                    let export_name = node_text(&exported, src).trim().to_string();
+                    let local_name = node_text(&local, src).trim();
+                    push_named_export_alias_for_name(
+                        decl_index,
+                        aliases,
+                        next_symbol,
+                        export_name,
+                        local_name,
+                    );
+                }
+                continue;
+            }
+            let mut cursor = current.walk();
+            for child in current.named_children(&mut cursor) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+fn push_named_export_alias_for_name(
+    decl_index: &DeclIndex,
+    aliases: &mut Vec<bonsai_lang_api::Decl>,
+    next_symbol: &mut u32,
+    export_name: String,
+    local_name: &str,
+) {
+    if export_name.is_empty() || local_name.is_empty() || export_name == local_name {
+        return;
+    }
+    let Some(source) = decl_index.defs.iter().find(|decl| decl.name == local_name) else {
+        return;
+    };
+    push_named_export_alias(decl_index, aliases, next_symbol, export_name, source);
+}
+
+fn push_named_export_alias_for_span(
+    decl_index: &DeclIndex,
+    aliases: &mut Vec<bonsai_lang_api::Decl>,
+    next_symbol: &mut u32,
+    export_name: String,
+    source_span: bonsai_common::Span,
+) {
+    if export_name.is_empty() {
+        return;
+    }
+    let Some(source) = decl_index.defs.iter().find(|decl| decl.span == source_span) else {
+        return;
+    };
+    push_named_export_alias(decl_index, aliases, next_symbol, export_name, source);
+}
+
+fn push_named_export_alias(
+    decl_index: &DeclIndex,
+    aliases: &mut Vec<bonsai_lang_api::Decl>,
+    next_symbol: &mut u32,
+    export_name: String,
+    source: &bonsai_lang_api::Decl,
+) {
+    if source.name == export_name {
+        return;
+    }
+    if !matches!(
+        source.kind,
+        bonsai_lang_api::DeclKind::Function
+            | bonsai_lang_api::DeclKind::Method
+            | bonsai_lang_api::DeclKind::Constructor
+            | bonsai_lang_api::DeclKind::Class
+    ) {
+        return;
+    }
+    if decl_index.defs.iter().chain(aliases.iter()).any(|decl| {
+        decl.name == export_name && decl.span == source.span && decl.body_span == source.body_span
+    }) {
+        return;
+    }
+    let mut alias = source.clone();
+    alias.symbol = SymbolId::new(*next_symbol);
+    *next_symbol = next_symbol.saturating_add(1);
+    alias.name = export_name;
+    alias.qualified_name = None;
+    aliases.push(alias);
 }
 
 fn commonjs_named_export_member(left: &str) -> Option<String> {
