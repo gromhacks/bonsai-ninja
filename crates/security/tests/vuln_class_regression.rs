@@ -400,6 +400,62 @@ class LocalRequest { String getParam(String n) { return "safe"; } }
 }
 
 #[test]
+fn sqli_kotlin_jaxrs_matrixparam_reports() {
+    let src = r#"
+import javax.ws.rs.MatrixParam
+import java.sql.Statement
+
+class App {
+  fun handle(@MatrixParam("id") value: String, stmt: Statement) {
+    val q = "SELECT * FROM users WHERE id='" + value + "'"
+    stmt.executeQuery(q)
+  }
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.kt", src), TaintAnalysisOptions::default());
+    assert_tag_reported(&outcome, "sql-injection", "Kotlin JAX-RS @MatrixParam");
+}
+
+#[test]
+fn sqli_kotlin_jaxrs_beanparam_reports() {
+    let src = r#"
+import javax.ws.rs.BeanParam
+import java.sql.Statement
+
+class App {
+  fun handle(@BeanParam value: String, stmt: Statement) {
+    val q = "SELECT * FROM users WHERE name='" + value + "'"
+    stmt.executeQuery(q)
+  }
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.kt", src), TaintAnalysisOptions::default());
+    assert_tag_reported(&outcome, "sql-injection", "Kotlin JAX-RS @BeanParam");
+}
+
+#[test]
+fn sqli_kotlin_unannotated_jaxrs_param_names_clean() {
+    let src = r#"
+import javax.ws.rs.MatrixParam
+import javax.ws.rs.BeanParam
+import java.sql.Statement
+
+class App {
+  fun helper(MatrixParam: String, BeanParam: String, stmt: Statement) {
+    val q = "SELECT * FROM users WHERE id='" + MatrixParam + BeanParam + "'"
+    stmt.executeQuery(q)
+  }
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.kt", src), TaintAnalysisOptions::default());
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "Kotlin unannotated MatrixParam/BeanParam names must stay clean",
+    );
+}
+
+#[test]
 fn sqli_java_esapi_encodeforsql_second_arg_sanitizes() {
     let src = r#"
 import java.sql.Statement;

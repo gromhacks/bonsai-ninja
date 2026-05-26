@@ -97,8 +97,18 @@ pub fn extract_param_annotations(fn_node: &Node<'_>, src: &[u8]) -> Vec<Vec<Stri
         .or_else(|| first_named_child_of_kind(fn_node, "formal_parameter_list"));
     if let Some(parameters_container) = parameters_container {
         let mut cursor = parameters_container.walk();
+        let mut pending_annotations: Vec<String> = Vec::new();
         for param in parameters_container.named_children(&mut cursor) {
+            if is_parameter_modifier_container(param.kind()) {
+                collect_param_annotation_names(param, src, &mut pending_annotations);
+                continue;
+            }
             visit_param(param, &mut per_param_annotations);
+            if let Some(annotations) = per_param_annotations.last_mut() {
+                annotations.append(&mut pending_annotations);
+                annotations.sort();
+                annotations.dedup();
+            }
         }
     }
     // Flat-shape grammars (Solidity, Objective-C) put each parameter as
@@ -280,6 +290,9 @@ pub(super) fn extract_param_names(fn_node: &Node<'_>, src: &[u8]) -> Vec<String>
     if let Some(parameters_container) = parameters_container {
         let mut cursor = parameters_container.walk();
         for param in parameters_container.named_children(&mut cursor) {
+            if is_parameter_modifier_container(param.kind()) {
+                continue;
+            }
             push_param_name(param, src, &mut param_names);
         }
     }
@@ -352,6 +365,13 @@ fn has_standalone_ellipsis_param(text: &str) -> bool {
         return false;
     };
     segment.split(',').any(|piece| piece.trim() == "...")
+}
+
+fn is_parameter_modifier_container(kind: &str) -> bool {
+    matches!(
+        kind,
+        "parameter_modifiers" | "modifiers" | "annotation_list" | "attribute_list"
+    )
 }
 
 fn first_parenthesized_segment_text(text: &str) -> Option<&str> {

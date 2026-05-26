@@ -347,34 +347,66 @@
   description: "JAX-RS @CookieParam annotated parameter — client-supplied cookie value."
 
 - id: kotlin.source.jaxrs_matrix_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: kotlin
   trust: remote
   tag: http-input
   category: http-input
+  payload_types: [path]
   packages: ["javax.ws.rs", "jakarta.ws.rs"]
   match:
     kind: param
     target:
-      name: MatrixParam
-  description: "Disabled — matcher only sees parameter identifiers, not JAX-RS @MatrixParam annotations."
+      annotation: MatrixParam
+  match_examples:
+  - name: jax-rs matrix param
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(@MatrixParam value: String) {
+        }
+      }
+    expect_match_text: [value]
+  - name: unannotated matrix param name negative
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(MatrixParam: String) {
+        }
+      }
+    expect_no_match: true
+  description: "JAX-RS @MatrixParam annotated parameter — matrix URI value supplied by the HTTP request."
 
 - id: kotlin.source.jaxrs_bean_param
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: kotlin
   trust: remote
   tag: http-input
   category: http-input
+  payload_types: [query, path, form]
   packages: ["javax.ws.rs", "jakarta.ws.rs"]
   match:
     kind: param
     target:
-      name: BeanParam
-  description: "Disabled — matcher only sees parameter identifiers, not JAX-RS @BeanParam annotations."
+      annotation: BeanParam
+  match_examples:
+  - name: jax-rs bean param
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(@BeanParam value: String) {
+        }
+      }
+    expect_match_text: [value]
+  - name: unannotated bean param name negative
+    code: |
+      import javax.ws.rs.*
+      class App {
+        fun handle(BeanParam: String) {
+        }
+      }
+    expect_no_match: true
+  description: "JAX-RS @BeanParam annotated parameter — request values bound into a bean."
 
 - id: kotlin.source.servlet_getparameter
   enabled: true
