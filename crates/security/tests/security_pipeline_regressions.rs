@@ -340,6 +340,41 @@ fn return_sink_rulepack(lang: &str) -> Rulepack {
     pack
 }
 
+fn constrained_call_sink_rulepack(lang: &str, source_name: &str, sink_name: &str) -> Rulepack {
+    let mut pack = Rulepack::default();
+    let mut sink = rule(
+        lang,
+        RuleKind::Sink,
+        &format!("{lang}.test.call_sink"),
+        None,
+        Some(Severity::Critical),
+        sink_name,
+    );
+    sink.constraints = RuleConstraint(vec![ConstraintKind::ArgTainted {
+        arg_tainted: ArgTaintedSpec {
+            index: Some(0),
+            kw: None,
+        },
+    }]);
+    pack.packs.insert(
+        lang.to_string(),
+        LanguagePack {
+            language: lang.to_string(),
+            sources: vec![rule(
+                lang,
+                RuleKind::Source,
+                &format!("{lang}.test.source"),
+                Some(TrustClass::Remote),
+                None,
+                source_name,
+            )],
+            sinks: vec![sink],
+            sanitizers: Vec::new(),
+        },
+    );
+    pack
+}
+
 fn c_recv_output_rulepack() -> Rulepack {
     let mut pack = Rulepack::default();
     let mut source = rule(
@@ -878,6 +913,66 @@ fn tainted_inline_return_is_a_sink() {
             .any(|finding| finding.finding.sink.file.contains("page.ts")
                 && matches!(finding.finding.precision.as_str(), "exact" | "narrowed")),
         "expected tainted return sink finding, got {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn nested_call_argument_uses_callee_return_summary_for_sink_taint() {
+    let ws = workspace(&[
+        (
+            "/app/server.js",
+            "import { renderUnsafe } from './render.js';\n\
+             function source() { return ''; }\n\
+             export function handle(res) {\n  const q = source();\n  res.end(renderUnsafe(q));\n}\n",
+        ),
+        (
+            "/app/render.js",
+            "export function renderUnsafe(q) {\n  return '<p>' + q + '</p>';\n}\n",
+        ),
+    ]);
+    let report = run_taint_analysis(
+        &ws,
+        &constrained_call_sink_rulepack("javascript", "source", "res.end"),
+        TaintAnalysisOptions::default(),
+    )
+    .expect("taint analysis");
+
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding.finding.sink.file.contains("server.js")
+                && finding.finding.sink.text == "res.end"
+                && finding.finding.chain_display == ["handle"]
+        }),
+        "expected nested call return taint to reach res.end, got {:#?}",
+        report.findings
+    );
+}
+
+#[test]
+fn nested_call_argument_clean_return_does_not_taint_outer_sink() {
+    let ws = workspace(&[
+        (
+            "/app/server.js",
+            "import { renderSafe } from './render.js';\n\
+             function source() { return ''; }\n\
+             export function handle(res) {\n  const q = source();\n  res.end(renderSafe(q));\n}\n",
+        ),
+        (
+            "/app/render.js",
+            "export function renderSafe(q) {\n  return '<p>safe</p>';\n}\n",
+        ),
+    ]);
+    let report = run_taint_analysis(
+        &ws,
+        &constrained_call_sink_rulepack("javascript", "source", "res.end"),
+        TaintAnalysisOptions::default(),
+    )
+    .expect("taint analysis");
+
+    assert!(
+        report.findings.is_empty(),
+        "constant-return helper must not taint outer sink just because the argument syntax mentions q: {:#?}",
         report.findings
     );
 }
