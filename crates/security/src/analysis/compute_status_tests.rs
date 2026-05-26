@@ -636,7 +636,8 @@ fn nested_sanitizer_inside_sink_arg_can_attach_after_sink_callee_token() {
         func,
         &snk,
         func,
-        &sink_tainted_args
+        &sink_tainted_args,
+        true
     ));
 }
 
