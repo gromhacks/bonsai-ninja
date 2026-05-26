@@ -5010,10 +5010,13 @@ fn sanitizer_is_nested_in_tainted_sink_arg(san: &RuleMatch, sink_tainted_args: &
 /// True when a sanitizer match could plausibly attach to the
 /// source→sink chain — must come AFTER the source within the
 /// source's enclosing fn, and BEFORE the sink within the sink's
-/// enclosing fn. A sanitizer nested inside a tainted sink argument is
-/// semantically before the sink execution even though its callee token
-/// appears after the sink callee token. Cross-fn sanitizers always pass
-/// this gate; the chain-hop check elsewhere handles inter-fn placement.
+/// enclosing fn. A sanitizer that wraps the source can have its
+/// callee token before the nested source token; source-specific
+/// data-flow evidence is enough to accept that case. A sanitizer
+/// nested inside a tainted sink argument is semantically before the
+/// sink execution even though its callee token appears after the sink
+/// callee token. Cross-fn sanitizers always pass this gate; the
+/// chain-hop check elsewhere handles inter-fn placement.
 fn sanitizer_can_attach(
     src: &RuleMatch,
     source_func: FuncId,
@@ -5022,8 +5025,9 @@ fn sanitizer_can_attach(
     snk: &RuleMatch,
     sink_func: FuncId,
     sink_tainted_args: &[TaintedArgInfo],
+    dataflow_connected: bool,
 ) -> bool {
-    if sanitizer_func == source_func && !match_precedes_or_same(src, san) {
+    if sanitizer_func == source_func && !match_precedes_or_same(src, san) && !dataflow_connected {
         return false;
     }
     if sanitizer_func == sink_func
@@ -5781,6 +5785,9 @@ fn make_finding(
             continue;
         };
         for sanitizer_match in sanitizer_hits {
+            let dataflow_connected =
+                sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
+                    || sanitizer_is_nested_in_tainted_sink_arg(sanitizer_match, &context.sink_tainted_args);
             if !sanitizer_can_attach(
                 src,
                 context.source_func,
@@ -5789,6 +5796,7 @@ fn make_finding(
                 snk,
                 context.sink_func,
                 &context.sink_tainted_args,
+                dataflow_connected,
             ) {
                 continue;
             }
@@ -5797,9 +5805,7 @@ fn make_finding(
             // gate any rule firing somewhere on the chain credits the
             // finding even when its argument has nothing to do with
             // the source's tainted value.
-            if !sanitizer_call_overlaps_tainted_call(sanitizer_match, context.tainted_call_spans)
-                && !sanitizer_is_nested_in_tainted_sink_arg(sanitizer_match, &context.sink_tainted_args)
-            {
+            if !dataflow_connected {
                 continue;
             }
             let dedup_key = (

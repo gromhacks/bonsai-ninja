@@ -11,8 +11,8 @@ use bonsai_lang_api::FlowEvent;
 use bonsai_security::loader::LanguagePack;
 use bonsai_security::rule::{ArgTaintedSpec, Severity, TaintSemantics};
 use bonsai_security::{
-    run_taint_analysis, ConstraintKind, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind, RuleTarget,
-    Rulepack, TaintAnalysisOptions, TrustClass,
+    run_taint_analysis, ConstraintKind, FindingStatus, MatchKind, MatchSpec, Rule, RuleConstraint, RuleKind,
+    RuleTarget, Rulepack, TaintAnalysisOptions, TrustClass,
 };
 use bonsai_workspace::Workspace;
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
@@ -974,6 +974,68 @@ fn nested_call_argument_clean_return_does_not_taint_outer_sink() {
         report.findings.is_empty(),
         "constant-return helper must not taint outer sink just because the argument syntax mentions q: {:#?}",
         report.findings
+    );
+}
+
+#[test]
+fn sanitizer_wrapping_source_attaches_to_same_function_flow() {
+    let ws = workspace(&[(
+        "/app/App.java",
+        "import org.owasp.esapi.ESAPI;\n\n\
+         class App {\n  static String source() { return \"\"; }\n  static void sink(String value) {}\n\n\
+         void handle() {\n    String clean = ESAPI.encoder().encodeForHTML(source());\n    sink(clean);\n  }\n}\n",
+    )]);
+    let mut pack = rulepack("java", "source", "sink");
+    let java_pack = pack.packs.get_mut("java").expect("java pack");
+    java_pack.sinks[0].tag = Some("xss".to_string());
+    java_pack.sanitizers.push(Rule {
+        id: "java.test.esapi_html".to_string(),
+        aliases: Vec::new(),
+        enabled: true,
+        disabled_reason: None,
+        title: None,
+        tag: Some("html-encode".to_string()),
+        severity: None,
+        trust: None,
+        category: Some("test".to_string()),
+        cwe: Vec::new(),
+        owasp: Vec::new(),
+        frameworks: Vec::new(),
+        packages: Vec::new(),
+        imports: Vec::new(),
+        modules: Vec::new(),
+        manifests: Vec::new(),
+        lockfiles: Vec::new(),
+        payload_types: Vec::new(),
+        match_spec: MatchSpec {
+            kind: MatchKind::Call,
+            callee: Some(RuleTarget {
+                regex: Some(r"^(Encoder|ESAPI\.encoder\(\))\.encodeForHTML$".to_string()),
+                ..Default::default()
+            }),
+            target: None,
+            search_depth: 0,
+        },
+        taint_semantics: None,
+        constraints: RuleConstraint::default(),
+        match_examples: Vec::new(),
+        description: "test ESAPI sanitizer".to_string(),
+        kind: RuleKind::Sanitizer,
+        language: "java".to_string(),
+        source_path: String::new(),
+    });
+
+    let report = run_taint_analysis(&ws, &pack, TaintAnalysisOptions::default()).expect("taint analysis");
+    assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+    let finding = &report.findings[0].finding;
+    assert_eq!(finding.status, FindingStatus::Sanitized, "{finding:#?}");
+    assert!(
+        finding
+            .sanitizers_seen
+            .iter()
+            .any(|sanitizer| sanitizer.rule_id == "java.test.esapi_html"),
+        "expected ESAPI sanitizer evidence, got {:#?}",
+        finding.sanitizers_seen
     );
 }
 
