@@ -564,6 +564,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.get_param$"
+      base_name_in: [req, request]
   constraints:
   - min_args: 1
   - max_args: 4
@@ -574,6 +575,12 @@
       def example(req, name):
           return req.get_param(name)
     expect_match_text: [req.get_param]
+  - name: local helper get param negative
+    code: |
+      import falcon
+      def example(helper, name):
+          return helper.get_param(name)
+    expect_no_match: true
   description: "Falcon req.get_param(name, ...) - attacker-controlled query parameter value."
 
 - id: python.falcon.get_param_typed
@@ -588,6 +595,7 @@
     kind: call
     callee:
       regex: "^[A-Za-z_$][A-Za-z0-9_$]*\\.get_param_as_(bool|date|datetime|dict|int|list|uuid)$"
+      base_name_in: [req, request]
   constraints:
   - min_args: 1
   - max_args: 5
@@ -604,6 +612,12 @@
       def example(req, name):
           return req.get_param_as_list(name, transform=str)
     expect_match_text: [req.get_param_as_list]
+  - name: local helper typed get param negative
+    code: |
+      import falcon
+      def example(helper, name):
+          return helper.get_param_as_int(name)
+    expect_no_match: true
   description: "Falcon typed query helpers req.get_param_as_* return attacker-controlled query values after type coercion."
 
 - id: python.falcon.get_header
