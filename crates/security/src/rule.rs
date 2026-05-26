@@ -224,6 +224,12 @@ pub struct RuleTarget {
     /// enclosing decl's `name`. Case-sensitive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub in_method: Vec<String>,
+    /// Restrict a rule match to declarations whose own name starts with
+    /// one of the given prefixes. This keeps framework rules from
+    /// enumerating generated handler names such as GraphQL `resolve_*`
+    /// while preserving a simple, auditable string gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_method_prefix: Vec<String>,
     /// Restrict a `kind: param` rule to zero-based parameter indexes.
     /// This keeps framework signature rules precise when the parameter
     /// name alone is common, e.g. GraphQL resolver `(parent, args, ...)`.
@@ -264,6 +270,7 @@ impl RuleTarget {
             && self.base_name_in.is_empty()
             && self.in_class.is_empty()
             && self.in_method.is_empty()
+            && self.in_method_prefix.is_empty()
             && self.param_index_in.is_empty()
             && self.base_param_index_in.is_empty()
             && self.receiver_type_in.is_empty()

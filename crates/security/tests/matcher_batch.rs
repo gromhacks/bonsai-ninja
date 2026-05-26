@@ -434,6 +434,37 @@ contract App {
     assert_eq!(hits[0].enclosing_fn.as_deref(), Some("handle"));
 }
 
+#[test]
+fn param_rule_method_prefix_and_index_filters_resolver_args() {
+    let ws = python_ws(
+        r#"
+import graphene
+
+def resolve_products(obj, info, args):
+    return args
+
+def helper(args, other):
+    return args
+
+def resolve_bad(args, other):
+    return args
+"#,
+    );
+    let mut rule = target_name_rule("python.test.graphql_args", MatchKind::Param, "args");
+    if let Some(target) = rule.match_spec.target.as_mut() {
+        target.in_method_prefix = vec!["resolve_".to_string()];
+        target.param_index_in = vec![2];
+    }
+
+    let hits = match_rule_against_facts(&ws, &rule);
+    assert_eq!(
+        hits.len(),
+        1,
+        "only the GraphQL-style third resolver arg should match: {hits:?}"
+    );
+    assert_eq!(hits[0].enclosing_fn.as_deref(), Some("resolve_products"));
+}
+
 fn signature(rows: &[bonsai_security::RuleMatch]) -> BTreeSet<(String, String, u32, String, Option<String>)> {
     rows.iter()
         .map(|m| {
