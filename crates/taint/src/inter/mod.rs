@@ -2132,7 +2132,7 @@ fn propagate_call_event(
         .args
         .iter()
         .enumerate()
-        .filter(|(_, arg)| call_arg_has_direct_value_taint(arg, state))
+        .filter(|(_, arg)| call_arg_has_semantic_direct_value_taint(arg, state, ctx, summary_cache))
         .map(|(idx, arg)| (idx, arg.value_text.clone()))
         .collect();
     let mut args_to_propagate_into_callee = tainted_at_call.clone();
@@ -3674,8 +3674,15 @@ fn apply_return_taint(
             callee_decl.is_some_and(|decl| !decl.receiver_field_writes.is_empty());
         let value_tainted_transits = if requires_yield_summary {
             summary.yields_taint_of.iter().any(|&idx| {
-                effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
-                    .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
+                effective_arg_for_param(effective_source_call_args, callee_decl, idx)
+                    .map(|actual| {
+                        effective_call_arg_has_semantic_direct_value_taint(
+                            actual,
+                            state,
+                            &resolve_scope,
+                            summary_cache,
+                        )
+                    })
                     .unwrap_or(false)
             })
         } else {
@@ -3698,8 +3705,15 @@ fn apply_return_taint(
                 // produce zero propagation records.
                 || config.source_bearing_functions.contains(&candidate.func)
                 || summary.returns_taint_of.iter().any(|&idx| {
-                    effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
-                        .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
+                    effective_arg_for_param(effective_source_call_args, callee_decl, idx)
+                        .map(|actual| {
+                            effective_call_arg_has_semantic_direct_value_taint(
+                                actual,
+                                state,
+                                &resolve_scope,
+                                summary_cache,
+                            )
+                        })
                         .unwrap_or(false)
                         || global
                             .decl_of(SymbolId::new(candidate.func.raw()))
@@ -3742,17 +3756,22 @@ fn apply_return_taint(
         let mut field_tainted_transits = false;
         if !requires_yield_summary {
             for returned in &summary.returns_field_taint_of {
-                let Some(arg_text) =
-                    effective_arg_value_for_param(effective_source_call_args, callee_decl, returned.param)
+                let Some(actual_arg) =
+                    effective_arg_for_param(effective_source_call_args, callee_decl, returned.param)
                 else {
                     continue;
                 };
+                let arg_text = actual_arg.value_text.as_str();
                 let source_path_tainted = returned
                     .source_path
                     .as_deref()
                     .is_some_and(|path| returned_access_path_is_tainted(arg_text, path, state));
-                if !call_arg_is_directly_tainted(arg_text, state)
-                    && !returned_access_path_is_tainted(arg_text, &returned.field, state)
+                if !effective_call_arg_has_semantic_direct_value_taint(
+                    actual_arg,
+                    state,
+                    &resolve_scope,
+                    summary_cache,
+                ) && !returned_access_path_is_tainted(arg_text, &returned.field, state)
                     && !source_path_tainted
                 {
                     continue;
@@ -3766,13 +3785,16 @@ fn apply_return_taint(
             && target_destructure_index.is_some_and(|target_index| {
                 summary.returns_element_taint_of.iter().any(|returned| {
                     returned.index == target_index
-                        && (effective_arg_value_for_param(
-                            effective_source_call_args,
-                            callee_decl,
-                            returned.param,
-                        )
-                        .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
-                        .unwrap_or(false)
+                        && (effective_arg_for_param(effective_source_call_args, callee_decl, returned.param)
+                            .map(|actual| {
+                                effective_call_arg_has_semantic_direct_value_taint(
+                                    actual,
+                                    state,
+                                    &resolve_scope,
+                                    summary_cache,
+                                )
+                            })
+                            .unwrap_or(false)
                             || global
                                 .decl_of(SymbolId::new(candidate.func.raw()))
                                 .and_then(|decl| decl.receiver_param_index)
@@ -3809,8 +3831,15 @@ fn apply_return_taint(
         let container_tainted_transits = !requires_yield_summary
             && target_destructure_index.is_none()
             && summary.returns_container_taint_of.iter().any(|&idx| {
-                effective_arg_value_for_param(effective_source_call_args, callee_decl, idx)
-                    .map(|arg_text| call_arg_is_directly_tainted(arg_text, state))
+                effective_arg_for_param(effective_source_call_args, callee_decl, idx)
+                    .map(|actual| {
+                        effective_call_arg_has_semantic_direct_value_taint(
+                            actual,
+                            state,
+                            &resolve_scope,
+                            summary_cache,
+                        )
+                    })
                     .unwrap_or(false)
                     || global
                         .decl_of(SymbolId::new(candidate.func.raw()))
@@ -5545,6 +5574,33 @@ fn call_arg_is_tainted(arg: &CallArg, state: &TokenSet) -> bool {
             .any(|operand| call_arg_source_operand_is_tainted(&arg.value_text, operand, state))
 }
 
+fn call_arg_has_semantic_direct_value_taint(
+    arg: &CallArg,
+    state: &TokenSet,
+    ctx: &PropagationCtx<'_>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
+) -> bool {
+    let scope = CallResolveScope {
+        aliases: ctx.aliases,
+        alias_targets: ctx.alias_targets,
+        local_bindings: ctx.local_bindings,
+        db: ctx.db,
+        caller: ctx.caller,
+        config: ctx.config,
+        resolved_calls: ctx.resolved_calls,
+    };
+    let effective = EffectiveCallArg::from_call_arg(arg);
+    effective_call_arg_has_semantic_direct_value_taint_with_depth(
+        &effective,
+        state,
+        &scope,
+        summary_cache,
+        Some(arg.span),
+        0,
+    )
+    .unwrap_or_else(|| call_arg_has_direct_value_taint(arg, state))
+}
+
 fn call_arg_has_direct_value_taint(arg: &CallArg, state: &TokenSet) -> bool {
     call_arg_is_directly_tainted(&arg.value_text, state)
         || arg
@@ -5567,6 +5623,314 @@ fn effective_call_arg_has_direct_value_taint(arg: &EffectiveCallArg, state: &Tok
             .source_names
             .iter()
             .any(|operand| call_arg_source_operand_is_tainted(&arg.value_text, operand, state))
+}
+
+fn effective_call_arg_has_semantic_direct_value_taint(
+    arg: &EffectiveCallArg,
+    state: &TokenSet,
+    scope: &CallResolveScope<'_>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
+) -> bool {
+    effective_call_arg_has_semantic_direct_value_taint_with_depth(arg, state, scope, summary_cache, None, 0)
+        .unwrap_or_else(|| effective_call_arg_has_direct_value_taint(arg, state))
+}
+
+fn effective_call_arg_has_semantic_direct_value_taint_with_depth(
+    arg: &EffectiveCallArg,
+    state: &TokenSet,
+    scope: &CallResolveScope<'_>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
+    call_span: Option<Span>,
+    depth: usize,
+) -> Option<bool> {
+    const MAX_NESTED_CALL_ARG_DEPTH: usize = 8;
+    if depth >= MAX_NESTED_CALL_ARG_DEPTH {
+        return None;
+    }
+    direct_call_expression_return_taint(arg, state, scope, summary_cache, call_span, depth + 1)
+}
+
+fn direct_call_expression_return_taint(
+    arg: &EffectiveCallArg,
+    state: &TokenSet,
+    scope: &CallResolveScope<'_>,
+    summary_cache: &parking_lot::RwLock<AHashMap<FuncId, FunctionSummary>>,
+    call_span: Option<Span>,
+    depth: usize,
+) -> Option<bool> {
+    let (callee_name, nested_arg_values) = direct_call_expression_parts(&arg.value_text)?;
+    let mut nested_args = nested_arg_values
+        .into_iter()
+        .map(EffectiveCallArg::positional)
+        .collect::<Vec<_>>();
+    let global = scope.db.global_index();
+    let mut candidates = resolve_call_candidates_with_caller_at(&callee_name, scope, &[], call_span);
+    let constructor_candidates =
+        constructor_candidates_for_class_call(scope.db, scope.caller, scope.alias_targets, &callee_name);
+    if !constructor_candidates.is_empty() {
+        candidates.retain(|candidate| {
+            global
+                .decl_of(SymbolId::new(candidate.func.raw()))
+                .is_none_or(|decl| !matches!(decl.kind, DeclKind::Class | DeclKind::Struct))
+        });
+        for candidate in constructor_candidates {
+            if !candidates.iter().any(|existing| existing.func == candidate.func) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates = narrow_overload_candidates_by_arg_types(candidates, &nested_args, scope.db, scope.caller);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    for candidate in &candidates {
+        if scope.config.source_bearing_functions.contains(&candidate.func) {
+            return Some(true);
+        }
+        let callee_decl = global.decl_of(SymbolId::new(candidate.func.raw()));
+        let summary = cache_or_insert_with(summary_cache, candidate.func, || {
+            callee_decl.map(compute_function_summary).unwrap_or_default()
+        });
+        let direct_arg_tainted = |idx| {
+            effective_arg_for_param(&nested_args, callee_decl, idx)
+                .map(|actual| {
+                    effective_call_arg_has_semantic_direct_value_taint_with_depth(
+                        actual,
+                        state,
+                        scope,
+                        summary_cache,
+                        None,
+                        depth,
+                    )
+                    .unwrap_or_else(|| effective_call_arg_has_direct_value_taint(actual, state))
+                })
+                .unwrap_or(false)
+        };
+        let receiver_direct_tainted = |idx| {
+            callee_decl
+                .and_then(|decl| decl.receiver_param_index)
+                .is_some_and(|receiver_idx| {
+                    receiver_idx == idx
+                        && call_receiver_from_name(&callee_name)
+                            .as_deref()
+                            .is_some_and(|receiver| call_arg_is_directly_tainted(receiver, state))
+                })
+        };
+        if summary
+            .returns_taint_of
+            .iter()
+            .any(|&idx| direct_arg_tainted(idx) || receiver_direct_tainted(idx))
+        {
+            return Some(true);
+        }
+        if summary.returns_access_paths.iter().any(|returned| {
+            effective_arg_value_for_param(&nested_args, callee_decl, returned.param)
+                .map(|arg_text| returned_access_path_is_tainted(arg_text, &returned.path, state))
+                .unwrap_or(false)
+                || callee_decl
+                    .and_then(|decl| decl.receiver_param_index)
+                    .is_some_and(|receiver_idx| {
+                        receiver_idx == returned.param
+                            && call_receiver_from_name(&callee_name)
+                                .as_deref()
+                                .is_some_and(|receiver| {
+                                    returned_access_path_is_tainted(receiver, &returned.path, state)
+                                })
+                    })
+        }) {
+            return Some(true);
+        }
+        if summary.returns_descendant_taint_of.iter().any(|&idx| {
+            effective_arg_for_param(&nested_args, callee_decl, idx)
+                .map(|actual| effective_call_arg_has_descendant_taint(actual, state))
+                .unwrap_or(false)
+                || callee_decl
+                    .and_then(|decl| decl.receiver_param_index)
+                    .is_some_and(|receiver_idx| {
+                        receiver_idx == idx
+                            && call_receiver_from_name(&callee_name)
+                                .as_deref()
+                                .is_some_and(|receiver| actual_has_descendant_taint(receiver, state))
+                    })
+        }) {
+            return Some(true);
+        }
+        if summary.returns_taint_of.is_empty()
+            && callee_decl.is_some_and(|decl| decl.flow_events.is_empty())
+            && nested_args
+                .iter()
+                .any(|actual| effective_call_arg_has_direct_value_taint(actual, state))
+        {
+            return Some(true);
+        }
+    }
+    nested_args.clear();
+    Some(false)
+}
+
+pub(crate) fn direct_call_expression_parts(text: &str) -> Option<(String, Vec<String>)> {
+    let mut text = text.trim().trim_end_matches(';').trim();
+    text = text.strip_prefix("await ").unwrap_or(text).trim();
+    text = text.strip_prefix("return ").unwrap_or(text).trim();
+    if text.starts_with('(') && text.ends_with(')') {
+        if let Some(inner) = strip_balanced_outer_parens(text) {
+            text = inner.trim();
+        }
+    }
+    if !text.ends_with(')') {
+        return None;
+    }
+    let open = matching_outer_call_open(text)?;
+    let callee = text[..open].trim();
+    let callee = callee.strip_prefix("new ").unwrap_or(callee).trim();
+    if !simple_call_callee_text(callee) {
+        return None;
+    }
+    let args_text = &text[open + 1..text.len().saturating_sub(1)];
+    Some((callee.to_string(), split_top_level_call_args(args_text)))
+}
+
+fn strip_balanced_outer_parens(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+        return None;
+    }
+    let close = matching_close_paren(text, 0)?;
+    (close == text.len().saturating_sub(1)).then_some(&text[1..text.len().saturating_sub(1)])
+}
+
+fn matching_outer_call_open(text: &str) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut open_at_depth_zero = None;
+    let mut last_close = None;
+    for (idx, ch) in text.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' => {
+                if depth == 0 {
+                    open_at_depth_zero = Some(idx);
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    last_close = Some(idx);
+                    if idx != text.len().saturating_sub(1) {
+                        return None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (depth == 0 && last_close == Some(text.len().saturating_sub(1))).then_some(open_at_depth_zero?)
+}
+
+fn matching_close_paren(text: &str, open_idx: usize) -> Option<usize> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices().skip_while(|(idx, _)| *idx < open_idx) {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn simple_call_callee_text(callee: &str) -> bool {
+    !callee.is_empty()
+        && !callee.chars().any(char::is_whitespace)
+        && callee.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '_' | '$' | '.' | ':' | '\\')
+                || matches!(ch, '-' | '>')
+        })
+}
+
+fn split_top_level_call_args(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in args.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            continue;
+        }
+        match ch {
+            '(' => paren += 1,
+            ')' => paren = paren.saturating_sub(1),
+            '[' => bracket += 1,
+            ']' => bracket = bracket.saturating_sub(1),
+            '{' => brace += 1,
+            '}' => brace = brace.saturating_sub(1),
+            ',' if paren == 0 && bracket == 0 && brace == 0 => {
+                let value = args[start..idx].trim();
+                if !value.is_empty() {
+                    out.push(value.to_string());
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let tail = args[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
 }
 
 fn effective_call_arg_has_descendant_taint(arg: &EffectiveCallArg, state: &TokenSet) -> bool {

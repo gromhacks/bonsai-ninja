@@ -1367,6 +1367,8 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
     let mut tainted_calls: Vec<crate::inter::TaintedCall> = Vec::new();
     let mut tainted_names_by_caller: ahash::AHashMap<FuncId, ahash::AHashSet<String>> =
         ahash::AHashMap::new();
+    let mut function_summary_cache: ahash::AHashMap<FuncId, crate::inter::FunctionSummary> =
+        ahash::AHashMap::default();
     let mut sorted_sites: Vec<((FuncId, bonsai_common::Span), Vec<u8>)> = by_site.into_iter().collect();
     // Tie-break on span.end too — two call sites in the same caller
     // can share a span.start when one is nested inside the other
@@ -1380,13 +1382,25 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
     sorted_sites.sort_by_key(|((f, s), _)| (f.raw(), s.start, s.end));
     for ((caller, call_span), arg_indices) in sorted_sites {
         let Some(call_summary) =
-            cached_call_event_summary(caller, call_span, global.as_ref(), &mut call_summary_cache)
+            cached_call_event_summary(caller, call_span, global.as_ref(), &mut call_summary_cache).cloned()
         else {
             continue;
         };
         let mut tainted_args: Vec<crate::inter::TaintedArgAtCall> = arg_indices
             .iter()
             .filter_map(|idx| {
+                if tainted_arg_is_clean_nested_call_return(
+                    caller,
+                    *idx,
+                    &call_summary,
+                    &cross_calls,
+                    db,
+                    global.as_ref(),
+                    &mut call_summary_cache,
+                    &mut function_summary_cache,
+                ) {
+                    return None;
+                }
                 call_summary.args_value_text.get(*idx as usize).map(|value_text| {
                     crate::inter::TaintedArgAtCall {
                         index: *idx as usize,
@@ -1409,6 +1423,9 @@ pub fn entry_taint_graph_from_idg_with_max_precision(
             }
             None
         });
+        if tainted_args.is_empty() && tainted_receiver.is_none() {
+            continue;
+        }
         tainted_calls.push(crate::inter::TaintedCall {
             parent_trace_id,
             caller,
@@ -2519,6 +2536,7 @@ fn push_id_token(tokens: &mut Vec<String>, current: &mut String) {
 struct CallEventSummary {
     name: String,
     args_value_text: Vec<String>,
+    args_span: Vec<bonsai_common::Span>,
     args_place: Vec<Option<String>>,
     receiver: Option<String>,
     call_kind: bonsai_lang_api::CallKind,
@@ -2576,6 +2594,133 @@ fn tainted_args_for_cross_call_edge(
     }]
 }
 
+fn tainted_arg_is_clean_nested_call_return(
+    caller: FuncId,
+    arg_idx: u8,
+    call_summary: &CallEventSummary,
+    cross_calls: &[bonsai_idg::CrossCallEdge],
+    db: &AnalyzerDb,
+    global: &GlobalIndex,
+    call_summary_cache: &mut ahash::AHashMap<FuncId, ahash::AHashMap<bonsai_common::Span, CallEventSummary>>,
+    function_summary_cache: &mut ahash::AHashMap<FuncId, crate::inter::FunctionSummary>,
+) -> bool {
+    let idx = usize::from(arg_idx);
+    let Some(value_text) = call_summary.args_value_text.get(idx).map(String::as_str) else {
+        return false;
+    };
+    let Some(arg_span) = call_summary.args_span.get(idx).copied() else {
+        return false;
+    };
+    let Some((callee_text, _)) = crate::inter::direct_call_expression_parts(value_text) else {
+        return false;
+    };
+
+    let mut tainted_params_by_callee: ahash::AHashMap<FuncId, ahash::AHashSet<usize>> =
+        ahash::AHashMap::default();
+    for edge in cross_calls {
+        if edge.caller != caller || edge.arg_idx == u8::MAX || edge.param_idx == u8::MAX {
+            continue;
+        }
+        if !span_contains_or_equals(arg_span, edge.call_span) {
+            continue;
+        }
+        let Some(nested_summary) =
+            cached_call_event_summary(edge.caller, edge.call_span, global, call_summary_cache).cloned()
+        else {
+            continue;
+        };
+        if !call_names_match_direct_callee(&nested_summary.name, &callee_text) {
+            continue;
+        }
+        tainted_params_by_callee
+            .entry(edge.callee)
+            .or_default()
+            .insert(usize::from(edge.param_idx));
+    }
+
+    if tainted_params_by_callee.is_empty() {
+        return false;
+    }
+
+    for (callee, tainted_params) in tainted_params_by_callee {
+        let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(callee.raw())) else {
+            return false;
+        };
+        if decl.flow_events.is_empty() {
+            return false;
+        }
+        let summary = function_summary_cache
+            .entry(callee)
+            .or_insert_with(|| crate::inter::function_summary(db, callee));
+        if function_summary_returns_any_tainted_param(summary, &tainted_params) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn function_summary_returns_any_tainted_param(
+    summary: &crate::inter::FunctionSummary,
+    tainted_params: &ahash::AHashSet<usize>,
+) -> bool {
+    summary
+        .returns_taint_of
+        .iter()
+        .any(|idx| tainted_params.contains(idx))
+        || summary
+            .returns_descendant_taint_of
+            .iter()
+            .any(|idx| tainted_params.contains(idx))
+        || summary
+            .returns_container_taint_of
+            .iter()
+            .any(|idx| tainted_params.contains(idx))
+        || summary
+            .returns_field_taint_of
+            .iter()
+            .any(|returned| tainted_params.contains(&returned.param))
+        || summary
+            .returns_element_taint_of
+            .iter()
+            .any(|returned| tainted_params.contains(&returned.param))
+        || summary
+            .returns_access_paths
+            .iter()
+            .any(|returned| tainted_params.contains(&returned.param))
+}
+
+fn span_contains_or_equals(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
+    inner.start >= outer.start && inner.end <= outer.end
+}
+
+fn call_names_match_direct_callee(event_name: &str, callee_text: &str) -> bool {
+    let event_name = event_name.trim();
+    let callee_text = callee_text.trim();
+    if event_name == callee_text {
+        return true;
+    }
+    let event_tail = call_name_tail(event_name);
+    let callee_tail = call_name_tail(callee_text);
+    event_tail == callee_tail || event_name == callee_tail || event_tail == callee_text
+}
+
+fn call_name_tail(name: &str) -> &str {
+    let mut tail = name.trim();
+    if let Some(idx) = tail.rfind("->") {
+        tail = &tail[idx + 2..];
+    }
+    if let Some((_, rest)) = tail.rsplit_once(['.', ':', '\\']) {
+        tail = rest;
+    }
+    if let Some(idx) = tail.find('/') {
+        if tail[idx + 1..].chars().all(|c| c.is_ascii_digit()) {
+            tail = &tail[..idx];
+        }
+    }
+    tail
+}
+
 fn cached_call_event_summary<'a>(
     func: FuncId,
     target_span: bonsai_common::Span,
@@ -2613,6 +2758,7 @@ fn collect_call_event_summaries(
                     CallEventSummary {
                         name: name.clone(),
                         args_value_text: args.iter().map(|arg| arg.value_text.clone()).collect(),
+                        args_span: args.iter().map(|arg| arg.span).collect(),
                         args_place: args.iter().map(|arg| arg.place.clone()).collect(),
                         receiver: receiver.clone(),
                         call_kind: *call_kind,
@@ -2628,6 +2774,7 @@ fn collect_call_event_summaries(
                 out.entry(*span).or_insert_with(|| CallEventSummary {
                     name: name.clone(),
                     args_value_text: source_call_args.clone(),
+                    args_span: source_call_args.iter().map(|_| *span).collect(),
                     args_place: source_call_args
                         .iter()
                         .map(|arg| is_bare_identifier(arg.trim()).then(|| arg.trim().to_string()))
