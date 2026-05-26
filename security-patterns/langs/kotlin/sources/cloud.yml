@@ -28,15 +28,33 @@
   description: "Disabled — `service` is the handler method name; `kind: param` only matches parameter identifiers."
 
 - id: kotlin.source.azure_http_trigger
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: kotlin
   trust: service
   tag: cloud-event
+  category: http-input
+  payload_types: [json, text]
   packages: ["com.microsoft.azure.functions"]
   match:
     kind: param
     target:
-      name: HttpTrigger
-  description: "Disabled — matcher only sees parameter identifiers, not Azure @HttpTrigger annotations."
+      annotation: HttpTrigger
+  match_examples:
+  - name: azure http trigger request parameter
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App {
+        fun run(@HttpTrigger(name = "req") req: Request) {
+        }
+      }
+      class Request
+    expect_match_text: [req]
+  - name: unannotated http trigger name negative
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger
+      class App {
+        fun run(HttpTrigger: String) {
+        }
+      }
+    expect_no_match: true
+  description: "Azure Functions @HttpTrigger annotated parameter — HTTP request envelope supplied by the remote caller."

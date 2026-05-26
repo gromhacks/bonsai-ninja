@@ -889,18 +889,36 @@
   description: "JAX-RS / Quarkus entity body parameter convention — unannotated String or Map body supplied by the HTTP request."
 
 - id: java.source.azure_http_trigger
-  enabled: false
-  disabled_reason:
-    code: over-broad
+  enabled: true
   language: java
   trust: remote
   tag: cloud-event
+  category: http-input
+  payload_types: [json, text]
   packages: ["com.microsoft.azure.functions"]
   match:
     kind: param
     target:
-      name: HttpTrigger
-  description: "Disabled — matcher only sees parameter identifiers, not Azure @HttpTrigger annotations."
+      annotation: HttpTrigger
+  match_examples:
+  - name: azure http trigger request parameter
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger;
+      class App {
+        void run(@HttpTrigger(name = "req") Request req) {
+        }
+      }
+      class Request {}
+    expect_match_text: [req]
+  - name: unannotated http trigger name negative
+    code: |
+      import com.microsoft.azure.functions.annotation.HttpTrigger;
+      class App {
+        void run(String HttpTrigger) {
+        }
+      }
+    expect_no_match: true
+  description: "Azure Functions @HttpTrigger annotated parameter — HTTP request envelope supplied by the remote caller."
 
 - id: java.source.gcf_http_function_service
   enabled: false

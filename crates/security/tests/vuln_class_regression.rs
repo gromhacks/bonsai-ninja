@@ -456,6 +456,93 @@ class App {
 }
 
 #[test]
+fn sqli_java_azure_httptrigger_request_body_reports() {
+    let src = r#"
+import com.microsoft.azure.functions.annotation.HttpTrigger;
+import java.sql.Statement;
+
+class App {
+  void run(@HttpTrigger(name = "req") Request req, Statement stmt) throws Exception {
+    String body = req.getBody();
+    String q = "SELECT * FROM users WHERE name='" + body + "'";
+    stmt.executeQuery(q);
+  }
+}
+class Request { String getBody() { return ""; } }
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.java", src), TaintAnalysisOptions::default());
+    assert_tag_reported(&outcome, "sql-injection", "Java Azure @HttpTrigger request body");
+}
+
+#[test]
+fn sqli_kotlin_azure_httptrigger_request_body_reports() {
+    let src = r#"
+import com.microsoft.azure.functions.annotation.HttpTrigger
+import java.sql.Statement
+
+class App {
+  fun run(@HttpTrigger(name = "req") req: Request, stmt: Statement) {
+    val body = req.getBody()
+    val q = "SELECT * FROM users WHERE name='" + body + "'"
+    stmt.executeQuery(q)
+  }
+}
+class Request { fun getBody(): String = "" }
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.kt", src), TaintAnalysisOptions::default());
+    assert_tag_reported(
+        &outcome,
+        "sql-injection",
+        "Kotlin Azure @HttpTrigger request body",
+    );
+}
+
+#[test]
+fn sqli_java_kotlin_unannotated_httptrigger_param_names_clean() {
+    let java_src = r#"
+import com.microsoft.azure.functions.annotation.HttpTrigger;
+import java.sql.Statement;
+
+class App {
+  void helper(String HttpTrigger, Statement stmt) throws Exception {
+    String q = "SELECT * FROM users WHERE name='" + HttpTrigger + "'";
+    stmt.executeQuery(q);
+  }
+}
+"#;
+    let java_outcome = analyse_with_options(
+        &ws_for_language("App.java", java_src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_absent(
+        &java_outcome,
+        "sql-injection",
+        "Java unannotated HttpTrigger parameter name must stay clean",
+    );
+
+    let kotlin_src = r#"
+import com.microsoft.azure.functions.annotation.HttpTrigger
+import java.sql.Statement
+
+class App {
+  fun helper(HttpTrigger: String, stmt: Statement) {
+    val q = "SELECT * FROM users WHERE name='" + HttpTrigger + "'"
+    stmt.executeQuery(q)
+  }
+}
+"#;
+    let kotlin_outcome = analyse_with_options(
+        &ws_for_language("App.kt", kotlin_src),
+        TaintAnalysisOptions::default(),
+    );
+    assert_tag_absent(
+        &kotlin_outcome,
+        "sql-injection",
+        "Kotlin unannotated HttpTrigger parameter name must stay clean",
+    );
+}
+
+#[test]
 fn sqli_java_esapi_encodeforsql_second_arg_sanitizes() {
     let src = r#"
 import java.sql.Statement;
