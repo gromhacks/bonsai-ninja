@@ -25,6 +25,19 @@ fn path_step(
     }
 }
 
+fn sink_match(file: &str, line: u32, column: u32, text: &str, enclosing_fn: &str) -> RuleMatch {
+    RuleMatch {
+        rule_id: "typescript.test.sink".to_string(),
+        language: "typescript".to_string(),
+        file: file.to_string(),
+        line,
+        column,
+        span: Span::new(bonsai_common::FileId::new(0), 0, 1),
+        match_text: text.to_string(),
+        enclosing_fn: Some(enclosing_fn.to_string()),
+    }
+}
+
 #[test]
 fn normalize_taint_path_collapses_adjacent_duplicate_report_sites() {
     let normalized = normalize_taint_path(vec![
@@ -106,4 +119,54 @@ fn normalize_taint_path_preserves_distinct_report_lines() {
     assert_eq!(normalized.len(), 2);
     assert_eq!(normalized[0].callee, "service");
     assert_eq!(normalized[1].callee, "renderResults");
+}
+
+#[test]
+fn terminal_taint_step_aligns_to_selected_sink_location() {
+    let aligned = align_terminal_taint_step_to_sink(
+        vec![
+            path_step(
+                "route",
+                "applyOverrides",
+                "src/server.ts",
+                4,
+                10,
+                vec![(1, "req.body", "source")],
+            ),
+            path_step(
+                "applyOverrides",
+                "key",
+                "src/deep.ts",
+                2,
+                3,
+                vec![(0, "key", ""), (1, "source", "")],
+            ),
+        ],
+        &sink_match("src/deep.ts", 6, 7, "target.key", "applyOverrides"),
+    );
+
+    assert_eq!(aligned.len(), 2);
+    let terminal = aligned.last().unwrap();
+    assert_eq!(terminal.file, "src/deep.ts");
+    assert_eq!(terminal.line, 6);
+    assert_eq!(terminal.column, 7);
+    assert_eq!(terminal.callee, "target.key");
+}
+
+#[test]
+fn terminal_taint_step_does_not_align_across_functions() {
+    let aligned = align_terminal_taint_step_to_sink(
+        vec![path_step(
+            "helper",
+            "key",
+            "src/deep.ts",
+            2,
+            3,
+            vec![(0, "key", "")],
+        )],
+        &sink_match("src/deep.ts", 6, 7, "target.key", "applyOverrides"),
+    );
+
+    assert_eq!(aligned[0].line, 2);
+    assert_eq!(aligned[0].callee, "key");
 }

@@ -3179,8 +3179,6 @@ struct CallEvidence {
     chain_names: Vec<String>,
     chain_precision: Precision,
     taint_path: Vec<TaintPropagationStep>,
-    group_id: String,
-    flow_id: String,
     sink_tainted_args: Vec<TaintedArgInfo>,
 }
 
@@ -3215,8 +3213,6 @@ fn build_call_evidence(
     }
     let taint_path = taint_path_for_lineage(ws, &records, Some(call));
     let chain_names = chain_names_for_path(ws, &chain_funcs)?;
-    let group_id = group_id_for_taint_path(&chain_names, &taint_path);
-    let flow_id = flow_id_for_taint_path(&chain_names, &taint_path);
     let sink_tainted_args: Vec<TaintedArgInfo> = call
         .tainted_args
         .iter()
@@ -3230,8 +3226,6 @@ fn build_call_evidence(
         chain_names,
         chain_precision,
         taint_path,
-        group_id,
-        flow_id,
         sink_tainted_args,
     })
 }
@@ -3592,6 +3586,43 @@ fn normalize_taint_path(path: Vec<TaintPropagationStep>) -> Vec<TaintPropagation
         merge_taint_report_step(previous, step);
     }
     normalized
+}
+
+fn align_terminal_taint_step_to_sink(
+    mut path: Vec<TaintPropagationStep>,
+    sink: &RuleMatch,
+) -> Vec<TaintPropagationStep> {
+    let Some(step) = path.last_mut() else {
+        return path;
+    };
+    if !terminal_taint_step_should_align_to_sink(step, sink) {
+        return path;
+    }
+    step.file = sink.file.clone();
+    step.line = sink.line;
+    step.column = sink.column;
+    if !sink.match_text.is_empty() {
+        step.callee = sink.match_text.clone();
+    }
+    normalize_taint_path(path)
+}
+
+fn terminal_taint_step_should_align_to_sink(step: &TaintPropagationStep, sink: &RuleMatch) -> bool {
+    if step.file != sink.file || sink.line == 0 {
+        return false;
+    }
+    if step.line == sink.line && (step.column == sink.column || sink.column == 0) {
+        return false;
+    }
+    if !sink.enclosing_fn.as_deref().is_none_or(|enclosing| {
+        let caller = display_callee_tail(&step.caller);
+        caller == enclosing || step.caller == enclosing
+    }) {
+        return false;
+    }
+    step.line == 0
+        || step.line < sink.line
+        || (step.line == sink.line && (step.column == 0 || step.column < sink.column))
 }
 
 fn same_taint_report_site(left: &TaintPropagationStep, right: &TaintPropagationStep) -> bool {
@@ -4625,13 +4656,16 @@ where
                         lineage_misses = lineage_misses.saturating_add(1);
                         continue;
                     };
+                    let taint_path = align_terminal_taint_step_to_sink(evidence.taint_path.clone(), snk);
+                    let group_id = group_id_for_taint_path(&evidence.chain_names, &taint_path);
+                    let flow_id = flow_id_for_taint_path(&evidence.chain_names, &taint_path);
                     if let Some(f) = make_finding(
                         src,
                         snk,
                         pack,
                         FindingBuildContext {
-                            group_id: Some(evidence.group_id.clone()),
-                            flow_id: Some(evidence.flow_id.clone()),
+                            group_id: Some(group_id),
+                            flow_id: Some(flow_id),
                             source_func: src_func_id,
                             sink_func: call.caller,
                             chain_funcs: &evidence.chain_funcs,
@@ -4639,7 +4673,7 @@ where
                             san_by_func: &san_by_func,
                             tainted_call_spans: &tainted_call_spans,
                             sink_tainted_args: evidence.sink_tainted_args.clone(),
-                            taint_path: evidence.taint_path.clone(),
+                            taint_path,
                             precision: evidence.chain_precision,
                             analysis_incomplete_reasons: unresolved_call_index
                                 .reasons_for_terminal_call(call),
