@@ -33,3 +33,68 @@ fn arrow_expression_records_implicit_return() {
         echo.flow_events
     );
 }
+
+#[test]
+fn commonjs_named_function_export_has_single_semantic_decl() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "service.js",
+            "function sink(filter) {}\n\
+             exports.search = function search(email, password) {\n  sink({ email, password });\n};\n",
+        )],
+    );
+    for file in ws.db().vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+
+    let global = ws.db().global_index();
+    let search_decls: Vec<_> = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .filter(|decl| decl.name == "search")
+        .collect();
+
+    assert_eq!(
+        search_decls.len(),
+        1,
+        "CommonJS function export should not create duplicate search FuncIds: {search_decls:#?}"
+    );
+    assert_eq!(search_decls[0].params, ["email", "password"]);
+}
+
+#[test]
+fn commonjs_export_alias_preserves_different_local_function_name() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "service.js",
+            "exports.lookup = function search(term) {\n  return term;\n};\n",
+        )],
+    );
+    for file in ws.db().vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+
+    let global = ws.db().global_index();
+    let names: Vec<_> = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .map(|decl| decl.name.as_str())
+        .collect();
+
+    assert!(
+        names.contains(&"search"),
+        "same-file references should keep resolving the local function name: {names:?}"
+    );
+    assert!(
+        names.contains(&"lookup"),
+        "CommonJS import resolution should see the exported member name: {names:?}"
+    );
+}

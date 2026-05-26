@@ -34,7 +34,10 @@ const TYPESCRIPT_VOCAB: ModifierVocabulary = ModifierVocabulary {
     // TypeScript's default class-member visibility is `public`.
     default_visibility: Visibility::Public,
 };
-use bonsai_lang_javascript::{apply_js_ts_default_export_aliases, js_ts_imports, js_ts_require_calls};
+use bonsai_lang_javascript::{
+    apply_js_ts_commonjs_named_export_aliases, apply_js_ts_default_export_aliases, js_ts_imports,
+    js_ts_require_calls,
+};
 use tree_sitter::{Language, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("typescript");
@@ -104,6 +107,9 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
+        }
         // TS/JS module = workspace-relative file path with `.ts`/`.tsx` (etc.) stripped.
         let module_segments = ctx
             .workspace_relative_path(file)
