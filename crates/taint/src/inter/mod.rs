@@ -5717,6 +5717,13 @@ fn direct_call_expression_return_taint(
                             .is_some_and(|receiver| call_arg_is_directly_tainted(receiver, state))
                 })
         };
+        if callee_decl.is_some_and(|decl| {
+            call_receiver_from_name(&callee_name)
+                .as_deref()
+                .is_some_and(|receiver| implicit_receiver_return_is_tainted(decl, receiver, state))
+        }) {
+            return Some(true);
+        }
         if summary
             .returns_taint_of
             .iter()
