@@ -98,3 +98,69 @@ fn commonjs_export_alias_preserves_different_local_function_name() {
         "CommonJS import resolution should see the exported member name: {names:?}"
     );
 }
+
+#[test]
+fn commonjs_object_export_alias_preserves_different_local_function_name() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "service.js",
+            "function realSearch(term) {\n  return term;\n}\nmodule.exports = { lookup: realSearch };\n",
+        )],
+    );
+    for file in ws.db().vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+
+    let global = ws.db().global_index();
+    let names: Vec<_> = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .map(|decl| decl.name.as_str())
+        .collect();
+
+    assert!(
+        names.contains(&"realSearch"),
+        "same-file references should keep resolving the local function name: {names:?}"
+    );
+    assert!(
+        names.contains(&"lookup"),
+        "CommonJS object export should expose the public member name: {names:?}"
+    );
+}
+
+#[test]
+fn esm_named_export_alias_preserves_different_local_function_name() {
+    use bonsai_lang_api::LanguageAdapter;
+
+    let adapter: Arc<dyn LanguageAdapter> = Arc::new(bonsai_lang_javascript::JavaScriptAdapter::new());
+    let ws = bonsai_testkit::workspace_with(
+        vec![adapter],
+        &[(
+            "service.js",
+            "function realRender(value) {\n  return value;\n}\nexport { realRender as render };\n",
+        )],
+    );
+    for file in ws.db().vfs().all_files() {
+        let _ = ws.db().decl_index(file);
+    }
+
+    let global = ws.db().global_index();
+    let names: Vec<_> = global
+        .all_files()
+        .flat_map(|file| global.decls_in(file))
+        .map(|decl| decl.name.as_str())
+        .collect();
+
+    assert!(
+        names.contains(&"realRender"),
+        "same-file references should keep resolving the local function name: {names:?}"
+    );
+    assert!(
+        names.contains(&"render"),
+        "ES named export should expose the public member name: {names:?}"
+    );
+}

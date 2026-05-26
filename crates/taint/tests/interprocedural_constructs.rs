@@ -1167,6 +1167,38 @@ module.exports = { searchByCode };
 }
 
 #[test]
+fn semantic_commonjs_object_export_rename_preserves_taint() {
+    let db = javascript_ws_files(&[
+        (
+            "api/search.js",
+            r"
+const { search } = require('../db/bookings');
+function handle(code) {
+  search(code);
+}
+",
+        ),
+        (
+            "db/bookings.js",
+            r"
+function realSearch(code) {
+  sink(code);
+}
+module.exports = { search: realSearch };
+",
+        ),
+    ]);
+    assert!(cross_function_sink_receives(
+        &db,
+        "handle",
+        &["code"],
+        "search",
+        "sink",
+        "code"
+    ));
+}
+
+#[test]
 fn semantic_commonjs_namespace_require_exports_assignment_preserves_taint() {
     let db = javascript_ws_files(&[
         (
@@ -1194,6 +1226,38 @@ exports.searchByCode = function (code) {
         "exports.searchByCode",
         "sink",
         "code"
+    ));
+}
+
+#[test]
+fn semantic_esm_named_export_rename_preserves_taint() {
+    let db = typescript_ws_files(&[
+        (
+            "api/render.ts",
+            r"
+import { render } from '../views/render';
+export function handle(q: string): void {
+  render(q);
+}
+",
+        ),
+        (
+            "views/render.ts",
+            r"
+function realRender(q: string): void {
+  sink(q);
+}
+export { realRender as render };
+",
+        ),
+    ]);
+    assert!(cross_function_sink_receives(
+        &db,
+        "handle",
+        &["q"],
+        "render",
+        "sink",
+        "q"
     ));
 }
 
