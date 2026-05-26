@@ -65,6 +65,9 @@ impl LanguageAdapter for JavaScriptAdapter {
     }
     fn extract_declarations(&self, file: FileId, ctx: &AdapterContext<'_>) -> DeclIndex {
         let mut decl_index = decl_index_with_handler(PACK_NAME, file, ctx, &HANDLER);
+        if let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) {
+            apply_js_ts_commonjs_named_export_aliases(&mut decl_index, &tree, snapshot.text.as_bytes(), file);
+        }
         // Module identity = workspace-relative path with the JS/TS extension stripped.
         let module_segments = ctx
             .workspace_relative_path(file)
@@ -373,6 +376,79 @@ pub fn apply_js_ts_default_export_aliases(decl_index: &mut DeclIndex, tree: &Tre
         aliases.push(alias);
     }
     decl_index.defs.extend(aliases);
+}
+
+/// Surface `exports.name = function localName ...` and
+/// `module.exports.name = function localName ...` under the exported
+/// member name when that differs from the function's local name. The
+/// shared declaration walker owns duplicate suppression for same-name
+/// function expressions, so this only adds a real export alias.
+pub fn apply_js_ts_commonjs_named_export_aliases(
+    decl_index: &mut DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let mut aliases = Vec::new();
+    let mut next_symbol = decl_index
+        .defs
+        .iter()
+        .map(|decl| decl.symbol.raw())
+        .max()
+        .map_or(0, |raw| raw.saturating_add(1));
+    for assignment in collect_kinds(tree, &["assignment_expression"]) {
+        let left = assignment.child_by_field_name("left");
+        let right = assignment.child_by_field_name("right");
+        let (Some(left), Some(right)) = (left, right) else {
+            continue;
+        };
+        let Some(export_name) = commonjs_named_export_member(&node_text(&left, src)) else {
+            continue;
+        };
+        if export_name == "default" || export_name.is_empty() {
+            continue;
+        }
+        let right_span = span_of(file, &right);
+        let Some(source) = decl_index.defs.iter().find(|decl| decl.span == right_span) else {
+            continue;
+        };
+        if source.name == export_name {
+            continue;
+        }
+        if !matches!(
+            source.kind,
+            bonsai_lang_api::DeclKind::Function
+                | bonsai_lang_api::DeclKind::Method
+                | bonsai_lang_api::DeclKind::Constructor
+                | bonsai_lang_api::DeclKind::Class
+        ) {
+            continue;
+        }
+        if decl_index.defs.iter().chain(aliases.iter()).any(|decl| {
+            decl.name == export_name && decl.span == source.span && decl.body_span == source.body_span
+        }) {
+            continue;
+        }
+        let mut alias = source.clone();
+        alias.symbol = SymbolId::new(next_symbol);
+        next_symbol = next_symbol.saturating_add(1);
+        alias.name = export_name;
+        alias.qualified_name = None;
+        aliases.push(alias);
+    }
+    decl_index.defs.extend(aliases);
+}
+
+fn commonjs_named_export_member(left: &str) -> Option<String> {
+    let left = left.trim();
+    let member = left
+        .strip_prefix("exports.")
+        .or_else(|| left.strip_prefix("module.exports."))?;
+    (!member.is_empty()
+        && member
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+    .then(|| member.to_string())
 }
 
 enum DefaultExportTarget {

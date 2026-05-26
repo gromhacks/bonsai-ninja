@@ -4779,6 +4779,14 @@ pub fn decl_index_with_handler(
     // diagnostics but never clash with a real function name.
     let lambda_nodes = collect_kinds(&tree, handler.lambda_kinds);
     for lambda in lambda_nodes {
+        // Some adapters promote expression-bodied callables to normal
+        // declarations because their grammar exposes enough structure
+        // to name and walk them directly. Do not index the same syntax
+        // again as a lambda; duplicate FuncIds split call resolution
+        // from matcher attribution for a single semantic function.
+        if handler.fn_kinds.contains(&lambda.kind()) {
+            continue;
+        }
         // Skip lambdas that are passed directly as call arguments.
         // `walk_into` inlines those bodies into the enclosing call's
         // owner via `walk_lambda_body`; emitting a second synthetic
