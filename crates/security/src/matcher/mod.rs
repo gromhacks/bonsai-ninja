@@ -1391,6 +1391,7 @@ fn decl_target_context_allows(
         && target.visibility_in.is_empty()
         && target.in_class.is_empty()
         && target.in_method.is_empty()
+        && target.in_method_prefix.is_empty()
         && (param_index.is_none() || target.param_index_in.is_empty())
     {
         return true;
@@ -1404,7 +1405,13 @@ fn decl_target_context_allows(
     if !target.visibility_in.is_empty() && !target.visibility_in.iter().any(|want| want == &decl.visibility) {
         return false;
     }
-    if !target.in_method.is_empty() && !target.in_method.iter().any(|want| want == &decl.name) {
+    let method_name_allowed = target.in_method.is_empty() && target.in_method_prefix.is_empty()
+        || target.in_method.iter().any(|want| want == &decl.name)
+        || target
+            .in_method_prefix
+            .iter()
+            .any(|prefix| decl.name.starts_with(prefix));
+    if !method_name_allowed {
         return false;
     }
     if let Some(idx) = param_index {
