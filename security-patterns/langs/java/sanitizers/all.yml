@@ -13,7 +13,7 @@
   - min_args: 1
   - arg_matches_regex:
       index: 0
-      regex: "\\?|:[A-Za-z_][A-Za-z0-9_]*"
+      regex: '^"([^"\\]|\\.)*(\?|:[A-Za-z_][A-Za-z0-9_]*)([^"\\]|\\.)*"$'
   match_examples:
   - name: generated shape example
     code: |
@@ -30,6 +30,16 @@
       class App {
         void handle(String input) throws Exception {
           Connection.prepareStatement(input);
+        }
+      }
+    expect_no_match: true
+  - name: prepare statement tainted template with placeholder negative
+    code: |
+      import java.sql.*;
+      class App {
+        void handle(Connection conn, String table) throws Exception {
+          String sql = "select * from " + table + " where id = ?";
+          conn.prepareStatement(sql);
         }
       }
     expect_no_match: true

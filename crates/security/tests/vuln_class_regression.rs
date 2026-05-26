@@ -596,6 +596,52 @@ class App {
 }
 
 #[test]
+fn sqli_java_prepared_statement_parameter_binding_clean() {
+    let src = r#"
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import javax.servlet.http.HttpServletRequest;
+
+class App {
+  void handle(HttpServletRequest request, Connection conn) throws Exception {
+    String name = request.getParameter("name");
+    PreparedStatement stmt = conn.prepareStatement("SELECT * FROM users WHERE name = ?");
+    stmt.setString(1, name);
+    stmt.executeQuery();
+  }
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.java", src), TaintAnalysisOptions::default());
+    assert_tag_absent(
+        &outcome,
+        "sql-injection",
+        "Java PreparedStatement parameter binding must stay clean",
+    );
+}
+
+#[test]
+fn sqli_java_preparestatement_tainted_template_reports() {
+    let src = r#"
+import java.sql.Connection;
+import javax.servlet.http.HttpServletRequest;
+
+class App {
+  void handle(HttpServletRequest request, Connection conn) throws Exception {
+    String table = request.getParameter("table");
+    String sql = "SELECT * FROM " + table + " WHERE id = ?";
+    conn.prepareStatement(sql);
+  }
+}
+"#;
+    let outcome = analyse_with_options(&ws_for_language("App.java", src), TaintAnalysisOptions::default());
+    assert_tag_reported(
+        &outcome,
+        "sql-injection",
+        "Java prepareStatement with tainted SQL template",
+    );
+}
+
+#[test]
 fn sqli_java_esapi_encodeforsql_second_arg_sanitizes() {
     let src = r#"
 import java.sql.Statement;
