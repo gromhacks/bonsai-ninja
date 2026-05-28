@@ -115,10 +115,12 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // component accessors. In `--inferred-sources` mode two extra
         // narrowed `entry-point.class_field.inherited` findings appear on
         // the sibling record components `kind`/`user` — the whole-object
-        // value-flow over-approximation (§C field-precision); they
-        // collapse to the single real flow once record objects are
-        // tracked field-precisely.
-        "java" => 3,
+        // §C collapse (2026-05-28): `entry-point.class_field.inherited`
+        // sources on sibling components (`this.kind`/`this.user`) are
+        // now dropped when their field doesn't appear in the sink's
+        // tainted_args, leaving just the real `req.getParameter →
+        // Runtime.exec` finding.
+        "java" => 1,
         "javascript" => 1,
         "kotlin" => 1,
         // Lua mega_flow has one real command-injection flow. The old count
@@ -138,7 +140,13 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // php-adapter field-precision (array-literal field-writes + spread +
         // subscript-read field links) — see docs/goal.md.
         "php" => 2,
-        "python" => 5,
+        // §C collapse (2026-05-28): one `class_field.inherited`
+        // sibling-component over-approximation dropped now that
+        // field-mismatched inferred sources are filtered when the
+        // sink's tainted arg doesn't name the source's field. Real
+        // flask request flow + 3 surviving decorator-handler inferred
+        // entries remain.
+        "python" => 4,
         "ruby" => 2,
         "rust" => 1,
         // HttpServletRequest.getParameter → Envelope (case class) →

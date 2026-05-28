@@ -55,6 +55,7 @@ fn value_flow_pipeline_hash(db: &AnalyzerDb, sidecar_path: &Path) -> u64 {
         ^ u64::from(VALUE_FLOW_CACHE_VERSION)
         ^ workspace_content_fingerprint(db)
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
+        ^ crate::build_fingerprint_hash()
 }
 
 /// Per-function content-address hash used for fine-grained

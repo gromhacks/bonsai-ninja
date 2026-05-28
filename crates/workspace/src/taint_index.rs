@@ -76,10 +76,11 @@ fn taint_graph_pipeline_hash(db: &AnalyzerDb, config_fingerprint: u64, sidecar_p
     // the old. `0` is the sentinel "no fingerprint set" value the
     // legacy bincode path used; treat it as opting out of the
     // config-bound check.
+    let build_fp = crate::build_fingerprint_hash();
     if config_fingerprint == 0 {
-        policy_lo ^ policy_hi ^ content ^ semantic_version
+        policy_lo ^ policy_hi ^ content ^ semantic_version ^ build_fp
     } else {
-        policy_lo ^ policy_hi ^ content ^ config_fingerprint ^ semantic_version
+        policy_lo ^ policy_hi ^ content ^ config_fingerprint ^ semantic_version ^ build_fp
     }
 }
 

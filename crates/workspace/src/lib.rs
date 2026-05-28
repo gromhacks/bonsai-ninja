@@ -1703,7 +1703,25 @@ fn idg_pipeline_hash() -> u64 {
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;
-    lo ^ hi ^ 0xBEEF_C0DE_DEAD_FACE_u64 ^ IDG_STITCHING_SEMANTIC_VERSION
+    lo ^ hi
+        ^ 0xBEEF_C0DE_DEAD_FACE_u64
+        ^ IDG_STITCHING_SEMANTIC_VERSION
+        ^ build_fingerprint_hash()
+}
+
+/// Build-time fingerprint emitted by `build.rs` — `git rev-parse HEAD`
+/// + dirty-tree content hash, folded into a `u64`. Every sidecar's
+/// pipeline hash xors this in so an upgraded binary can't reuse
+/// caches built by a different analyzer version even if the per-
+/// sidecar manual semantic constant wasn't bumped. Falls back to `0`
+/// only when the build.rs env var is somehow unset (defense in depth
+/// — `build.rs` always emits it).
+pub(crate) fn build_fingerprint_hash() -> u64 {
+    const FINGERPRINT_HEX: &str = env!(
+        "BONSAI_BUILD_FINGERPRINT_HASH",
+        "build.rs must emit BONSAI_BUILD_FINGERPRINT_HASH"
+    );
+    u64::from_str_radix(FINGERPRINT_HEX, 16).unwrap_or(0)
 }
 
 fn idg_workspace_pipeline_hash(db: &AnalyzerDb, root: Option<&Path>) -> u64 {
