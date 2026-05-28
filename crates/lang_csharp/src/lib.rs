@@ -6,8 +6,9 @@ use bonsai_lang_api::{
         canonical_simple_type_name, collect_kinds, language_from_pack, node_text, parse_with, span_of,
         with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope, ImportSpec,
-    LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, CallKind, DeclIndex, DeclKind, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 
 const CSHARP_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
@@ -203,6 +204,42 @@ impl LanguageAdapter for CSharpAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, CSHARP_LIFECYCLE_TRANSITIONS);
         }
+        // Synthesize implicit members of positional `record`
+        // declarations (canonical constructor + component accessors) so
+        // `new R(.., tainted, ..)` and `r.Comp` thread taint — C#
+        // records have no grammar nodes for these. Shared with lang_java.
+        if let Some((_, tree)) = parse_with(PACK_NAME, file, ctx) {
+            let src = parse_with(PACK_NAME, file, ctx)
+                .map(|(s, _)| s.text.as_bytes().to_vec())
+                .unwrap_or_default();
+            bonsai_lang_api::kit::synthesize_record_members(&mut idx, &tree, &src, file);
+            // Expression-bodied properties (`X => expr;`) have no
+            // accessor node, so synthesize their getter before resolving
+            // bare property reads below.
+            synthesize_csharp_expression_bodied_properties(&mut idx, &tree, &src, file);
+            // C# constructor bodies are `block` kind — excluded from
+            // the kit's `body_has_implicit_return` set — so the kit
+            // emits no synthetic Return for them. Java's equivalent
+            // (`constructor_body` kind) IS treated as an expression-
+            // body, so each Java ctor gets a `Return{value_text=body}`
+            // event whose identifier tokenization bridges param taint
+            // to the return → caller's CallRet → caller's `repo`
+            // allocation. Mirror that by synthesizing a ctor Return
+            // whose value_text includes the body text + constructor_
+            // initializer text (`: base(data)`) so params propagate
+            // through the inheritance chain even when the body is
+            // empty — `new AuditedRepository(envelope)` then taints
+            // `repo` whole-object (Java-style), letting the existing
+            // 1-level receiver-field bridge carry it.
+            synthesize_csharp_constructor_implicit_returns(&mut idx, &tree, &src, file);
+        }
+        // Resolve bare implicit-`this` property reads. C# accesses a
+        // zero-arg property/getter by its bare name (`var c = Cmd;` for
+        // `string Cmd => Data.Cmd;`), which the generic walker emits as a
+        // plain identifier read — so taint never flows out of the
+        // property. Rewrite such reads into getter calls so the IDG
+        // stitches the property's return into the assignment.
+        qualify_csharp_implicit_member_reads(&mut idx);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -213,6 +250,538 @@ impl LanguageAdapter for CSharpAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// Synthesize getter `Method` decls for C# expression-bodied properties
+/// (`public string Cmd => Data.Cmd;`). The grammar emits these as a
+/// `property_declaration` whose body is an `arrow_expression_clause` with
+/// no `accessor_declaration` child — so the HANDLER's fn-kind extraction
+/// (which keys on `accessor_declaration`) produces no decl at all and the
+/// property's return expression is invisible to the IDG. Mirror the
+/// record-accessor synthesis: one zero-arg `Method` named after the
+/// property whose single `Return` forwards the (receiver-qualified) body
+/// expression, so a getter call resolves the property's value and a
+/// tainted receiver field flows out through the property.
+fn synthesize_csharp_expression_bodied_properties(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    let mut next_symbol = index
+        .defs
+        .iter()
+        .map(|d| d.symbol.raw())
+        .max()
+        .map_or(1, |m| m + 1);
+    let mut synthesized: Vec<bonsai_lang_api::Decl> = Vec::new();
+    for prop in collect_kinds(tree, &["property_declaration"]) {
+        // Expression-bodied only: a direct `arrow_expression_clause`
+        // child. Properties with an `accessor_list` (`{ get; set; }`)
+        // surface their bodies through `accessor_declaration` decls.
+        let mut pc = prop.walk();
+        let Some(arrow) = prop
+            .children(&mut pc)
+            .find(|c| c.kind() == "arrow_expression_clause")
+        else {
+            continue;
+        };
+        let Some(name_node) = prop.child_by_field_name("name") else {
+            continue;
+        };
+        let name = node_text(&name_node, src).trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        // Body expression = the arrow clause's last named child (the
+        // node after the `=>` token).
+        let mut ac = arrow.walk();
+        let named: Vec<_> = arrow.children(&mut ac).filter(|c| c.is_named()).collect();
+        let Some(expr) = named.last().copied() else {
+            continue;
+        };
+        let body = node_text(&expr, src).trim().to_string();
+        if body.is_empty() {
+            continue;
+        }
+        // Qualify a bare member read against the receiver so the field
+        // base resolves to `this` (`Data.Cmd` → `this.Data.Cmd`), which
+        // is what the receiver-state machinery keys on.
+        let qualified = if body.starts_with("this.") || body.starts_with("base.") {
+            body.clone()
+        } else {
+            format!("this.{body}")
+        };
+        let Some((parent, module_path, visibility)) =
+            csharp_enclosing_type_decl(index, prop, file)
+        else {
+            continue;
+        };
+        // A property with an explicit getter/field of the same name
+        // already covers this; don't double-declare.
+        if index
+            .defs
+            .iter()
+            .chain(synthesized.iter())
+            .any(|d| d.parent == parent && d.name == name && d.params.is_empty())
+        {
+            continue;
+        }
+        let body_span = span_of(file, &expr);
+        // If the body is a simple dotted member access (`Data.Cmd` —
+        // optionally prefixed with `this.`/`base.`), model it as a
+        // CALL chain rather than a single 2-level field read. The
+        // IDG's interprocedural receiver-field bridge is 1-level, so
+        // `Cmd => Data.Cmd` modeled as `Return this.Data.Cmd` (2-
+        // level read) never connects to the caller's tainted
+        // `repo.Data.Cmd`. Modeling as `Call Data.Cmd(); Return
+        // call-result` mirrors the Java accessor pattern
+        // (`String cmd() { return data.cmd(); }`) which the bridge
+        // already handles — the call resolves to the receiver-typed
+        // member (e.g. the record component's synthesized accessor),
+        // and that 1-level hop forwards the tainted field.
+        let flow_events = if let Some((call_receiver, call_name)) =
+            dotted_member_access_call_parts(&body)
+        {
+            // Look up the receiver's static type from sibling
+            // `property_declaration` / `field_declaration` siblings in
+            // the same class so the resolver can disambiguate the
+            // call's `name` against the receiver's class instead of
+            // resolving back to the synthesizing property itself
+            // (which would self-recurse).
+            let receiver_types =
+                csharp_lookup_member_type(prop, &call_receiver, src).into_iter().collect();
+            vec![
+                FlowEvent::Call {
+                    span: body_span,
+                    name: call_name.clone(),
+                    receiver: Some(call_receiver),
+                    receiver_types,
+                    call_kind: CallKind::Method,
+                    args: Vec::new(),
+                },
+                FlowEvent::Return {
+                    span: body_span,
+                    value_text: Some(format!("{call_name}()")),
+                    value_name: None,
+                },
+            ]
+        } else {
+            vec![FlowEvent::Return {
+                span: body_span,
+                value_text: Some(qualified.clone()),
+                value_name: Some(qualified.clone()),
+            }]
+        };
+        synthesized.push(bonsai_lang_api::Decl {
+            symbol: bonsai_common::SymbolId::new(next_symbol),
+            kind: DeclKind::Method,
+            name,
+            qualified_name: None,
+            module_path,
+            span: span_of(file, &name_node),
+            name_span: span_of(file, &name_node),
+            visibility,
+            parent,
+            body_span: Some(body_span),
+            flow_events,
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: vec!["this".to_string(), "base".to_string()],
+            receiver_state_sources: vec![qualified],
+            return_type: None,
+        });
+        next_symbol += 1;
+    }
+    index.defs.extend(synthesized);
+}
+
+/// For each C# `constructor_declaration` whose extracted decl has
+/// no `Return` event yet, synthesize one whose `value_text` includes
+/// the constructor body + initializer text (`: base(data)`). The IDG
+/// transfer's Return handler tokenizes that text via
+/// `bridge_value_expr_to_node`, so each identifier (in particular the
+/// `data` param forwarded to `base`) bridges to `Place::Return`. The
+/// caller's `new R(envelope)` site then connects via the standard
+/// callee-Return → caller-CallRet edge, tainting `repo` whole-object
+/// — which is exactly how Java's identical mega_flow propagates
+/// (Java's `constructor_body` kind falls into the kit's implicit-
+/// return path automatically; C#'s `block` doesn't).
+fn synthesize_csharp_constructor_implicit_returns(
+    index: &mut DeclIndex,
+    tree: &Tree,
+    src: &[u8],
+    file: FileId,
+) {
+    for ctor_node in collect_kinds(tree, &["constructor_declaration"]) {
+        let ctor_span = span_of(file, &ctor_node);
+        let Some(decl) = index.defs.iter_mut().find(|d| {
+            matches!(d.kind, DeclKind::Constructor) && d.span == ctor_span
+        }) else {
+            continue;
+        };
+        if decl.flow_events.iter().any(|e| matches!(e, FlowEvent::Return { .. })) {
+            continue;
+        }
+        // Build value_text from the constructor_initializer + body
+        // texts. Concatenating both surfaces param identifiers from
+        // either side (`: base(data)` or `{ Data = data; }`) so
+        // tokenization can bridge them.
+        let mut parts: Vec<String> = Vec::new();
+        let mut cw = ctor_node.walk();
+        for child in ctor_node.children(&mut cw) {
+            if matches!(child.kind(), "constructor_initializer" | "block") {
+                let t = node_text(&child, src).trim().to_string();
+                if !t.is_empty() {
+                    parts.push(t);
+                }
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let value_text = parts.join(" ");
+        let body_span = ctor_node
+            .child_by_field_name("body")
+            .map(|b| span_of(file, &b))
+            .unwrap_or_else(|| span_of(file, &ctor_node));
+        decl.flow_events.push(FlowEvent::Return {
+            span: body_span,
+            value_text: Some(value_text),
+            value_name: None,
+        });
+    }
+}
+
+/// Find a sibling `property_declaration` / `field_declaration` named
+/// `member` in the type that lexically encloses `prop`, returning its
+/// declared (canonical) type name. Used to set `receiver_types` on a
+/// synthesized member-access Call so the resolver dispatches against
+/// the receiver's class — without this, `Cmd => Data.Cmd` resolves
+/// `Data.Cmd` back to the same `Cmd` property and self-recurses.
+fn csharp_lookup_member_type(
+    prop: tree_sitter::Node<'_>,
+    member: &str,
+    src: &[u8],
+) -> Option<String> {
+    let mut cur = prop.parent();
+    let mut class_node = None;
+    while let Some(n) = cur {
+        if matches!(
+            n.kind(),
+            "class_declaration"
+                | "struct_declaration"
+                | "record_declaration"
+                | "interface_declaration"
+        ) {
+            class_node = Some(n);
+            break;
+        }
+        cur = n.parent();
+    }
+    let class_node = class_node?;
+    let body = class_node.child_by_field_name("body")?;
+    let mut walker = body.walk();
+    for child in body.children(&mut walker) {
+        match child.kind() {
+            "property_declaration" => {
+                let name_node = child.child_by_field_name("name")?;
+                if node_text(&name_node, src).trim() == member {
+                    let type_node = child.child_by_field_name("type")?;
+                    let raw = node_text(&type_node, src).trim();
+                    if raw.is_empty() {
+                        return None;
+                    }
+                    return Some(canonical_simple_type_name(raw).to_string());
+                }
+            }
+            "field_declaration" => {
+                // C# field_declaration: `Type Name [, Name2];` — the
+                // type is the `type` field; the name(s) are inside
+                // `variable_declaration` children.
+                let Some(type_node) = child.child_by_field_name("type") else {
+                    continue;
+                };
+                let mut cw = child.walk();
+                for cc in child.children(&mut cw) {
+                    if cc.kind() != "variable_declaration" {
+                        continue;
+                    }
+                    let mut vw = cc.walk();
+                    for v in cc.children(&mut vw) {
+                        if v.kind() != "variable_declarator" {
+                            continue;
+                        }
+                        if let Some(name_node) = v.child_by_field_name("name") {
+                            if node_text(&name_node, src).trim() == member {
+                                let raw = node_text(&type_node, src).trim();
+                                if raw.is_empty() {
+                                    return None;
+                                }
+                                return Some(canonical_simple_type_name(raw).to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// If `body` is a simple dotted member-access of identifiers
+/// (`Data.Cmd`, optionally prefixed `this.`/`base.`), return
+/// `(receiver, call_name)` modeling it as a method call — `Data.Cmd`
+/// becomes `(receiver="Data", call_name="Data.Cmd")` so the IDG's
+/// 1-level receiver-field bridge resolves it to the receiver-typed
+/// member (e.g. a record component's synthesized accessor). Returns
+/// `None` for any non-trivial body (call, indexer, literal, complex
+/// expression) so those keep the Return-only fallback.
+fn dotted_member_access_call_parts(body: &str) -> Option<(String, String)> {
+    let trimmed = body.trim();
+    // Strip a leading receiver qualifier; the remaining text must be a
+    // pure dotted identifier path of at least two segments
+    // (`A.B`/`A.B.C`/...).
+    let inner = trimmed
+        .strip_prefix("this.")
+        .or_else(|| trimmed.strip_prefix("base."))
+        .unwrap_or(trimmed);
+    let segments: Vec<&str> = inner.split('.').collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    for seg in &segments {
+        if seg.is_empty()
+            || !seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seg
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return None;
+        }
+    }
+    // Receiver = everything up to the last dot; call_name = full dotted
+    // form mirroring Java's `data.cmd` pattern (`receiver="data",
+    // name="data.cmd"`).
+    let last_dot = inner.rfind('.').unwrap();
+    let receiver = inner[..last_dot].to_string();
+    Some((receiver, inner.to_string()))
+}
+
+/// Resolve the type declaration (`class`/`struct`/`record`/`interface`)
+/// that lexically encloses `node`, returning its symbol / module / visibility.
+fn csharp_enclosing_type_decl(
+    index: &DeclIndex,
+    node: tree_sitter::Node<'_>,
+    file: FileId,
+) -> Option<(
+    Option<bonsai_common::SymbolId>,
+    bonsai_lang_api::ModulePath,
+    Visibility,
+)> {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if matches!(
+            n.kind(),
+            "class_declaration"
+                | "struct_declaration"
+                | "record_declaration"
+                | "interface_declaration"
+        ) {
+            let span = span_of(file, &n);
+            return index
+                .defs
+                .iter()
+                .find(|d| d.span == span)
+                .map(|d| (Some(d.symbol), d.module_path.clone(), d.visibility));
+        }
+        cur = n.parent();
+    }
+    None
+}
+
+/// Rewrite bare reads of zero-arg member accessors (C# properties /
+/// expression-bodied `=> expr` getters) into getter calls. C# reads a
+/// property by its bare name (`var c = Cmd;` for `string Cmd =>
+/// Data.Cmd;`), which the generic walker emits as `Assign { source_name:
+/// "Cmd" }` — a plain identifier read that never connects to the
+/// property's return, so taint stops at the property boundary. When the
+/// bare RHS name matches a zero-arg member decl in this file and is NOT
+/// a local/param of the method, convert it into a `source_call` so the
+/// IDG resolves the getter and forwards its return into the assignment.
+fn qualify_csharp_implicit_member_reads(index: &mut DeclIndex) {
+    use std::collections::HashSet;
+    let getter_names: HashSet<String> = index
+        .defs
+        .iter()
+        .filter(|d| matches!(d.kind, DeclKind::Method) && d.params.is_empty() && !d.name.is_empty())
+        .map(|d| d.name.clone())
+        .collect();
+    if getter_names.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        if decl.flow_events.is_empty() {
+            continue;
+        }
+        // A local binding (param or assignment target) shadows the
+        // member, so those names must keep their plain-read semantics.
+        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
+        collect_csharp_assign_targets(&decl.flow_events, &mut locals);
+        rewrite_csharp_member_reads(&mut decl.flow_events, &getter_names, &locals);
+    }
+}
+
+fn collect_csharp_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } => {
+                if !target.is_empty() {
+                    out.insert(target.trim().to_string());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_csharp_assign_targets(then_events, out);
+                collect_csharp_assign_targets(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_csharp_assign_targets(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_csharp_assign_targets(body, out);
+                collect_csharp_assign_targets(catch_events, out);
+                collect_csharp_assign_targets(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_csharp_member_reads(
+    events: &mut Vec<FlowEvent>,
+    getters: &std::collections::HashSet<String>,
+    locals: &std::collections::HashSet<String>,
+) {
+    // Two-pass: first recurse into nested events (mutating their
+    // inner vecs); then walk this level with an index, mutating each
+    // Assign that needs qualification AND inserting an explicit Call
+    // event before it so `walk_call`'s `args.is_empty()` fallback
+    // tokenizes the property name into a `CallArg{idx=0}` recv-slot.
+    // Without that synthetic recv-slot, `recv_slots_for_call_span`
+    // returns nothing for the property's call and the interprocedural
+    // receiver-field bridge can't propagate caller-receiver taint
+    // into the getter's body — mirrors Java's pattern where
+    // `String c = cmd();` emits both `Assign{source_call:"cmd"}` and
+    // `Call{name:"cmd", call_kind:function, args:[]}`.
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_csharp_member_reads(then_events, getters, locals);
+                rewrite_csharp_member_reads(else_events, getters, locals);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_csharp_member_reads(body, getters, locals);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_csharp_member_reads(body, getters, locals);
+                rewrite_csharp_member_reads(catch_events, getters, locals);
+                rewrite_csharp_member_reads(finally_events, getters, locals);
+            }
+            _ => {}
+        }
+    }
+    let mut idx = 0usize;
+    while idx < events.len() {
+        let (qualify_name, span) = match &events[idx] {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                span,
+                ..
+            } => {
+                if source_call.is_some() {
+                    (None, *span)
+                } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    if getters.contains(&name)
+                        && !locals.contains(&name)
+                        && name != target.trim()
+                    {
+                        (Some(name), *span)
+                    } else {
+                        (None, *span)
+                    }
+                } else {
+                    (None, *span)
+                }
+            }
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+        let Some(name) = qualify_name else {
+            idx += 1;
+            continue;
+        };
+        // Mutate the Assign in place.
+        if let FlowEvent::Assign {
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = &mut events[idx]
+        {
+            *source_call = Some(name.clone());
+            *source_call_args = Vec::new();
+            *source_name = None;
+            source_names.retain(|s| s.trim() != name);
+            *value_kind = Some(AssignValueKind::CallResult);
+        }
+        // Insert an explicit Call event before the Assign so
+        // `walk_call`'s argless fallback synthesizes the recv-slot.
+        events.insert(
+            idx,
+            FlowEvent::Call {
+                span,
+                name: name.clone(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            },
+        );
+        idx += 2;
     }
 }
 

@@ -3,12 +3,13 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
     kit::{
-        collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
-        node_text, parse_with, span_of, walk_flow_events, with_fn_kinds_and_implicit_receivers,
+        canonical_simple_type_name, collect_kinds, collect_receiver_field_writes,
+        first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of,
+        walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, GrammarHandler, ImportIndex, ImportScope,
-    ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, ModifierVocabulary, TypeAliasBinding,
-    TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, CallKind, Decl, DeclIndex, DeclKind, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::Node;
 
@@ -117,6 +118,33 @@ impl LanguageAdapter for SwiftAdapter {
             // method decl.
             let class_field_aliases = collect_swift_class_field_aliases(&tree, file, src);
             synthesize_swift_constructor_decls(&mut idx, file, &tree, src);
+            // Swift structs (`struct Envelope { var kind, var cmd, ... }`)
+            // get a compiler-synthesized **memberwise init** — no
+            // explicit `init` block, but `Envelope(kind:, cmd:, ...)`
+            // is callable. Without surfacing this as a Constructor
+            // decl with `receiver_field_writes` for each stored
+            // property, `new Envelope(...)` never field-projects
+            // `envelope.cmd ← arg` onto the caller's allocation and
+            // the entire mega_flow chain stalls at handle_request.
+            synthesize_swift_memberwise_struct_inits(&mut idx, file, &tree, src);
+            // Swift computed properties (`var cmd: String { data.cmd }`)
+            // are wrapped in `property_declaration` with a
+            // `computed_value: computed_property` child rather than a
+            // function_declaration — the kit's fn-kind extraction
+            // misses them entirely. Synthesize a zero-arg Method per
+            // computed property so `let c = cmd` (resolved via the
+            // qualify pass below) finds a callable getter.
+            synthesize_swift_computed_property_decls(&mut idx, file, &tree, src);
+            // Synthesize a `Return` whose value_text is the param list
+            // on each Constructor that lacks one. Tokenization
+            // bridges the param identifiers to the Return, which
+            // the standard callee-Return → caller-CallRet edge then
+            // carries onto the allocation target — making `repo`
+            // whole-object tainted (Java-style) so the receiver-
+            // field bridge fires for `repo.run()` even when only
+            // `repo.data.cmd` is field-precisely tainted. Mirrors
+            // `synthesize_csharp_constructor_implicit_returns`.
+            synthesize_swift_constructor_implicit_returns(&mut idx);
             let class_span_for_parent: std::collections::HashMap<bonsai_common::SymbolId, Span> = idx
                 .defs
                 .iter()
@@ -692,4 +720,640 @@ fn parse_imports(tree: &Tree, src: &[u8], file: FileId) -> Vec<ImportSpec> {
         });
     }
     imports
+}
+
+/// Synthesize a zero-arg `Method` decl for each Swift computed
+/// property — `var cmd: String { data.cmd }` — by extracting the
+/// property name + computed-property body. The kit's fn-kind set is
+/// `["function_declaration"]`, so `property_declaration` nodes (which
+/// is what computed properties parse to in tree-sitter-swift) aren't
+/// indexed and a bare property read `let c = cmd` resolves to
+/// nothing. Each synthesized Method's body is modeled as a `Call+
+/// Return` chain when the computed body is a simple dotted member
+/// access (`data.cmd`) so the 1-level receiver-field bridge can
+/// thread taint to the record/component accessor; otherwise it's a
+/// single `Return` with the body text.
+fn synthesize_swift_computed_property_decls(
+    idx: &mut DeclIndex,
+    file: FileId,
+    tree: &Tree,
+    src: &[u8],
+) {
+    let mut next = idx
+        .defs
+        .iter()
+        .map(|d| d.symbol.raw())
+        .max()
+        .map_or(1, |m| m + 1);
+    let mut synthesized: Vec<Decl> = Vec::new();
+    for prop in collect_kinds(tree, &["property_declaration"]) {
+        // Only handle computed properties — a `computed_value:
+        // computed_property` child. Stored properties (no body) are
+        // already represented via `let x: T` field bindings.
+        let mut pw = prop.walk();
+        let Some(computed) = prop
+            .children(&mut pw)
+            .find(|c| c.kind() == "computed_property")
+        else {
+            continue;
+        };
+        // Property name lives under `name: pattern > bound_identifier:
+        // simple_identifier`.
+        let Some(name) = swift_property_name(prop, src) else {
+            continue;
+        };
+        // Extract the body expression text. For
+        // `computed_property > statements > <expr>`, take the
+        // statements' last named child.
+        let body_text = swift_computed_body_text(computed, src);
+        let Some(body_text) = body_text else {
+            continue;
+        };
+        let body_span = span_of(file, &computed);
+        // Find enclosing class/struct/protocol/extension decl for
+        // parent + module path + visibility lookup.
+        let Some((parent, module_path, visibility)) =
+            swift_enclosing_type_decl(idx, prop, file)
+        else {
+            continue;
+        };
+        // Skip if a sibling decl with the same name + zero-arg
+        // already exists (e.g. an explicit `get` accessor).
+        if idx
+            .defs
+            .iter()
+            .chain(synthesized.iter())
+            .any(|d| {
+                d.parent == parent && d.name == name && d.params.is_empty()
+                    && matches!(d.kind, DeclKind::Method | DeclKind::Function)
+            })
+        {
+            continue;
+        }
+        // Body shape: Call+Return when it's a dotted member access,
+        // else single Return with the body text.
+        let flow_events = if let Some((call_receiver, call_name)) =
+            swift_dotted_member_access_parts(&body_text)
+        {
+            let receiver_types =
+                swift_lookup_member_type(prop, &call_receiver, src).into_iter().collect();
+            vec![
+                FlowEvent::Call {
+                    span: body_span,
+                    name: call_name.clone(),
+                    receiver: Some(call_receiver),
+                    receiver_types,
+                    call_kind: CallKind::Method,
+                    args: Vec::new(),
+                },
+                FlowEvent::Return {
+                    span: body_span,
+                    value_text: Some(format!("{call_name}()")),
+                    value_name: None,
+                },
+            ]
+        } else {
+            let qualified = if body_text.starts_with("self.") || body_text.starts_with("super.") {
+                body_text.clone()
+            } else {
+                format!("self.{body_text}")
+            };
+            vec![FlowEvent::Return {
+                span: body_span,
+                value_text: Some(qualified.clone()),
+                value_name: Some(qualified),
+            }]
+        };
+        // Name span: the simple_identifier under `name: pattern`.
+        let name_span = swift_property_name_span(prop, file).unwrap_or(body_span);
+        synthesized.push(Decl {
+            symbol: bonsai_common::SymbolId::new(next),
+            kind: DeclKind::Method,
+            name,
+            qualified_name: None,
+            module_path,
+            span: name_span,
+            name_span,
+            visibility,
+            parent,
+            body_span: Some(body_span),
+            flow_events,
+            has_implicit_returns: false,
+            params: Vec::new(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes: Vec::new(),
+            implicit_receiver_names: vec!["self".to_string(), "super".to_string()],
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+        });
+        next += 1;
+    }
+    idx.defs.extend(synthesized);
+    // After synthesis, rewrite bare-name reads of these getters
+    // throughout the file's method bodies (`let c = cmd` → `Call cmd; Assign{source_call:cmd}`).
+    qualify_swift_implicit_member_reads(idx);
+}
+
+fn swift_property_name(prop: Node<'_>, src: &[u8]) -> Option<String> {
+    let pattern = prop.child_by_field_name("name")?;
+    let mut pw = pattern.walk();
+    for c in pattern.children(&mut pw) {
+        if c.kind() == "bound_identifier" || c.kind() == "simple_identifier" {
+            let mut ic = c.walk();
+            for inner in c.children(&mut ic) {
+                if inner.kind() == "simple_identifier" {
+                    let n = node_text(&inner, src).trim();
+                    if !n.is_empty() {
+                        return Some(n.to_string());
+                    }
+                }
+            }
+            let n = node_text(&c, src).trim();
+            if !n.is_empty() {
+                return Some(n.to_string());
+            }
+        }
+    }
+    let n = node_text(&pattern, src).trim();
+    if n.is_empty() {
+        None
+    } else {
+        Some(n.to_string())
+    }
+}
+
+fn swift_property_name_span(prop: Node<'_>, file: FileId) -> Option<Span> {
+    let pattern = prop.child_by_field_name("name")?;
+    let mut pw = pattern.walk();
+    for c in pattern.children(&mut pw) {
+        if c.kind() == "bound_identifier" || c.kind() == "simple_identifier" {
+            return Some(span_of(file, &c));
+        }
+    }
+    Some(span_of(file, &pattern))
+}
+
+fn swift_computed_body_text(computed: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut cw = computed.walk();
+    // Prefer the inner `statements` child's last named expression.
+    let stmts = computed
+        .children(&mut cw)
+        .find(|c| c.kind() == "statements")?;
+    let mut sw = stmts.walk();
+    let named: Vec<_> = stmts.children(&mut sw).filter(|c| c.is_named()).collect();
+    let expr = named.last().copied()?;
+    let text = node_text(&expr, src).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn swift_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
+    let trimmed = body.trim();
+    let inner = trimmed
+        .strip_prefix("self.")
+        .or_else(|| trimmed.strip_prefix("super."))
+        .unwrap_or(trimmed);
+    let segments: Vec<&str> = inner.split('.').collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    for seg in &segments {
+        if seg.is_empty()
+            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return None;
+        }
+    }
+    let last_dot = inner.rfind('.').unwrap();
+    Some((inner[..last_dot].to_string(), inner.to_string()))
+}
+
+fn swift_enclosing_type_decl(
+    idx: &DeclIndex,
+    node: Node<'_>,
+    file: FileId,
+) -> Option<(
+    Option<bonsai_common::SymbolId>,
+    bonsai_lang_api::ModulePath,
+    Visibility,
+)> {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if matches!(
+            n.kind(),
+            "class_declaration"
+                | "struct_declaration"
+                | "protocol_declaration"
+                | "extension_declaration"
+                | "enum_declaration"
+        ) {
+            let span = span_of(file, &n);
+            return idx
+                .defs
+                .iter()
+                .find(|d| d.span == span)
+                .map(|d| (Some(d.symbol), d.module_path.clone(), d.visibility));
+        }
+        cur = n.parent();
+    }
+    None
+}
+
+/// Find a sibling stored-property/let-binding named `member` in the
+/// enclosing Swift type and return its canonical declared type.
+fn swift_lookup_member_type(prop: Node<'_>, member: &str, src: &[u8]) -> Option<String> {
+    let mut cur = prop.parent();
+    let mut type_node = None;
+    while let Some(n) = cur {
+        if matches!(
+            n.kind(),
+            "class_declaration" | "struct_declaration" | "protocol_declaration" | "extension_declaration"
+        ) {
+            type_node = Some(n);
+            break;
+        }
+        cur = n.parent();
+    }
+    let type_node = type_node?;
+    let body = first_named_child_of_kind(&type_node, "class_body")
+        .or_else(|| first_named_child_of_kind(&type_node, "struct_body"))
+        .or_else(|| first_named_child_of_kind(&type_node, "extension_body"))?;
+    let mut bw = body.walk();
+    for child in body.children(&mut bw) {
+        if child.kind() != "property_declaration" {
+            continue;
+        }
+        let Some(name) = swift_property_name(child, src) else { continue };
+        if name != member {
+            continue;
+        }
+        // Look for `type_annotation > <type>` sibling.
+        let mut cw = child.walk();
+        for c in child.children(&mut cw) {
+            if c.kind() == "type_annotation" {
+                let mut tw = c.walk();
+                for t in c.children(&mut tw) {
+                    if t.is_named() && t.kind() != "type_annotation" {
+                        let raw = node_text(&t, src).trim();
+                        if !raw.is_empty() {
+                            return Some(canonical_simple_type_name(raw).to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Mirror `qualify_csharp_implicit_member_reads` / `qualify_dart_...`
+/// for Swift: bare reads of a sibling zero-arg member (`let c = cmd`)
+/// become `Assign{source_call:cmd}` plus an explicit `Call` event so
+/// `walk_call`'s args-empty fallback synthesizes the recv-slot.
+fn qualify_swift_implicit_member_reads(index: &mut DeclIndex) {
+    use std::collections::HashSet;
+    let getter_names: HashSet<String> = index
+        .defs
+        .iter()
+        .filter(|d| matches!(d.kind, DeclKind::Method | DeclKind::Function) && d.params.is_empty() && !d.name.is_empty())
+        .map(|d| d.name.clone())
+        .collect();
+    if getter_names.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        if decl.flow_events.is_empty() {
+            continue;
+        }
+        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
+        swift_collect_assign_targets(&decl.flow_events, &mut locals);
+        swift_rewrite_member_reads(&mut decl.flow_events, &getter_names, &locals);
+    }
+}
+
+fn swift_collect_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } => {
+                if !target.is_empty() {
+                    out.insert(target.trim().to_string());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                swift_collect_assign_targets(then_events, out);
+                swift_collect_assign_targets(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                swift_collect_assign_targets(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                swift_collect_assign_targets(body, out);
+                swift_collect_assign_targets(catch_events, out);
+                swift_collect_assign_targets(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn swift_rewrite_member_reads(
+    events: &mut Vec<FlowEvent>,
+    getters: &std::collections::HashSet<String>,
+    locals: &std::collections::HashSet<String>,
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                swift_rewrite_member_reads(then_events, getters, locals);
+                swift_rewrite_member_reads(else_events, getters, locals);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                swift_rewrite_member_reads(body, getters, locals);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                swift_rewrite_member_reads(body, getters, locals);
+                swift_rewrite_member_reads(catch_events, getters, locals);
+                swift_rewrite_member_reads(finally_events, getters, locals);
+            }
+            _ => {}
+        }
+    }
+    let mut idx = 0usize;
+    while idx < events.len() {
+        let (qualify_name, span) = match &events[idx] {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                span,
+                ..
+            } => {
+                if source_call.is_some() {
+                    (None, *span)
+                } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    if getters.contains(&name)
+                        && !locals.contains(&name)
+                        && name != target.trim()
+                    {
+                        (Some(name), *span)
+                    } else {
+                        (None, *span)
+                    }
+                } else {
+                    (None, *span)
+                }
+            }
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+        let Some(name) = qualify_name else {
+            idx += 1;
+            continue;
+        };
+        if let FlowEvent::Assign {
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = &mut events[idx]
+        {
+            *source_call = Some(name.clone());
+            *source_call_args = Vec::new();
+            *source_name = None;
+            source_names.retain(|s| s.trim() != name);
+            *value_kind = Some(AssignValueKind::CallResult);
+        }
+        events.insert(
+            idx,
+            FlowEvent::Call {
+                span,
+                name: name.clone(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            },
+        );
+        idx += 2;
+    }
+}
+
+/// Synthesize a memberwise initializer (Constructor decl) for each
+/// Swift struct that has no explicit `init`. Swift's compiler
+/// synthesizes one automatically with one labeled param per stored
+/// `var`/`let` property; without surfacing this to the IDG,
+/// `Envelope(kind:, cmd:, ...)` resolves to nothing and field-
+/// projection never reaches the caller's allocation.
+fn synthesize_swift_memberwise_struct_inits(
+    idx: &mut DeclIndex,
+    file: FileId,
+    tree: &Tree,
+    src: &[u8],
+) {
+    use bonsai_lang_api::FieldWrite;
+    let mut next = idx
+        .defs
+        .iter()
+        .map(|d| d.symbol.raw())
+        .max()
+        .map_or(1, |m| m + 1);
+    let mut synthesized: Vec<Decl> = Vec::new();
+    // Tree-sitter-swift unifies `class`, `struct`, and `enum` under
+    // `class_declaration`. Disambiguate by scanning the node's
+    // prefix text for the `struct` keyword (the only kind that
+    // gets a compiler-synthesized memberwise init).
+    for struct_node in collect_kinds(tree, &["class_declaration"]) {
+        let text = node_text(&struct_node, src);
+        let is_struct = text
+            .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+            .take(8)
+            .any(|t| t == "struct");
+        if !is_struct {
+            continue;
+        }
+        let struct_span = span_of(file, &struct_node);
+        let Some(struct_decl) = idx
+            .defs
+            .iter()
+            .find(|d| d.span == struct_span && is_class_like(d.kind))
+        else {
+            continue;
+        };
+        let parent_sym = struct_decl.symbol;
+        let module_path = struct_decl.module_path.clone();
+        let visibility = struct_decl.visibility;
+        let class_name = struct_decl.name.clone();
+        let class_name_span = struct_decl.name_span;
+        // Skip if an explicit Constructor already exists under this
+        // parent (an `init` block).
+        let has_explicit_init = idx
+            .defs
+            .iter()
+            .any(|d| matches!(d.kind, DeclKind::Constructor) && d.parent == Some(parent_sym));
+        if has_explicit_init {
+            continue;
+        }
+        // Collect stored property names (skip computed properties).
+        let body = first_named_child_of_kind(&struct_node, "class_body");
+        let Some(body) = body else { continue };
+        let mut params: Vec<(String, Span)> = Vec::new();
+        let mut bw = body.walk();
+        for child in body.children(&mut bw) {
+            if child.kind() != "property_declaration" {
+                continue;
+            }
+            // Skip computed properties (they have a `computed_value`
+            // child) — those aren't part of the memberwise init.
+            let mut pw = child.walk();
+            let has_computed = child
+                .children(&mut pw)
+                .any(|c| c.kind() == "computed_property");
+            if has_computed {
+                continue;
+            }
+            let Some(name) = swift_property_name(child, src) else { continue };
+            let span = swift_property_name_span(child, file).unwrap_or(span_of(file, &child));
+            params.push((name, span));
+        }
+        if params.is_empty() {
+            continue;
+        }
+        let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+        let receiver_field_writes: Vec<FieldWrite> = params
+            .iter()
+            .enumerate()
+            .map(|(idx, (name, span))| FieldWrite {
+                span: *span,
+                target: format!("self.{name}"),
+                source_param_indices: vec![idx],
+            })
+            .collect();
+        synthesized.push(Decl {
+            symbol: bonsai_common::SymbolId::new(next),
+            kind: DeclKind::Constructor,
+            name: class_name.clone(),
+            qualified_name: None,
+            module_path: module_path.clone(),
+            span: class_name_span,
+            name_span: class_name_span,
+            visibility,
+            parent: Some(parent_sym),
+            body_span: Some(class_name_span),
+            flow_events: Vec::new(),
+            has_implicit_returns: false,
+            params: param_names.clone(),
+            param_annotations: Vec::new(),
+            type_aliases: Vec::new(),
+            bases: Vec::new(),
+            receiver_param_index: None,
+            receiver_field_writes,
+            implicit_receiver_names: vec!["self".to_string()],
+            receiver_state_sources: Vec::new(),
+            return_type: None,
+        });
+        next += 1;
+        // Synthesize a zero-arg accessor `Method` per stored property,
+        // mirroring Java record accessors so `envelope.cmd()` resolves
+        // to a callable that returns `self.<cmd>` — without this, the
+        // synthesized computed-property pass for `Repository.cmd`
+        // (whose body becomes `Call{data.cmd}`) can't dispatch to a
+        // Method on `Envelope` and the chain stops at the struct boundary.
+        for (name, span) in &params {
+            let already = idx.defs.iter().chain(synthesized.iter()).any(|d| {
+                d.parent == Some(parent_sym) && d.name == *name && d.params.is_empty()
+                    && matches!(d.kind, DeclKind::Method | DeclKind::Function)
+            });
+            if already {
+                continue;
+            }
+            let field = format!("self.{name}");
+            synthesized.push(Decl {
+                symbol: bonsai_common::SymbolId::new(next),
+                kind: DeclKind::Method,
+                name: name.clone(),
+                qualified_name: None,
+                module_path: module_path.clone(),
+                span: *span,
+                name_span: *span,
+                visibility,
+                parent: Some(parent_sym),
+                body_span: Some(*span),
+                flow_events: vec![FlowEvent::Return {
+                    span: *span,
+                    value_text: Some(field.clone()),
+                    value_name: Some(field.clone()),
+                }],
+                has_implicit_returns: false,
+                params: Vec::new(),
+                param_annotations: Vec::new(),
+                type_aliases: Vec::new(),
+                bases: Vec::new(),
+                receiver_param_index: None,
+                receiver_field_writes: Vec::new(),
+                implicit_receiver_names: vec!["self".to_string()],
+                receiver_state_sources: vec![field],
+                return_type: None,
+            });
+            next += 1;
+        }
+    }
+    idx.defs.extend(synthesized);
+}
+
+/// For each Swift Constructor decl that lacks a Return event,
+/// synthesize one whose value_text is the joined params list so
+/// `bridge_value_expr_to_node` tokenizes each param identifier to
+/// `Place::Return`. The standard callee-Return → caller-CallRet edge
+/// then propagates the args' taint onto the caller's allocation
+/// target, making `repo` whole-object tainted (Java-style) — required
+/// so the receiver-field bridge can fire for `repo.run()` even when
+/// field-precise mode would otherwise only mark `repo.data.cmd`.
+fn synthesize_swift_constructor_implicit_returns(index: &mut DeclIndex) {
+    for decl in &mut index.defs {
+        if !matches!(decl.kind, DeclKind::Constructor) {
+            continue;
+        }
+        if decl.flow_events.iter().any(|e| matches!(e, FlowEvent::Return { .. })) {
+            continue;
+        }
+        if decl.params.is_empty() {
+            continue;
+        }
+        let value_text = decl.params.join(" ");
+        let span = decl.body_span.unwrap_or(decl.span);
+        decl.flow_events.push(FlowEvent::Return {
+            span,
+            value_text: Some(value_text),
+            value_name: None,
+        });
+    }
 }

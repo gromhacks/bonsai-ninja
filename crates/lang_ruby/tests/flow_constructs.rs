@@ -104,3 +104,41 @@ end
         "Ruby `items.each do` should emit a Loop event; events: {events:?}"
     );
 }
+
+#[test]
+fn ruby_begin_assignment_uses_compound_operands_not_nested_raise_call() {
+    let events = ruby_decl_events(
+        r#"
+class Repo
+  def run(envelope, routed, user)
+    valid = begin
+      raise 'empty' if routed.to_s.empty?
+      { **envelope, cmd: routed, user: user }
+    rescue
+      { **envelope, cmd: routed.to_s, user: user }
+    end
+    persist(valid)
+  end
+end
+"#,
+        "run",
+    );
+
+    let valid_assignment = events
+        .iter()
+        .find_map(|event| match event {
+            FlowEvent::Assign {
+                target,
+                source_call,
+                source_names,
+                ..
+            } if target == "valid" => Some((source_call, source_names)),
+            _ => None,
+        })
+        .expect("valid assignment should be indexed");
+
+    assert_eq!(valid_assignment.0, &None);
+    assert!(valid_assignment.1.iter().any(|name| name == "envelope"));
+    assert!(valid_assignment.1.iter().any(|name| name == "routed"));
+    assert!(valid_assignment.1.iter().any(|name| name == "user"));
+}

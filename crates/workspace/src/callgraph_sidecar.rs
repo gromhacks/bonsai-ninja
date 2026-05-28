@@ -23,7 +23,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const CALLGRAPH_CACHE_VERSION: u32 = 10;
+// v11 (2026-05-27): adapter decl-extraction changes add synthesized
+// members (C# expression-bodied-property getters + record members, Java
+// records, Solidity struct-literal field writes) → new call edges, so
+// callgraphs persisted by older binaries are no longer equivalent.
+pub const CALLGRAPH_CACHE_VERSION: u32 = 11;
 static CALLGRAPH_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

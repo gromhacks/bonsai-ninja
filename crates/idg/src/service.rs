@@ -584,6 +584,31 @@ impl IdgQueryService {
                 }
             }
         }
+        // Fallback for sources in NON-assigned position — a source value
+        // that is returned directly (`return os.environ["CMD"]`) or
+        // nested in a sink argument (`os.system(os.environ["CMD"])`) is
+        // bridged through a `Place::Read` → `Place::Return`/`CallArg`
+        // edge. `Place::Read` and `Place::Return` are span-less (only
+        // `Write` carries a span — see `place.rs`), so the place loop
+        // above (which can only seed span-bearing
+        // `Write`/`CallRet`/`CallArg`) finds nothing. The edge carrying
+        // the value, however, records the statement span in
+        // `meta.via_span`. So when no place anchored at the span, seed
+        // the `from`-node of every intra edge whose `via_span` overlaps
+        // the anchor — that is the read of the source expression, whose
+        // forward closure reaches the return / sink argument. Purely
+        // additive (only runs when the span loop produced no seed), so
+        // it cannot perturb sources that already anchor on a span node.
+        if out.is_empty() {
+            for edge in &segment.edges {
+                if !spans_overlap(edge.meta.via_span, match_span) {
+                    continue;
+                }
+                if let Some(ws_node) = Self::ws_node_for(&unified, seg_id, edge.from) {
+                    out.push(ws_node);
+                }
+            }
+        }
         out.sort();
         out.dedup();
         out
@@ -1246,7 +1271,7 @@ impl IdgQueryService {
             Place::Return => (PointKind::Return, String::new(), default_span),
             Place::Read { name, path } => (PointKind::Read, place_name(*name, path), default_span),
             Place::Write { name, path, span } => (PointKind::Write, place_name(*name, path), *span),
-            Place::CallArg { site, .. } => (PointKind::CallArg, String::new(), site.0),
+            Place::CallArg { site, idx } => (PointKind::CallArg, format!("arg{idx}"), site.0),
             Place::CallRet { site } => (PointKind::CallRet, String::new(), site.0),
             _ => (PointKind::Other, String::new(), default_span),
         };

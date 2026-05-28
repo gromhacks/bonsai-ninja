@@ -1692,7 +1692,14 @@ fn idg_pipeline_hash() -> u64 {
     // on-disk layout change. This rejects old `idg.v*.factstore`
     // files whose shape can still decode but whose edges/lineage are
     // no longer semantically equivalent.
-    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 21;
+    // v23 (2026-05-27): transfer.rs source-seeding changes
+    // (method-receiver-base SemanticSourceFilter exemption +
+    // container-input span-containment linkage), service.rs
+    // return-position source-seeding fallback, and adapter member
+    // synthesis (C# expression-bodied-property getters / record members,
+    // Java records, Solidity struct-literal field writes) all change the
+    // built IDG without an on-disk layout change.
+    const IDG_STITCHING_SEMANTIC_VERSION: u64 = 23;
     let raw = bonsai_common::MATCHER_POLICY_FINGERPRINT;
     let lo = raw as u64;
     let hi = (raw >> 64) as u64;

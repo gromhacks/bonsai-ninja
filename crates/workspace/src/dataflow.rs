@@ -40,7 +40,11 @@ use std::{
 /// Monotonic bump. Increment every time the on-disk format changes
 /// (shape of `KindedTokens`, serialisation layout, propagation
 /// semantics) so old sidecars are rejected on open.
-pub const DATAFLOW_CACHE_VERSION: u32 = 27;
+// v28 (2026-05-27): IDG seeding / side-effect changes (transfer.rs
+// method-receiver-base source exemption + container-input span
+// containment, service.rs return-position source-seeding fallback) and
+// adapter member synthesis alter propagated taint facts.
+pub const DATAFLOW_CACHE_VERSION: u32 = 28;
 static SIDECAR_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type DataFlowMemoryEntry = (FuncId, Arc<KindedTokens>, Arc<EntryTaintGraph>, AHashSet<FileId>);

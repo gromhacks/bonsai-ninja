@@ -6,8 +6,9 @@ use bonsai_lang_api::{
         collect_kinds, first_named_child, first_named_child_of_kind, language_from_pack, node_text,
         parse_with, span_of,
     },
-    AdapterContext, AdapterError, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, TypeAliasBinding, Visibility,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -197,6 +198,32 @@ impl LanguageAdapter for DartAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, DART_LIFECYCLE_TRANSITIONS);
         }
+        // Mirror the lang_csharp fixes that unblocked the parallel
+        // mega_flow: (1) convert a getter / expression-body whose
+        // single Return reads a dotted receiver field (`String get
+        // cmd => data.cmd`) into a `Call+Return` chain so the call
+        // resolves to the receiver-typed member (record accessor /
+        // sibling getter) instead of being a single 2-level field
+        // read the bridge can't follow; (2) qualify bare reads of a
+        // sibling zero-arg member (`final c = cmd;`) into an
+        // `Assign{source_call}` plus an explicit `Call` event whose
+        // argless walk_call fallback synthesizes a `CallArg{idx=0}`
+        // recv-slot so `recv_slots_for_call_span` has something to
+        // bridge caller-receiver taint through.
+        rewrite_dart_member_access_getters(&mut decl_index);
+        qualify_dart_implicit_member_reads(&mut decl_index);
+        // Synthesize an implicit Return for ctors with no flow events.
+        // `BaseRepository(this.data);` declares but has no body; with
+        // no Return, the ConstructorReturn stitch can't connect
+        // `new BaseRepository(envelope)`'s allocation target to a
+        // tainted return — so `repo` stays whole-object untainted
+        // even though `repo.data.cmd` becomes tainted field-precisely.
+        // Emit a Return whose value_text is the param-name list; the
+        // transfer's identifier tokenization picks up each param so
+        // the ctor's CallRet inherits the args' taint at object level.
+        // Mirrors the lang_csharp `synthesize_csharp_constructor_
+        // implicit_returns` pass.
+        synthesize_dart_constructor_implicit_returns(&mut decl_index);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -207,6 +234,270 @@ impl LanguageAdapter for DartAdapter {
     }
     fn extract_imports(&self, file: FileId, ctx: &AdapterContext<'_>) -> ImportIndex {
         extract_imports_via(PACK_NAME, file, ctx, parse_imports)
+    }
+}
+
+/// For each Dart Constructor decl whose `flow_events` is empty,
+/// synthesize a `Return` whose `value_text` is the joined param-name
+/// list. `bridge_value_expr_to_node` tokenizes that text so each
+/// param identifier bridges into `Place::Return`; the standard
+/// callee-Return → caller-CallRet inter-procedural edge then carries
+/// the ctor's args' taint onto the caller's allocation target,
+/// tainting `repo` whole-object even when receiver-field-write
+/// extraction missed the param's field-initializing semantics.
+fn synthesize_dart_constructor_implicit_returns(index: &mut DeclIndex) {
+    for decl in &mut index.defs {
+        if !matches!(decl.kind, DeclKind::Constructor) {
+            continue;
+        }
+        if !decl.flow_events.is_empty() {
+            continue;
+        }
+        if decl.params.is_empty() {
+            continue;
+        }
+        let value_text = decl.params.join(" ");
+        let span = decl.body_span.unwrap_or(decl.span);
+        decl.flow_events.push(FlowEvent::Return {
+            span,
+            value_text: Some(value_text),
+            value_name: None,
+        });
+    }
+}
+
+/// Convert a getter / expression-bodied function whose body is a
+/// simple dotted member-access (`String get cmd => data.cmd;`) into a
+/// `Call+Return` chain. The IDG's interprocedural receiver-field
+/// bridge is 1-level — modeling the body as a single 2-level field
+/// read (`Read{name:"data.cmd"}`) never matches the caller's
+/// receiver-state composition (`recv.data.cmd`). Modeling it as
+/// `Call data.cmd(); Return data.cmd()` lets the call resolve to the
+/// receiver-typed member (e.g. a record component accessor) and
+/// thread taint through the chain — mirrors the lang_csharp /
+/// lang_java patterns and Java's natural `data.cmd()` accessor body.
+fn rewrite_dart_member_access_getters(index: &mut DeclIndex) {
+    for decl in &mut index.defs {
+        if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
+            continue;
+        }
+        if !decl.params.is_empty() {
+            continue;
+        }
+        if decl.flow_events.len() != 1 {
+            continue;
+        }
+        let FlowEvent::Return {
+            span,
+            value_text,
+            ..
+        } = &decl.flow_events[0]
+        else {
+            continue;
+        };
+        let Some(body) = value_text.as_ref() else {
+            continue;
+        };
+        let Some((call_receiver, call_name)) = dart_dotted_member_access_call_parts(body) else {
+            continue;
+        };
+        let body_span = *span;
+        decl.flow_events = vec![
+            FlowEvent::Call {
+                span: body_span,
+                name: call_name.clone(),
+                receiver: Some(call_receiver),
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            },
+            FlowEvent::Return {
+                span: body_span,
+                value_text: Some(format!("{call_name}()")),
+                value_name: None,
+            },
+        ];
+    }
+}
+
+/// If `body` is a simple dotted member-access of identifiers
+/// (`data.cmd`, optionally `this.X.Y`), return `(receiver, call_name)`.
+fn dart_dotted_member_access_call_parts(body: &str) -> Option<(String, String)> {
+    let trimmed = body.trim();
+    let inner = trimmed
+        .strip_prefix("this.")
+        .or_else(|| trimmed.strip_prefix("super."))
+        .unwrap_or(trimmed);
+    let segments: Vec<&str> = inner.split('.').collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    for seg in &segments {
+        if seg.is_empty()
+            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return None;
+        }
+    }
+    let last_dot = inner.rfind('.').unwrap();
+    Some((inner[..last_dot].to_string(), inner.to_string()))
+}
+
+/// Rewrite a bare read (`final c = cmd;`) of a sibling zero-arg member
+/// (getter / property / record accessor) into an `Assign{source_call}`
+/// plus an explicit `Call` event so `walk_call`'s argless fallback
+/// creates a `CallArg{idx=0}` recv-slot. Without that synthetic slot,
+/// `recv_slots_for_call_span` returns nothing and the interprocedural
+/// receiver-field bridge can't propagate caller-receiver taint into
+/// the getter's body.
+fn qualify_dart_implicit_member_reads(index: &mut DeclIndex) {
+    use std::collections::HashSet;
+    let getter_names: HashSet<String> = index
+        .defs
+        .iter()
+        .filter(|d| matches!(d.kind, DeclKind::Method | DeclKind::Function) && d.params.is_empty() && !d.name.is_empty())
+        .map(|d| d.name.clone())
+        .collect();
+    if getter_names.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        if decl.flow_events.is_empty() {
+            continue;
+        }
+        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
+        collect_dart_assign_targets(&decl.flow_events, &mut locals);
+        rewrite_dart_member_reads(&mut decl.flow_events, &getter_names, &locals);
+    }
+}
+
+fn collect_dart_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } => {
+                if !target.is_empty() {
+                    out.insert(target.trim().to_string());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_dart_assign_targets(then_events, out);
+                collect_dart_assign_targets(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_dart_assign_targets(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_dart_assign_targets(body, out);
+                collect_dart_assign_targets(catch_events, out);
+                collect_dart_assign_targets(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_dart_member_reads(
+    events: &mut Vec<FlowEvent>,
+    getters: &std::collections::HashSet<String>,
+    locals: &std::collections::HashSet<String>,
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                rewrite_dart_member_reads(then_events, getters, locals);
+                rewrite_dart_member_reads(else_events, getters, locals);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                rewrite_dart_member_reads(body, getters, locals);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                rewrite_dart_member_reads(body, getters, locals);
+                rewrite_dart_member_reads(catch_events, getters, locals);
+                rewrite_dart_member_reads(finally_events, getters, locals);
+            }
+            _ => {}
+        }
+    }
+    let mut idx = 0usize;
+    while idx < events.len() {
+        let (qualify_name, span) = match &events[idx] {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                span,
+                ..
+            } => {
+                if source_call.is_some() {
+                    (None, *span)
+                } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    if getters.contains(&name)
+                        && !locals.contains(&name)
+                        && name != target.trim()
+                    {
+                        (Some(name), *span)
+                    } else {
+                        (None, *span)
+                    }
+                } else {
+                    (None, *span)
+                }
+            }
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+        let Some(name) = qualify_name else {
+            idx += 1;
+            continue;
+        };
+        if let FlowEvent::Assign {
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = &mut events[idx]
+        {
+            *source_call = Some(name.clone());
+            *source_call_args = Vec::new();
+            *source_name = None;
+            source_names.retain(|s| s.trim() != name);
+            *value_kind = Some(AssignValueKind::CallResult);
+        }
+        events.insert(
+            idx,
+            FlowEvent::Call {
+                span,
+                name: name.clone(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            },
+        );
+        idx += 2;
     }
 }
 

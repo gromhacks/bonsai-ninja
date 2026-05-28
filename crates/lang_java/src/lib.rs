@@ -182,6 +182,13 @@ impl LanguageAdapter for JavaAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, JAVA_LIFECYCLE_TRANSITIONS);
         }
+        // Synthesize the implicit members of `record` declarations —
+        // Java auto-generates a canonical constructor (`this.<comp> =
+        // <comp>` for each component) and a zero-arg accessor per
+        // component (`<comp>()` returns `this.<comp>`). The grammar has
+        // no nodes for these, so without synthesis `new R(..)` and
+        // `r.comp()` are opaque and taint can't thread through a record.
+        bonsai_lang_api::kit::synthesize_record_members(&mut index, &tree, src, file);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)

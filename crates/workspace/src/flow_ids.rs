@@ -36,7 +36,9 @@ const FLOW_IDS_TABLE_ID: u32 = 3;
 
 /// On-disk format version. Bump when the encoding changes so old
 /// sidecars are rejected on open.
-pub const FLOW_IDS_CACHE_VERSION: u32 = 5;
+// v6 (2026-05-27): downstream of the IDG/adapter semantic changes this
+// WIP introduced — enumerated chains can differ, so reject older sidecars.
+pub const FLOW_IDS_CACHE_VERSION: u32 = 6;
 
 /// Pipeline-hash field in the factstore header. Folds the matcher
 /// policy fingerprint into 64 bits and mixes in the current workspace

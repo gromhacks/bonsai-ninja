@@ -8,8 +8,9 @@ use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     decl_index_with_handler, extract_imports_via,
     kit::{collect_kinds, first_named_child_of_kind, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, DeclIndex, DeclKind, FieldWrite, FlowEvent, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding,
+    AdapterContext, AdapterError, AssignValueKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
+    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
+    TypeAliasBinding,
 };
 use tree_sitter::{Language, Node, Tree};
 
@@ -122,6 +123,7 @@ impl LanguageAdapter for ObjCAdapter {
                 decl.visibility = bonsai_lang_api::Visibility::Private;
             }
         }
+        mark_objc_initializer_methods(&mut decl_index);
         // Per-decl `type_aliases` from typed parameters
         // (`(NSString *)name`, `(HTTPRequest *)req`). Objective-C
         // method signatures and C-style function parameters both
@@ -185,6 +187,10 @@ impl LanguageAdapter for ObjCAdapter {
                 if let Some(bases) = bases_by_name.get(&decl.name) {
                     decl.bases = bases.clone();
                 }
+            }
+            for decl in &mut decl_index.defs {
+                suppress_objc_dynamic_subscript_literal_overwrites(&mut decl.flow_events, &tree, src);
+                augment_objc_dictionary_flow_events(&mut decl.flow_events, &tree, src);
             }
         }
         // Recognised Objective-C lifecycle transitions. Manual
@@ -358,6 +364,361 @@ fn tag_objc_alloc_receiver_types(events: &mut [bonsai_lang_api::FlowEvent]) {
             }
             _ => {}
         }
+    }
+}
+
+fn mark_objc_initializer_methods(decl_index: &mut DeclIndex) {
+    for decl in &mut decl_index.defs {
+        if matches!(decl.kind, DeclKind::Method | DeclKind::Function)
+            && (decl.name == "init" || decl.name.starts_with("initWith"))
+        {
+            decl.kind = DeclKind::Constructor;
+        }
+    }
+}
+
+fn suppress_objc_dynamic_subscript_literal_overwrites(events: &mut Vec<FlowEvent>, tree: &Tree, src: &[u8]) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                suppress_objc_dynamic_subscript_literal_overwrites(then_events, tree, src);
+                suppress_objc_dynamic_subscript_literal_overwrites(else_events, tree, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                suppress_objc_dynamic_subscript_literal_overwrites(body, tree, src);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                suppress_objc_dynamic_subscript_literal_overwrites(body, tree, src);
+                suppress_objc_dynamic_subscript_literal_overwrites(catch_events, tree, src);
+                suppress_objc_dynamic_subscript_literal_overwrites(finally_events, tree, src);
+            }
+            _ => {}
+        }
+    }
+
+    let root = tree.root_node();
+    events.retain(|event| {
+        let FlowEvent::Assign {
+            span,
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = event
+        else {
+            return true;
+        };
+        let source_free_literal = matches!(value_kind, Some(AssignValueKind::Literal))
+            || (value_kind.is_none()
+                && source_name.is_none()
+                && source_call.is_none()
+                && source_call_args.is_empty()
+                && source_names.is_empty());
+        if !source_free_literal {
+            return true;
+        }
+        !objc_assignment_has_dynamic_subscript_lhs(root, *span, src)
+    });
+}
+
+fn objc_assignment_has_dynamic_subscript_lhs(root: Node<'_>, span: Span, src: &[u8]) -> bool {
+    let Some(node) =
+        bonsai_lang_api::kit::node_at_span(root, span, &["assignment_expression", "subscript_expression"])
+    else {
+        return false;
+    };
+    let lhs = node
+        .child_by_field_name("left")
+        .or_else(|| node.child_by_field_name("target"))
+        .unwrap_or(node);
+    let Some(subscript) = first_descendant_of_kind(lhs, "subscript_expression") else {
+        return false;
+    };
+    let Some(index) = subscript.child_by_field_name("index") else {
+        return true;
+    };
+    objc_static_string_key(index, src).is_none()
+}
+
+fn augment_objc_dictionary_flow_events(events: &mut Vec<FlowEvent>, tree: &Tree, src: &[u8]) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_objc_dictionary_flow_events(then_events, tree, src);
+                augment_objc_dictionary_flow_events(else_events, tree, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_objc_dictionary_flow_events(body, tree, src);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_objc_dictionary_flow_events(body, tree, src);
+                augment_objc_dictionary_flow_events(catch_events, tree, src);
+                augment_objc_dictionary_flow_events(finally_events, tree, src);
+            }
+            _ => {}
+        }
+    }
+
+    let root = tree.root_node();
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let mut synthetic = Vec::new();
+        if let FlowEvent::Assign { span, target, .. } = &event {
+            if let Some(dict) = objc_assignment_dictionary_literal(root, *span) {
+                synthetic.extend(objc_dictionary_field_assigns(target, *span, dict, src));
+            }
+        }
+        rewritten.push(event);
+        rewritten.extend(synthetic);
+    }
+    *events = rewritten;
+}
+
+fn objc_assignment_dictionary_literal<'tree>(root: Node<'tree>, span: Span) -> Option<Node<'tree>> {
+    let node = bonsai_lang_api::kit::node_at_span(
+        root,
+        span,
+        &["init_declarator", "assignment_expression", "dictionary_literal"],
+    )?;
+    if node.kind() == "dictionary_literal" {
+        return Some(node);
+    }
+    let rhs = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("right"))
+        .unwrap_or(node);
+    first_descendant_of_kind(rhs, "dictionary_literal")
+}
+
+fn first_descendant_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = first_descendant_of_kind(child, kind) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn objc_dictionary_field_assigns(
+    target: &str,
+    span: Span,
+    dictionary: Node<'_>,
+    src: &[u8],
+) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    let mut cursor = dictionary.walk();
+    for pair in dictionary.named_children(&mut cursor) {
+        if pair.kind() != "dictionary_pair" {
+            continue;
+        }
+        let Some((key_node, value_node)) = objc_dictionary_pair_nodes(pair) else {
+            continue;
+        };
+        let Some(key) = objc_static_string_key(key_node, src) else {
+            continue;
+        };
+        let source_names = objc_value_source_names(value_node, src);
+        let value_kind = if source_names.is_empty() && objc_value_is_literal(value_node) {
+            Some(AssignValueKind::Literal)
+        } else {
+            Some(AssignValueKind::Compound)
+        };
+        out.push(FlowEvent::Assign {
+            span,
+            target: format!("{target}.@{key}"),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names,
+            declares_new_binding: false,
+            value_kind,
+        });
+    }
+    out
+}
+
+fn objc_dictionary_pair_nodes(pair: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    let mut cursor = pair.walk();
+    let mut children = pair.named_children(&mut cursor);
+    let key = children.next()?;
+    let value = children.next()?;
+    Some((key, value))
+}
+
+fn objc_static_string_key(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let raw = node_text(&node, src).trim();
+    let without_at = raw.strip_prefix('@').unwrap_or(raw);
+    let key = without_at
+        .strip_prefix('"')
+        .and_then(|part| part.strip_suffix('"'))
+        .or_else(|| {
+            without_at
+                .strip_prefix('\'')
+                .and_then(|part| part.strip_suffix('\''))
+        })?
+        .trim();
+    if key.is_empty()
+        || !key
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        || !key.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(key.to_string())
+}
+
+fn objc_value_source_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_objc_value_source_names(node, src, &mut out);
+    out
+}
+
+fn collect_objc_value_source_names(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "string_literal" | "number_literal" | "char_literal" | "null" => return,
+        "identifier" => {
+            let text = node_text(&node, src).trim();
+            if objc_identifier_is_value(text) {
+                push_objc_source_name(out, text.to_string());
+            }
+            return;
+        }
+        "field_expression" => {
+            if let Some(place) = objc_place_name(node, src) {
+                push_objc_source_name(out, place);
+                return;
+            }
+        }
+        "subscript_expression" => {
+            if let Some(place) = objc_place_name(node, src) {
+                push_objc_source_name(out, place);
+                return;
+            }
+        }
+        "message_expression" => {
+            let receiver = node.child_by_field_name("receiver");
+            let method = node.child_by_field_name("method");
+            if let Some(receiver) = receiver {
+                collect_objc_value_source_names(receiver, src, out);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                let skip_receiver = receiver.is_some_and(|receiver| receiver.id() == child.id());
+                let skip_method = method.is_some_and(|method| method.id() == child.id());
+                if !skip_receiver && !skip_method {
+                    collect_objc_value_source_names(child, src, out);
+                }
+            }
+            return;
+        }
+        "call_expression" => {
+            if let Some(args) = node
+                .child_by_field_name("arguments")
+                .or_else(|| node.child_by_field_name("argument_list"))
+            {
+                let mut cursor = args.walk();
+                for arg in args.named_children(&mut cursor) {
+                    collect_objc_value_source_names(arg, src, out);
+                }
+                return;
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_objc_value_source_names(child, src, out);
+    }
+}
+
+fn objc_place_name(node: Node<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "type_identifier" => {
+            let text = node_text(&node, src).trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        "field_expression" => {
+            let base = node
+                .child_by_field_name("argument")
+                .or_else(|| node.child_by_field_name("object"))
+                .or_else(|| node.child_by_field_name("value"))?;
+            let field = node.child_by_field_name("field")?;
+            let base = objc_place_name(base, src)?;
+            let field = node_text(&field, src).trim();
+            (!field.is_empty()).then(|| format!("{base}.{field}"))
+        }
+        "subscript_expression" => {
+            let base = node
+                .child_by_field_name("argument")
+                .or_else(|| node.child_by_field_name("object"))
+                .or_else(|| node.child_by_field_name("value"))?;
+            let index = node.child_by_field_name("index")?;
+            let base = objc_place_name(base, src)?;
+            let key = objc_static_string_key(index, src)?;
+            Some(format!("{base}.@{key}"))
+        }
+        "parenthesized_expression" | "at_expression" => {
+            let mut cursor = node.walk();
+            let place = node
+                .named_children(&mut cursor)
+                .find_map(|child| objc_place_name(child, src));
+            place
+        }
+        _ => None,
+    }
+}
+
+fn objc_identifier_is_value(text: &str) -> bool {
+    !matches!(text, "" | "nil" | "NULL" | "YES" | "NO" | "true" | "false")
+}
+
+fn objc_value_is_literal(node: Node<'_>) -> bool {
+    match node.kind() {
+        "string_literal" | "number_literal" | "char_literal" | "null" => true,
+        "at_expression" | "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            let all_literal = node.named_children(&mut cursor).all(objc_value_is_literal);
+            all_literal
+        }
+        "array_literal" => {
+            let mut cursor = node.walk();
+            let all_literal = node.named_children(&mut cursor).all(objc_value_is_literal);
+            all_literal
+        }
+        _ => false,
+    }
+}
+
+fn push_objc_source_name(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
     }
 }
 

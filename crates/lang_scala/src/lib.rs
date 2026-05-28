@@ -6,9 +6,9 @@ use bonsai_lang_api::{
         collect_kinds, collect_receiver_field_writes, first_named_child_of_kind, language_from_pack,
         node_text, parse_with, span_of, walk_flow_events, with_fn_kinds_and_implicit_receivers,
     },
-    AdapterContext, AdapterError, Decl, DeclIndex, DeclKind, FieldWrite, GrammarHandler, ImportIndex,
-    ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId, TypeAliasBinding,
-    TypeAliasVocabulary, Visibility,
+    AdapterContext, AdapterError, AssignValueKind, CallKind, Decl, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter,
+    LanguageCapabilities, LanguageId, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 use tree_sitter::Node;
 
@@ -203,6 +203,26 @@ impl LanguageAdapter for ScalaAdapter {
             bonsai_lang_api::normalize_call_result_assignment_sources(&mut decl.flow_events);
             bonsai_lang_api::inject_lifecycle_events(&mut decl.flow_events, SCALA_LIFECYCLE_TRANSITIONS);
         }
+        // Mirror the lang_csharp / lang_dart synthesis passes that
+        // unblocked the parallel mega_flow chains: convert a method
+        // body that's a simple dotted receiver field read
+        // (`def cmd: String = data.cmd`) into a `Call+Return` chain
+        // (lets the 1-level receiver-field bridge resolve it through
+        // a record/case-class component accessor instead of staying
+        // as a 2-level field read); qualify bare reads of sibling
+        // zero-arg members (`val c = cmd`) by inserting an explicit
+        // `Call` event so `walk_call`'s args-empty fallback creates
+        // a `CallArg{idx=0}` recv-slot for the receiver bridge.
+        rewrite_scala_member_access_accessors(&mut idx);
+        qualify_scala_implicit_member_reads(&mut idx);
+        // Synthesize case-class component accessors. Scala
+        // `case class Envelope(kind, cmd, user, length, extras)` —
+        // tree-sitter node `class_definition` with `case_class_*`
+        // modifiers — produces no per-component accessor decl, so
+        // `envelope.cmd` field-projection never connects to a Method
+        // body. Mirror the Java/C# record synthesis: one zero-arg
+        // `Method` per class_parameter whose `Return` is `this.<param>`.
+        synthesize_scala_case_class_accessors(&mut idx, file, ctx);
         // Precompute `self.<field> → Type` bindings from each
         // class's constructor `receiver_field_writes` so receiver-
         // typed dispatch through stable instance state is an O(1)
@@ -252,14 +272,25 @@ fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
         else {
             continue;
         };
-        let Some(body) = first_named_child_of_kind(&class_node, "template_body") else {
-            continue;
-        };
-        let flow_events = walk_flow_events(body, file, src, &HANDLER, &class_names);
+        // Case classes (`case class Envelope(...)`) and other
+        // parameterised classes without an explicit body block still
+        // declare a primary constructor whose `class_parameters`
+        // become field-initializing writes — so don't skip when
+        // `template_body` is absent. Body-less ctors get an empty
+        // `flow_events` vec but real `receiver_field_writes` from
+        // the param list, which is what drives the IDG's
+        // `ConstructorReturnStitch` field-projection onto the
+        // caller's allocation target.
+        let body = first_named_child_of_kind(&class_node, "template_body");
+        let flow_events = body
+            .map(|b| walk_flow_events(b, file, src, &HANDLER, &class_names))
+            .unwrap_or_default();
+        let body_span = body.map_or(class_span, |b| span_of(file, &b));
         let class_params = first_named_child_of_kind(&class_node, "class_parameters");
         let params = class_params.map_or_else(Vec::new, |params| constructor_param_names(params, src));
+        let is_case = scala_class_is_case(class_node, src);
         let mut receiver_field_writes = class_params.map_or_else(Vec::new, |params_node| {
-            scala_constructor_param_field_writes(params_node, file, src, &params)
+            scala_constructor_param_field_writes_with_mode(params_node, file, src, &params, is_case)
         });
         let mut body_writes =
             collect_receiver_field_writes(&flow_events, &params, None, &["this", "super"], &[]);
@@ -277,7 +308,7 @@ fn synthesize_scala_constructor_decls(idx: &mut DeclIndex, file: FileId, tree: &
             class_name,
             *class_name_span,
             class_span,
-            span_of(file, &body),
+            body_span,
             params,
             flow_events,
             receiver_field_writes,
@@ -338,9 +369,26 @@ fn scala_constructor_param_field_writes(
     src: &[u8],
     params: &[String],
 ) -> Vec<FieldWrite> {
+    scala_constructor_param_field_writes_with_mode(params_node, file, src, params, false)
+}
+
+/// `is_case_class` forces every class-parameter to count as a field-
+/// initializing write, regardless of `val`/`var` modifier — Scala
+/// case classes promote every positional parameter to a public `val`
+/// implicitly, so without this flag the synthesized ctor would emit
+/// no `receiver_field_writes` for `case class Envelope(kind, cmd,
+/// user, ...)` and the constructor-return field stitch couldn't
+/// project `envelope.cmd ← raw` onto the caller's allocation.
+fn scala_constructor_param_field_writes_with_mode(
+    params_node: Node<'_>,
+    file: FileId,
+    src: &[u8],
+    params: &[String],
+    is_case_class: bool,
+) -> Vec<FieldWrite> {
     let mut writes = Vec::new();
     for param in collect_descendant_kinds(params_node, &["class_parameter"]) {
-        if !scala_class_parameter_declares_property(param, src) {
+        if !is_case_class && !scala_class_parameter_declares_property(param, src) {
             continue;
         }
         let Some(name) = parameter_binding_name(param, src) else {
@@ -362,6 +410,39 @@ fn scala_class_parameter_declares_property(param: Node<'_>, src: &[u8]) -> bool 
     node_text(&param, src)
         .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
         .any(|token| matches!(token, "val" | "var"))
+}
+
+/// Detect a Scala `case class` (modifier `case` on a `class_definition`).
+fn scala_class_is_case(class_node: Node<'_>, src: &[u8]) -> bool {
+    let mut cw = class_node.walk();
+    for child in class_node.children(&mut cw) {
+        if matches!(child.kind(), "case" | "case_class_modifier") {
+            return true;
+        }
+        if child.kind() == "modifiers" {
+            let mut mw = child.walk();
+            for m in child.children(&mut mw) {
+                if matches!(m.kind(), "case" | "case_class_modifier") {
+                    return true;
+                }
+                if node_text(&m, src).trim() == "case" {
+                    return true;
+                }
+            }
+        }
+    }
+    // Fallback: scan the prefix text before `class` for the `case` keyword.
+    let text = node_text(&class_node, src);
+    if let Some(idx) = text.find("class") {
+        let prefix = &text[..idx];
+        if prefix
+            .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+            .any(|t| t == "case")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn parameter_binding_name(param: Node<'_>, src: &[u8]) -> Option<String> {
@@ -954,4 +1035,357 @@ fn extract_scala_package(root: tree_sitter::Node<'_>, src: &[u8]) -> Option<Vec<
         }
     }
     None
+}
+
+/// Convert a Scala accessor method whose single Return reads a dotted
+/// receiver field (`def cmd: String = data.cmd`) into a `Call+Return`
+/// chain so the call dispatches to the receiver-typed member (case-
+/// class accessor / sibling getter) and threads taint through the
+/// 1-level interprocedural receiver-field bridge. Mirrors the
+/// lang_csharp / lang_dart conversion that unblocked the parallel
+/// mega_flow chains.
+fn rewrite_scala_member_access_accessors(index: &mut DeclIndex) {
+    for decl in &mut index.defs {
+        if !matches!(decl.kind, DeclKind::Function | DeclKind::Method) {
+            continue;
+        }
+        if !decl.params.is_empty() {
+            continue;
+        }
+        if decl.flow_events.len() != 1 {
+            continue;
+        }
+        let FlowEvent::Return {
+            span,
+            value_text,
+            ..
+        } = &decl.flow_events[0]
+        else {
+            continue;
+        };
+        let Some(body) = value_text.as_ref() else {
+            continue;
+        };
+        let Some((call_receiver, call_name)) = scala_dotted_member_access_parts(body) else {
+            continue;
+        };
+        let body_span = *span;
+        decl.flow_events = vec![
+            FlowEvent::Call {
+                span: body_span,
+                name: call_name.clone(),
+                receiver: Some(call_receiver),
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Method,
+                args: Vec::new(),
+            },
+            FlowEvent::Return {
+                span: body_span,
+                value_text: Some(format!("{call_name}()")),
+                value_name: None,
+            },
+        ];
+    }
+}
+
+fn scala_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
+    let trimmed = body.trim();
+    let inner = trimmed
+        .strip_prefix("this.")
+        .or_else(|| trimmed.strip_prefix("super."))
+        .unwrap_or(trimmed);
+    let segments: Vec<&str> = inner.split('.').collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    for seg in &segments {
+        if seg.is_empty()
+            || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seg.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return None;
+        }
+    }
+    let last_dot = inner.rfind('.').unwrap();
+    Some((inner[..last_dot].to_string(), inner.to_string()))
+}
+
+/// Qualify a bare read `val c = cmd` of a sibling zero-arg member by
+/// rewriting to `Assign{source_call:cmd}` plus an explicit `Call`
+/// event so `walk_call`'s argless fallback synthesizes a recv-slot
+/// for the interprocedural receiver-field bridge.
+fn qualify_scala_implicit_member_reads(index: &mut DeclIndex) {
+    use std::collections::HashSet;
+    let getter_names: HashSet<String> = index
+        .defs
+        .iter()
+        .filter(|d| matches!(d.kind, DeclKind::Method | DeclKind::Function) && d.params.is_empty() && !d.name.is_empty())
+        .map(|d| d.name.clone())
+        .collect();
+    if getter_names.is_empty() {
+        return;
+    }
+    for decl in &mut index.defs {
+        if decl.flow_events.is_empty() {
+            continue;
+        }
+        let mut locals: HashSet<String> = decl.params.iter().cloned().collect();
+        scala_collect_assign_targets(&decl.flow_events, &mut locals);
+        scala_rewrite_member_reads(&mut decl.flow_events, &getter_names, &locals);
+    }
+}
+
+fn scala_collect_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Assign { target, .. } => {
+                if !target.is_empty() {
+                    out.insert(target.trim().to_string());
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                scala_collect_assign_targets(then_events, out);
+                scala_collect_assign_targets(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                scala_collect_assign_targets(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                scala_collect_assign_targets(body, out);
+                scala_collect_assign_targets(catch_events, out);
+                scala_collect_assign_targets(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scala_rewrite_member_reads(
+    events: &mut Vec<FlowEvent>,
+    getters: &std::collections::HashSet<String>,
+    locals: &std::collections::HashSet<String>,
+) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                scala_rewrite_member_reads(then_events, getters, locals);
+                scala_rewrite_member_reads(else_events, getters, locals);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                scala_rewrite_member_reads(body, getters, locals);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                scala_rewrite_member_reads(body, getters, locals);
+                scala_rewrite_member_reads(catch_events, getters, locals);
+                scala_rewrite_member_reads(finally_events, getters, locals);
+            }
+            _ => {}
+        }
+    }
+    let mut idx = 0usize;
+    while idx < events.len() {
+        let (qualify_name, span) = match &events[idx] {
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                span,
+                ..
+            } => {
+                if source_call.is_some() {
+                    (None, *span)
+                } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    if getters.contains(&name)
+                        && !locals.contains(&name)
+                        && name != target.trim()
+                    {
+                        (Some(name), *span)
+                    } else {
+                        (None, *span)
+                    }
+                } else {
+                    (None, *span)
+                }
+            }
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+        let Some(name) = qualify_name else {
+            idx += 1;
+            continue;
+        };
+        if let FlowEvent::Assign {
+            source_name,
+            source_call,
+            source_call_args,
+            source_names,
+            value_kind,
+            ..
+        } = &mut events[idx]
+        {
+            *source_call = Some(name.clone());
+            *source_call_args = Vec::new();
+            *source_name = None;
+            source_names.retain(|s| s.trim() != name);
+            *value_kind = Some(AssignValueKind::CallResult);
+        }
+        events.insert(
+            idx,
+            FlowEvent::Call {
+                span,
+                name: name.clone(),
+                receiver: None,
+                receiver_types: Vec::new(),
+                call_kind: CallKind::Function,
+                args: Vec::new(),
+            },
+        );
+        idx += 2;
+    }
+}
+
+/// Synthesize per-component accessor `Method` decls for each Scala
+/// case class (`case class Envelope(kind, cmd, user, length, extras)`).
+/// The kit's `synthesize_record_members` only matches the `record_
+/// declaration` node kind — Scala case classes are `class_definition`
+/// with `case_class_*` modifiers, so none of the components get
+/// accessors and `envelope.cmd` resolves to nothing → taint stops.
+/// Mirror the Java/C# record synthesis: one zero-arg Method per
+/// class_parameter whose single Return is `this.<param>`.
+fn synthesize_scala_case_class_accessors(idx: &mut DeclIndex, file: FileId, ctx: &AdapterContext<'_>) {
+    let Some((snapshot, tree)) = parse_with(PACK_NAME, file, ctx) else {
+        return;
+    };
+    let src = snapshot.text.as_bytes();
+    let mut next = idx
+        .defs
+        .iter()
+        .map(|d| d.symbol.raw())
+        .max()
+        .map_or(1, |m| m + 1);
+    let mut synthesized: Vec<Decl> = Vec::new();
+    for class_node in collect_kinds(&tree, &["class_definition"]) {
+        // Detect `case` modifier — Scala wraps it under a
+        // `modifiers` child containing a `case_class_modifier` /
+        // `case` token.
+        let mut is_case = false;
+        let mut cw = class_node.walk();
+        for child in class_node.children(&mut cw) {
+            if matches!(child.kind(), "modifiers") {
+                let mut mw = child.walk();
+                for m in child.children(&mut mw) {
+                    if m.kind() == "case" || node_text(&m, src).contains("case") {
+                        is_case = true;
+                        break;
+                    }
+                }
+            }
+            if child.kind() == "case" {
+                is_case = true;
+            }
+        }
+        if !is_case {
+            continue;
+        }
+        let class_span = span_of(file, &class_node);
+        let Some(parent_decl) = idx
+            .defs
+            .iter()
+            .find(|d| is_class_like(d.kind) && d.span == class_span)
+        else {
+            continue;
+        };
+        let parent_sym = parent_decl.symbol;
+        let module_path = parent_decl.module_path.clone();
+        let visibility = parent_decl.visibility;
+        // Pull case-class params from the `class_parameters` child.
+        let Some(params_node) = first_named_child_of_kind(&class_node, "class_parameters") else {
+            continue;
+        };
+        let mut comps: Vec<(String, Span)> = Vec::new();
+        let mut pw = params_node.walk();
+        for child in params_node.children(&mut pw) {
+            if child.kind() != "class_parameter" {
+                continue;
+            }
+            let mut found_name: Option<tree_sitter::Node<'_>> = None;
+            let mut subw = child.walk();
+            for sub in child.children(&mut subw) {
+                if sub.kind() == "identifier" {
+                    found_name = Some(sub);
+                    break;
+                }
+            }
+            if let Some(name_node) = found_name {
+                let name = node_text(&name_node, src).trim().to_string();
+                if !name.is_empty() {
+                    comps.push((name, span_of(file, &name_node)));
+                }
+            }
+        }
+        if comps.is_empty() {
+            continue;
+        }
+        for (comp, comp_span) in &comps {
+            let already = idx.defs.iter().chain(synthesized.iter()).any(|d| {
+                d.parent == Some(parent_sym)
+                    && d.name == *comp
+                    && d.params.is_empty()
+                    && matches!(d.kind, DeclKind::Method | DeclKind::Function)
+            });
+            if already {
+                continue;
+            }
+            let field = format!("this.{comp}");
+            synthesized.push(Decl {
+                symbol: SymbolId::new(next),
+                kind: DeclKind::Method,
+                name: comp.clone(),
+                qualified_name: None,
+                module_path: module_path.clone(),
+                span: *comp_span,
+                name_span: *comp_span,
+                visibility,
+                parent: Some(parent_sym),
+                body_span: Some(*comp_span),
+                flow_events: vec![FlowEvent::Return {
+                    span: *comp_span,
+                    value_text: Some(field.clone()),
+                    value_name: Some(field.clone()),
+                }],
+                has_implicit_returns: false,
+                params: Vec::new(),
+                param_annotations: Vec::new(),
+                type_aliases: Vec::new(),
+                bases: Vec::new(),
+                receiver_param_index: None,
+                receiver_field_writes: Vec::new(),
+                implicit_receiver_names: vec!["this".to_string(), "super".to_string()],
+                receiver_state_sources: vec![field],
+                return_type: None,
+            });
+            next += 1;
+        }
+    }
+    idx.defs.extend(synthesized);
 }
