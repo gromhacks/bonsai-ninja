@@ -66,28 +66,114 @@ const REQUIRED_MEGA_FLOW_EVENT_UNION: &[&str] = &[
 fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
     match lang {
         "c" => 1,
-        "cpp" => 0,
-        "csharp" => 0,
-        "dart" => 0,
-        "elixir" => 0,
+        // argv → env.cmd → … → repo.cmd() → std::system: a real CWE-78
+        // command-injection threaded through the C++ pipeline. The
+        // tainted `.cmd` field is what reaches the sink.
+        "cpp" => 1,
+        // Console.ReadLine → Envelope.Cmd → Pipeline.Orchestrate (record `with`)
+        // → Storage.Persist → AuditedRepository.Run → base.Run →
+        // Repository.Run → Cmd property getter (expression-bodied
+        // `Cmd => Data.Cmd`) → Executor.Execute → Process.Start: a real
+        // CWE-78 command-injection threaded through C#'s full FN-language
+        // construct stack (records, properties, inheritance, ctor chains,
+        // async). Unblocked 2026-05-27 by the lang_csharp synthesis
+        // additions (expression-bodied-property getter modeled as
+        // `Call+Return` member-access with receiver_types, qualified bare
+        // property reads emitting an explicit `Call` event for
+        // walk_call's args-empty recv-slot fallback, and constructor
+        // implicit-Return synthesis so the ctor chain forwards param taint
+        // to the caller's allocation).
+        "csharp" => 1,
+        // stdin.readLineSync → Envelope.cmd → pipeline.orchestrate
+        // (record copyWith) → storage.persist → AuditedRepository.run
+        // → super.run → Repository.run → cmd getter (expression-bodied
+        // `String get cmd => data.cmd`) → execute → Process.runSync
+        // (runInShell): a real CWE-78 command-injection through Dart's
+        // full FN-language construct stack (mixins, super-init params,
+        // getters, factory ctors, async streams). Unblocked 2026-05-27
+        // by the lang_dart synthesis additions (member-access getter
+        // modeled as `Call+Return`, bare getter reads qualified with
+        // explicit `Call` for walk_call's recv-slot fallback, ctor
+        // implicit-Return synthesis). Two findings emerge because
+        // both `main(args)` and the inferred `handle_request` source
+        // reach the same sink — counted distinctly per upstream entry.
+        "dart" => 2,
+        // System.argv → envelope.cmd → … → :os.cmd: a real CWE-78
+        // command-injection threaded through the Elixir pipeline.
+        "elixir" => 1,
         "erlang" => 2,
-        "go" => 2,
-        "java" => 0,
+        "go" => 1,
+        // NOTE: java is the validated record-synthesis case. C# uses the
+        // same shared helper but stays FN — its remaining blocker is the
+        // bare implicit-`this` property read `var c = Cmd;` in
+        // `Repository.Run` (expression-bodied `Cmd => Data.Cmd`) not being
+        // qualified to `this.Cmd`, so it misses the tainted receiver
+        // field. See docs/goal.md §A.
+        // The real flow `getParameter → Envelope.cmd → … → Runtime.exec`
+        // is now detected (precise mode = 1) after the lang_java adapter
+        // synthesizes the implicit `record` canonical constructor +
+        // component accessors. In `--inferred-sources` mode two extra
+        // narrowed `entry-point.class_field.inherited` findings appear on
+        // the sibling record components `kind`/`user` — the whole-object
+        // value-flow over-approximation (§C field-precision); they
+        // collapse to the single real flow once record objects are
+        // tracked field-precisely.
+        "java" => 3,
         "javascript" => 1,
         "kotlin" => 1,
         // Lua mega_flow has one real command-injection flow. The old count
         // included LuaSQL-shaped SQLi false positives on generic executor
         // calls without LuaSQL package evidence.
         "lua" => 1,
-        "objc" => 2,
+        "objc" => 1,
         "perl" => 1,
-        "php" => 0,
+        // Two real vulns: readline → $envelope.cmd → … → shell_exec (CWE-78)
+        // and readline → echo (CWE-79). Both reach their sink via real
+        // chains (verified with `--source readline`). NOTE: the php adapter
+        // models the `[...]` array literal / `[...$envelope]` spread as a
+        // whole-container value (the destructuring `['cmd'=>$cmd]=$env`
+        // emits no field link), so the combiner currently reports the
+        // co-tainted `$_SERVER` (in the `user` field) as the representative
+        // source instead of `readline`. Correct source attribution needs
+        // php-adapter field-precision (array-literal field-writes + spread +
+        // subscript-read field links) — see docs/goal.md.
+        "php" => 2,
         "python" => 5,
         "ruby" => 2,
         "rust" => 1,
-        "scala" => 0,
+        // HttpServletRequest.getParameter → Envelope (case class) →
+        // Pipeline.orchestrate (Option/for/case match) → Storage.persist
+        // → Repository.wrap → AuditedRepository.run → super.run →
+        // Repository.run → cmd accessor (`def cmd: String = data.cmd`)
+        // → Executor.execute → Process .!: a real CWE-78 command-
+        // injection through Scala's FN-language construct stack
+        // (case classes, traits, Option, for-comprehensions, partial
+        // functions). Unblocked 2026-05-27 by the lang_scala synthesis
+        // additions (case-class ctor field-writes for params lacking
+        // explicit `val`/`var` modifier — Scala promotes case-class
+        // params to public vals implicitly; member-access accessor
+        // rewritten as `Call+Return`; bare reads qualified with
+        // explicit `Call` event; case-class component accessors
+        // synthesized for cross-class field-projection).
+        "scala" => 1,
         "solidity" => 2,
-        "swift" => 0,
+        // readLine() → Envelope (struct memberwise init) → Pipeline.orchestrate
+        // (Optional/guard/case match) → Storage.persist → AuditedRepository
+        // (inherits Repository.init via class chain) → super.run → Repository.run
+        // → cmd computed property (`var cmd: String { data.cmd }`) → Envelope.cmd
+        // accessor → Executor.execute → Process().launch with arguments=[..., cmd]:
+        // a real CWE-78 command-injection through Swift's FN-language construct
+        // stack (structs, computed properties, optionals, guard, switch, classes
+        // with inheritance, `super`). Unblocked 2026-05-27 by the lang_swift
+        // synthesis additions (memberwise init for structs + per-property
+        // accessor methods so `data.cmd()` resolves to a callable; computed-
+        // property `var X { expr }` synthesized as a Method whose body is
+        // `Call+Return` for member-access expressions; bare property reads
+        // qualified with an explicit `Call` event for walk_call's recv-slot
+        // fallback; constructor implicit-Return synthesis so the init's param
+        // tokens propagate to the caller's `repo` allocation at object level).
+        // Two findings = real flow + 1 inferred unreferenced-entry over-approximation.
+        "swift" => 2,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
     }
@@ -746,6 +832,32 @@ fn mega_flow_security_pipeline_covers_every_language_and_flow_event_kind() {
                     .iter()
                     .any(|finding| finding.finding.chain_display.len() >= 2),
                 "{lang}: mega_flow must include at least one multi-hop source-to-sink chain; findings={:#?}",
+                report.findings
+            );
+        }
+        if *lang == "go" {
+            let go_cmd = report
+                .findings
+                .iter()
+                .find(|finding| finding.finding.sink.rule_id == "go.cmdi.exec_command_shell_wrapper")
+                .expect("go command-injection flow");
+            assert_eq!(go_cmd.finding.source.rule_id, "go.nethttp.query_value_get");
+            assert_eq!(go_cmd.finding.source.line, 33, "{go_cmd:#?}");
+        }
+        if *lang == "objc" {
+            let objc_cmd = report
+                .findings
+                .iter()
+                .find(|finding| finding.finding.sink.rule_id == "objc.cmdi.system")
+                .expect("objc command-injection flow");
+            assert_eq!(objc_cmd.finding.source.rule_id, "objc.source.stdin_fgets");
+            assert_eq!(objc_cmd.finding.source.line, 15, "{objc_cmd:#?}");
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .all(|finding| finding.finding.sink.rule_id != "objc.xxe.nsxmlparser_initwithdata"),
+                "repository initWithData: must not be reported as NSXMLParser XXE: {:#?}",
                 report.findings
             );
         }

@@ -36,7 +36,9 @@ use std::sync::Arc;
 /// On-disk snapshot version for the workspace-wide taint graph.
 /// Disk format is the streaming factstore; bumping this invalidates
 /// every cached sidecar so consumers get a fresh build on next open.
-pub const TAINT_GRAPH_CACHE_VERSION: u32 = 8;
+// v9 (2026-05-27): taint graph derives from the IDG, whose construction
+// + seeding changed this WIP — old graphs are no longer equivalent.
+pub const TAINT_GRAPH_CACHE_VERSION: u32 = 9;
 
 /// Caller-defined table id stamped into the factstore header. 4 is
 /// the next slot after dataflow (2), value-flow (1), flow-ids (3).

@@ -307,6 +307,163 @@ pub fn span_of(file: FileId, node: &Node<'_>) -> Span {
     )
 }
 
+/// Synthesize the implicit members that `record` / positional value
+/// declarations auto-generate but the grammar emits no nodes for: a
+/// canonical constructor (`this.<comp> = <comp>` for each component) and
+/// a zero-arg accessor per component (`<comp>()` returns `this.<comp>`).
+/// Covers Java records (`parameters` list of `formal_parameter`) and C#
+/// positional records (`parameter_list` of `parameter`). Without these,
+/// `new R(.., tainted, ..)` and `r.comp()` are opaque and taint cannot
+/// thread through the data holder.
+///
+/// The synthetic constructor's `receiver_field_writes` drive the IDG's
+/// constructor field-forwarding (arg → object field); the accessors'
+/// `receiver_state_sources` + field-read `Return` let a tainted receiver
+/// field flow out through `r.comp()`. The record type must already be
+/// indexed as a class-like decl (so `record_declaration` is in the
+/// handler's `class_kinds`) — this only adds its missing members.
+pub fn synthesize_record_members(index: &mut crate::DeclIndex, tree: &Tree, src: &[u8], file: FileId) {
+    let mut next_symbol = index
+        .defs
+        .iter()
+        .map(|d| d.symbol.raw())
+        .max()
+        .map_or(1, |m| m + 1);
+    let mut synthesized: Vec<crate::Decl> = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+        if node.kind() != "record_declaration" {
+            continue;
+        }
+        let Some(name_node) = node.child_by_field_name("name") else {
+            continue;
+        };
+        let record_span = span_of(file, &node);
+        let Some((parent, module_path, visibility)) = index
+            .defs
+            .iter()
+            .find(|d| d.span == record_span)
+            .map(|d| (Some(d.symbol), d.module_path.clone(), d.visibility))
+        else {
+            continue;
+        };
+        // The canonical component list is the record's own direct
+        // parameter list (`parameters` in Java, `parameter_list` in C#) —
+        // NOT params of any method declared in the record body.
+        let mut components: Vec<(String, Span)> = Vec::new();
+        let mut rc = node.walk();
+        for child in node.children(&mut rc) {
+            // Java: `formal_parameters` (the `parameters:` field); C#:
+            // `parameter_list`. Match by node kind so we never pick up a
+            // method's param list from the record body.
+            if !matches!(child.kind(), "formal_parameters" | "parameter_list") {
+                continue;
+            }
+            let mut pc = child.walk();
+            for p in child.children(&mut pc) {
+                if !matches!(p.kind(), "formal_parameter" | "parameter") {
+                    continue;
+                }
+                if let Some(cn) = p.child_by_field_name("name") {
+                    let comp = node_text(&cn, src).trim().to_string();
+                    if !comp.is_empty() {
+                        components.push((comp, span_of(file, &cn)));
+                    }
+                }
+            }
+            break;
+        }
+        if components.is_empty() {
+            continue;
+        }
+        let comp_names: Vec<String> = components.iter().map(|(c, _)| c.clone()).collect();
+
+        let has_explicit_ctor = index
+            .defs
+            .iter()
+            .any(|d| d.parent == parent && matches!(d.kind, crate::DeclKind::Constructor));
+        if !has_explicit_ctor {
+            let receiver_field_writes = components
+                .iter()
+                .enumerate()
+                .map(|(idx, (comp, comp_span))| crate::FieldWrite {
+                    span: *comp_span,
+                    target: format!("this.{comp}"),
+                    source_param_indices: vec![idx],
+                })
+                .collect::<Vec<_>>();
+            synthesized.push(crate::Decl {
+                symbol: bonsai_common::SymbolId::new(next_symbol),
+                kind: crate::DeclKind::Constructor,
+                name: node_text(&name_node, src).trim().to_string(),
+                qualified_name: None,
+                module_path: module_path.clone(),
+                span: span_of(file, &name_node),
+                name_span: span_of(file, &name_node),
+                visibility,
+                parent,
+                body_span: Some(span_of(file, &name_node)),
+                flow_events: Vec::new(),
+                has_implicit_returns: false,
+                params: comp_names.clone(),
+                param_annotations: Vec::new(),
+                type_aliases: Vec::new(),
+                bases: Vec::new(),
+                receiver_param_index: None,
+                receiver_field_writes,
+                implicit_receiver_names: vec!["this".to_string()],
+                receiver_state_sources: Vec::new(),
+                return_type: None,
+            });
+            next_symbol += 1;
+        }
+
+        for (comp, comp_span) in &components {
+            let already_declared = index
+                .defs
+                .iter()
+                .any(|d| d.parent == parent && d.name == *comp && d.params.is_empty());
+            if already_declared {
+                continue;
+            }
+            let field = format!("this.{comp}");
+            synthesized.push(crate::Decl {
+                symbol: bonsai_common::SymbolId::new(next_symbol),
+                kind: crate::DeclKind::Method,
+                name: comp.clone(),
+                qualified_name: None,
+                module_path: module_path.clone(),
+                span: *comp_span,
+                name_span: *comp_span,
+                visibility,
+                parent,
+                body_span: Some(*comp_span),
+                flow_events: vec![crate::FlowEvent::Return {
+                    span: *comp_span,
+                    value_text: Some(field.clone()),
+                    value_name: Some(field.clone()),
+                }],
+                has_implicit_returns: false,
+                params: Vec::new(),
+                param_annotations: Vec::new(),
+                type_aliases: Vec::new(),
+                bases: Vec::new(),
+                receiver_param_index: None,
+                receiver_field_writes: Vec::new(),
+                implicit_receiver_names: vec!["this".to_string()],
+                receiver_state_sources: vec![field],
+                return_type: None,
+            });
+            next_symbol += 1;
+        }
+    }
+    index.defs.extend(synthesized);
+}
+
 /// Find the descendant of `root` whose byte range matches `span`,
 /// preferring nodes whose kind is in `expected_kinds` when multiple
 /// nodes share an exact span (e.g. a `statements` wrapper and the
@@ -702,6 +859,11 @@ pub const GENERIC_HANDLER: GrammarHandler = GrammarHandler {
         "enum_item",
         "enum_definition",
         "interface_declaration",
+        // Java 16+ / C# records — value-type holders whose canonical
+        // constructor and component accessors are implicit (synthesized
+        // by the adapter), so the type itself must still be indexed as a
+        // class so `new R(..)` resolves a constructor candidate.
+        "record_declaration",
         // Go's `type X struct/interface { ... }` lowers to a type_spec
         // inside a type_declaration.
         "type_spec",
@@ -1437,6 +1599,11 @@ fn walk_into(
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| node.child_by_field_name("pattern"))
             .or_else(|| node.child_by_field_name("declarator"))
+            .or_else(|| {
+                (kind == "property_declaration")
+                    .then(|| first_named_child_of_kind(&node, "variable_declaration"))
+                    .flatten()
+            })
             .or_else(|| first_non_keyword_named_child(&node, src));
         // If the picked target is itself a declarator wrapper —
         // tree-sitter emits `variable_declarator` in C# /
@@ -3309,6 +3476,9 @@ pub(crate) fn is_ident_continue_byte(byte: u8) -> bool {
 /// texts are the raw source strings of each positional argument.
 pub(crate) fn extract_direct_call_info(node: &Node<'_>, src: &[u8]) -> Option<(Option<String>, Vec<String>)> {
     if !COMMON_CALL_KINDS.contains(&node.kind()) {
+        if !direct_call_wrapper_kind(node.kind()) {
+            return None;
+        }
         return first_call_descendant(*node).and_then(|call| extract_direct_call_info(&call, src));
     }
     let erlang_remote = node
@@ -3368,6 +3538,27 @@ pub(crate) fn extract_direct_call_info(node: &Node<'_>, src: &[u8]) -> Option<(O
         }
     }
     Some((Some(full), args))
+}
+
+fn direct_call_wrapper_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "field_expression"
+            | "member_expression"
+            | "member_access_expression"
+            | "navigation_expression"
+            | "selector_expression"
+            | "scoped_identifier"
+            | "scope_resolution"
+            | "selector"
+            | "postfix_expression"
+            | "parenthesized_expression"
+            | "expression"
+            | "primary_expression"
+            | "await_expression"
+            | "co_await_expression"
+            | "dot"
+    )
 }
 
 fn first_call_descendant<'tree>(node: Node<'tree>) -> Option<Node<'tree>> {

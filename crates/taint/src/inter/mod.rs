@@ -7856,8 +7856,8 @@ fn apply_event_transfer_with_options(
         // (`data['other']` produces source_names containing both
         // `data` and `data.other` from the adapter), bare-name
         // operands like `data` should NOT match against
-        // qualified seeds in state via the loose
-        // base/tail-promotion that `state_qualified_token_matches_text`
+        // qualified seeds in state via the loose base-carrier
+        // promotion that `state_qualified_token_matches_text`
         // performs at call-site checks. That promotion is correct
         // for arg passing (passing `obj` propagates carrier
         // taint) but wrong for assignment RHS extraction
@@ -8531,8 +8531,7 @@ fn state_qualified_token_matches_text(text: &str, state: &TokenSet) -> bool {
         }
         let mut parts = normalised.split('.');
         let base = parts.next().unwrap_or_default();
-        let tail = normalised.rsplit('.').next().unwrap_or_default();
-        text == base || text == tail
+        text == base
     })
 }
 

@@ -444,6 +444,83 @@ fn call_site_spans_match(edge_span: bonsai_common::Span, event_span: bonsai_comm
     span_contains(edge_span, event_span) || span_contains(event_span, edge_span)
 }
 
+fn call_site_has_no_explicit_args(global: &GlobalIndex, func: FuncId, span: bonsai_common::Span) -> bool {
+    let Some(decl) = global.decl_of(bonsai_common::SymbolId::new(func.raw())) else {
+        return false;
+    };
+    let mut saw_empty_match = false;
+    let mut saw_non_empty_match = false;
+    scan_call_site_arg_presence(
+        &decl.flow_events,
+        span,
+        &mut saw_empty_match,
+        &mut saw_non_empty_match,
+    );
+    saw_empty_match && !saw_non_empty_match
+}
+
+fn scan_call_site_arg_presence(
+    events: &[bonsai_lang_api::FlowEvent],
+    span: bonsai_common::Span,
+    saw_empty_match: &mut bool,
+    saw_non_empty_match: &mut bool,
+) {
+    use bonsai_lang_api::FlowEvent;
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                span: event_span,
+                args,
+                ..
+            } => {
+                if call_site_spans_match(span, *event_span) {
+                    if args.is_empty() {
+                        *saw_empty_match = true;
+                    } else {
+                        *saw_non_empty_match = true;
+                    }
+                }
+            }
+            FlowEvent::Assign {
+                span: event_span,
+                source_call,
+                source_call_args,
+                ..
+            } => {
+                if source_call.is_some() && call_site_spans_match(span, *event_span) {
+                    if source_call_args.is_empty() {
+                        *saw_empty_match = true;
+                    } else {
+                        *saw_non_empty_match = true;
+                    }
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                scan_call_site_arg_presence(then_events, span, saw_empty_match, saw_non_empty_match);
+                scan_call_site_arg_presence(else_events, span, saw_empty_match, saw_non_empty_match);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                scan_call_site_arg_presence(body, span, saw_empty_match, saw_non_empty_match);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                scan_call_site_arg_presence(body, span, saw_empty_match, saw_non_empty_match);
+                scan_call_site_arg_presence(catch_events, span, saw_empty_match, saw_non_empty_match);
+                scan_call_site_arg_presence(finally_events, span, saw_empty_match, saw_non_empty_match);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn span_contains(outer: bonsai_common::Span, inner: bonsai_common::Span) -> bool {
     outer.start <= inner.start && inner.end <= outer.end
 }
@@ -1161,7 +1238,7 @@ fn stitch_receiver_method_propagation(
             // recv-slot needs to be tainted so the next Phase 3d
             // pair `(run, super.run)` finds the recv-slot in the
             // closure).
-            let recv_targets = collect_recv_slot_nodes(ws, callee);
+            let recv_targets = collect_recv_slot_nodes(ws, global, callee);
             for n in &recv_targets {
                 if !read_nodes.contains(n) {
                     read_nodes.push(*n);
@@ -1214,7 +1291,7 @@ fn stitch_receiver_method_propagation(
                 if !funcs_share_language(func_to_language, caller, callee) {
                     continue;
                 }
-                let recv_slots = recv_slots_for_call_span(ws, caller, edge.span);
+                let recv_slots = recv_slots_for_call_span(ws, global, caller, edge.span);
                 let mut emitted_link_for_call = false;
                 for (recv_ws, callee_target) in recv_slots {
                     if let Some(target) = callee_target {
@@ -1341,14 +1418,35 @@ fn collect_field_read_nodes(
         let Place::Read { name, path } = place else {
             continue;
         };
-        if !path.is_empty() {
-            continue;
-        }
+        // The bridge matches when the read's "head field" — the first
+        // dot-segment of a canonical name (`this.Data.Cmd` → `Data`)
+        // OR `path[0]` for a structured `Read{name=this, path=[..]}` —
+        // lies in `field_names`. Without the nested case the bridge
+        // collapses to one level and getters whose body reads a nested
+        // receiver field (`Cmd => Data.Cmd`) never connect to the
+        // caller's tainted `recv.Data.Cmd`, which is the FN root cause
+        // for the csharp/dart/scala/swift mega_flows.
         let Some(s) = segment.strings.get(*name) else {
             continue;
         };
-        let canonical = canonical_field_name(s);
-        if !field_names.contains(&canonical) {
+        let head_field = if path.is_empty() {
+            let canonical = canonical_field_name(s);
+            // first dot-segment of the (sigil/`this.`-stripped) name
+            let head = canonical.split('.').next().unwrap_or(&canonical);
+            head.to_string()
+        } else if is_implicit_receiver_name(s) {
+            // `Read{name=this/self, path=[f, sub, ...]}` — the head
+            // field is `path[0]`; canonicalise to bucket onto the same
+            // key as a write.
+            let head_id = path[0];
+            let Some(head) = segment.strings.get(head_id) else {
+                continue;
+            };
+            canonical_field_name(head)
+        } else {
+            continue;
+        };
+        if head_field.is_empty() || !field_names.contains(&head_field) {
             continue;
         }
         let pid = crate::node::PlaceId(pid_idx as u32);
@@ -1518,7 +1616,7 @@ fn collect_super_chain_read_nodes_and_funcs(
                     continue;
                 }
                 let mut nodes = collect_field_read_nodes(ws, other, field_names);
-                let recv = collect_recv_slot_nodes(ws, other);
+                let recv = collect_recv_slot_nodes(ws, global, other);
                 for n in recv {
                     if !nodes.contains(&n) {
                         nodes.push(n);
@@ -1545,7 +1643,7 @@ fn collect_super_chain_read_nodes_and_funcs(
     out
 }
 
-fn collect_recv_slot_nodes(ws: &IdgWorkspace, func: FuncId) -> Vec<crate::WsNodeId> {
+fn collect_recv_slot_nodes(ws: &IdgWorkspace, global: &GlobalIndex, func: FuncId) -> Vec<crate::WsNodeId> {
     use crate::place::Place;
     let Some(seg_id) = ws.segment_for_func(func) else {
         return Vec::new();
@@ -1555,10 +1653,10 @@ fn collect_recv_slot_nodes(ws: &IdgWorkspace, func: FuncId) -> Vec<crate::WsNode
     };
     let mut out = Vec::new();
     for (pid_idx, place) in segment.places.places.iter().enumerate() {
-        let Place::CallArg { idx, .. } = place else {
+        let Place::CallArg { site, idx } = place else {
             continue;
         };
-        if *idx != u8::MAX && *idx != 0 {
+        if *idx != u8::MAX && !(*idx == 0 && call_site_has_no_explicit_args(global, func, site.0)) {
             continue;
         }
         let pid = crate::node::PlaceId(pid_idx as u32);
@@ -1584,6 +1682,7 @@ fn collect_recv_slot_nodes(ws: &IdgWorkspace, func: FuncId) -> Vec<crate::WsNode
 /// precisely.
 fn recv_slots_for_call_span(
     ws: &IdgWorkspace,
+    global: &GlobalIndex,
     caller: FuncId,
     span: bonsai_common::Span,
 ) -> Vec<(crate::WsNodeId, Option<crate::WsNodeId>)> {
@@ -1595,20 +1694,19 @@ fn recv_slots_for_call_span(
     let Some(segment) = ws.segment(seg_id) else {
         return out;
     };
-    // Emit edges from BOTH the receiver-bridge slot (`idx=u8::MAX`)
-    // and the synthetic args-empty slot (`idx=0`). The transfer
-    // pass's `args.is_empty()` fallback creates a `CallArg{site,
-    // idx=0}` that funnels every name token from the call expression
-    // — receivers spelled with `super` / `base` / `this` may route
-    // through that slot rather than the dedicated `idx=u8::MAX`
-    // bridge, depending on adapter shape. Trying both keeps the
-    // receiver-state edge alive across that ambiguity, while the
-    // exact `span` keeps same-named calls in the same function from
-    // borrowing each other's resolved callee.
-    for try_idx in [u8::MAX, 0u8] {
+    // Emit from the receiver-bridge slot (`idx=u8::MAX`). Older
+    // adapter shapes also route receiver tokens through `idx=0` for
+    // argument-less calls, but for calls with explicit arguments
+    // `idx=0` is the first real argument.
+    let try_indices: &[u8] = if call_site_has_no_explicit_args(global, caller, span) {
+        &[u8::MAX, 0u8]
+    } else {
+        &[u8::MAX]
+    };
+    for try_idx in try_indices {
         let place = Place::CallArg {
             site: crate::CallSiteId(span),
-            idx: try_idx,
+            idx: *try_idx,
         };
         let Some(pid) = segment.places.lookup(&place) else {
             continue;

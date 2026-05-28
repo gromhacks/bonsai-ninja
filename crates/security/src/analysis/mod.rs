@@ -667,7 +667,17 @@ where
     // `--inferred-sources` to restore the legacy behavior; combine with
     // `--trust local --category inferred` to view only the inferred set.
     if options.include_inferred_sources && options.source.is_none() {
-        source_hits.extend(infer_entry_point_sources(ws));
+        // A broad inferred entry-point param source is redundant noise
+        // when a concrete source in the same function is rooted at that
+        // same parameter (e.g. Go's `unreferenced_entry.param_1` for `r`
+        // duplicates the concrete `r.URL.Query().Get(...)` source). Drop
+        // the inferred param so the precise source is the sole evidence.
+        let concrete_param_bases = concrete_source_param_bases(&source_hits);
+        source_hits.extend(
+            infer_entry_point_sources(ws)
+                .into_iter()
+                .filter(|inferred| !inferred_param_subsumed_by_concrete(inferred, &concrete_param_bases)),
+        );
     }
     filter_source_hits_by_metadata(
         &mut source_hits,
@@ -921,7 +931,20 @@ where
     );
     // Opt-in synthetic per-function entry-point sources (see TaintAnalysisOptions).
     if options.include_inferred_sources {
-        source_hits.extend(infer_entry_point_sources(ws));
+        // Concrete rulepack source matches gathered above are precise,
+        // resolver-backed evidence. A broad inferred entry-point param
+        // source is redundant noise when a concrete source in the same
+        // function is rooted at that same parameter — e.g. Go's
+        // `entry-point.unreferenced_entry.param_1` for `r` duplicates the
+        // concrete `r.URL.Query().Get(...)` query-value source on the same
+        // request param. Drop the inferred param in that case so the
+        // precise source is the sole evidence for the flow.
+        let concrete_param_bases = concrete_source_param_bases(&source_hits);
+        source_hits.extend(
+            infer_entry_point_sources(ws)
+                .into_iter()
+                .filter(|inferred| !inferred_param_subsumed_by_concrete(inferred, &concrete_param_bases)),
+        );
     }
     if let Some(source) = options.source.as_deref() {
         // CLI `--source <regex>` filter — match rule id directly, or
@@ -2935,6 +2958,61 @@ fn filter_source_hits_by_metadata(
     hits.retain(|hit| source_hit_matches_metadata(hit, pack, trust, category, tag));
 }
 
+/// `(file, enclosing_fn)` → the set of base identifiers a concrete
+/// (non-inferred) rulepack source match is rooted at in that function.
+/// Used to drop redundant inferred entry-point param sources that only
+/// re-describe a flow a precise source already covers.
+fn concrete_source_param_bases(hits: &[RuleMatch]) -> AHashMap<(String, String), AHashSet<String>> {
+    let mut out: AHashMap<(String, String), AHashSet<String>> = AHashMap::default();
+    for hit in hits {
+        if hit.rule_id.starts_with("entry-point.") {
+            continue;
+        }
+        let Some(fn_name) = hit.enclosing_fn.clone() else {
+            continue;
+        };
+        if let Some(base) = source_expr_base_identifier(&hit.match_text) {
+            out.entry((hit.file.clone(), fn_name))
+                .or_default()
+                .insert(base.to_string());
+        }
+    }
+    out
+}
+
+/// True when `inferred` is a synthetic entry-point param source whose
+/// parameter is the root of a concrete source match in the same
+/// function (so the concrete match is the precise evidence and the
+/// inferred param is redundant).
+fn inferred_param_subsumed_by_concrete(
+    inferred: &RuleMatch,
+    concrete: &AHashMap<(String, String), AHashSet<String>>,
+) -> bool {
+    if !inferred.rule_id.starts_with("entry-point.") {
+        return false;
+    }
+    let Some(fn_name) = inferred.enclosing_fn.as_ref() else {
+        return false;
+    };
+    let param = inferred.match_text.trim();
+    !param.is_empty()
+        && concrete
+            .get(&(inferred.file.clone(), fn_name.clone()))
+            .is_some_and(|bases| bases.contains(param))
+}
+
+/// Leading identifier of a source expression — `r.URL.Query().Get` → `r`,
+/// `payload[0]` → `payload`. Returns `None` when the text does not begin
+/// with an identifier character.
+fn source_expr_base_identifier(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let end = trimmed
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '@'))
+        .unwrap_or(trimmed.len());
+    let base = &trimmed[..end];
+    (!base.is_empty()).then_some(base)
+}
+
 fn source_hit_matches_metadata(
     hit: &RuleMatch,
     pack: &Rulepack,
@@ -3945,6 +4023,18 @@ fn same_source_location(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.file == b.file && a.line == b.line && a.column == b.column
 }
 
+fn source_preference_rank(source: &FindingMatch) -> u8 {
+    if source.rule_id.starts_with("entry-point.") || source.category.as_deref() == Some("inferred") {
+        return 30;
+    }
+    match source.trust.as_deref() {
+        Some("remote") => 0,
+        Some("service" | "ipc" | "database" | "library") => 5,
+        Some("local" | "config" | "physical") => 10,
+        _ => 15,
+    }
+}
+
 /// True when two sink-side `FindingMatch`es refer to the exact same
 /// call-site. Symmetric counterpart to [`same_source_site`].
 fn same_sink_site(a: &FindingMatch, b: &FindingMatch) -> bool {
@@ -4089,14 +4179,16 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
     sources.push(group.finding.source.clone());
     sources.extend(group.additional_sources.iter().cloned());
     sources.sort_by(|a, b| {
-        (a.file.as_str(), a.line, a.column)
-            .cmp(&(b.file.as_str(), b.line, b.column))
+        source_preference_rank(a)
+            .cmp(&source_preference_rank(b))
+            .then_with(|| (a.file.as_str(), a.line, a.column).cmp(&(b.file.as_str(), b.line, b.column)))
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
     group.finding.source = sources[0].clone();
     // Distinct source sites can collapse onto the same conservative
-    // field/container lineage. Do not surface them as additional proven
-    // sources unless they are aliases for the same exact call site.
+    // field/container lineage. Prefer concrete rulepack sources over
+    // inferred entry-point placeholders, then do not surface other
+    // source sites unless they are aliases for the same exact call site.
     group.additional_sources = sources
         .into_iter()
         .skip(1)

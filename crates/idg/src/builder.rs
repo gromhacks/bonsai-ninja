@@ -56,6 +56,7 @@ struct CalleeEndpoints {
     param_names: Vec<String>,
     receiver_param_index: Option<usize>,
     receiver_field_bases: Vec<String>,
+    implicit_receiver_bases: Vec<String>,
     return_node: Option<NodeId>,
 }
 
@@ -66,6 +67,7 @@ struct FunctionStitchData {
     param_count: usize,
     receiver_param_index: Option<usize>,
     receiver_field_bases: Vec<String>,
+    implicit_receiver_bases: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -347,6 +349,7 @@ pub fn stitch_idg(
                 params,
                 receiver_param_index,
                 receiver_field_bases,
+                implicit_receiver_bases,
                 call_sites,
                 ..
             } = out;
@@ -359,6 +362,7 @@ pub fn stitch_idg(
                     param_count,
                     receiver_param_index,
                     receiver_field_bases,
+                    implicit_receiver_bases,
                 },
             );
             local_remaps.push((func, remap));
@@ -421,6 +425,7 @@ pub fn stitch_idg(
                 site,
                 &data.params,
                 data.receiver_param_index,
+                &data.implicit_receiver_bases,
                 resolver,
                 &callee_endpoints,
                 &mut ws,
@@ -523,6 +528,10 @@ fn build_callee_endpoints(
                 receiver_field_bases: stitch_data
                     .get(&func)
                     .map(|data| data.receiver_field_bases.clone())
+                    .unwrap_or_default(),
+                implicit_receiver_bases: stitch_data
+                    .get(&func)
+                    .map(|data| data.implicit_receiver_bases.clone())
                     .unwrap_or_default(),
                 return_node,
             },
@@ -703,6 +712,7 @@ fn stitch_call_site(
     site: &CallSiteRef,
     caller_params: &[String],
     caller_receiver_param_index: Option<usize>,
+    caller_implicit_receiver_bases: &[String],
     resolver: &dyn CalleeResolver,
     callee_endpoints: &AHashMap<FuncId, CalleeEndpoints>,
     ws: &mut IdgWorkspace,
@@ -852,6 +862,36 @@ fn stitch_call_site(
                             cand.precision,
                             cand.edge_kind,
                             Some(receiver_type.as_str()),
+                        );
+                    }
+                }
+            }
+            if endpoints.receiver_param_index.is_none() && !endpoints.implicit_receiver_bases.is_empty() {
+                if let Some(receiver) = site
+                    .receiver
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|receiver| !receiver.is_empty())
+                {
+                    let actual_receiver = implicit_receiver_actual_base(
+                        receiver,
+                        caller_params,
+                        caller_receiver_param_index,
+                        caller_implicit_receiver_bases,
+                    );
+                    for param_name in &endpoints.implicit_receiver_bases {
+                        push_receiver_field_arg_site(
+                            field_arg_sites,
+                            caller,
+                            caller_seg,
+                            cand.func,
+                            endpoints.segment,
+                            &actual_receiver,
+                            param_name,
+                            site.site.0,
+                            cand.precision,
+                            cand.edge_kind,
+                            None,
                         );
                     }
                 }
@@ -1043,6 +1083,36 @@ fn constructor_receiver_target_base(
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| trimmed.to_string());
+    }
+    trimmed.to_string()
+}
+
+fn implicit_receiver_actual_base(
+    receiver: &str,
+    caller_params: &[String],
+    caller_receiver_param_index: Option<usize>,
+    caller_implicit_receiver_bases: &[String],
+) -> String {
+    let trimmed = receiver.trim();
+    if is_super_receiver(trimmed) || is_implicit_receiver_name(trimmed) {
+        if let Some(param) = caller_receiver_param_index
+            .and_then(|idx| caller_params.get(idx))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return param.to_string();
+        }
+        if let Some(base) = caller_implicit_receiver_bases
+            .iter()
+            .find(|base| is_implicit_receiver_name(base.trim()) && !is_super_receiver(base.trim()))
+            .or_else(|| caller_implicit_receiver_bases.first())
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return base.to_string();
+        }
     }
     trimmed.to_string()
 }

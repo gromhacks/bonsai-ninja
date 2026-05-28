@@ -120,3 +120,22 @@ fn javascript_init_method_is_not_a_constructor_but_constructor_decl_is() {
     assert_has_constructor(&db, "constructor");
     assert_not_constructor(&db, "init");
 }
+
+#[test]
+fn objc_initwith_method_is_constructor_but_initialize_is_not() {
+    let db = db_for(
+        Arc::new(bonsai_lang_objc::ObjCAdapter::new()),
+        "Demo.m",
+        "@interface Demo\n\
+         - (instancetype)initWithData:(id)data;\n\
+         + (void)initialize;\n\
+         @end\n\
+         @implementation Demo\n\
+         - (instancetype)initWithData:(id)data { return self; }\n\
+         + (void)initialize {}\n\
+         @end\n",
+    );
+
+    assert_has_constructor(&db, "initWithData");
+    assert_not_constructor(&db, "initialize");
+}

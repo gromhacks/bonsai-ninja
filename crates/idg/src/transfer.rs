@@ -220,6 +220,11 @@ pub struct TransferOutput {
     /// so Phase 3 uses these bases to forward constructor-return
     /// fields back to the assigned object.
     pub receiver_field_bases: Vec<String>,
+    /// Receiver-state base names used by methods whose receiver is
+    /// implicit in the language body (`self`, `super`, `this`, etc.).
+    /// Phase 3 uses these bases to forward caller receiver fields into
+    /// the callee even when there is no explicit receiver parameter.
+    pub implicit_receiver_bases: Vec<String>,
     /// Place dictionary local to this function. The Phase 3 builder
     /// merges it into the segment's dictionary, remapping ids.
     pub places: PlaceDict,
@@ -251,6 +256,7 @@ impl TransferOutput {
             params: Vec::new(),
             receiver_param_index: None,
             receiver_field_bases: Vec::new(),
+            implicit_receiver_bases: Vec::new(),
             places: PlaceDict::new(),
             nodes: NodeDict::new(),
             edges: Vec::new(),
@@ -325,6 +331,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
     out.params.clone_from(&decl.params);
     out.receiver_param_index = decl.receiver_param_index;
     out.receiver_field_bases = receiver_field_bases(decl);
+    out.implicit_receiver_bases = implicit_receiver_bases(decl);
     let mut ctx = TransferCtx {
         out: &mut out,
         options,
@@ -332,6 +339,7 @@ pub fn transfer_function_for_with_options(decl: &Decl, options: &TransferOptions
         catch_projection_receivers: ahash::AHashSet::default(),
         emitted_edges: ahash::AHashSet::default(),
         field_precise_container_assigns: collect_field_precise_container_assigns(&decl.flow_events),
+        method_receiver_bases: collect_method_receiver_bases(&decl.flow_events),
     };
 
     // Seed the function's `Return` place defensively. Every
@@ -389,6 +397,104 @@ fn receiver_field_bases(decl: &Decl) -> Vec<String> {
         }
     }
     out
+}
+
+fn implicit_receiver_bases(decl: &Decl) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in decl
+        .implicit_receiver_names
+        .iter()
+        .chain(decl.receiver_state_sources.iter())
+    {
+        push_implicit_receiver_base(&mut out, name);
+    }
+    for write in &decl.receiver_field_writes {
+        push_implicit_receiver_base(&mut out, &write.target);
+    }
+    collect_implicit_receiver_bases(&decl.flow_events, &mut out);
+    out
+}
+
+fn collect_implicit_receiver_bases(events: &[FlowEvent], out: &mut Vec<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Call { name, receiver, .. } => {
+                push_implicit_receiver_base(out, name);
+                if let Some(receiver) = receiver {
+                    push_implicit_receiver_base(out, receiver);
+                }
+            }
+            FlowEvent::Assign {
+                target,
+                source_name,
+                source_call,
+                source_names,
+                ..
+            } => {
+                push_implicit_receiver_base(out, target);
+                if let Some(source_name) = source_name {
+                    push_implicit_receiver_base(out, source_name);
+                }
+                if let Some(source_call) = source_call {
+                    push_implicit_receiver_base(out, source_call);
+                }
+                for source in source_names {
+                    push_implicit_receiver_base(out, source);
+                }
+            }
+            FlowEvent::Return {
+                value_text,
+                value_name,
+                ..
+            } => {
+                if let Some(value_text) = value_text {
+                    push_implicit_receiver_base(out, value_text);
+                }
+                if let Some(value_name) = value_name {
+                    push_implicit_receiver_base(out, value_name);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_implicit_receiver_bases(then_events, out);
+                collect_implicit_receiver_bases(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_implicit_receiver_bases(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_implicit_receiver_bases(body, out);
+                collect_implicit_receiver_bases(catch_events, out);
+                collect_implicit_receiver_bases(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_implicit_receiver_base(out: &mut Vec<String>, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let candidate = field_base_name(trimmed).unwrap_or(trimmed).trim();
+    let bare = candidate.trim_start_matches(['$', '@', '%']);
+    if !matches!(bare, "self" | "this" | "super" | "base" | "Self") {
+        return;
+    }
+    for value in [candidate, bare] {
+        if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+            out.push(value.to_string());
+        }
+    }
 }
 
 fn emit_receiver_field_writes(decl: &Decl, ctx: &mut TransferCtx<'_>) {
@@ -509,6 +615,13 @@ struct TransferCtx<'a> {
     /// that shape; feeding every literal identifier into it collapses
     /// sibling fields.
     field_precise_container_assigns: ahash::AHashSet<(Span, String)>,
+    /// Bare names that appear as the receiver of a method call in this
+    /// function (`raw` in `raw.dup`, `routed` in `routed.to_s`). A
+    /// method invocation derives its result from the *whole* receiver
+    /// value, so a sibling method projection (`raw.dup`) must NOT
+    /// demote bare `raw` to a structural field-only base the way a
+    /// genuine field/index access (`obj.field`, `data[:cmd]`) does.
+    method_receiver_bases: ahash::AHashSet<String>,
 }
 
 impl<'a> TransferCtx<'a> {
@@ -680,19 +793,100 @@ fn field_base_name(target: &str) -> Option<&str> {
     (!base.is_empty()).then_some(base)
 }
 
+/// Collect the bare base names that are used as a method-call receiver
+/// somewhere in the function. `raw.dup` / `routed.to_s` contribute
+/// `raw` / `routed`; chained calls like `routed.to_s.empty?` also
+/// contribute the intermediate `routed` (via the receiver's base).
+/// Used by [`SemanticSourceFilter`] to keep a whole-value receiver
+/// from being demoted to a field-only structural base.
+fn collect_method_receiver_bases(events: &[FlowEvent]) -> ahash::AHashSet<String> {
+    let mut out = ahash::AHashSet::default();
+    collect_method_receiver_bases_into(events, &mut out);
+    out
+}
+
+fn collect_method_receiver_bases_into(events: &[FlowEvent], out: &mut ahash::AHashSet<String>) {
+    for event in events {
+        match event {
+            FlowEvent::Call {
+                receiver, call_kind, ..
+            } => {
+                if matches!(call_kind, CallKind::Method) {
+                    push_method_receiver_base(receiver.as_deref(), out);
+                }
+            }
+            FlowEvent::Assign { source_call, .. } => {
+                // `a = raw.dup` carries the method projection through
+                // `source_call` rather than a `source_names` entry.
+                if let Some(call) = source_call.as_deref() {
+                    push_method_receiver_base(method_chain_receiver_carrier(call).as_deref(), out);
+                }
+            }
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                collect_method_receiver_bases_into(then_events, out);
+                collect_method_receiver_bases_into(else_events, out);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                collect_method_receiver_bases_into(body, out);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                collect_method_receiver_bases_into(body, out);
+                collect_method_receiver_bases_into(catch_events, out);
+                collect_method_receiver_bases_into(finally_events, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn push_method_receiver_base(receiver: Option<&str>, out: &mut ahash::AHashSet<String>) {
+    let Some(receiver) = receiver.map(str::trim).filter(|r| !r.is_empty()) else {
+        return;
+    };
+    // The receiver itself is a whole value (`routed.to_s` as the
+    // receiver of `.empty?`), and so is its base (`routed`).
+    out.insert(receiver.to_string());
+    if let Some(base) = field_base_name(receiver) {
+        out.insert(base.to_string());
+    }
+}
+
 #[derive(Default)]
 struct SemanticSourceFilter {
     structural_bases: ahash::AHashSet<String>,
 }
 
 impl SemanticSourceFilter {
-    fn from_sources(primary: Option<&str>, sources: &[String]) -> Self {
+    fn from_sources(
+        primary: Option<&str>,
+        sources: &[String],
+        method_receiver_bases: &ahash::AHashSet<String>,
+    ) -> Self {
         let mut filter = Self::default();
         for source in primary.into_iter().chain(sources.iter().map(String::as_str)) {
             let Some(base) = field_base_name(source) else {
                 continue;
             };
             if source_uses_index_projection(source, base) {
+                continue;
+            }
+            // A method projection (`raw.dup`, `routed.to_s`) derives
+            // its value from the whole receiver, so it must not demote
+            // bare `raw`/`routed` to a field-only structural base — the
+            // receiver legitimately flows whole when it is also read
+            // directly (`cmd: "#{raw}"`, `cmd: routed`). Genuine field
+            // / index projections (`obj.field`, `data[:cmd]`,
+            // Solidity `routed.length`) keep their base structural.
+            if method_receiver_bases.contains(base) {
                 continue;
             }
             filter.structural_bases.insert(base.to_string());
@@ -1009,15 +1203,25 @@ fn bridge_value_expr_to_node(
     };
     let mut bridged: ahash::AHashSet<StrId> = ahash::AHashSet::default();
     let qualified_accesses = extract_qualified_accesses_outside_strings(value);
-    for (access, _, _) in &qualified_accesses {
+    for (access, start, end) in &qualified_accesses {
         let sid = ctx.intern_name(access);
         if bridged.insert(sid) {
             ctx.bridge_read(access, target, meta);
         }
-        if let Some(receiver) = method_chain_receiver_carrier(access) {
-            let sid = ctx.intern_name(&receiver);
-            if bridged.insert(sid) {
-                ctx.bridge_read(&receiver, target, meta);
+        let source_slice = value.get(*start..*end).unwrap_or(access);
+        if !source_slice.contains('[') {
+            if let Some(receiver) = method_chain_receiver_carrier(access) {
+                let sid = ctx.intern_name(&receiver);
+                if bridged.insert(sid) {
+                    ctx.bridge_read(&receiver, target, meta);
+                }
+            }
+        } else if !source_slice.trim_end().ends_with(']') {
+            if let Some(receiver) = static_subscript_method_receiver(access) {
+                let sid = ctx.intern_name(&receiver);
+                if bridged.insert(sid) {
+                    ctx.bridge_read(&receiver, target, meta);
+                }
             }
         }
     }
@@ -1436,10 +1640,20 @@ fn walk_assign(
     // sink(SAFE)` doesn't fire any rule, because the sink's
     // `bridge_read("SAFE")` resolves to a writer node that has
     // no incoming edge from any tainted source.
-    let suppress_broad_container_inputs = !is_field_write
-        && ctx
-            .field_precise_container_assigns
-            .contains(&(span, target.trim().to_string()));
+    // A bare container assign is field-precise when the same statement
+    // also emits explicit field writes for that container. Adapters
+    // anchor those field writes either at the whole container-literal
+    // span (equality) or, when a field value is itself a span-anchored
+    // source (`user: msg.sender`), at the narrower field-value span —
+    // so link by span CONTAINMENT, not equality. Containment is a
+    // superset of the old equality match, so existing field-precise
+    // shapes are unchanged.
+    let suppress_broad_container_inputs = !is_field_write && {
+        let bare_target = target.trim();
+        ctx.field_precise_container_assigns
+            .iter()
+            .any(|(field_span, base)| base == bare_target && span_contains_or_equal(span, *field_span))
+    };
     if is_structural_index_base_write(target, source_name, source_names, suppress_broad_container_inputs) {
         return;
     }
@@ -1466,7 +1680,8 @@ fn walk_assign(
         || (source_call.is_some()
             && !source_call_args.is_empty()
             && matches!(value_kind, Some(bonsai_lang_api::AssignValueKind::CallResult)));
-    let source_filter = SemanticSourceFilter::from_sources(source_name, source_names);
+    let source_filter =
+        SemanticSourceFilter::from_sources(source_name, source_names, &ctx.method_receiver_bases);
     if !suppress_direct_rhs_inputs {
         if let Some(src) = source_name {
             if !src.is_empty()
@@ -1557,15 +1772,17 @@ fn walk_assign(
                 });
             }
         }
-    } else if let Some(hint) = source_call_site_hint {
-        let ret_node = ctx.intern_node(Place::CallRet {
-            site: CallSiteId(hint.site_span),
-        });
-        ctx.emit(IdgEdge {
-            from: ret_node,
-            to: write_node,
-            meta: edge_meta,
-        });
+    } else if !suppress_broad_container_inputs {
+        if let Some(hint) = source_call_site_hint {
+            let ret_node = ctx.intern_node(Place::CallRet {
+                site: CallSiteId(hint.site_span),
+            });
+            ctx.emit(IdgEdge {
+                from: ret_node,
+                to: write_node,
+                meta: edge_meta,
+            });
+        }
     }
 
     // Commit the new writer LAST: prior bridge_read calls already
@@ -1681,7 +1898,11 @@ fn walk_call(
             via_span: span,
         };
         let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
-        let source_filter = SemanticSourceFilter::from_sources(arg.place.as_deref(), &arg.source_names);
+        let source_filter = SemanticSourceFilter::from_sources(
+            arg.place.as_deref(),
+            &arg.source_names,
+            &ctx.method_receiver_bases,
+        );
         if let Some(place) = arg.place.as_deref() {
             if !place.is_empty() && !source_filter.is_structural_base_token(place) {
                 let sid = ctx.intern_name(place);
@@ -1946,7 +2167,11 @@ fn bridge_call_arg_value_to_node(
     span: Span,
     ctx: &mut TransferCtx<'_>,
 ) {
-    let source_filter = SemanticSourceFilter::from_sources(arg.place.as_deref(), &arg.source_names);
+    let source_filter = SemanticSourceFilter::from_sources(
+        arg.place.as_deref(),
+        &arg.source_names,
+        &ctx.method_receiver_bases,
+    );
     let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
     if let Some(place) = arg.place.as_deref() {
         if !place.is_empty() && !source_filter.is_structural_base_token(place) {
@@ -2380,7 +2605,11 @@ fn bridge_call_arg_value_to_throw(arg: &CallArg, throw_node: NodeId, span: Span,
         call_kind: bonsai_callgraph::EdgeKind::Direct,
         via_span: span,
     };
-    let source_filter = SemanticSourceFilter::from_sources(arg.place.as_deref(), &arg.source_names);
+    let source_filter = SemanticSourceFilter::from_sources(
+        arg.place.as_deref(),
+        &arg.source_names,
+        &ctx.method_receiver_bases,
+    );
     let mut emitted: ahash::AHashSet<StrId> = ahash::AHashSet::new();
     if let Some(place) = arg.place.as_deref() {
         if !place.is_empty() && !source_filter.is_structural_base_token(place) {
@@ -2543,6 +2772,14 @@ fn method_chain_receiver_carrier(source_call: &str) -> Option<String> {
     Some(candidate.to_string())
 }
 
+fn static_subscript_method_receiver(access: &str) -> Option<String> {
+    let (receiver, field_or_method) = access.rsplit_once('.')?;
+    if field_or_method.starts_with('@') || !receiver.contains('.') {
+        return None;
+    }
+    Some(receiver.to_string())
+}
+
 /// Extract every bare-identifier token from `text`, ignoring runs
 /// inside string literals (`"..."`, `'...'`, `` `...` ``). Mirrors
 /// the engine's `identifier_tokens_outside_strings` so the IDG
@@ -2658,6 +2895,17 @@ fn extract_qualified_accesses_outside_strings(text: &str) -> Vec<(String, usize,
                 end = i;
                 continue;
             }
+            if i < bytes.len() && bytes[i] == b'[' {
+                let Some((field, field_end)) = parse_static_subscript_access_segment(text, bytes, i) else {
+                    break;
+                };
+                access.push('.');
+                access.push_str(&field);
+                saw_field = true;
+                i = field_end;
+                end = i;
+                continue;
+            }
             break;
         }
         if saw_field && !out.iter().any(|(existing, _, _)| existing == &access) {
@@ -2665,6 +2913,83 @@ fn extract_qualified_accesses_outside_strings(text: &str) -> Vec<(String, usize,
         }
     }
     out
+}
+
+fn parse_static_subscript_access_segment(text: &str, bytes: &[u8], open: usize) -> Option<(String, usize)> {
+    let mut cursor = open.checked_add(1)?;
+    skip_ascii_ws(bytes, &mut cursor);
+    if cursor >= bytes.len() {
+        return None;
+    }
+
+    let mut objc_string_key = false;
+    let mut symbol_key = false;
+    if bytes[cursor] == b':' {
+        symbol_key = true;
+        cursor += 1;
+        skip_ascii_ws(bytes, &mut cursor);
+    } else if bytes[cursor] == b'@' {
+        objc_string_key = true;
+        cursor += 1;
+        skip_ascii_ws(bytes, &mut cursor);
+    }
+
+    let key = if cursor < bytes.len() && matches!(bytes[cursor], b'\'' | b'"') {
+        let quote = bytes[cursor];
+        cursor += 1;
+        let key_start = cursor;
+        let mut escaped = false;
+        while cursor < bytes.len() {
+            let b = bytes[cursor];
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == quote {
+                break;
+            }
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != quote {
+            return None;
+        }
+        let key = &text[key_start..cursor];
+        cursor += 1;
+        key
+    } else if symbol_key {
+        let key_start = cursor;
+        if key_start >= bytes.len() || !is_ident_start_byte_for_access(bytes, key_start) {
+            return None;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && is_ident_continue_byte_for_access(bytes[cursor]) {
+            cursor += 1;
+        }
+        &text[key_start..cursor]
+    } else {
+        return None;
+    };
+
+    skip_ascii_ws(bytes, &mut cursor);
+    if cursor >= bytes.len() || bytes[cursor] != b']' {
+        return None;
+    }
+    if key.is_empty() || !key.bytes().all(is_static_field_key_byte) {
+        return None;
+    }
+
+    let mut field = String::with_capacity(key.len() + usize::from(objc_string_key));
+    if objc_string_key {
+        field.push('@');
+    }
+    field.push_str(key);
+    Some((field, cursor + 1))
+}
+
+fn skip_ascii_ws(bytes: &[u8], cursor: &mut usize) {
+    while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
+        *cursor += 1;
+    }
 }
 
 fn text_without_qualified_ranges(text: &str, ranges: &[(String, usize, usize)]) -> String {
@@ -2686,6 +3011,10 @@ fn is_ident_start_byte_for_access(bytes: &[u8], i: usize) -> bool {
 }
 
 fn is_ident_continue_byte_for_access(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphanumeric()
+}
+
+fn is_static_field_key_byte(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric()
 }
 

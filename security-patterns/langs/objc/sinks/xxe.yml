@@ -8,7 +8,7 @@
   match:
     kind: call
     callee:
-      name: initWithData
+      attribute: [NSXMLParser, initWithData]
   constraints:
   - arg_tainted:
       index: 0
@@ -19,6 +19,13 @@
   - name: literal xml data negative
     code: |
       void test(void) { [NSXMLParser initWithData:@"<root/>"]; }
+    expect_no_match: true
+  - name: unrelated initWithData selector negative
+    code: |
+      @interface Repository
+      - (instancetype)initWithData:(id)data;
+      @end
+      void test(id input) { id target = input; int amount = 1; [Repository initWithData:input]; }
     expect_no_match: true
   description: "[[NSXMLParser alloc] initWithData:] — parses tainted XML; default allows external entities unless -setShouldResolveExternalEntities:NO is set."
 
@@ -31,7 +38,7 @@
   match:
     kind: call
     callee:
-      name: initWithStream
+      attribute: [NSXMLParser, initWithStream]
   constraints:
   - arg_tainted:
       index: 0
@@ -54,7 +61,7 @@
   match:
     kind: call
     callee:
-      name: initWithContentsOfURL
+      attribute: [NSXMLParser, initWithContentsOfURL]
   constraints:
   - arg_tainted:
       index: 0
@@ -66,7 +73,30 @@
     code: |
       void test(void) { [NSXMLParser initWithContentsOfURL:@"https://safe.example/feed.xml"]; }
     expect_no_match: true
-  description: "NSXMLParser/NSXMLDocument -initWithContentsOfURL: — fetches and parses remote XML; both XXE and SSRF."
+  description: "NSXMLParser -initWithContentsOfURL: — fetches and parses remote XML; both XXE and SSRF."
+
+- id: objc.xxe.nsxmldocument_initwithcontentsofurl
+  enabled: true
+  language: objc
+  tag: xxe
+  severity: high
+  cwe: [CWE-611, CWE-918]
+  match:
+    kind: call
+    callee:
+      attribute: [NSXMLDocument, initWithContentsOfURL]
+  constraints:
+  - arg_tainted:
+      index: 0
+  match_examples:
+  - name: declared shape
+    code: |
+      void test(id input) { id target = input; int amount = 1; [NSXMLDocument initWithContentsOfURL:input]; }
+  - name: literal xml url negative
+    code: |
+      void test(void) { [NSXMLDocument initWithContentsOfURL:@"https://safe.example/feed.xml"]; }
+    expect_no_match: true
+  description: "NSXMLDocument -initWithContentsOfURL: — fetches and parses remote XML; both XXE and SSRF."
 
 - id: objc.xxe.shouldresolveexternalentities_yes
   enabled: true
@@ -99,7 +129,7 @@
   match:
     kind: call
     callee:
-      name: initWithXMLString
+      attribute: [NSXMLDocument, initWithXMLString]
   constraints:
   - arg_tainted:
       index: 0

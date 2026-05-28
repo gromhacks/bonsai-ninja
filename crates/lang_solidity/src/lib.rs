@@ -2,10 +2,10 @@
 use bonsai_common::{FileId, Span};
 use bonsai_lang_api::{
     collect_modifier_visibility, collect_param_type_aliases, decl_index_with_handler, extract_imports_via,
-    kit::{collect_kinds, language_from_pack, node_text, parse_with, span_of},
-    AdapterContext, AdapterError, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite, FlowEvent,
-    GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities, LanguageId,
-    ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
+    kit::{collect_kinds, language_from_pack, node_at_span, node_text, parse_with, span_of},
+    AdapterContext, AdapterError, AssignValueKind, CallArg, CallKind, DeclIndex, DeclKind, FieldWrite,
+    FlowEvent, GrammarHandler, ImportIndex, ImportScope, ImportSpec, LanguageAdapter, LanguageCapabilities,
+    LanguageId, ModifierVocabulary, TypeAliasBinding, TypeAliasVocabulary, Visibility,
 };
 
 const SOLIDITY_VOCAB: ModifierVocabulary = ModifierVocabulary {
@@ -40,7 +40,7 @@ const SOLIDITY_TYPE_ALIASES: TypeAliasVocabulary = TypeAliasVocabulary {
     name_field: "name",
     type_field: "type",
 };
-use tree_sitter::{Language, Tree};
+use tree_sitter::{Language, Node, Tree};
 
 pub const LANG_ID: LanguageId = LanguageId::new("solidity");
 const PACK_NAME: &str = "solidity";
@@ -234,6 +234,7 @@ impl LanguageAdapter for SolidityAdapter {
             }
             for decl in &mut idx.defs {
                 synthesize_try_return_assigns(&mut decl.flow_events, src);
+                augment_solidity_struct_literal_flow_events(&mut decl.flow_events, &tree, src);
             }
         }
         attach_solidity_method_owners(&mut idx);
@@ -371,7 +372,7 @@ fn synthesize_emit_call_events(tree: &Tree, src: &[u8], file: FileId) -> Vec<(Sp
                 name: None,
                 place: simple_identifier_place(&value_node, src),
                 value_text,
-                source_names: Vec::new(),
+                source_names: solidity_value_source_names(value_node, src),
             });
         }
         synthesized.push((
@@ -474,6 +475,248 @@ fn synthesize_try_return_assigns(events: &mut Vec<FlowEvent>, src: &[u8]) {
             _ => {}
         }
     }
+}
+
+fn augment_solidity_struct_literal_flow_events(events: &mut Vec<FlowEvent>, tree: &Tree, src: &[u8]) {
+    for event in events.iter_mut() {
+        match event {
+            FlowEvent::Branch {
+                then_events,
+                else_events,
+                ..
+            } => {
+                augment_solidity_struct_literal_flow_events(then_events, tree, src);
+                augment_solidity_struct_literal_flow_events(else_events, tree, src);
+            }
+            FlowEvent::Loop { body, .. } | FlowEvent::Defer { body, .. } | FlowEvent::Using { body, .. } => {
+                augment_solidity_struct_literal_flow_events(body, tree, src);
+            }
+            FlowEvent::Try {
+                body,
+                catch_events,
+                finally_events,
+                ..
+            } => {
+                augment_solidity_struct_literal_flow_events(body, tree, src);
+                augment_solidity_struct_literal_flow_events(catch_events, tree, src);
+                augment_solidity_struct_literal_flow_events(finally_events, tree, src);
+            }
+            _ => {}
+        }
+    }
+
+    let root = tree.root_node();
+    let mut rewritten = Vec::with_capacity(events.len());
+    for event in events.drain(..) {
+        let mut synthetic = Vec::new();
+        if let FlowEvent::Assign { span, target, .. } = &event {
+            if let Some(call) = solidity_assignment_struct_literal(root, *span) {
+                synthetic.extend(solidity_struct_literal_field_assigns(target, *span, call, src));
+            }
+        }
+        rewritten.push(event);
+        rewritten.extend(synthetic);
+    }
+    *events = rewritten;
+}
+
+fn solidity_assignment_struct_literal<'tree>(root: Node<'tree>, span: Span) -> Option<Node<'tree>> {
+    let node = node_at_span(
+        root,
+        span,
+        &[
+            "variable_declaration_statement",
+            "assignment_expression",
+            "call_expression",
+        ],
+    )?;
+    if node.kind() == "call_expression" && solidity_call_has_struct_arguments(node) {
+        return Some(node);
+    }
+    let rhs = node
+        .child_by_field_name("value")
+        .or_else(|| node.child_by_field_name("right"))
+        .unwrap_or(node);
+    first_solidity_struct_literal_call(rhs)
+}
+
+fn first_solidity_struct_literal_call(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() == "call_expression" && solidity_call_has_struct_arguments(node) {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = first_solidity_struct_literal_call(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn solidity_call_has_struct_arguments(call: Node<'_>) -> bool {
+    solidity_call_struct_arguments(call).next().is_some()
+}
+
+fn solidity_struct_literal_field_assigns(
+    target: &str,
+    span: Span,
+    call: Node<'_>,
+    src: &[u8],
+) -> Vec<FlowEvent> {
+    let mut out = Vec::new();
+    for arg in solidity_call_struct_arguments(call) {
+        let Some(field_node) = arg.child_by_field_name("name") else {
+            continue;
+        };
+        let Some(value_node) = arg.child_by_field_name("value") else {
+            continue;
+        };
+        let field = node_text(&field_node, src).trim();
+        if !solidity_is_field_key(field) {
+            continue;
+        }
+        let source_names = solidity_value_source_names(value_node, src);
+        let value_kind = if source_names.is_empty() && solidity_value_is_literal(value_node, src) {
+            Some(AssignValueKind::Literal)
+        } else {
+            Some(AssignValueKind::Compound)
+        };
+        // Anchor the synthetic field-write at the field VALUE's span
+        // (not the whole struct-literal span). A span-anchored source
+        // inside one field (`user: msg.sender`) must seed only that
+        // field's write, not every sibling field that happens to share
+        // the literal's outer span. The IDG links these field-writes to
+        // their bare container assign by span CONTAINMENT, so the
+        // narrower value span still drives `suppress_broad_container_inputs`.
+        let field_span = Span::new(
+            span.file,
+            u64::try_from(value_node.start_byte()).unwrap_or(span.start),
+            u64::try_from(value_node.end_byte()).unwrap_or(span.end),
+        );
+        out.push(FlowEvent::Assign {
+            span: field_span,
+            target: format!("{target}.{field}"),
+            source_name: None,
+            source_call: None,
+            source_call_args: Vec::new(),
+            source_names,
+            declares_new_binding: false,
+            value_kind,
+        });
+    }
+    out
+}
+
+fn solidity_call_struct_arguments(call: Node<'_>) -> impl Iterator<Item = Node<'_>> {
+    let mut args = Vec::new();
+    let mut cursor = call.walk();
+    for child in call.named_children(&mut cursor) {
+        if child.kind() == "call_struct_argument" {
+            args.push(child);
+            continue;
+        }
+        if child.kind() != "call_argument" {
+            continue;
+        }
+        let mut arg_cursor = child.walk();
+        for arg in child.named_children(&mut arg_cursor) {
+            if arg.kind() == "call_struct_argument" {
+                args.push(arg);
+            }
+        }
+    }
+    args.into_iter()
+}
+
+fn solidity_value_source_names(value: Node<'_>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_solidity_value_source_names(value, src, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_solidity_value_source_names(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" => {
+            let text = node_text(&node, src).trim();
+            if solidity_is_value_identifier(text) {
+                out.push(text.to_string());
+            }
+        }
+        "member_expression" | "field_expression" => {
+            let text = collapse_whitespace(node_text(&node, src));
+            if !text.is_empty() {
+                out.push(text);
+            }
+            if let Some(object) = node
+                .child_by_field_name("object")
+                .or_else(|| node.child_by_field_name("receiver"))
+            {
+                collect_solidity_value_source_names(object, src, out);
+            }
+        }
+        "call_expression" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if child.kind() != "call_argument" {
+                    continue;
+                }
+                let mut arg_cursor = child.walk();
+                for arg in child.named_children(&mut arg_cursor) {
+                    collect_solidity_value_source_names(arg, src, out);
+                }
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_solidity_value_source_names(child, src, out);
+            }
+        }
+    }
+}
+
+fn solidity_value_is_literal(node: Node<'_>, src: &[u8]) -> bool {
+    match node.kind() {
+        "number_literal" | "string_literal" | "hex_string_literal" | "boolean_literal" | "true" | "false"
+        | "null" => true,
+        "member_expression" | "field_expression" => node
+            .child_by_field_name("object")
+            .map(|object| {
+                node_text(&object, src)
+                    .trim()
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_uppercase)
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn solidity_is_field_key(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
+}
+
+fn solidity_is_value_identifier(value: &str) -> bool {
+    solidity_is_field_key(value)
+        && !matches!(
+            value,
+            "memory"
+                | "calldata"
+                | "storage"
+                | "uint"
+                | "uint256"
+                | "int"
+                | "int256"
+                | "address"
+                | "bool"
+                | "string"
+                | "bytes"
+                | "true"
+                | "false"
+        )
 }
 
 /// Extract the bound return identifier from `try ... returns (T name) { ... }`.

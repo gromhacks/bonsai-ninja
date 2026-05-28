@@ -380,6 +380,37 @@ fn qualified_field_reads_do_not_bridge_structural_base_to_scalar_target() {
 }
 
 #[test]
+fn static_subscript_return_bridges_precise_field_read() {
+    let mut decl = empty_decl(1, "f");
+    decl.params = vec!["env".to_string()];
+    decl.flow_events = vec![FlowEvent::Return {
+        span: span(20, 40),
+        value_name: None,
+        value_text: Some("env[@\"cmd\"]".to_string()),
+    }];
+    let out = transfer_function_for(&decl);
+
+    assert!(
+        out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "env.@cmd"
+                && rendered_place_name(&out, edge.to) == "Return"
+                && edge.meta.kind == IdgEdgeKind::IntraReturn
+        }),
+        "ObjC static string subscript returns must bridge the precise field: {:#?}",
+        out.edges
+    );
+    assert!(
+        !out.edges.iter().any(|edge| {
+            rendered_place_name(&out, edge.from) == "env"
+                && rendered_place_name(&out, edge.to) == "Return"
+                && edge.meta.kind == IdgEdgeKind::IntraReturn
+        }),
+        "static field returns must not promote the whole container base into the return: {:#?}",
+        out.edges
+    );
+}
+
+#[test]
 fn indexed_reads_keep_array_base_value_bearing() {
     let mut decl = empty_decl(1, "f");
     decl.params = vec!["argv".to_string()];
