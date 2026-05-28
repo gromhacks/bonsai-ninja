@@ -51,6 +51,7 @@ fn flow_ids_pipeline_hash(db: &AnalyzerDb, sidecar_path: &Path) -> u64 {
         ^ u64::from(FLOW_IDS_CACHE_VERSION)
         ^ workspace_content_fingerprint(db)
         ^ dependency_metadata_fingerprint_for_sidecar(sidecar_path)
+        ^ crate::build_fingerprint_hash()
 }
 
 /// Per-function chain cap. Matches `bonsai_inspect`'s `--max-flows`

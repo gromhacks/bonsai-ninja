@@ -43,6 +43,15 @@ pub(crate) struct CallgraphSnapshot {
     /// Fingerprint of dependency manifests and lockfiles that may
     /// influence import and call resolution.
     pub dependency_metadata_fingerprint: u64,
+    /// Build-time analyzer fingerprint (git HEAD + dirty-tree hash,
+    /// emitted by `crates/workspace/build.rs`). Folded into every
+    /// other sidecar's `pipeline_hash` and validated here on load so
+    /// an upgraded binary can't reuse a callgraph built by a
+    /// different analyzer version — closes the manual-bump foot-gun.
+    /// Defaults to `0` for legacy snapshots (validates them out via
+    /// version mismatch anyway).
+    #[serde(default)]
+    pub build_fingerprint: u64,
     pub graph: ResolvedCallGraph,
 }
 
@@ -74,6 +83,7 @@ pub(crate) fn save_callgraph_sidecar(
         matcher_policy_fingerprint: MATCHER_POLICY_FINGERPRINT,
         files,
         dependency_metadata_fingerprint: dependency_metadata_fingerprint_for_sidecar(path),
+        build_fingerprint: crate::build_fingerprint_hash(),
         graph: graph.clone(),
     };
     let bytes =
@@ -117,6 +127,9 @@ pub(crate) fn load_callgraph_sidecar(path: &Path, db: &AnalyzerDb) -> Option<Res
         return None;
     }
     if snap.dependency_metadata_fingerprint != dependency_metadata_fingerprint_for_sidecar(path) {
+        return None;
+    }
+    if snap.build_fingerprint != crate::build_fingerprint_hash() {
         return None;
     }
     // Build the current `(path, hash)` set so we can match it

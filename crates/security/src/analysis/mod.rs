@@ -847,6 +847,16 @@ where
         findings.retain(|combined| !combined.finding.from_test);
     }
     drop_dominated_wrapper_findings(&mut findings);
+    // §C cleanup pass: when `--inferred-sources` synthesizes
+    // `entry-point.class_field.inherited` sources for every record/
+    // case-class component, each component reaches the sink through
+    // the same flat container — so a sink that semantically consumes
+    // only the `cmd` component still picks up inferred findings on
+    // sibling components (`this.kind`, `this.user`). Drop those
+    // sibling-attributed findings when (a) a concrete source already
+    // covers the same chain end-to-end, and (b) the inferred source's
+    // field name doesn't appear in any of the sink's `tainted_args`.
+    findings = drop_field_mismatched_inferred_findings(findings);
     // Sort highest-severity-first, then by finding id so two runs
     // produce identical output ordering.
     findings.sort_by(|a, b| {
@@ -4024,15 +4034,210 @@ fn same_source_location(a: &FindingMatch, b: &FindingMatch) -> bool {
 }
 
 fn source_preference_rank(source: &FindingMatch) -> u8 {
-    if source.rule_id.starts_with("entry-point.") || source.category.as_deref() == Some("inferred") {
+    source_preference_rank_for_sink(source, None)
+}
+
+/// Drop `entry-point.class_field.inherited` (and equivalent
+/// inferred-source) findings whose source-side `text` is
+/// `this.<field>` / `self.<field>` / etc and whose `<field>` does
+/// not appear in the sink's `tainted_args` value text — provided
+/// the same chain (same chain_display) is already covered by a
+/// concrete (non-inferred) source. This is what collapses Java's
+/// mega_flow `--inferred-sources` count from 3 (real +
+/// `this.kind`/`this.user`) down to the single real
+/// `req.getParameter → ... → Runtime.exec` finding without losing
+/// inferred sources in scenarios where they are the ONLY upstream
+/// (e.g. an unreferenced entry point whose param IS the input).
+fn drop_field_mismatched_inferred_findings(
+    findings: Vec<CombinedFindingWithChain>,
+) -> Vec<CombinedFindingWithChain> {
+    // Pre-pass: index, per (language + chain), whether a concrete
+    // source already covers this exact lineage.
+    let mut concrete_chains: AHashMap<(String, Vec<String>, String), ()> = AHashMap::new();
+    for combined in &findings {
+        let f = &combined.finding;
+        if source_is_inferred(&f.source) {
+            continue;
+        }
+        concrete_chains.insert(
+            (f.language.clone(), f.chain_display.clone(), f.sink.rule_id.clone()),
+            (),
+        );
+    }
+    findings
+        .into_iter()
+        .filter(|combined| {
+            let f = &combined.finding;
+            if !source_is_inferred(&f.source) {
+                return true;
+            }
+            // `entry-point.class_field.inherited` synthesizes ONE
+            // inferred source per record/case-class component (e.g.
+            // `this.kind`, `this.user`, `this.cmd` for an Envelope
+            // record). The IDG's whole-container overtaint then lets
+            // each component reach any sink the container reaches,
+            // even when the sink semantically consumes a different
+            // component. These findings are by definition over-
+            // approximations: if the sink's tainted_arg names a
+            // specific component, only the matching inferred source
+            // is semantically meaningful — drop the rest. This is
+            // distinct from `unreferenced_entry.param_N` (where the
+            // param IS the only input), which we leave alone.
+            let is_class_field = f.source.rule_id.contains(".class_field.inherited");
+            // For other inferred kinds, require concrete coverage of
+            // the same chain before dropping — otherwise we'd lose
+            // detection on unreferenced entries with no concrete
+            // upstream.
+            let same_chain_covered = {
+                let key = (f.language.clone(), f.chain_display.clone(), f.sink.rule_id.clone());
+                concrete_chains.contains_key(&key)
+            };
+            if !is_class_field && !same_chain_covered {
+                return true;
+            }
+            // Extract the `<field>` segment from `this.<field>` /
+            // `self.<field>` / bare `<field>`. If the source text
+            // doesn't carry a field name (rare), keep the finding —
+            // the next sort layer demotes it anyway.
+            let Some(field) = inferred_source_field_name(&f.source.text) else {
+                return true;
+            };
+            // Drop when none of the sink's tainted_args mention this
+            // field by name. The match is conservative substring —
+            // sinks often surface the arg as `$cmd`, `cmd`, or
+            // `data.cmd`, so a single token check is enough.
+            let sink_arg_text = f
+                .sink
+                .tainted_args
+                .iter()
+                .map(|arg| arg.value_text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mentioned = sink_arg_text
+                .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+                .any(|t| t == field);
+            mentioned
+        })
+        .collect()
+}
+
+fn source_is_inferred(source: &FindingMatch) -> bool {
+    source.rule_id.starts_with("entry-point.")
+        || source.rule_id.contains(".unreferenced_entry.")
+        || source.rule_id.contains(".class_field.inherited")
+        || source.category.as_deref() == Some("inferred")
+}
+
+/// Extract the most-specific field-name segment from an inferred
+/// source's `text` — `this.cmd` / `self.cmd` / `$this->cmd` →
+/// `cmd`; `envelope.cmd` → `cmd`; `this.data.cmd` → `cmd`. We take
+/// the LAST dotted segment because that's the actual leaf field the
+/// inferred-source-generator named (the parent path is the
+/// container chain we're projecting through).
+fn inferred_source_field_name(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("this.")
+        .or_else(|| trimmed.strip_prefix("self."))
+        .or_else(|| trimmed.strip_prefix("$this->"))
+        .unwrap_or(trimmed);
+    let tail = stripped.rsplit('.').next()?.trim();
+    if tail.is_empty()
+        || tail
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_ascii_alphabetic() && c != '_')
+    {
+        return None;
+    }
+    Some(tail)
+}
+
+/// Trust-based source preference, modulated by the sink the source
+/// reaches when known. The flat trust-rank ("remote" beats "local"
+/// always) systematically mis-attributes mega_flow-shape chains
+/// where two sources co-taint a container and only one of them
+/// semantically feeds the sink's matched arg — e.g. PHP's
+/// `['cmd' => $raw, 'user' => $_SERVER, ...]` puts both readline
+/// (`local`) and `$_SERVER` (`remote`) into `$envelope`, and the
+/// downstream `shell_exec($cmd)` sink reaches both. The cmd-channel
+/// source is `readline`, but the flat rank picks `$_SERVER` because
+/// remote-trust outranks local-trust. Use sink semantics
+/// (`category`/`tag`) to break that tie when the rule pack tells us
+/// which input shape is the natural carrier for that sink class.
+fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingMatch>) -> u8 {
+    if source.rule_id.starts_with("entry-point.")
+        || source.rule_id.contains(".unreferenced_entry.")
+        || source.rule_id.contains(".class_field.inherited")
+        || source.category.as_deref() == Some("inferred")
+    {
         return 30;
     }
-    match source.trust.as_deref() {
+    let base = match source.trust.as_deref() {
         Some("remote") => 0,
         Some("service" | "ipc" | "database" | "library") => 5,
         Some("local" | "config" | "physical") => 10,
         _ => 15,
+    };
+    let Some(sink) = sink else { return base };
+    // Sink-aware nudge: when the sink class semantically expects a
+    // particular input shape, promote the matching source class by
+    // 2 ranks so it overcomes one trust-tier when both reach the
+    // same chain. We deliberately keep the nudge small so the trust
+    // hierarchy still dominates across-rank choices (a remote source
+    // beats an unrelated local source for an arbitrary sink).
+    let sink_token = format!(
+        "{} {} {}",
+        sink.category.as_deref().unwrap_or(""),
+        sink.tag.as_deref().unwrap_or(""),
+        sink.rule_id,
+    );
+    let src_token = format!(
+        "{} {} {}",
+        source.category.as_deref().unwrap_or(""),
+        source.tag.as_deref().unwrap_or(""),
+        source.rule_id,
+    );
+    let sink_is_process =
+        sink_token.contains("process-exec") || sink_token.contains("command") || sink_token.contains("cmdi");
+    let src_is_process_or_cli = src_token.contains("cli")
+        || src_token.contains("stdin")
+        || src_token.contains("process-input")
+        || src_token.contains("file-read")
+        || src_token.contains("readline");
+    let src_is_http = src_token.contains("http") || src_token.contains("web") || src_token.contains("servlet");
+    let sink_is_browser =
+        sink_token.contains("xss") || sink_token.contains("browser") || sink_token.contains("html");
+    let mut adjusted = base as i16;
+    // Sink-aware adjustments span a full trust tier (10) so a
+    // semantic match against the sink can outweigh the
+    // remote-vs-local trust gap when both sources reach the same
+    // chain. The match-side promote AND the mismatch-side penalize
+    // are intentional: when sink-class strongly indicates the
+    // expected source-class, label by the matching source and
+    // demote unrelated co-tainted siblings (e.g. PHP's
+    // `$_SERVER` shouldn't outrank `readline` for a cmd-injection
+    // sink just because remote-trust > local-trust in the abstract).
+    if sink_is_process {
+        if src_is_process_or_cli {
+            adjusted -= 10;
+        }
+        if src_is_http && !src_is_process_or_cli {
+            adjusted += 10;
+        }
     }
+    if sink_is_browser {
+        if src_is_http {
+            adjusted -= 10;
+        }
+        if src_is_process_or_cli && !src_is_http {
+            adjusted += 10;
+        }
+    }
+    adjusted.clamp(0, 255) as u8
 }
 
 /// True when two sink-side `FindingMatch`es refer to the exact same
@@ -4041,9 +4246,60 @@ fn same_sink_site(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.rule_id == b.rule_id && a.file == b.file && a.line == b.line && a.column == b.column
 }
 
-fn combine_findings_by_source_flow(findings: Vec<FindingWithChain>) -> Vec<CombinedFindingWithChain> {
+fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<CombinedFindingWithChain> {
     let mut groups: Vec<CombinedFindingWithChain> = Vec::new();
     let mut index: AHashMap<String, usize> = AHashMap::new();
+
+    // Stable-sort so that within each `(language, group_id,
+    // representative_flow_id, chain, sink.rule_id)` bucket — which is
+    // what `combined_finding_key` collapses into one group — the most
+    // specific source becomes the primary one preserved on the merged
+    // finding. The combiner's `merge_finding_into_group` keeps the
+    // first-seen source as primary and demotes everything else to
+    // `additional_sources`; without a deterministic preference,
+    // co-tainted siblings can win and mis-label the chain (e.g. php's
+    // `$_SERVER` taking precedence over the real `readline` source for
+    // a cmd-injection finding even though both reach the sink through
+    // the same `$envelope` container).
+    //
+    // Ordering criteria (lower is better → becomes primary):
+    //   1. Sources whose `rule_id` starts with `entry-point.` or
+    //      contains `.unreferenced_entry.` are inferred over-approxi-
+    //      mations — push them to the back so a concrete source rule
+    //      always wins when both are present in the same group.
+    //   2. Sources whose `tag == sink.tag` are direct semantic matches
+    //      (a `cli-input` source reaching a `command-injection` sink
+    //      via the cmd-channel is more specific than a co-tainted
+    //      `web-input` source threading through the same envelope).
+    //   3. Otherwise: alphabetical by `rule_id`. Source rule IDs use
+    //      `<lang>.<category>.<name>` so this prefers e.g.
+    //      `php.source.readline` over `php.source.superglobal_server`,
+    //      matching the "more specific / less broad" intuition.
+    findings.sort_by(|a, b| {
+        let inferred = |rule_id: &str| {
+            rule_id.starts_with("entry-point.")
+                || rule_id.contains(".unreferenced_entry.")
+                || rule_id.contains(".class_field.inherited")
+        };
+        let inferred_a = inferred(&a.finding.source.rule_id);
+        let inferred_b = inferred(&b.finding.source.rule_id);
+        let bucket_a = (
+            &a.finding.language,
+            a.finding.group_id.as_deref().unwrap_or(""),
+            a.finding.representative_flow_id.as_deref().unwrap_or(""),
+            &a.finding.sink.rule_id,
+        );
+        let bucket_b = (
+            &b.finding.language,
+            b.finding.group_id.as_deref().unwrap_or(""),
+            b.finding.representative_flow_id.as_deref().unwrap_or(""),
+            &b.finding.sink.rule_id,
+        );
+        bucket_a
+            .cmp(&bucket_b)
+            .then(inferred_a.cmp(&inferred_b))
+            .then_with(|| a.finding.source.rule_id.cmp(&b.finding.source.rule_id))
+    });
 
     bonsai_diagnostics::debug_log!(
         "find-group",
@@ -4178,9 +4434,10 @@ fn finalize_combined_finding(group: &mut CombinedFindingWithChain) {
     let mut sources = Vec::with_capacity(1 + group.additional_sources.len());
     sources.push(group.finding.source.clone());
     sources.extend(group.additional_sources.iter().cloned());
+    let primary_sink = group.finding.sink.clone();
     sources.sort_by(|a, b| {
-        source_preference_rank(a)
-            .cmp(&source_preference_rank(b))
+        source_preference_rank_for_sink(a, Some(&primary_sink))
+            .cmp(&source_preference_rank_for_sink(b, Some(&primary_sink)))
             .then_with(|| (a.file.as_str(), a.line, a.column).cmp(&(b.file.as_str(), b.line, b.column)))
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
