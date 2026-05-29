@@ -3602,6 +3602,15 @@ fn direct_call_wrapper_kind(kind: &str) -> bool {
             | "parenthesized_expression"
             | "expression"
             | "primary_expression"
+            // `await EXPR` is a transparent wrapper around its operand —
+            // Python's grammar names the node `await` (bare), C++/JS use
+            // `await_expression` / `co_await_expression`. Without `await`
+            // here, `x = await f(arg)` fell through to `source_names` and
+            // tokenized the `await` keyword + callee as pseudo-operands,
+            // dropping the real `f(arg)` call (and overwriting `x`'s
+            // taint with a clean value — see the async-for `chunk`
+            // regression in examples/python/mega_flow).
+            | "await"
             | "await_expression"
             | "co_await_expression"
             | "dot"
