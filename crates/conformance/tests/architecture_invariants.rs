@@ -1940,12 +1940,18 @@ fn same_name_tu_private_decls_do_not_collide() {
     );
 }
 
-/// `kind: param` rules with `in_class:` constraints must accept
-/// both direct class-name match AND any name listed in the
-/// enclosing class's `bases` list. Pinning the matcher's gate to
-/// `enclosing_class_bases` so a `class Echo(WebSocketHandler):`
-/// matches `in_class: [WebSocketHandler]` per
-/// docs/contributing/design-patterns.mdx::Semantic Resolution Always.
+/// `kind: param` rules with `in_class:` constraints must accept both a
+/// direct class-name match AND any name in the enclosing class's `bases`
+/// list, so `class Echo(WebSocketHandler):` matches
+/// `in_class: [WebSocketHandler]` (docs/contributing/design-patterns.mdx
+/// ::Semantic Resolution Always).
+///
+/// The in_class gate is shared across the param / call / read / write
+/// scanners and lives in `decl_target_context_allows`, which
+/// `scan_params_batch` delegates to — so this invariant pins the
+/// ancestry consultation there (`enclosing_class.bases` checked against
+/// `target.in_class`) AND verifies `scan_params_batch` routes through
+/// that gate rather than re-implementing a name-only class check.
 #[test]
 fn param_in_class_constraint_consults_decl_bases() {
     let root = repo_root();
@@ -1956,14 +1962,22 @@ fn param_in_class_constraint_consults_decl_bases() {
         .join("matcher")
         .join("mod.rs");
     let text = read(&matcher);
-    let body = function_body(&text, "scan_params_batch");
+    // scan_params_batch must run params through the shared context gate.
+    let params_body = function_body(&text, "scan_params_batch");
     assert!(
-        body.contains("enclosing_class_bases"),
-        "scan_params_batch must consult Decl.bases for in_class ancestry matching"
+        params_body.contains("decl_target_context_allows("),
+        "scan_params_batch must enforce in_class / in_method via decl_target_context_allows"
+    );
+    // The shared gate must match in_class against the enclosing class's
+    // `bases` (ancestry), not only its own name.
+    let gate_body = function_body(&text, "decl_target_context_allows");
+    assert!(
+        gate_body.contains("enclosing_class") && gate_body.contains(".bases"),
+        "decl_target_context_allows must consult enclosing_class.bases for in_class ancestry matching"
     );
     assert!(
-        body.contains("base_match"),
-        "scan_params_batch must accept either a direct class match OR a bases match"
+        gate_body.contains("in_class"),
+        "decl_target_context_allows must match the enclosing class (or a base) against target.in_class"
     );
 }
 

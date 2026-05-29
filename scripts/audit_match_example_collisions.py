@@ -143,6 +143,33 @@ def is_passthrough_sidecar_overlap(hit: Finding, tags: dict[str, str]) -> bool:
     return (owner_tag == "passthrough-transform") ^ (matched_tag == "passthrough-transform")
 
 
+def is_same_family_layered_overlap(
+    hit: Finding,
+    tags: dict[str, str],
+    expected_by_case: dict[str, frozenset[str]],
+) -> bool:
+    """A same-tag sibling rule that matched a DIFFERENT construct than the
+    example demonstrates is a legitimate layered overlap, not a rule
+    ambiguity. The canonical case: the GraphQL `args` param source
+    (`graphql_resolver_args`, matches the `args` param) co-occurs in the
+    examples of `graphql_args_field` (`args.input` read) and
+    `graphql_info_context_args` (`info.context.args` read). All three are
+    `graphql-input`; the param and the field-reads seed DIFFERENT nodes
+    (the combiner dedups any shared finding), so flagging them as
+    colliding is a false positive — the example just happens to contain
+    the param the field is read from. We only suppress when (a) both
+    rules share a tag and (b) the colliding match text is NOT one of the
+    owner example's demonstrated `expect_match_text` (i.e. a different
+    construct). Same-construct same-tag overlaps (a real two-rules-one-
+    node ambiguity) and all cross-tag overlaps stay flagged."""
+    owner_tag = tags.get(hit.owner_rule)
+    matched_tag = tags.get(hit.matched_rule)
+    if owner_tag is None or owner_tag != matched_tag:
+        return False
+    owner_expected = expected_by_case.get(hit.case_key, frozenset())
+    return hit.text not in owner_expected
+
+
 def safe_rel_path(raw: str | None, language: str) -> Path:
     fallback = f"example.{DEFAULT_EXT.get(language, 'txt')}"
     candidate = Path(raw or fallback)
@@ -407,6 +434,9 @@ def main() -> int:
                         }
                     )
 
+    expected_by_case: dict[str, frozenset[str]] = {
+        case.key: frozenset(case.expected_text) for case in cases
+    }
     collisions = [
         hit
         for hit in all_findings
@@ -414,6 +444,7 @@ def main() -> int:
         and hit.owner_rule not in arg_tainted_rules
         and hit.matched_rule not in arg_tainted_rules
         and not is_passthrough_sidecar_overlap(hit, tags_by_rule)
+        and not is_same_family_layered_overlap(hit, tags_by_rule, expected_by_case)
     ]
     collision_pairs = Counter((hit.owner_rule, hit.matched_rule, hit.command_kind) for hit in collisions)
     merge_candidates = [
