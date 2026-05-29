@@ -94,10 +94,13 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // by the lang_dart synthesis additions (member-access getter
         // modeled as `Call+Return`, bare getter reads qualified with
         // explicit `Call` for walk_call's recv-slot fallback, ctor
-        // implicit-Return synthesis). Two findings emerge because
-        // both `main(args)` and the inferred `handle_request` source
-        // reach the same sink — counted distinctly per upstream entry.
-        "dart" => 2,
+        // One finding: the readLineSync → Process.runSync command
+        // injection. The flow is reachable via two entry chains
+        // (`handle_request → …` directly and `__module__ → handle_request
+        // → …`) but both share the same source, sink, `finding_id`, and
+        // `group_id` — so the combiner reports them as one finding, not
+        // two duplicate rows (combiner keys on `group_id`, not chain).
+        "dart" => 1,
         // System.argv → envelope.cmd → … → :os.cmd: a real CWE-78
         // command-injection threaded through the Elixir pipeline.
         "elixir" => 1,
@@ -143,10 +146,14 @@ fn expected_mega_flow_findings_with_inferred_sources(lang: &str) -> usize {
         // §C collapse (2026-05-28): one `class_field.inherited`
         // sibling-component over-approximation dropped now that
         // field-mismatched inferred sources are filtered when the
-        // sink's tainted arg doesn't name the source's field. Real
-        // flask request flow + 3 surviving decorator-handler inferred
-        // entries remain.
-        "python" => 4,
+        // sink's tainted arg doesn't name the source's field. Then
+        // (2026-05-29) the combiner's `group_id`-based dedup collapsed a
+        // duplicate finding that reached `os_system@29` via a second
+        // entry chain but carried the same `finding_id`. Three distinct
+        // findings remain: the real flask `request.args.get` flow plus
+        // two distinct `decorator_handler.param_1` inferred entries
+        // (lines 21 and 25).
+        "python" => 3,
         "ruby" => 2,
         "rust" => 1,
         // HttpServletRequest.getParameter → Envelope (case class) →

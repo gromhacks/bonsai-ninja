@@ -299,7 +299,12 @@ pub const LANGS: &[LangExp] = &[
         refs_populated: true,
         has_classes: true,
         min_sources_micro: 3,
-        min_source_flows_micro: 8,
+        // 4 distinct exact source-lineage chains: token→getUser→verifyToken
+        // (SQLi), token→updateUser→verifyToken, action→updateUser→
+        // runAdminCommand (cmdi), rs.getString→verifyToken. The earlier
+        // floor of 8 counted duplicate/fan-out rows the engine no longer
+        // emits (one resolved chain per distinct path).
+        min_source_flows_micro: 4,
         min_deps_micro: 4,
         min_sanitizers_micro: 0,
     },
@@ -317,7 +322,9 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        min_sources_micro: 5,
+        // The js micro fixture models 3 source matches (two `req.query`
+        // reads + the route getter); the earlier floor of 5 over-counted.
+        min_sources_micro: 3,
         min_source_flows_micro: 7,
         min_deps_micro: 3,
         min_sanitizers_micro: 0,
@@ -337,7 +344,10 @@ pub const LANGS: &[LangExp] = &[
         refs_populated: true,
         has_classes: true,
         min_sources_micro: 2,
-        min_source_flows_micro: 7,
+        // 5 distinct exact source-lineage chains from getParameter@13/@14
+        // (the earlier floor of 7 counted fan-out rows now collapsed to
+        // one resolved chain per distinct path).
+        min_source_flows_micro: 5,
         min_deps_micro: 3,
         min_sanitizers_micro: 0,
     },
@@ -451,13 +461,21 @@ pub const LANGS: &[LangExp] = &[
         min_findings_micro: 0,
         // Receiver-name-gating the Ruby SQL execute rule drops two
         // unrelated `.execute(...)` complex-fixture matches while
-        // preserving the real `db.execute(...)` SQL sink.
-        min_findings_complex: 29,
+        // preserving the real `db.execute(...)` SQL sink. Floor lowered
+        // 29→26 (2026-05-29) when the combiner's group_id+sink-site dedup
+        // collapsed 6 duplicate rows that earlier chain/flow-split keying
+        // had emitted for the same flow; the 26 distinct findings each
+        // resolve to a unique (group, sink site).
+        min_findings_complex: 26,
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: true,
-        min_sources_micro: 6,
-        min_source_flows_micro: 6,
+        // 4 source matches / 4 distinct exact source-lineage chains in the
+        // ruby micro fixture (params_read@12 → get_user/update_user →
+        // verify_token, @13 → update_user, @23 module-level). Earlier
+        // floor of 6 over-counted fan-out rows now deduplicated.
+        min_sources_micro: 4,
+        min_source_flows_micro: 4,
         min_deps_micro: 2,
         min_sanitizers_micro: 0,
     },
@@ -551,7 +569,9 @@ pub const LANGS: &[LangExp] = &[
         min_complex_decls: 100,
         refs_populated: true,
         has_classes: false,
-        min_sources_micro: 9,
+        // The ts micro fixture models 5 source matches; the earlier floor
+        // of 9 over-counted.
+        min_sources_micro: 5,
         min_source_flows_micro: 14,
         min_deps_micro: 3,
         min_sanitizers_micro: 0,
@@ -974,30 +994,51 @@ fn check_security_flows(ws: &str, lang: &str, min: usize) {
 }
 
 fn expected_default_mega_flow_findings(lang: &str) -> usize {
+    // Counts for the DEFAULT `taint-analysis --all` run — concrete
+    // source-rule matches only, NO `--inferred-sources`. So a language
+    // whose mega_flow source is an inferred entry-point parameter (rather
+    // than a concrete rule match) legitimately reports 0 here while
+    // `--inferred-sources` shows its real flow (see the parallel
+    // `expected_mega_flow_findings_with_inferred_sources` in
+    // security_pipeline_regressions.rs). The cpp/csharp/dart/elixir/java/
+    // scala/swift entries went 0→{1,2} when d332009 closed the FN-language
+    // construct gaps; objc went 2→1 when the xxe over-claim was removed;
+    // solidity went 1→0 once its concrete-source FP was dropped (its real
+    // flow seeds from an inferred entry param); dart settled at 1 after
+    // the combiner's group_id dedup collapsed a duplicate entry-chain row.
     match lang {
         "c" => 1,
-        "cpp" => 0,
-        "csharp" => 0,
-        "dart" => 0,
-        "elixir" => 0,
+        "cpp" => 1,
+        "csharp" => 1,
+        "dart" => 1,
+        "elixir" => 1,
+        // Concrete-source empty: the real flow seeds from an inferred
+        // entry-point parameter, surfaced only under `--inferred-sources`.
         "erlang" => 0,
         "go" => 1,
-        "java" => 0,
+        "java" => 1,
         "javascript" => 1,
         "kotlin" => 1,
         // The old count included LuaSQL-shaped SQLi false positives on
         // generic executor calls without LuaSQL package evidence. The
         // default mega-flow fixture now has one real command-injection flow.
         "lua" => 1,
-        "objc" => 2,
+        // One real command-injection (stdin_fgets → system). The earlier
+        // count of 2 included an xxe over-claim that was removed.
+        "objc" => 1,
         "perl" => 1,
-        "php" => 0,
+        // Two real vulns: readline → shell_exec (CWE-78) and
+        // superglobal_server → echo (CWE-79).
+        "php" => 2,
         "python" => 1,
         "ruby" => 2,
+        // Concrete-source empty: real flow needs an inferred entry source.
         "rust" => 0,
-        "scala" => 0,
-        "solidity" => 1,
-        "swift" => 0,
+        "scala" => 1,
+        // Concrete-source empty: both real sources are inferred entry
+        // points (`entry-point.*`), surfaced only under --inferred-sources.
+        "solidity" => 0,
+        "swift" => 1,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
     }
