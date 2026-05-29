@@ -363,15 +363,6 @@ fn constructor_param_names(node: Node<'_>, src: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn scala_constructor_param_field_writes(
-    params_node: Node<'_>,
-    file: FileId,
-    src: &[u8],
-    params: &[String],
-) -> Vec<FieldWrite> {
-    scala_constructor_param_field_writes_with_mode(params_node, file, src, params, false)
-}
-
 /// `is_case_class` forces every class-parameter to count as a field-
 /// initializing write, regardless of `val`/`var` modifier — Scala
 /// case classes promote every positional parameter to a public `val`

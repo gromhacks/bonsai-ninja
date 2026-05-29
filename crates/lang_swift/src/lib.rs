@@ -1187,15 +1187,28 @@ fn synthesize_swift_memberwise_struct_inits(
         .max()
         .map_or(1, |m| m + 1);
     let mut synthesized: Vec<Decl> = Vec::new();
-    // Tree-sitter-swift unifies `class`, `struct`, and `enum` under
-    // `class_declaration`. Disambiguate by scanning the node's
-    // prefix text for the `struct` keyword (the only kind that
-    // gets a compiler-synthesized memberwise init).
+    // Tree-sitter-swift unifies `class`, `struct`, `enum`, and
+    // `actor` under `class_declaration`. Disambiguate by inspecting
+    // the prefix text between the node's start and its `name:` child
+    // — that range contains only modifiers + the immediate keyword,
+    // so `struct` appearing there definitively names THIS decl as a
+    // struct (avoids false positives from nested `struct Bar {}` in
+    // an outer `class Foo { ... }`). Only structs get a compiler-
+    // synthesized memberwise init.
     for struct_node in collect_kinds(tree, &["class_declaration"]) {
-        let text = node_text(&struct_node, src);
-        let is_struct = text
+        let Some(name_node) = struct_node.child_by_field_name("name") else {
+            continue;
+        };
+        let prefix_start = struct_node.start_byte();
+        let prefix_end = name_node.start_byte();
+        if prefix_end <= prefix_start || prefix_end > src.len() {
+            continue;
+        }
+        let Ok(prefix) = std::str::from_utf8(&src[prefix_start..prefix_end]) else {
+            continue;
+        };
+        let is_struct = prefix
             .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-            .take(8)
             .any(|t| t == "struct");
         if !is_struct {
             continue;
