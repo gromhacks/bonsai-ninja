@@ -4033,22 +4033,16 @@ fn same_source_location(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.file == b.file && a.line == b.line && a.column == b.column
 }
 
-/// Drop `entry-point.class_field.inherited` (and equivalent
-/// inferred-source) findings whose source-side `text` is
-/// `this.<field>` / `self.<field>` / etc and whose `<field>` does
-/// not appear in the sink's `tainted_args` value text — provided
-/// the same chain (same chain_display) is already covered by a
-/// concrete (non-inferred) source. This is what collapses Java's
-/// mega_flow `--inferred-sources` count from 3 (real +
-/// `this.kind`/`this.user`) down to the single real
-/// `req.getParameter → ... → Runtime.exec` finding without losing
-/// inferred sources in scenarios where they are the ONLY upstream
-/// (e.g. an unreferenced entry point whose param IS the input).
+/// Drop inferred-source findings whose source-side field name
+/// doesn't match any of the sink's `tainted_args` — collapses
+/// `entry-point.class_field.inherited` over-approximations (Java
+/// 3→1, Python 5→4) while preserving inferred sources when they're
+/// the only upstream (`unreferenced_entry.param_N` shapes).
 fn drop_field_mismatched_inferred_findings(
     findings: Vec<CombinedFindingWithChain>,
 ) -> Vec<CombinedFindingWithChain> {
-    // Pre-pass: index, per (language + chain), whether a concrete
-    // source already covers this exact lineage.
+    // Pre-pass: which (lang + chain + sink_rule) lineages already
+    // have a concrete (non-inferred) source covering them?
     let mut concrete_chains: AHashMap<(String, Vec<String>, String), ()> = AHashMap::new();
     for combined in &findings {
         let f = &combined.finding;
@@ -4064,26 +4058,18 @@ fn drop_field_mismatched_inferred_findings(
         .into_iter()
         .filter(|combined| {
             let f = &combined.finding;
+            // Concrete sources are never dropped here.
             if !source_is_inferred(&f.source) {
                 return true;
             }
-            // `entry-point.class_field.inherited` synthesizes ONE
-            // inferred source per record/case-class component (e.g.
-            // `this.kind`, `this.user`, `this.cmd` for an Envelope
-            // record). The IDG's whole-container overtaint then lets
-            // each component reach any sink the container reaches,
-            // even when the sink semantically consumes a different
-            // component. These findings are by definition over-
-            // approximations: if the sink's tainted_arg names a
-            // specific component, only the matching inferred source
-            // is semantically meaningful — drop the rest. This is
-            // distinct from `unreferenced_entry.param_N` (where the
-            // param IS the only input), which we leave alone.
+            // `class_field.inherited` is the synthesized-per-record-
+            // component shape — always over-approximation, safe to
+            // drop even without concrete coverage when the field
+            // name mismatches the sink.
             let is_class_field = f.source.rule_id.contains(".class_field.inherited");
-            // For other inferred kinds, require concrete coverage of
-            // the same chain before dropping — otherwise we'd lose
-            // detection on unreferenced entries with no concrete
-            // upstream.
+            // Other inferred shapes (e.g. `unreferenced_entry.param_N`)
+            // may be the only upstream — only drop when a concrete
+            // source already covers the same chain end-to-end.
             let same_chain_covered = {
                 let key = (f.language.clone(), f.chain_display.clone(), f.sink.rule_id.clone());
                 concrete_chains.contains_key(&key)
@@ -4091,17 +4077,14 @@ fn drop_field_mismatched_inferred_findings(
             if !is_class_field && !same_chain_covered {
                 return true;
             }
-            // Extract the `<field>` segment from `this.<field>` /
-            // `self.<field>` / bare `<field>`. If the source text
-            // doesn't carry a field name (rare), keep the finding —
-            // the next sort layer demotes it anyway.
+            // Source text without a field-name segment (rare) gets
+            // kept; the source-preference rank demotes it anyway.
             let Some(field) = inferred_source_field_name(&f.source.text) else {
                 return true;
             };
-            // Drop when none of the sink's tainted_args mention this
-            // field by name. The match is conservative substring —
-            // sinks often surface the arg as `$cmd`, `cmd`, or
-            // `data.cmd`, so a single token check is enough.
+            // Compare the leaf field name against tokens extracted
+            // from the sink's tainted-arg value_text. Substring-token
+            // match handles `$cmd` / `cmd` / `data.cmd` uniformly.
             let sink_arg_text = f
                 .sink
                 .tainted_args
@@ -4112,6 +4095,8 @@ fn drop_field_mismatched_inferred_findings(
             let mentioned = sink_arg_text
                 .split(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
                 .any(|t| t == field);
+            // Keep only the field-matching inferred sources; drop
+            // the siblings that reached this chain via overtaint.
             mentioned
         })
         .collect()
@@ -4179,13 +4164,10 @@ fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingM
         _ => 15,
     };
     let Some(sink) = sink else { return base };
-    // Sink-aware adjustment magnitude is one full trust tier (10)
-    // — promotes the semantic-match source AND penalizes the
-    // semantic-mismatch source by the same amount, so a remote-trust
-    // mismatching source ends up ranked WORSE than a local-trust
-    // matching source for that sink class (the inverse of the
-    // un-modulated trust ordering). For sinks with no tag/category
-    // match below, the plain trust ordering still applies.
+    // Build searchable tokens by concatenating each side's
+    // category + tag + rule_id. `contains()` does substring match,
+    // so "cli" matches "cli-input", "command" matches
+    // "command-injection", etc.
     let sink_token = format!(
         "{} {} {}",
         sink.category.as_deref().unwrap_or(""),
@@ -4198,27 +4180,27 @@ fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingM
         source.tag.as_deref().unwrap_or(""),
         source.rule_id,
     );
+    // Sink class — process-exec / cmd-injection vs xss/browser/html.
     let sink_is_process =
         sink_token.contains("process-exec") || sink_token.contains("command") || sink_token.contains("cmdi");
+    let sink_is_browser =
+        sink_token.contains("xss") || sink_token.contains("browser") || sink_token.contains("html");
+    // Source class — process/cli input vs http/web input.
     let src_is_process_or_cli = src_token.contains("cli")
         || src_token.contains("stdin")
         || src_token.contains("process-input")
         || src_token.contains("file-read")
         || src_token.contains("readline");
     let src_is_http = src_token.contains("http") || src_token.contains("web") || src_token.contains("servlet");
-    let sink_is_browser =
-        sink_token.contains("xss") || sink_token.contains("browser") || sink_token.contains("html");
+    // Adjustment magnitude is one full trust tier (10) so a semantic
+    // match against the sink can flip the abstract trust order — e.g.
+    // a `local`-trust cli source ranks ABOVE a `remote`-trust http
+    // source when the sink is cmd-injection. Match-side promote AND
+    // mismatch-side penalize, so the gap is the full 20.
     let mut adjusted = base as i16;
-    // Sink-aware adjustments span a full trust tier (10) so a
-    // semantic match against the sink can outweigh the
-    // remote-vs-local trust gap when both sources reach the same
-    // chain. The match-side promote AND the mismatch-side penalize
-    // are intentional: when sink-class strongly indicates the
-    // expected source-class, label by the matching source and
-    // demote unrelated co-tainted siblings (e.g. PHP's
-    // `$_SERVER` shouldn't outrank `readline` for a cmd-injection
-    // sink just because remote-trust > local-trust in the abstract).
     if sink_is_process {
+        // Process / cmdi sink: prefer cli/stdin/file sources, demote
+        // pure-http sources that only co-tainted through a container.
         if src_is_process_or_cli {
             adjusted -= 10;
         }
@@ -4227,6 +4209,8 @@ fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingM
         }
     }
     if sink_is_browser {
+        // xss / browser sink: prefer http sources, demote pure-cli
+        // sources that only co-tainted through a container.
         if src_is_http {
             adjusted -= 10;
         }

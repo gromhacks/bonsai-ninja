@@ -857,11 +857,16 @@ fn synthesize_swift_computed_property_decls(
     qualify_swift_implicit_member_reads(idx);
 }
 
+/// Extract the property name from a `property_declaration` — the name
+/// is wrapped in `name: pattern > bound_identifier: simple_identifier`
+/// in tree-sitter-swift's grammar.
 fn swift_property_name(prop: Node<'_>, src: &[u8]) -> Option<String> {
     let pattern = prop.child_by_field_name("name")?;
     let mut pw = pattern.walk();
     for c in pattern.children(&mut pw) {
         if c.kind() == "bound_identifier" || c.kind() == "simple_identifier" {
+            // The bound_identifier wraps a simple_identifier; prefer
+            // its text when present, otherwise the wrapper's own.
             let mut ic = c.walk();
             for inner in c.children(&mut ic) {
                 if inner.kind() == "simple_identifier" {
@@ -877,6 +882,8 @@ fn swift_property_name(prop: Node<'_>, src: &[u8]) -> Option<String> {
             }
         }
     }
+    // Fallback: the pattern node's full text (covers destructure /
+    // tuple-pattern shapes that don't hit the wrapper above).
     let n = node_text(&pattern, src).trim();
     if n.is_empty() {
         None
@@ -885,6 +892,8 @@ fn swift_property_name(prop: Node<'_>, src: &[u8]) -> Option<String> {
     }
 }
 
+/// Span of a `property_declaration`'s name token, for stamping the
+/// synthesized accessor's `name_span` precisely.
 fn swift_property_name_span(prop: Node<'_>, file: FileId) -> Option<Span> {
     let pattern = prop.child_by_field_name("name")?;
     let mut pw = pattern.walk();
@@ -896,9 +905,12 @@ fn swift_property_name_span(prop: Node<'_>, file: FileId) -> Option<Span> {
     Some(span_of(file, &pattern))
 }
 
+/// Extract the expression text from a `computed_property` body —
+/// `var cmd: String { data.cmd }` → `"data.cmd"`. tree-sitter-swift
+/// wraps the body in `statements`; the last named child is the
+/// expression we want.
 fn swift_computed_body_text(computed: Node<'_>, src: &[u8]) -> Option<String> {
     let mut cw = computed.walk();
-    // Prefer the inner `statements` child's last named expression.
     let stmts = computed
         .children(&mut cw)
         .find(|c| c.kind() == "statements")?;
@@ -913,8 +925,16 @@ fn swift_computed_body_text(computed: Node<'_>, src: &[u8]) -> Option<String> {
     }
 }
 
+/// If `body` is a simple dotted member-access of identifiers
+/// (`data.cmd`, optionally prefixed `self.`/`super.`), return
+/// `(receiver, call_name)` so the synthesized accessor can model
+/// it as a method call. Returns `None` for non-trivial bodies
+/// (literals, calls, complex expressions) — those keep the
+/// Return-only fallback.
 fn swift_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
     let trimmed = body.trim();
+    // Strip the implicit-receiver qualifier if present; the inner
+    // text must be a pure dotted identifier path of ≥2 segments.
     let inner = trimmed
         .strip_prefix("self.")
         .or_else(|| trimmed.strip_prefix("super."))
@@ -923,6 +943,7 @@ fn swift_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
     if segments.len() < 2 {
         return None;
     }
+    // Every segment must be a Rust-ASCII-style identifier.
     for seg in &segments {
         if seg.is_empty()
             || !seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -931,10 +952,15 @@ fn swift_dotted_member_access_parts(body: &str) -> Option<(String, String)> {
             return None;
         }
     }
+    // Receiver = up-to-last-dot; call_name = full dotted form
+    // (mirrors Java's `data.cmd` shape: receiver="data" name="data.cmd").
     let last_dot = inner.rfind('.').unwrap();
     Some((inner[..last_dot].to_string(), inner.to_string()))
 }
 
+/// Walk up from `node` to the enclosing class/struct/protocol/extension/
+/// enum declaration and return its symbol / module / visibility for
+/// parenting synthesized accessor decls.
 fn swift_enclosing_type_decl(
     idx: &DeclIndex,
     node: Node<'_>,
@@ -1038,6 +1064,8 @@ fn qualify_swift_implicit_member_reads(index: &mut DeclIndex) {
     }
 }
 
+/// Walk the flow-event tree and collect every assignment target name
+/// — used to mask shadowing locals out of the qualify pass below.
 fn swift_collect_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
     for event in events {
         match event {
@@ -1046,6 +1074,8 @@ fn swift_collect_assign_targets(events: &[FlowEvent], out: &mut std::collections
                     out.insert(target.trim().to_string());
                 }
             }
+            // Recurse through nested-vec variants so a `let c = cmd`
+            // hidden inside an if/guard/do-catch arm isn't missed.
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -1072,11 +1102,18 @@ fn swift_collect_assign_targets(events: &[FlowEvent], out: &mut std::collections
     }
 }
 
+/// Rewrite each bare-property read (`let c = cmd`) into a
+/// `Call{name:"cmd"} + Assign{source_call:"cmd"}` pair so the
+/// interprocedural receiver-field bridge can route caller-receiver
+/// taint through the computed property. See
+/// `qualify_swift_implicit_member_reads`.
 fn swift_rewrite_member_reads(
     events: &mut Vec<FlowEvent>,
     getters: &std::collections::HashSet<String>,
     locals: &std::collections::HashSet<String>,
 ) {
+    // Pass 1: recurse first so insertions in pass 2 don't shift
+    // indices the inner walks would have used.
     for event in events.iter_mut() {
         match event {
             FlowEvent::Branch {
@@ -1103,8 +1140,11 @@ fn swift_rewrite_member_reads(
             _ => {}
         }
     }
+    // Pass 2: walk this level with an explicit index so insertions
+    // don't invalidate the loop.
     let mut idx = 0usize;
     while idx < events.len() {
+        // Decide qualify-eligibility without holding a mut borrow yet.
         let (qualify_name, span) = match &events[idx] {
             FlowEvent::Assign {
                 target,
@@ -1114,8 +1154,11 @@ fn swift_rewrite_member_reads(
                 ..
             } => {
                 if source_call.is_some() {
+                    // Already converted — skip.
                     (None, *span)
                 } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    // Only qualify zero-arg-member reads that aren't
+                    // shadowed locals and aren't self-assigns.
                     if getters.contains(&name)
                         && !locals.contains(&name)
                         && name != target.trim()
@@ -1137,6 +1180,8 @@ fn swift_rewrite_member_reads(
             idx += 1;
             continue;
         };
+        // Step A — Assign goes to a `source_call` shape so c gets
+        // bridged from the cmd-call's CallRet.
         if let FlowEvent::Assign {
             source_name,
             source_call,
@@ -1152,6 +1197,9 @@ fn swift_rewrite_member_reads(
             source_names.retain(|s| s.trim() != name);
             *value_kind = Some(AssignValueKind::CallResult);
         }
+        // Step B — explicit Call event before the Assign; its
+        // args-empty fallback synthesizes the recv-slot the bridge
+        // needs (mirrors Java's `String c = cmd();` shape).
         events.insert(
             idx,
             FlowEvent::Call {
@@ -1163,6 +1211,7 @@ fn swift_rewrite_member_reads(
                 args: Vec::new(),
             },
         );
+        // Skip past both the inserted Call and the modified Assign.
         idx += 2;
     }
 }

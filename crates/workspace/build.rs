@@ -61,12 +61,17 @@ fn main() {
     emit_fingerprint(&fingerprint);
 }
 
+/// Emit the fingerprint string and its 64-bit hash as `rustc-env` vars
+/// so they're available to library code via `env!("BONSAI_BUILD_FINGERPRINT_HASH")`.
 fn emit_fingerprint(value: &str) {
     let hash = fnv1a64(value.as_bytes());
     println!("cargo:rustc-env=BONSAI_BUILD_FINGERPRINT={value}");
     println!("cargo:rustc-env=BONSAI_BUILD_FINGERPRINT_HASH={hash:016x}");
 }
 
+/// Run `git <args>` and capture stdout; returns `None` on any failure
+/// (git missing, non-zero exit, non-UTF-8 output) so the caller can
+/// fall back to a non-git fingerprint without aborting the build.
 fn run_git(args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).output().ok()?;
     if !out.status.success() {
@@ -76,11 +81,14 @@ fn run_git(args: &[&str]) -> Option<String> {
     Some(stdout.trim().to_string())
 }
 
+/// Find the repo's `.git` dir by walking up from `CARGO_MANIFEST_DIR`.
+/// Submodule case (`.git` is a file, not a dir) intentionally returns
+/// `None` — the build falls back to the ungitted fingerprint.
 fn locate_git_dir() -> Option<std::path::PathBuf> {
-    // Walk up from CARGO_MANIFEST_DIR until we find `.git/HEAD` (the
-    // common case is the repo root four levels up from a crate).
     let start = std::env::var("CARGO_MANIFEST_DIR").ok()?;
     let mut path: std::path::PathBuf = start.into();
+    // Bound the walk — bonsai's deepest crate is four levels under
+    // the repo root; 8 leaves headroom for nested workspaces.
     for _ in 0..8 {
         let candidate = path.join(".git");
         if candidate.join("HEAD").exists() {

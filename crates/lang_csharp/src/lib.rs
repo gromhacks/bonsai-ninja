@@ -642,14 +642,20 @@ fn qualify_csharp_implicit_member_reads(index: &mut DeclIndex) {
     }
 }
 
+/// Walk the flow-event tree and collect every assignment target name
+/// — used to mask shadowing locals out of the qualify pass below.
 fn collect_csharp_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
     for event in events {
         match event {
             FlowEvent::Assign { target, .. } => {
+                // Bare-name targets become locals; nested `target.field`
+                // shapes don't shadow getters (the field is what's read).
                 if !target.is_empty() {
                     out.insert(target.trim().to_string());
                 }
             }
+            // Recurse through every nested-vec variant — assigns can
+            // hide arbitrarily deep inside conditionals/loops/try.
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -676,22 +682,19 @@ fn collect_csharp_assign_targets(events: &[FlowEvent], out: &mut std::collection
     }
 }
 
+/// Rewrite each bare-property read (`var c = Cmd;`) into the Java-
+/// shaped `Call{name:"Cmd"} + Assign{source_call:"Cmd"}` pair so the
+/// interprocedural receiver-field bridge can route caller-receiver
+/// taint through the getter. See `qualify_csharp_implicit_member_reads`
+/// for the full rationale; this is the recursive worker.
 fn rewrite_csharp_member_reads(
     events: &mut Vec<FlowEvent>,
     getters: &std::collections::HashSet<String>,
     locals: &std::collections::HashSet<String>,
 ) {
-    // Two-pass: first recurse into nested events (mutating their
-    // inner vecs); then walk this level with an index, mutating each
-    // Assign that needs qualification AND inserting an explicit Call
-    // event before it so `walk_call`'s `args.is_empty()` fallback
-    // tokenizes the property name into a `CallArg{idx=0}` recv-slot.
-    // Without that synthetic recv-slot, `recv_slots_for_call_span`
-    // returns nothing for the property's call and the interprocedural
-    // receiver-field bridge can't propagate caller-receiver taint
-    // into the getter's body — mirrors Java's pattern where
-    // `String c = cmd();` emits both `Assign{source_call:"cmd"}` and
-    // `Call{name:"cmd", call_kind:function, args:[]}`.
+    // Pass 1: recurse into nested-vec variants. We do this BEFORE
+    // walking this level so insertions below don't shift indices the
+    // recursive call would have used.
     for event in events.iter_mut() {
         match event {
             FlowEvent::Branch {
@@ -718,8 +721,12 @@ fn rewrite_csharp_member_reads(
             _ => {}
         }
     }
+    // Pass 2: walk this level with an explicit index so we can
+    // `events.insert(idx, ...)` without invalidating the loop.
     let mut idx = 0usize;
     while idx < events.len() {
+        // Decide whether THIS event is a qualify-eligible Assign,
+        // without holding a mutable borrow into `events` yet.
         let (qualify_name, span) = match &events[idx] {
             FlowEvent::Assign {
                 target,
@@ -729,8 +736,12 @@ fn rewrite_csharp_member_reads(
                 ..
             } => {
                 if source_call.is_some() {
+                    // Already converted — leave it alone.
                     (None, *span)
                 } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    // Eligible only when the bare RHS name resolves
+                    // to a zero-arg member of the class, isn't
+                    // shadowed by a local, and isn't a self-assign.
                     if getters.contains(&name)
                         && !locals.contains(&name)
                         && name != target.trim()
@@ -752,7 +763,8 @@ fn rewrite_csharp_member_reads(
             idx += 1;
             continue;
         };
-        // Mutate the Assign in place.
+        // Step A — convert the Assign to a `source_call` shape so the
+        // value-flow side sees `c ← CallRet(cmd-call)`.
         if let FlowEvent::Assign {
             source_name,
             source_call,
@@ -768,8 +780,11 @@ fn rewrite_csharp_member_reads(
             source_names.retain(|s| s.trim() != name);
             *value_kind = Some(AssignValueKind::CallResult);
         }
-        // Insert an explicit Call event before the Assign so
-        // `walk_call`'s argless fallback synthesizes the recv-slot.
+        // Step B — insert the explicit Call event before the Assign.
+        // walk_call's `args.is_empty()` fallback turns this into a
+        // synthetic `CallArg{idx=0}` recv-slot that
+        // `recv_slots_for_call_span` can find. Java's `String c =
+        // cmd();` emits the same Assign+Call pair natively.
         events.insert(
             idx,
             FlowEvent::Call {
@@ -781,6 +796,7 @@ fn rewrite_csharp_member_reads(
                 args: Vec::new(),
             },
         );
+        // Skip past both the inserted Call and the modified Assign.
         idx += 2;
     }
 }
