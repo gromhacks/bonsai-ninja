@@ -3728,8 +3728,21 @@ fn render_function_source(
                 subjects.push(next);
             }
         } else if advance_line.is_none() && !is_root && !is_target && ln == def_line {
-            if next_name.is_some() {
-                return None;
+            *step_counter += 1;
+            step = Some(*step_counter);
+            if let Some(next) = &next_name {
+                // A MIDDLE function whose advance-call to `next` has no
+                // single call line — this happens when the canonical
+                // chain folds an INDIRECT edge (e.g. an inherited
+                // `super.run()` hop collapsed into one `run`, so this
+                // function reaches `next` through a base method rather
+                // than a direct call here). The chain is still valid;
+                // render the body with an advance marker at the def line
+                // instead of dropping the ENTIRE flow render to the
+                // compact same-file fallback (which would hide every
+                // function body the reader came for).
+                annotation = Some(format!("[FLOW {flow_label} -> {next} (indirect)]"));
+                subjects.push(next);
             } else {
                 // Chain TAIL that isn't the match target (happens
                 // when the match point is an upstream function and
@@ -3738,8 +3751,6 @@ fn render_function_source(
                 // advance — print an arrival marker so the tail's
                 // body still has a numbered anchor and the folded
                 // placeholder picks it up.
-                *step_counter += 1;
-                step = Some(*step_counter);
                 annotation = Some(format!("[FLOW {flow_label} REACHES {}]", decl.name));
                 subjects.push(&decl.name);
             }
