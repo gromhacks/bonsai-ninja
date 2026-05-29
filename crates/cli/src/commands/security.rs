@@ -2040,7 +2040,47 @@ fn render_finding_block_compact(
 ) {
     let f = &combined.finding;
     cli_println!();
-    cli_println!("{}", u.dim("(same-file evidence — no cross-function chain)"));
+    // The full per-function body render (`render_flow_with_filters`)
+    // couldn't resolve every hop — e.g. an inheritance `super` hop that
+    // the canonical chain collapses (`run → run → execute` rendered as
+    // `run → execute`, leaving no direct `run → execute` call edge), or a
+    // synthesized data-holder accessor with no source span of its own.
+    // When a cross-function chain still EXISTS in the propagation data,
+    // show it from `taint_path` / `chain_display` rather than mislabeling
+    // the finding as same-file (the flow IS cross-function — only the
+    // body-level render degraded).
+    let distinct_fns = f
+        .chain_display
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if !f.taint_path.is_empty() || distinct_fns > 1 {
+        if !f.chain_display.is_empty() {
+            cli_println!("{}  {}", u.kind("CHAIN"), u.dim(&f.chain_display.join(" → ")));
+        }
+        for step in &f.taint_path {
+            let loc = format!("{}:{}", short_file(&step.file), step.line);
+            let args: Vec<&str> = step
+                .tainted_args
+                .iter()
+                .map(|a| a.value_text.as_str())
+                .collect();
+            let arg_note = if args.is_empty() {
+                String::new()
+            } else {
+                format!("  tainted: {}", args.join(", "))
+            };
+            cli_println!(
+                "    {} → {}  {}{}",
+                u.name(&step.caller),
+                u.name(&step.callee),
+                u.path(&loc),
+                u.dim(&arg_note),
+            );
+        }
+    } else {
+        cli_println!("{}", u.dim("(same-file evidence — no cross-function chain)"));
+    }
     render_site_code(u, "SOURCE", &f.source, pack, ws);
     for source in &combined.additional_sources {
         render_site_code(u, "SOURCE", source, pack, ws);
