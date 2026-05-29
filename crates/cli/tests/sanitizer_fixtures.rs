@@ -103,8 +103,22 @@ const LANGS_WITH_DEFAULT_RAW_FINDING: &[&str] = &[
 /// sanitizer coverage through `crates/security/tests/sanitizer_credit_audit.rs`;
 /// this legacy fixture only asserts evidence shape where evidence is
 /// actually emitted in default taint-analysis.
+///
+/// `go` is intentionally absent: its sanitizer model is hard-removal
+/// (a sanitizer on the path drops the taint, so a sanitized flow is
+/// SAFE and emits no finding — `RedirectSafe`'s `url.QueryEscape`'d URL,
+/// `XssSafe`'s disabled-`Fprintf` sink, etc.). Sanitizer evidence is now
+/// attached only when the sanitizer sits ON the source→sink path; the go
+/// fixture has no such flow. It previously "passed" only via an artifact
+/// — `open_redirect`'s `arg_tainted index: 1` matched `http.Redirect`'s
+/// `r *http.Request` (arg 1 is the request object, not the URL, which is
+/// arg 2 for net/http), and an off-path `url.QueryEscape` was spuriously
+/// attached as evidence. Tightening attribution to on-path sanitizers
+/// (the accurate behavior) correctly removed both. Go's `db_query`
+/// prepared-statement FP and the net/http `http.Redirect` arg-index are
+/// tracked as follow-up rulepack fixes in docs/goal.md §H.
 const LANGS_WITH_SANITIZER_EVIDENCE: &[&str] = &[
-    "c", "cpp", "dart", "elixir", "erlang", "go", "lua", "php", "ruby", "rust", "swift",
+    "c", "cpp", "dart", "elixir", "erlang", "lua", "php", "ruby", "rust", "swift",
 ];
 
 #[test]
