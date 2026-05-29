@@ -372,6 +372,8 @@ fn qualify_dart_implicit_member_reads(index: &mut DeclIndex) {
     }
 }
 
+/// Walk the flow-event tree and collect every assignment target name
+/// — used to mask shadowing locals out of the qualify pass below.
 fn collect_dart_assign_targets(events: &[FlowEvent], out: &mut std::collections::HashSet<String>) {
     for event in events {
         match event {
@@ -380,6 +382,8 @@ fn collect_dart_assign_targets(events: &[FlowEvent], out: &mut std::collections:
                     out.insert(target.trim().to_string());
                 }
             }
+            // Recurse through nested-vec variants so we don't miss
+            // a `final c = cmd;` hidden inside an if/loop/try arm.
             FlowEvent::Branch {
                 then_events,
                 else_events,
@@ -406,11 +410,18 @@ fn collect_dart_assign_targets(events: &[FlowEvent], out: &mut std::collections:
     }
 }
 
+/// Rewrite each bare-getter read (`final c = cmd;`) into a
+/// `Call{name:"cmd"} + Assign{source_call:"cmd"}` pair so the
+/// interprocedural receiver-field bridge can route caller-receiver
+/// taint through the getter. Same pattern as `lang_csharp` — see
+/// `qualify_dart_implicit_member_reads` for the full rationale.
 fn rewrite_dart_member_reads(
     events: &mut Vec<FlowEvent>,
     getters: &std::collections::HashSet<String>,
     locals: &std::collections::HashSet<String>,
 ) {
+    // Pass 1: recurse first so later insertions can't shift indices
+    // the inner walks would have used.
     for event in events.iter_mut() {
         match event {
             FlowEvent::Branch {
@@ -437,8 +448,11 @@ fn rewrite_dart_member_reads(
             _ => {}
         }
     }
+    // Pass 2: walk this level with an explicit index so insertions
+    // don't invalidate the loop.
     let mut idx = 0usize;
     while idx < events.len() {
+        // Decide qualify-eligibility without holding a mut borrow yet.
         let (qualify_name, span) = match &events[idx] {
             FlowEvent::Assign {
                 target,
@@ -448,8 +462,11 @@ fn rewrite_dart_member_reads(
                 ..
             } => {
                 if source_call.is_some() {
+                    // Already converted — skip.
                     (None, *span)
                 } else if let Some(name) = source_name.as_deref().map(str::trim).map(str::to_string) {
+                    // Only qualify zero-arg-member reads that aren't
+                    // shadowed locals and aren't self-assigns.
                     if getters.contains(&name)
                         && !locals.contains(&name)
                         && name != target.trim()
@@ -471,6 +488,8 @@ fn rewrite_dart_member_reads(
             idx += 1;
             continue;
         };
+        // Step A — Assign goes to a `source_call` shape so c gets
+        // bridged from the cmd-call's CallRet.
         if let FlowEvent::Assign {
             source_name,
             source_call,
@@ -486,6 +505,9 @@ fn rewrite_dart_member_reads(
             source_names.retain(|s| s.trim() != name);
             *value_kind = Some(AssignValueKind::CallResult);
         }
+        // Step B — explicit Call event before the Assign; its
+        // args-empty fallback synthesizes the recv-slot the bridge
+        // needs (mirrors Java's `String c = cmd();` shape).
         events.insert(
             idx,
             FlowEvent::Call {
@@ -497,6 +519,7 @@ fn rewrite_dart_member_reads(
                 args: Vec::new(),
             },
         );
+        // Skip past both the inserted Call and the modified Assign.
         idx += 2;
     }
 }
