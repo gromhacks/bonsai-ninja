@@ -188,12 +188,17 @@ fn simple_scalar_assignment_rewrites_to_exact_source_name() {
 
     normalize_perl_simple_scalar_renames(&mut events, src);
 
+    // Normalizing `my $y = $x` to an EXACT scalar rename rewrites the
+    // compound `source_names: ["x"]` shape into `source_name: Some("$x")`
+    // and clears `value_kind` — it is no longer a compound expression but
+    // a single-variable copy (see `normalize_perl_simple_scalar_renames`,
+    // which sets `*value_kind = None`).
     assert!(matches!(
         &events[0],
         FlowEvent::Assign {
             source_name: Some(source),
             source_names,
-            value_kind: Some(bonsai_lang_api::AssignValueKind::Compound),
+            value_kind: None,
             ..
         } if source == "$x" && source_names.is_empty()
     ));

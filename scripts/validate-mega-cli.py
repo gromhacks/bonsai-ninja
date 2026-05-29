@@ -46,35 +46,38 @@ LANGS = [
 ]
 
 EXPECTED_FINDINGS = {
-    # Current release-binary source-to-sink finding counts with
-    # `--inferred-sources`. Zero is valid for languages whose
-    # mega_flow fixture exercises command/dataflow constructs but
-    # whose enabled rulepack surface has no firing source-to-sink
-    # rule after pattern-only and no-path rows are filtered from
-    # default taint-analysis output.
+    # Release-binary source-to-sink finding counts under
+    # `taint-analysis --inferred-sources --all`. These match the
+    # canonical `security_pipeline_regressions::mega_flow` baselines
+    # (`expected_mega_flow_findings_with_inferred_sources`). Refreshed
+    # 2026-05-29: the FN-language construct gaps closed (cpp/csharp/
+    # dart/elixir/java/scala 0→1, swift 0→2, php 0→2); go 2→1 and
+    # objc 2→1 after redundant-inferred / xxe-over-claim removal;
+    # python 5→3 and dart→1 after the combiner's group_id+sink-site
+    # dedup collapsed duplicate entry-chain rows.
     "c": 1,
-    "cpp": 0,
-    "csharp": 0,
-    "dart": 0,
-    "elixir": 0,
+    "cpp": 1,
+    "csharp": 1,
+    "dart": 1,
+    "elixir": 1,
     "erlang": 2,
-    "go": 2,
-    "java": 0,
+    "go": 1,
+    "java": 1,
     "javascript": 1,
     "kotlin": 1,
     # Lua previously reported two extra SQLi findings from generic
     # Executor.execute calls. LuaSQL sinks now require LuaSQL package
     # evidence, leaving the one real os.execute command-injection flow.
     "lua": 1,
-    "objc": 2,
+    "objc": 1,
     "perl": 1,
-    "php": 0,
-    "python": 5,
+    "php": 2,
+    "python": 3,
     "ruby": 2,
     "rust": 1,
-    "scala": 0,
+    "scala": 1,
     "solidity": 2,
-    "swift": 0,
+    "swift": 2,
     "typescript": 1,
 }
 

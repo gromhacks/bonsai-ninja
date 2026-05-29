@@ -4109,28 +4109,35 @@ fn source_is_inferred(source: &FindingMatch) -> bool {
         || source.category.as_deref() == Some("inferred")
 }
 
-/// Extract the most-specific field-name segment from an inferred
-/// source's `text` — `this.cmd` / `self.cmd` / `$this->cmd` →
-/// `cmd`; `envelope.cmd` → `cmd`; `this.data.cmd` → `cmd`. We take
-/// the LAST dotted segment because that's the actual leaf field the
-/// inferred-source-generator named (the parent path is the
-/// container chain we're projecting through).
+/// Extract the leaf field-name from an inferred source's `text` —
+/// the final identifier token, regardless of the member-access
+/// operator or sigil that precedes it: `this.cmd` / `self.cmd` /
+/// `this->cmd` (C/C++) / `$this->cmd` (PHP) / `self::cmd` (Rust) /
+/// `envelope.data.cmd` all yield `cmd`. The leaf is the actual field
+/// the inferred-source generator named; the parent path is the
+/// container chain we project through.
+///
+/// We scan the trailing run of identifier characters rather than
+/// splitting on `.` alone, so `->` / `::` / `$` separators are all
+/// handled uniformly (a `.`-only split left C/C++ `this->cmd` intact
+/// and mis-matched it against the sink's `cmd` arg).
 fn inferred_source_field_name(text: &str) -> Option<&str> {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
+    // Walk back from the end collecting the final identifier run.
+    let mut start = trimmed.len();
+    for (idx, ch) in trimmed.char_indices().rev() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            start = idx;
+        } else {
+            break;
+        }
     }
-    let stripped = trimmed
-        .strip_prefix("this.")
-        .or_else(|| trimmed.strip_prefix("self."))
-        .or_else(|| trimmed.strip_prefix("$this->"))
-        .unwrap_or(trimmed);
-    let tail = stripped.rsplit('.').next()?.trim();
-    if tail.is_empty()
-        || tail
-            .chars()
-            .next()
-            .is_some_and(|c| !c.is_ascii_alphabetic() && c != '_')
+    let tail = &trimmed[start..];
+    // Reject an empty or digit-leading tail (not a field identifier).
+    if !tail
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
     {
         return None;
     }
@@ -4264,16 +4271,23 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
         };
         let inferred_a = inferred(&a.finding.source.rule_id);
         let inferred_b = inferred(&b.finding.source.rule_id);
+        // Sort bucket MUST match `combined_finding_key`'s grouping
+        // dimensions (language, group_id, sink site) — excluding
+        // `representative_flow_id` / chain — so the inferred / source-rule
+        // tiebreakers below decide the primary source WITHIN each merge
+        // group rather than being pre-split by flow id.
         let bucket_a = (
             &a.finding.language,
             a.finding.group_id.as_deref().unwrap_or(""),
-            a.finding.representative_flow_id.as_deref().unwrap_or(""),
+            &a.finding.sink.file,
+            a.finding.sink.line,
             &a.finding.sink.rule_id,
         );
         let bucket_b = (
             &b.finding.language,
             b.finding.group_id.as_deref().unwrap_or(""),
-            b.finding.representative_flow_id.as_deref().unwrap_or(""),
+            &b.finding.sink.file,
+            b.finding.sink.line,
             &b.finding.sink.rule_id,
         );
         bucket_a
@@ -4329,15 +4343,42 @@ fn combine_findings_by_source_flow(mut findings: Vec<FindingWithChain>) -> Vec<C
 
 fn combined_finding_key(item: &FindingWithChain) -> String {
     let f = &item.finding;
-    let chain = f.chain_display.join("\0");
-    format!(
-        "{}\0{}\0{}\0{}\0{}",
-        f.language,
-        f.group_id.as_deref().unwrap_or(""),
-        f.representative_flow_id.as_deref().unwrap_or(""),
-        chain,
-        f.sink.rule_id
-    )
+    let group = f.group_id.as_deref().unwrap_or("");
+    // Key on (language, group_id, SINK SITE) — sink site = file + line +
+    // rule_id. The sink site is what distinguishes genuinely separate
+    // findings that happen to share a `group_id`: structurally identical
+    // flows in different files hash to the same group tokens, so
+    // group_id alone would wrongly collapse them into one row.
+    //
+    // Deliberately NOT keyed on `chain_display` or
+    // `representative_flow_id`: the SAME logical finding can be reached
+    // via more than one entry chain (e.g. dart's `handle_request → … →
+    // execute` and `__module__ → handle_request → … → execute`) and
+    // carry a different representative flow each time — same sink site,
+    // same group_id, so it is one finding, not two duplicate rows.
+    //
+    // Source is omitted on purpose — co-tainted sources reaching the
+    // same sink site fold into the primary's `additional_sources` (this
+    // is "combine findings by source flow").
+    if !group.is_empty() {
+        format!(
+            "{}\0{}\0{}\0{}\0{}",
+            f.language, group, f.sink.file, f.sink.line, f.sink.rule_id
+        )
+    } else {
+        // No group id to anchor on — fall back to the chain + flow id so
+        // genuinely distinct flows don't collapse together.
+        let chain = f.chain_display.join("\0");
+        format!(
+            "{}\0\0{}\0{}\0{}\0{}\0{}",
+            f.language,
+            chain,
+            f.representative_flow_id.as_deref().unwrap_or(""),
+            f.sink.file,
+            f.sink.line,
+            f.sink.rule_id
+        )
+    }
 }
 
 fn merge_finding_into_group(group: &mut CombinedFindingWithChain, incoming: Finding, member_id: String) {

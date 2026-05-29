@@ -244,14 +244,134 @@ The csharp/dart/scala/swift mega_flows funnel through a method/getter that reads
 ### E. Known regressions / failures to fix
 1. ✅ **§E.1 inherited WIP regression — DONE (2026-05-27).** Implemented fix option (a): `source_seed_nodes_at_span` in `crates/idg/src/service.rs` falls back to the `from`-node of any intra edge whose `meta.via_span` overlaps the anchor when no span-bearing `Write`/`CallRet`/`CallArg` place is found. `rulepack_conformance::caller_scheduling_preserves_source_attribution` passes.
 2. ✅ **§E.2 legacy engine — DONE (2026-05-28).** The 2 deprecated `interprocedural_constructs.rs` tests (go/ruby mega_flow) retired with documented rationale in-file; canonical IDG coverage is `security_pipeline_regressions::mega_flow` (14/14 green, go=1 ruby=2 with `--inferred-sources`).
-3. ⏸ Full `cargo test --workspace` green-cert — not run to completion this session (compile-time prohibitive in single sweep). All key per-crate suites verified green: mega-flow 14/14, no_fp_audit 1/1 (136 cases), rulepack_conformance 28, idg 193+5, workspace --lib 59, taint 120 (lib) + 79 (interprocedural_constructs after retiring 2), per-language adapter tests.
+3. ❌ **§E.3 full-workspace test — FAILED (2026-05-29).** `cargo test --workspace --no-fail-fast` finally run to completion. **5704 passed / 40 failed / 6 ignored across 270 binaries (12 binaries failing).** Prior session's "all gates green" claim was wrong — only the three suites I touched had been re-run. The 40 failures are inventoried in **§H** below; **must be resolved before this WIP can be considered closed.**
 
 ### F. Performance / scale (goal targets, not yet validated this session)
 - Benchmark `examples/` cold vs warm; track parse/index/callgraph/summary/taint time, peak RSS, cache hit/miss, finding counts.
 - Validate on **Redis** (C) and the **Java OWASP Benchmark** — no hangs, bounded memory, no whole-program recompute. (Java FN gap in §A blocks OWASP detection quality.)
 - Confirm SCC / compositional summaries prevent recomputing the same callees across exact command scopes.
 
-### G. Test-suite health
-- mega_flow security regression **GREEN (20/20)**; `bonsai_idg` **193**; `bonsai_taint` lib **120** + semantic_container_fields **19** + over_taint/constructor/etc. binaries all green; FP-audit suites (no_fp_audit **136**, false_positive_guards, per_lang_gap_coverage) green; `rulepack_conformance` **28** (incl. the now-fixed `caller_scheduling`); `security_pipeline_regressions` **14/14**.
-- **Only known failing tests = the 2 §E.2 legacy-engine tests** (`crates/taint/tests/interprocedural_constructs.rs` go/ruby `…handle_reaches_execute…`), which fail on committed HEAD and exercise the unused `inter/mod.rs` walker.
-- Full-workspace `cargo test --workspace` was not run to completion (compile is ~10+ min and was hogging build resources); re-run it once §A/§E.2 are addressed to certify the whole tree green. Crates not yet individually swept this session: `cli` (18 test files), `workspace` (57), `conformance` (8) — sweep these for any further inherited gaps.
+### G. Test-suite health — last known counts (most are STALE, see §H)
+- Per-suite re-runs done in isolation passed: mega-flow 14/14, no_fp_audit 1/1 (136 cases), rulepack_conformance 28, idg 193, workspace --lib 0, taint 120 (lib) + 41 (other), security_pipeline_regressions 14, security --lib 111, abstract_interp/adapters/browse/callgraph/cfg lib tests pass.
+- **40 tests fail when run as a single `cargo test --workspace` sweep** — these are NOT covered by the per-suite runs above. See §H.
+
+### H. Outstanding test failures — 40 found, 35 fixed, 5 remaining
+
+Full failure list captured 2026-05-29 from `cargo test --workspace --no-fail-fast` on HEAD = `11354ea`. The original five categories (H.1–H.5) are the diagnosis record. **Resolution status below.**
+
+#### RESOLUTION STATUS (2026-05-29, working tree on top of `11354ea`)
+
+**FIXED & verified (35 of 40):**
+- **§H.1 over-taint FP (go)** — `extract_direct_call_info` in `kit/mod.rs` gained a guard in d332009 that omitted `expression_list` (Go's assignment-RHS wrapper); the assignment fell through to name-based `source_names` and leaked `args`. Fixed by recursing into single-expression grouping lists (`grouping_list_kind`). over_taint_matrix 13/13.
+- **§H.2 i_18/i_19 (11)** — same guard also blocked lambda/closure RHS recursion (`anonymous_function`, `function_definition`, `block_literal`, …) the legacy closure model needs. Fixed by adding `lambda_closure_kind` to the recursion allowlist. matrix 1447/0.
+- **§H.3 CLI mega_flow baselines (10) + a real DEDUP BUG** — dart/python emitted duplicate finding rows (same `finding_id`/`group_id`, different entry chain). Fixed the combiner key in `analysis/mod.rs` to `(language, group_id, sink-site file+line+rule_id)` — collapses true duplicates (dart 2→1, python 4→3) while keeping structurally-identical-but-distinct findings (different files/sink-sites) separate. Updated baselines in security_pipeline_regressions.rs, per_lang_cli_matrix.rs, security_commands.rs, and scripts/validate-mega-cli.py. CLI mega_flow matrix 21/21; validate-mega-cli.py passes.
+- **§H.4 micro_security thresholds (6)** — lower-bound coverage thresholds calibrated against pre-dedup fan-out inflation (java source-analysis emitted `getParameter@21` 6× pre-session; now 2 distinct exact chains). Recalibrated to verified-accurate counts in per_lang_cli_matrix.rs. Also recalibrated ruby `min_findings_complex` 29→26 (same dedup effect).
+- **g3_cpp_single** — `inferred_source_field_name` (§C filter, committed in 9f5da3a) split only on `.`, so cpp's `this->cmd` leaf extracted as `this->cmd` and never matched the sink arg `cmd` → the real finding was dropped. Fixed to extract the trailing identifier run (handles `->` / `::` / `$` uniformly). per_lang_gap_coverage 136/136.
+- **dart static_factory_call_result_preserves_type_receiver** + **perl simple_scalar_assignment_rewrites_to_exact_source_name** — both PRE-EXISTING test-expectation bugs (failed at pre-session too; code behavior is correct). Corrected the stale expectations.
+
+**REMAINING (5 — all genuine, with root-cause pointers):**
+1. **3 dump-taint / sanitizer engine regressions** (session-caused, bisected to **d332009**'s `crates/idg/src/transfer.rs` `implicit_receiver_bases` work — all 3 pass at 5c341a0/2a56f5c, fail at d332009 with a freshly-built release binary; fixtures + test files unchanged this session):
+   - `bonsai_cli::taint_engine_e2e::mega_flow_dump_taint_uses_rulepack_transfer_semantics` — the `orchestrate -> validate_payload` transfer edge (value `chunk`, param `payload`) is missing from `dump-taint`; 4 of the 5 expected edges are present. Fixture: `chunk = await _identity(chunk); valid = validate_payload(chunk)` in `examples/python/mega_flow/pipeline.py`.
+   - `bonsai_cli::sanitizer_fixtures::sanitized_paths_attach_sanitizer_evidence`.
+   - `bonsai_cli::per_lang_cli_matrix::mega_flow_dump_taint_threads_every_cross_function_hop`.
+   - NEXT STEP: bisect d332009's transfer.rs hunks (the `implicit_receiver_bases` / `collect_implicit_receiver_bases` additions are the prime suspect for altered transfer-edge extraction) with a per-commit release rebuild — the earlier worktree bisect was invalid because the worktree release binary wasn't rebuilt after `git checkout`.
+2. **`bonsai_conformance::architecture_invariants::param_in_class_constraint_consults_decl_bases`** — PRE-EXISTING (matcher/mod.rs unchanged this session; fails at pre-session). An architecture-invariant for an unimplemented feature: `scan_params_batch` must consult `Decl.bases` for in-class ancestry (strings `enclosing_class_bases` / `base_match`). Requires implementing base-class ancestry matching in the param-in-class matcher.
+3. **`bonsai_cli::validate_script::validate_pattern_pack_enforces_zero_collisions_and_example_drift`** — PRE-EXISTING (graphql rules unchanged this session; the over-generalization came from the pre-session commit `2a56f5c` "Generalize Python GraphQL resolver args"). `javascript/typescript.source.graphql_resolver_args` now matches bare `args` examples owned by `…graphql_args_field` → 12 match-example collisions. Requires narrowing `graphql_resolver_args` (js + ts) so it doesn't steal `graphql_args_field`'s examples, or merging the overlapping rules.
+
+#### Original diagnosis records (H.1–H.5) follow.
+
+Five categories, ordered by severity.
+
+#### H.1 — Real over-taint regression (1 test, HIGH PRIORITY — false-positive risk)
+
+- `bonsai_taint::over_taint_matrix::over_taint_all_languages_clean_return_after_tainted_consume_stays_clean`
+- Failing language: **go**. (Other 11 languages in the same parameterized test still pass.)
+- Test asserts: `func helper(v) { audit(v); return "clean" }; func entry(args) { x := helper(args); sink(x) }` — `sink(x)` must stay clean because `helper` returns a literal, not its arg.
+- Observed: `sink(x)` tainted. The Go adapter wasn't touched in any session commit; root cause must be in shared IDG / kit / taint code.
+- **Git bisection results so far (2026-05-29):**
+  - Passes on `2a56f5c` (pre-session).
+  - Passes on `5c341a0` (Propagate nested receiver return taint — first session commit).
+  - Fails on `d332009` (Detect mega_flow command-injection across all 21 languages).
+  - Reverting `crates/idg/src/{builder,transfer,workspace_adapter,service,transfer_tests}.rs` + `crates/taint/src/inter/mod.rs` + `crates/security/src/analysis/mod.rs` + `crates/lang_java`/`csharp/src/lib.rs` back to `5c341a0` while keeping `crates/lang_api/src/kit/mod.rs` at `d332009` **still fails** → cause is in `kit/mod.rs`'s d332009 changes.
+  - `kit/mod.rs` d332009 diff has 5 hunks: `synthesize_record_members` (new); adding `"record_declaration"` to GENERIC_HANDLER class_kinds; `property_declaration` fallback in `walk_into`'s target lookup; `direct_call_wrapper_kind` introduced in `extract_direct_call_info`. The first two are Java/C# only. **The remaining suspects are the `walk_into` property_declaration fallback and `direct_call_wrapper_kind` — both could plausibly mis-handle Go's `x := helper(args)` assignment shape.**
+- **Action:** finish bisection by reverting one hunk at a time and identifying which broke Go. Likely fix is to tighten the new condition (kind gate, language gate) rather than reverting wholesale.
+
+#### H.2 — Construct matrix i_18 / i_19 (11 tests, taint integration)
+
+`crates/taint/tests/matrix.rs::{i_18,i_19}::*` — failing per-language:
+- **i_18** (4): kotlin, lua, scala, swift
+- **i_19** (7): elixir, kotlin, lua, objc, php, scala, swift
+
+All failing languages overlap with the FN languages I added adapter passes for in `d332009`. Likely root cause: my adapter passes shifted what gets reported in taint construct fixtures. Need per-test inspection — could be over-taint (must fix) or baseline drift (update expected count).
+
+**Action:** read `crates/taint/tests/matrix.rs` for i_18 / i_19, run each with `--nocapture` to see actual vs expected, classify each as regression vs baseline-update.
+
+#### H.3 — CLI matrix mega_flow baselines (10 tests, baseline drift)
+
+`crates/cli/tests/per_lang_cli_matrix.rs::*_matrix::mega_flow_security_flows_produces_finding` for **cpp, csharp, dart, elixir, java, objc, php, scala, solidity, swift**. Hardcoded counts in `expected_default_mega_flow_findings()` at line 976.
+
+| lang | expected | actual | new value |
+|---|---|---|---|
+| cpp | 0 | 1 | 1 |
+| csharp | 0 | 1 | 1 |
+| dart | 0 | 2 | 2 |
+| elixir | 0 | 1 | 1 |
+| java | 0 | 1 | 1 |
+| objc | 2 | 1 | 1 *(drop — investigate why detection went down)* |
+| php | 0 | 2 | 2 |
+| scala | 0 | 1 | 1 |
+| solidity | 0 | 1 *(check)* | check |
+| swift | 0 | 2 *(check)* | check |
+
+**Action:** these are the same baseline updates I made in `security_pipeline_regressions.rs` (commit `d332009`); apply them to `per_lang_cli_matrix.rs:976`. **Objc dropping from 2 → 1 is a regression smell** — re-confirm whether that's a legitimate de-duplication or lost detection.
+
+#### H.4 — CLI matrix micro_security drift (6 tests)
+
+- `java_matrix::micro_security_source_analysis_semantic_chains` (per_lang_cli_matrix.rs:1310)
+- `kotlin_matrix::micro_security_source_analysis_semantic_chains`
+- `ruby_matrix::micro_security_source_analysis_semantic_chains`
+- `javascript_matrix::micro_security_sources_semantic_inventory` (per_lang_cli_matrix.rs:1278)
+- `ruby_matrix::micro_security_sources_semantic_inventory`
+- `typescript_matrix::micro_security_sources_semantic_inventory`
+
+Source attribution changes (sink-aware `source_preference_rank_for_sink`, inferred-source filter) shifted which sources surface on the micro fixtures.
+
+**Action:** run each with `--nocapture` to see expected vs actual surface; either fix attribution if a legitimate source was lost, or update the test expectation.
+
+#### H.5 — Other one-offs (12 tests, mixed)
+
+| Test | Binary | Likely cause |
+|---|---|---|
+| `mega_flow_dump_taint_threads_every_cross_function_hop` | sdk_cli_parity | Source attribution / detection delta |
+| `mega_flow_dump_taint_uses_rulepack_transfer_semantics` | sdk_cli_parity | Source attribution / detection delta |
+| `ruby_matrix::complex_security_flows_scale` | sdk_cli_parity | Source attribution / detection delta |
+| `validate_mega_cli_script_language_matrix` | sdk_cli_parity | likely tied to H.3 baseline drifts |
+| `validate_pattern_pack_enforces_zero_collisions_and_example_drift` | sdk_cli_parity | Pattern pack drift from xxe.yml or rule additions |
+| `taint_analysis_run_across_every_mega_flow_lang` | (find) | Mega-flow coverage |
+| `flow_event_shape_conformance` | (find) | IDG event shape changed |
+| `static_factory_call_result_preserves_type_receiver` | (find) | Receiver type resolution |
+| `param_in_class_constraint_consults_decl_bases` | (find) | Decl base lookup |
+| `sanitized_paths_attach_sanitizer_evidence` | (find) | Sanitizer evidence path |
+| `tests::simple_scalar_assignment_rewrites_to_exact_source_name` | (find) | Likely a lang adapter unit test (lang_api kit `walk_into` property fallback?) |
+| `g3_cpp_single` | (find) | Some C++ specific case |
+
+**Action:** for each, locate the binary via `grep -rn "<test name>" --include="*.rs"`, run with `--nocapture` to capture actual vs expected, then classify and fix.
+
+#### H.6 — Re-cert and push
+
+The 35 fixes above are committed. The 5 remaining (see RESOLUTION STATUS) are tracked.
+After the remaining 5 are resolved:
+1. Re-run `cargo test --workspace --no-fail-fast` to completion (45-60 min including cold build).
+2. Confirm 0 failures.
+3. `git push origin main`.
+
+#### Bisection notes for future sessions
+
+The session commit chain is `2a56f5c (pre) → 5c341a0 → d332009 → 9f5da3a → 8a44464 → e134f28 → 090dd9c → 11354ea (HEAD)`. To bisect quickly:
+```bash
+git worktree add /tmp/bonsai-bisect <commit>
+cd /tmp/bonsai-bisect && cargo test -p bonsai_taint --test over_taint_matrix <test-name>
+# or: cargo test -p bonsai_security --test security_pipeline_regressions ...
+git worktree remove /tmp/bonsai-bisect --force
+```
+The over-taint bisect (§H.1) localized to `crates/lang_api/src/kit/mod.rs`'s d332009 changes; resume there.

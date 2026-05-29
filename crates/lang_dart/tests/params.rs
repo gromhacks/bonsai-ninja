@@ -216,7 +216,11 @@ Logger handle(String name) {
     assert_eq!(assign.0.as_deref(), None);
     assert_eq!(assign.1.as_deref(), Some("Logger.getLogger"));
     assert_eq!(assign.2.as_slice(), ["name"]);
-    assert_eq!(assign.3.as_slice(), ["Logger", "getLogger"]);
+    // `source_names` carries the receiver TYPE (`Logger`) so a tainted
+    // receiver propagates — but NOT the method name `getLogger`, which is
+    // a callee path component, not a value operand. The real argument
+    // operand (`name`) is already captured in `source_call_args` above.
+    assert_eq!(assign.3.as_slice(), ["Logger"]);
 }
 
 #[test]

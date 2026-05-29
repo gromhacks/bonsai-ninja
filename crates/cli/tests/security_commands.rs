@@ -159,27 +159,34 @@ fn expected_mega_chain_hops(lang: &str) -> &'static [&'static str] {
 }
 
 fn expected_mega_finding_count_with_inferred_sources(lang: &str) -> usize {
+    // Mirrors security_pipeline_regressions.rs
+    // `expected_mega_flow_findings_with_inferred_sources` and
+    // scripts/validate-mega-cli.py `EXPECTED_FINDINGS`. Refreshed
+    // 2026-05-29: FN-language gaps closed (cpp/csharp/dart/elixir/java/
+    // scala 0→1, swift 0→2, php 0→2); go 2→1 + objc 2→1 (redundant-
+    // inferred / xxe over-claim removed); python 5→3 + dart→1 (combiner
+    // group_id+sink-site dedup collapsed duplicate entry-chain rows).
     match lang {
         "c" => 1,
-        "cpp" => 0,
-        "csharp" => 0,
-        "dart" => 0,
-        "elixir" => 0,
+        "cpp" => 1,
+        "csharp" => 1,
+        "dart" => 1,
+        "elixir" => 1,
         "erlang" => 2,
-        "go" => 2,
-        "java" => 0,
+        "go" => 1,
+        "java" => 1,
         "javascript" => 1,
         "kotlin" => 1,
         "lua" => 1,
-        "objc" => 2,
+        "objc" => 1,
         "perl" => 1,
-        "php" => 0,
-        "python" => 5,
+        "php" => 2,
+        "python" => 3,
         "ruby" => 2,
         "rust" => 1,
-        "scala" => 0,
+        "scala" => 1,
         "solidity" => 2,
-        "swift" => 0,
+        "swift" => 2,
         "typescript" => 1,
         other => panic!("missing mega_flow expected finding count for {other}"),
     }
