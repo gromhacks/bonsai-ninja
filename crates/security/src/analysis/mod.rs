@@ -4179,12 +4179,13 @@ fn source_preference_rank_for_sink(source: &FindingMatch, sink: Option<&FindingM
         _ => 15,
     };
     let Some(sink) = sink else { return base };
-    // Sink-aware nudge: when the sink class semantically expects a
-    // particular input shape, promote the matching source class by
-    // 2 ranks so it overcomes one trust-tier when both reach the
-    // same chain. We deliberately keep the nudge small so the trust
-    // hierarchy still dominates across-rank choices (a remote source
-    // beats an unrelated local source for an arbitrary sink).
+    // Sink-aware adjustment magnitude is one full trust tier (10)
+    // — promotes the semantic-match source AND penalizes the
+    // semantic-mismatch source by the same amount, so a remote-trust
+    // mismatching source ends up ranked WORSE than a local-trust
+    // matching source for that sink class (the inverse of the
+    // un-modulated trust ordering). For sinks with no tag/category
+    // match below, the plain trust ordering still applies.
     let sink_token = format!(
         "{} {} {}",
         sink.category.as_deref().unwrap_or(""),
