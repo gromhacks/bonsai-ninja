@@ -60,26 +60,28 @@ Generated with the release CLI:
 | Lang       | Findings | Primary chain when emitted                                     |
 |------------|---------:|----------------------------------------------------------------|
 | c          | 1        | main → orchestrate → persist → run → execute                   |
-| cpp        | 0        | No default finding                                             |
-| csharp     | 0        | No default finding                                             |
-| dart       | 0        | No default finding                                             |
-| elixir     | 0        | No default finding                                             |
-| erlang     | 0        | No default finding                                             |
+| cpp        | 1        | main → orchestrate → persist → run → execute                   |
+| csharp     | 1        | Handle → OrchestrateAsync → Orchestrate → Persist → Run@Storage.cs:38 → Run@Storage.cs:27 |
+| dart       | 2        | handle_request → orchestrate → persist → AuditedRepository → run → execute |
+| elixir     | 1        | main → orchestrate → persist → run → execute                   |
+| erlang     | 0        | No default finding (real flow detected with `--inferred-sources`) |
 | go         | 1        | handleRequest → Orchestrate → Persist → Run → Execute          |
-| java       | 0        | No default finding                                             |
+| java       | 1        | handle → orchestrate → persist → run → execute                 |
 | javascript | 1        | handle_request → orchestrate → persist → run → execute         |
 | kotlin     | 1        | handle → orchestrate → persist → run → execute                 |
-| lua        | 3        | handle_request → orchestrate → persist → run → execute         |
-| objc       | 2        | handle_request → orchestrate → persist → run → executeCmd      |
+| lua        | 1        | handle_request → orchestrate → persist → run → execute         |
+| objc       | 1        | handle_request → orchestrate → persist → run@Storage.m:41 → run@Storage.m:31 → executeCmd |
 | perl       | 1        | handle_request → orchestrate → StorePersist → persist → run → execute |
-| php        | 0        | No default finding                                             |
+| php        | 2        | handle_request → orchestrate → persist → run@storage.php:33 → run@storage.php:27 → execute |
 | python     | 1        | handle_request → run_pipeline → orchestrate → persist → perform → execute |
-| ruby       | 2        | handle_request → orchestrate → persist → run → execute         |
+| ruby       | 2        | wrap → persist → run → execute                                 |
 | rust       | 0        | No default finding                                             |
-| scala      | 0        | No default finding                                             |
-| solidity   | 1        | audit                                                          |
-| swift      | 0        | No default finding                                             |
+| scala      | 1        | handle → orchestrate → persist → run → execute                 |
+| solidity   | 0        | No default finding (real flow detected with `--inferred-sources`) |
+| swift      | 1        | handle_request → orchestrate → persist → run@Storage.swift:30 → run@Storage.swift:23 → execute |
 | typescript | 1        | handle_request → orchestrate → persist → run → execute         |
+
+> Refresh procedure: rebuild release (`cargo build --release -p bonsai_cli --bin bonsai-ninja`), clear fixture sidecars (`find examples -type d -name .bonsai -exec rm -rf {} +`), then re-run the command in this section's heading per language. The full `--inferred-sources` baselines (used by the CI gate `mega_flow_security_pipeline_covers_every_language_and_flow_event_kind`) live in `crates/security/tests/security_pipeline_regressions.rs::expected_mega_flow_findings_with_inferred_sources`.
 
 ## What each fixture exercises
 
