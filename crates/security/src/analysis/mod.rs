@@ -4033,10 +4033,6 @@ fn same_source_location(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.file == b.file && a.line == b.line && a.column == b.column
 }
 
-fn source_preference_rank(source: &FindingMatch) -> u8 {
-    source_preference_rank_for_sink(source, None)
-}
-
 /// Drop `entry-point.class_field.inherited` (and equivalent
 /// inferred-source) findings whose source-side `text` is
 /// `this.<field>` / `self.<field>` / etc and whose `<field>` does

@@ -1709,13 +1709,13 @@ fn idg_pipeline_hash() -> u64 {
         ^ build_fingerprint_hash()
 }
 
-/// Build-time fingerprint emitted by `build.rs` — `git rev-parse HEAD`
-/// + dirty-tree content hash, folded into a `u64`. Every sidecar's
-/// pipeline hash xors this in so an upgraded binary can't reuse
-/// caches built by a different analyzer version even if the per-
-/// sidecar manual semantic constant wasn't bumped. Falls back to `0`
-/// only when the build.rs env var is somehow unset (defense in depth
-/// — `build.rs` always emits it).
+/// Build-time fingerprint emitted by `build.rs` — combines
+/// `git rev-parse HEAD` with the working-tree dirty hash, folded
+/// into a `u64`. Every sidecar's pipeline hash xors this in so an
+/// upgraded binary can't reuse caches built by a different analyzer
+/// version even if the per-sidecar manual semantic constant wasn't
+/// bumped. Falls back to `0` only when the build.rs env var is
+/// somehow unset (defense in depth — `build.rs` always emits it).
 pub(crate) fn build_fingerprint_hash() -> u64 {
     const FINGERPRINT_HEX: &str = env!(
         "BONSAI_BUILD_FINGERPRINT_HASH",
