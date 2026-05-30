@@ -12,7 +12,7 @@ rules.
 
 ## Sources
 
-### HTTP request — attribute read
+### HTTP request - attribute read
 
 ```yaml
 - id: python.flask.request_args_get
@@ -34,10 +34,10 @@ rules.
         from flask import request
         def example():
             return request.args.get("q")
-  description: "Flask request.args.get(name) — query parameter from remote client."
+  description: "Flask request.args.get(name) - query parameter from remote client."
 ```
 
-### HTTP request — receiver-agnostic regex
+### HTTP request - receiver-agnostic regex
 
 When the receiver varies but the suffix is distinctive:
 
@@ -59,7 +59,7 @@ When the receiver varies but the suffix is distinctive:
         function demo(request) {
           return request.body;
         }
-  description: "Koa/Fastify request.body — HTTP request body."
+  description: "Koa/Fastify request.body - HTTP request body."
 ```
 
 ### Class-method override
@@ -86,7 +86,7 @@ class overrides:
         class Echo(tornado.websocket.WebSocketHandler):
             def on_message(self, message):
                 use(message)
-  description: "Tornado WebSocketHandler.on_message — peer-controlled message payload."
+  description: "Tornado WebSocketHandler.on_message - peer-controlled message payload."
 ```
 
 ### Decorated function parameter (FastAPI)
@@ -116,7 +116,7 @@ class overrides:
 
 ## Sinks
 
-### Command injection — Type-method
+### Command injection - Type-method
 
 ```yaml
 - id: python.cmdi.os_system
@@ -139,10 +139,10 @@ class overrides:
         def run(user):
             os.system(user)
       expect_match_text: [os.system]
-  description: "os.system(cmd) — tainted shell command execution."
+  description: "os.system(cmd) - tainted shell command execution."
 ```
 
-### SQL injection — keyword arg
+### SQL injection - keyword arg
 
 ```yaml
 - id: python.sqli.cursor_execute_string_format
@@ -167,7 +167,7 @@ class overrides:
             con.cursor().execute("SELECT * WHERE u = '" + user + "'")
 ```
 
-### Path traversal — argument constraint
+### Path traversal - argument constraint
 
 ```yaml
 - id: python.path.open_tainted
@@ -233,7 +233,7 @@ class overrides:
           w.Header().Set(name, val)
         }
       expect_match_text: [w.Header().Set]
-  description: "w.Header().Set(name, value) — response header injection risk."
+  description: "w.Header().Set(name, value) - response header injection risk."
   packages:
     - net/http
 ```
@@ -331,7 +331,7 @@ extending `tornado.web.RequestHandler` directly or transitively.
 When the same callee has multiple sink modes:
 
 ```yaml
-# subprocess.run(cmd, shell=True) — shell mode
+# subprocess.run(cmd, shell=True) - shell mode
 - id: python.cmdi.subprocess_run_shell_true
   match:
     kind: call
@@ -343,7 +343,7 @@ When the same callee has multiple sink modes:
   cwe: [CWE-78]
   severity: critical
 
-# subprocess.run([cmd, ...]) — argv mode is over-broad without
+# subprocess.run([cmd, ...]) - argv mode is over-broad without
 # additional constraints (no shell interpolation, list-form invocation)
 - id: python.cmdi.subprocess_run_argv
   enabled: false

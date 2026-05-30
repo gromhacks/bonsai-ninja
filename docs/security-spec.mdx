@@ -11,7 +11,7 @@ drives the engine to produce findings, and renders SARIF / JSON / text
 reports.
 
 If you're authoring rules, start with [Pattern Guide](pattern-guide.mdx). This doc is
-the engine-side spec — what `bonsai_security` does with rules, how
+the engine-side spec - what `bonsai_security` does with rules, how
 findings flow, how IDs are stable.
 
 ## Rulepack layout
@@ -28,19 +28,19 @@ security-patterns/
 Two layouts work: the canonical `langs/<lang>/{sources,sinks,sanitizers}/`
 where the rule kind comes from the directory, and a flat custom layout
 where each YAML file declares `language:` explicitly. `RuleKind` is always
-derived from the directory — never declared in YAML.
+derived from the directory - never declared in YAML.
 
 ## Rule schema essentials
 
 Required for every rule:
 
-- `id` — globally unique within (language, kind).
-- `language` — one of the 21 supported languages.
-- `match.kind` — `call`, `new`, `read`, `write`, `return`, or `param`.
+- `id` - globally unique within (language, kind).
+- `language` - one of the 21 supported languages.
+- `match.kind` - `call`, `new`, `read`, `write`, `return`, or `param`.
 - `match.callee` (call/new) or `match.target` (read/write/return/param)
-  — at least one of `name`, `attribute`, `regex`, or `annotation`.
-- `description` — at least 15 chars, explains the API and risk.
-- `match_examples` — at least one entry whose `code` triggers the rule.
+  - at least one of `name`, `attribute`, `regex`, or `annotation`.
+- `description` - at least 15 chars, explains the API and risk.
+- `match_examples` - at least one entry whose `code` triggers the rule.
 
 Sinks also need `cwe: [CWE-NNN]` and `severity: low|medium|high|critical|info`.
 Sources also need `trust: remote|local|service|ipc|database|library|config|physical`.
@@ -66,35 +66,35 @@ broken chains.
 
 The matcher reads each adapter's `LanguageCapabilities` (see
 the internal coverage baseline at rulepack load time. A rule that anchors on
-a construct the adapter declares `Unsupported` is rejected — typically
-with `disabled_reason.code: pending-adapter-fact` — so it can't fire on
+a construct the adapter declares `Unsupported` is rejected - typically
+with `disabled_reason.code: pending-adapter-fact` - so it can't fire on
 shapes the engine wouldn't analyse precisely.
 
 Recent capability promotions unblock several rule families:
 
-- **Macros** in C / C++ / Objective-C — Unsupported → Partial. Rules
+- **Macros** in C / C++ / Objective-C - Unsupported -> Partial. Rules
   anchored on `STR_CPY`, `LOG`, `assert`, `NSAssert` shapes load.
-- **Reflection** in Python — Unsupported → Partial. Constant-string
+- **Reflection** in Python - Unsupported -> Partial. Constant-string
   `getattr` / `setattr` / `hasattr` are rewritten to direct attribute
   calls.
-- **Reflection** in Java — Unsupported → Partial. The
+- **Reflection** in Java - Unsupported -> Partial. The
   `Class.forName("X").getMethod("Y").invoke(...)` chain rewrites to a
   synthesized `X.Y(...)`.
-- **Exceptions** in Java / Kotlin / C# — Partial → Exact. Rules that
+- **Exceptions** in Java / Kotlin / C# - Partial -> Exact. Rules that
   anchor on a specific catch arm fire only when the throw type can
   plausibly be caught.
 
 ## Match shapes
 
-| Shape | Example | Notes |
-|---|---|---|
-| `name` | `name: get` | Bare callee — pair with `packages:`. |
-| `attribute` | `[requests, get]` | Fully-qualified path. Alias-aware. |
-| `regex` | `^.*\\.body$` | For variable receivers with a fixed verb. |
-| `base_name_in` | `[args, variables]` | Optional base/receiver identifier filter for receiver-agnostic regexes. |
-| `annotation` | `RequestParam` | Walks `Decl.param_annotations`. |
-| `decl_kind_in` | `[method]` | Param-rule filter over adapter-emitted `Decl.kind`. |
-| `visibility_in` | `[public]` | Param-rule filter over adapter-emitted `Decl.visibility`. |
+| Shape           | Example             | Notes                                                                   |
+| --------------- | ------------------- | ----------------------------------------------------------------------- |
+| `name`          | `name: get`         | Bare callee - pair with `packages:`.                                    |
+| `attribute`     | `[requests, get]`   | Fully-qualified path. Alias-aware.                                      |
+| `regex`         | `^.*\\.body$`       | For variable receivers with a fixed verb.                               |
+| `base_name_in`  | `[args, variables]` | Optional base/receiver identifier filter for receiver-agnostic regexes. |
+| `annotation`    | `RequestParam`      | Walks `Decl.param_annotations`.                                         |
+| `decl_kind_in`  | `[method]`          | Param-rule filter over adapter-emitted `Decl.kind`.                     |
+| `visibility_in` | `[public]`          | Param-rule filter over adapter-emitted `Decl.visibility`.               |
 
 Scope qualifiers `in_class` and `in_method` consult `Decl.parent` and
 `Decl.bases`, so a class `WebSocketHandler` matches subclasses as well.
@@ -125,7 +125,7 @@ Constraints are post-filters applied after the basic match. All must pass.
 
 `arg_tainted` is intentionally narrow. For `call` and `new` rules it
 evaluates syntactic call arguments against engine `TaintedCallKind::Call`
-records — that includes real `FlowEvent::Call` arguments and nested
+records - that includes real `FlowEvent::Call` arguments and nested
 receiver calls extracted from chains. For `write` rules it may also evaluate
 the synthetic write operand, where `index: 0` is the assignment RHS. This
 lets assignment sinks require a tainted value without encoding library API
@@ -147,10 +147,10 @@ argument is an equivalent payload surface.
 Rules whose risk names a specific argument **must** constrain that
 argument:
 
-- Bounded-copy memory rules — `memcpy(dst, src, n)` needs
+- Bounded-copy memory rules - `memcpy(dst, src, n)` needs
   `arg_tainted: { index: 2 }`. A fixed `FIXED_LEN` is not evidence of
   CWE-120 because `dst` or `src` is tainted.
-- Allocation-size rules — `malloc(n)` / `alloca(n)` index 0, `realloc(ptr,
+- Allocation-size rules - `malloc(n)` / `alloca(n)` index 0, `realloc(ptr,
   n)` index 1, `aligned_alloc(align, size)` index 1, `calloc(nmemb,
   size)` needs separate rules. Tainted pointer reachability is not a
   tainted allocation size.
@@ -237,7 +237,7 @@ matched sources         matched sinks
                     │
                     ▼
           sanitizer credit pass
-          (tag → tag table)
+          (tag -> tag table)
                     │
                     ▼
         combine_findings_by_source_flow
@@ -252,7 +252,7 @@ matched sources         matched sinks
             TaintAnalysisReport
 ```
 
-The finding ID is stable: same source/sink/group/language → same ID
+The finding ID is stable: same source/sink/group/language -> same ID
 across runs. SARIF and JSON outputs use the same ID.
 
 Security taint analysis builds an exact graph per matched source seed.
@@ -278,8 +278,8 @@ tainted just because a GraphQL package is imported.
 
 Sanitizer rules don't change the engine's propagation. After the engine
 emits findings, the security layer walks each finding's chain and looks
-for sanitizer matches in scope. The credit table maps `tag → tag` (e.g.
-`unescaped-html → escaped-html`) and downgrades the finding's severity or
+for sanitizer matches in scope. The credit table maps `tag -> tag` (e.g.
+`unescaped-html -> escaped-html`) and downgrades the finding's severity or
 suppresses it based on the rule's declared coverage.
 
 This keeps sanitizer attribution conservative: false positives over false
@@ -290,9 +290,9 @@ anything.
 
 Three:
 
-- **text** (default) — themed terminal output.
-- **json** — stable schema documented in `crates/security/src/report.rs`.
-- **sarif** — SARIF 2.1.0 for `security taint-analysis` findings,
+- **text** (default) - themed terminal output.
+- **json** - stable schema documented in `crates/security/src/report.rs`.
+- **sarif** - SARIF 2.1.0 for `security taint-analysis` findings,
   GitHub code scanning, and the CVEBench-SAST harness. SARIF includes
   exact source-independent API/config misuse findings by default; those
   rows have no `codeFlows` and use `pattern:<sink-rule-id>` as their
