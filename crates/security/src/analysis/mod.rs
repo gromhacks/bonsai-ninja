@@ -1230,11 +1230,18 @@ where
     // par-collected candidates. Order is stable because
     // `flat_map_iter` preserves input order on collection.
     //
-    // Key on the user-visible identity `(source-site, chain_names)`,
+    // Key on the user-visible identity `(source-site, displayed-chain)`,
     // not on `flow_id`. The flow id includes intermediate taint-path
     // detail that doesn't always survive into the rendered output —
     // two lineages that collapse to the same chain produce identical
-    // panels and must not be reported twice.
+    // panels and must not be reported twice. The chain is keyed on the
+    // *displayed* hop names: the `@file:line` suffix that
+    // `chain_names_for_path` appends to disambiguate a name repeated
+    // within one path is stripped here, so two lineages that walk the
+    // same function set in different orders (e.g. the real `run -> run`
+    // super-chain and a reversed base->derived ordering produced by
+    // ambiguous virtual dispatch) collapse to the single row they
+    // render as, keeping the first — call-graph-ordered — occurrence.
     let mut seen: AHashMap<(String, String, u32, u32, String), usize> = AHashMap::new();
     let mut candidates: Vec<SourceAnalysisCandidate> = Vec::with_capacity(parallel_candidates.len());
     for candidate in parallel_candidates {
@@ -1243,7 +1250,7 @@ where
             candidate.source.file.clone(),
             candidate.source.line,
             candidate.source.column,
-            candidate.chain_names.join("\0"),
+            displayed_chain_key(&candidate.chain_names),
         );
         if let Some(&idx) = seen.get(&dedupe_key) {
             merge_source_lineage_status(&mut candidates[idx].lineage, candidate.lineage);
@@ -4025,6 +4032,20 @@ fn chain_names_for_path(ws: &Workspace, path: &[FuncId]) -> Option<Vec<String>> 
 /// to avoid pushing duplicate sources onto a group.
 fn same_source_site(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.rule_id == b.rule_id && a.file == b.file && a.line == b.line && a.column == b.column
+}
+
+/// Render a function chain down to the hop names the reader actually sees,
+/// joined into a stable key. `chain_names_for_path` appends an `@file:line`
+/// suffix to any hop whose name repeats within the path so the raw chain
+/// stays unique; that suffix never reaches the rendered output, so two
+/// lineages that walk the same function set in different orders collapse to
+/// the same key here.
+fn displayed_chain_key(chain_names: &[String]) -> String {
+    chain_names
+        .iter()
+        .map(|name| name.split('@').next().unwrap_or(name.as_str()))
+        .collect::<Vec<_>>()
+        .join("\0")
 }
 
 /// True when two source matches point at the same concrete source
