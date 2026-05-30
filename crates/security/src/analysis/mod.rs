@@ -1225,23 +1225,15 @@ where
         .flat_map(|(_, candidates)| candidates)
         .collect();
 
-    // Single-threaded dedupe pass — preserves the first-occurrence
-    // semantics of the prior sequential `seen` set across the
-    // par-collected candidates. Order is stable because
-    // `flat_map_iter` preserves input order on collection.
+    // Single-threaded canonicalisation: stable first-occurrence dedupe
+    // across the par-collected candidates.
     //
-    // Key on the user-visible identity `(source-site, displayed-chain)`,
-    // not on `flow_id`. The flow id includes intermediate taint-path
-    // detail that doesn't always survive into the rendered output —
-    // two lineages that collapse to the same chain produce identical
-    // panels and must not be reported twice. The chain is keyed on the
-    // *displayed* hop names: the `@file:line` suffix that
-    // `chain_names_for_path` appends to disambiguate a name repeated
-    // within one path is stripped here, so two lineages that walk the
-    // same function set in different orders (e.g. the real `run -> run`
-    // super-chain and a reversed base->derived ordering produced by
-    // ambiguous virtual dispatch) collapse to the single row they
-    // render as, keeping the first — call-graph-ordered — occurrence.
+    // Key on the rendered identity `(source-site, displayed-chain)`, not
+    // `flow_id` — the flow id carries taint-path detail that never reaches
+    // the panel, so two lineages that render the same chain would be
+    // reported twice. Ambiguous virtual dispatch can emit the same function
+    // set in different internal orders; keeping the first (call-graph
+    // ordered) drops the spurious reversed ordering.
     let mut seen: AHashMap<(String, String, u32, u32, String), usize> = AHashMap::new();
     let mut candidates: Vec<SourceAnalysisCandidate> = Vec::with_capacity(parallel_candidates.len());
     for candidate in parallel_candidates {
@@ -4034,12 +4026,10 @@ fn same_source_site(a: &FindingMatch, b: &FindingMatch) -> bool {
     a.rule_id == b.rule_id && a.file == b.file && a.line == b.line && a.column == b.column
 }
 
-/// Render a function chain down to the hop names the reader actually sees,
-/// joined into a stable key. `chain_names_for_path` appends an `@file:line`
-/// suffix to any hop whose name repeats within the path so the raw chain
-/// stays unique; that suffix never reaches the rendered output, so two
-/// lineages that walk the same function set in different orders collapse to
-/// the same key here.
+/// Join a chain into a key of the hop names as rendered. `chain_names_for_path`
+/// suffixes repeated names with `@file:line` to keep the raw chain unique, but
+/// that suffix never reaches the output — strip it so equivalently-rendered
+/// chains share one key.
 fn displayed_chain_key(chain_names: &[String]) -> String {
     chain_names
         .iter()
