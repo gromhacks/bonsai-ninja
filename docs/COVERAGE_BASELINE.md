@@ -11,34 +11,34 @@ mean](#what-the-levels-mean) below before getting alarmed by a wall
 of `Partial`s.
 
 > **Reading this alongside [`TAINT_COVERAGE_MATRIX.md`](TAINT_COVERAGE_MATRIX.md)?**
-> The taint matrix shows every applicable cell as `pass` — that's the
+> The taint matrix shows every applicable cell as `pass` - that's the
 > per-scenario behavioural truth (1267 tests run the real engine on
 > each scenario × language and assert the right answer). This doc is
-> the *modeling-level declaration* — `Partial` here means "common
+> the *modeling-level declaration* - `Partial` here means "common
 > case is semantic, rare shapes are marked incomplete/unsupported," not
 > "the test fails." Both views are correct simultaneously.
 >
-> **Should everything here be `Exact`?** No — and that is principled,
+> **Should everything here be `Exact`?** No - and that is principled,
 > not a gap. `Exact` requires a closed-form analysis with no dynamic
 > uncertainty. Real-world languages don't admit that for most constructs.
 > The production-correct stance is to model the common case semantically
-> and surface the remaining cases as incompleteness/debug metadata —
+> and surface the remaining cases as incompleteness/debug metadata -
 > exactly what `Partial` denotes.
 >
 > **Should everything here be supported (no `Unsupported` cells)?**
 > The remaining `Unsupported` cells are deliberate engineering
 > tradeoffs, not omissions:
 >
-> - **Macros** (C, C++, Elixir, Erlang, Objective-C) — modeling
+> - **Macros** (C, C++, Elixir, Erlang, Objective-C) - modeling
 >   un-expanded macros would invent flow that may not exist after
 >   preprocessing. Rust has limited support (`println!` etc.) because
 >   the kit recognizes the common shapes; C-style preprocessor macros
 >   require a real preprocessor pass we deliberately don't run.
-> - **Reflection** (most langs) — runtime introspection
+> - **Reflection** (most langs) - runtime introspection
 >   (`getattr(obj, dyn_str)`, `Class.forName(...)`, etc.) cannot be
 >   resolved statically. Modeling it imprecisely would manufacture
 >   false-precision findings.
-> - **FFI** — foreign function calls cross the language boundary; we
+> - **FFI** - foreign function calls cross the language boundary; we
 >   cannot analyze code that isn't in the workspace.
 >
 > Rather than fire imprecise findings on these, the engine rejects
@@ -53,7 +53,7 @@ of `Partial`s.
   are marked incomplete/unsupported instead of reported as guessed flows"*.
   It does NOT mean broken or unimplemented.
 - An `Unsupported` cell means *"rules anchored on this construct are
-  rejected at rulepack load time"* — a deliberate choice that prevents
+  rejected at rulepack load time"* - a deliberate choice that prevents
   rules from firing on shapes the engine wouldn't analyse precisely.
 - An `n/a` cell means the construct **does not exist in that
   language** (e.g. macros in JavaScript, exceptions in Rust). Rules
@@ -79,7 +79,7 @@ finding so you can decide whether to act on it."
 
 Capabilities are grouped by what they affect.
 
-### Tier 1 — Required for taint analysis to run
+### Tier 1 - Required for taint analysis to run
 
 These are the constructs the resolver and CFG layer use to walk a
 program. Without them, the engine can't even build a call graph.
@@ -115,7 +115,7 @@ caveats.
 dispatch; Rust uses `Result` instead of exceptions; Erlang has no
 class hierarchy).
 
-### Tier 2 — Required only if a rule uses the construct
+### Tier 2 - Required only if a rule uses the construct
 
 These categories matter for rules that anchor on async/await,
 coroutines, generics, or pattern matching. A rule that doesn't target
@@ -154,7 +154,7 @@ summary construction. The `Partial` (rather than `Exact`) caveat is
 that cross-process generator-state propagation is intentionally out
 of scope.
 
-### Tier 3 — Adapter conveniences (precision boosters)
+### Tier 3 - Adapter conveniences (precision boosters)
 
 These don't gate rule loading; they affect how the resolver narrows
 candidate edges. `Unsupported` here means findings that go through
@@ -189,54 +189,54 @@ they're handled in the common case.
 
 A plain-English read of where each language stands today:
 
-- **C / C++** — Core analysis works. C++ templates handled as a single
+- **C / C++** - Core analysis works. C++ templates handled as a single
   decl with type parameters; unsupported per-instantiation specialisation
   is treated as incomplete. Macro expansion is not performed; rules
   anchored on macro-defined names won't fire. Smart-pointer move/copy
   isn't distinguished beyond the standard Assign event.
-- **C#** — Standard async/await flows analysed; reflection (`Type`
+- **C#** - Standard async/await flows analysed; reflection (`Type`
   introspection, dynamic invocation) is opaque. Generic
   monomorphisation works for the closed set of instantiations seen.
-- **Dart** — Standard analysis. Async/await modeled; FFI is library-
+- **Dart** - Standard analysis. Async/await modeled; FFI is library-
   level (not a language construct) so declared `n/a`.
-- **Elixir / Erlang** — Module + protocol/behaviour resolution works;
+- **Elixir / Erlang** - Module + protocol/behaviour resolution works;
   process boundaries (`spawn`, `send`, `receive`) are unresolved by
-  design — taint cannot cross process boundaries in static analysis
+  design - taint cannot cross process boundaries in static analysis
   on an actor model. GenServer callbacks are recognised but the
   message protocol is opaque.
-- **Go** — Standard module + interface dispatch analysis. Generics
+- **Go** - Standard module + interface dispatch analysis. Generics
   (1.18+) handled. `panic`/`recover` is not modeled as exceptions;
   goroutines record the spawn but happens-before is not tracked.
-- **Java / Kotlin** — Standard inheritance + method-resolution
+- **Java / Kotlin** - Standard inheritance + method-resolution
   analysis. Annotations (`@RequestBody`, etc.) are read by the
   resolver; reflection (`Class.forName`) is opaque.
-- **JavaScript / TypeScript** — CommonJS + ES module analysis. The
+- **JavaScript / TypeScript** - CommonJS + ES module analysis. The
   engine credits `module.exports = X` and `exports.X = …` to the
   module's public surface (the only languages that need this). Type
   annotations populate `Decl.type_aliases`; flow-sensitive narrowing
   isn't used by the matcher.
-- **Lua** — Module-level resolution via `require` works; the
+- **Lua** - Module-level resolution via `require` works; the
   metatable-based "method dispatch" is partially modeled (the common
   `obj:method()` shape resolves; metatable forwarding chains
   degrade).
-- **Objective-C** — Standard class + protocol analysis. C-interop
+- **Objective-C** - Standard class + protocol analysis. C-interop
   (FFI) is via direct C calls; modeled at the standard call-site
   level.
-- **Perl / PHP / Python / Ruby** — Standard class + module analysis.
+- **Perl / PHP / Python / Ruby** - Standard class + module analysis.
   Decorators (Python) and modifiers (PHP attributes, Ruby method
   visibility) feed the resolver. Dynamic dispatch (Python `getattr`,
   Ruby `send`) is opaque when the method name is computed.
-- **Rust** — Trait-based dispatch analysis. `Box<dyn Trait>` calls
+- **Rust** - Trait-based dispatch analysis. `Box<dyn Trait>` calls
   emit semantic virtual edges only when the receiver set is proven. No
   exception model (Rust uses `Result`); macro expansion is partial
   (we recognise common shapes like `println!`, but `macro_rules!`
   and proc-macros aren't expanded).
-- **Scala** — Inheritance + pattern-matching analysis. FFI via Scala-
+- **Scala** - Inheritance + pattern-matching analysis. FFI via Scala-
   native isn't modeled (not a language-level construct).
-- **Solidity** — Contract inheritance + try/catch external-call
+- **Solidity** - Contract inheritance + try/catch external-call
   analysis. Inline `assembly { … }` (Yul) is parsed but not modeled;
   rules anchored on inline-assembly shapes need manual annotation.
-- **Swift** — Standard class + protocol analysis. FFI via the
+- **Swift** - Standard class + protocol analysis. FFI via the
   Objective-C bridge or `@_cdecl` isn't modeled at the language
   level.
 
@@ -250,22 +250,22 @@ because Rust has no exception model). `lang_javascript` /
 `lang_typescript` add `module_export_aliases = ["exports",
 "module.exports"]` so the resolver can credit CommonJS-style
 assignments to the module's public surface. Everything else is the
-same conservative `partial_baseline()` — that's by design, not
+same conservative `partial_baseline()` - that's by design, not
 neglect.
 
 ## Backlog
 
-Promotion candidates — places where an adapter could declare `Exact`
+Promotion candidates - places where an adapter could declare `Exact`
 once the matching test coverage lands:
 
-- **C# / Java / Kotlin:** `Exceptions → Exact` (typed `throws` /
+- **C# / Java / Kotlin:** `Exceptions -> Exact` (typed `throws` /
   checked exceptions / `try-catch` chains are statically analysable
   in ways Python/Ruby exception hierarchies aren't).
-- **JavaScript / TypeScript:** `Modules → Exact` for ES module graphs
+- **JavaScript / TypeScript:** `Modules -> Exact` for ES module graphs
   that aren't dynamic-import-shaped.
-- **Scala / Swift:** `Pattern matching → Exact` (both have exhaustive-
+- **Scala / Swift:** `Pattern matching -> Exact` (both have exhaustive-
   by-default match expressions with compiler-validated totality).
-- **Rust:** `Async / await → Exact` once we model `Future::poll`
+- **Rust:** `Async / await -> Exact` once we model `Future::poll`
   happens-before relations from `tokio::spawn` / `select!`.
 
 Each promotion lands together with: (a) the adapter override
@@ -286,10 +286,10 @@ cargo test -p bonsai_conformance --test coverage_baseline
 BLESS_BASELINE=1 cargo test -p bonsai_conformance --test coverage_baseline -- --nocapture
 ```
 
-- `.snapshots/COVERAGE_BASELINE.snapshot` — raw runtime levels (no
+- `.snapshots/COVERAGE_BASELINE.snapshot` - raw runtime levels (no
   applicability overlay). Pure drift gate against
   `LanguageCapabilities` returns.
-- `.snapshots/COVERAGE_BASELINE.rendered.snapshot` — the human-readable
+- `.snapshots/COVERAGE_BASELINE.rendered.snapshot` - the human-readable
   table above with applicability overlay. Editing the applicability
   map in [`coverage_baseline.rs`](../crates/conformance/tests/coverage_baseline.rs)
   invalidates this snapshot and forces a re-bless.
@@ -319,5 +319,5 @@ Things that aren't visible in this matrix:
   declared here.
 
 If you want a real "how good is taint coverage" view, the precision
-histogram is the metric — capability levels are a contract for rule
+histogram is the metric - capability levels are a contract for rule
 validation, not a coverage scorecard.

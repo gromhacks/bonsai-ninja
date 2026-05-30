@@ -17,7 +17,7 @@ security-patterns/langs/<lang>/{sources,sinks,sanitizers}/<family>.yml
 
 The directory determines the rule kind. `<lang>` matches one of the 21
 supported language IDs. `<family>` is a free-form filename that groups
-related rules — `cmdi.yml`, `sqli.yml`, `xss.yml`, etc.
+related rules - `cmdi.yml`, `sqli.yml`, `xss.yml`, etc.
 
 ## Minimum viable rule
 
@@ -43,24 +43,24 @@ related rules — `cmdi.yml`, `sqli.yml`, `xss.yml`, etc.
         def example(user):
             os.system(user)
       expect_match_text: [os.system]
-  description: "os.system(cmd) — tainted shell command execution."
+  description: "os.system(cmd) - tainted shell command execution."
 ```
 
 Required:
 
-- `id` — unique per (language, kind).
-- `language` — required in flat layout, optional in canonical layout.
-- `match.kind` — `call`, `new`, `read`, `write`, `return`, or `param`.
+- `id` - unique per (language, kind).
+- `language` - required in flat layout, optional in canonical layout.
+- `match.kind` - `call`, `new`, `read`, `write`, `return`, or `param`.
 - `match.callee` (call/new) or `match.target` (read/write/return/param).
-- `description` — at least 15 chars; explains the API shape and the
+- `description` - at least 15 chars; explains the API shape and the
   security consequence.
-- `match_examples` — at least one entry with `code` that fires the rule.
+- `match_examples` - at least one entry with `code` that fires the rule.
 
 Sinks also need `cwe` and `severity`. Sources need `trust`.
 
 ## Match shapes
 
-**Attribute path** — preferred for `Type.method` calls:
+**Attribute path** - preferred for `Type.method` calls:
 
 ```yaml
 match:
@@ -72,7 +72,7 @@ match:
 The matcher's alias map handles `from requests import get as r; r(...)`
 automatically.
 
-**Bare name** — use sparingly, pair with `packages:` to narrow:
+**Bare name** - use sparingly, pair with `packages:` to narrow:
 
 ```yaml
 match:
@@ -81,7 +81,7 @@ match:
     name: open
 ```
 
-**Regex** — for variable receivers with a distinctive verb:
+**Regex** - for variable receivers with a distinctive verb:
 
 ```yaml
 match:
@@ -109,7 +109,7 @@ This is the preferred shape for contextual resolver maps such as GraphQL
 `args.<field>`: it allows arbitrary field names while keeping sibling
 objects like `user.id` clean.
 
-**Annotation / decorator** — Spring `@RequestParam`, FastAPI binders,
+**Annotation / decorator** - Spring `@RequestParam`, FastAPI binders,
 etc.:
 
 ```yaml
@@ -121,7 +121,7 @@ match:
 
 Reads `Decl.param_annotations`.
 
-**Read / write target** — for source-side container reads:
+**Read / write target** - for source-side container reads:
 
 ```yaml
 match:
@@ -198,7 +198,7 @@ pointers. C/C++ `memcpy(dst, src, n)` uses `index: 2`. A fixed constant
 like `FIXED_LEN` is not evidence of CWE-120 just because `dst` or `src` is
 tainted.
 
-Allocation rules follow the same rule — pin the size/count operand:
+Allocation rules follow the same rule - pin the size/count operand:
 `malloc(n)` index 0, `realloc(ptr, n)` index 1, `aligned_alloc(align,
 size)` index 1, `calloc(nmemb, size)` needs a rule for each.
 
@@ -232,7 +232,7 @@ receiver-agnostic regex plus adapter-visible `packages:` / `imports:` /
 - format_arg_index: 0
 ```
 
-Treats arg N as a format string — for `printf`-shaped sinks.
+Treats arg N as a format string - for `printf`-shaped sinks.
 
 ### `top_level_only` / `not_in_top_level`
 
@@ -289,7 +289,7 @@ the constraint conservatively.
 The arg at `index` must be narrowed to the declared type by a
 preceding type-test guard inside the same decl: `instanceof X`,
 `isinstance(_, X)`, `_ is X`, or `typeof _ === "X"`. The narrowing
-is CFG-aware — only the then-branch of the guard counts; outside
+is CFG-aware - only the then-branch of the guard counts; outside
 that range the constraint fails closed.
 
 ### `enclosing_decorator_in`
@@ -349,7 +349,7 @@ the untrusted value.
       name: recv
   taint_semantics:
     source_output_args: [1]
-  description: "recv(fd, buf, len, flags) — remote bytes taint buf."
+  description: "recv(fd, buf, len, flags) - remote bytes taint buf."
 ```
 
 This is the right model for `recv`, `recvfrom`, `SSL_read`, `fgets`,
@@ -509,7 +509,7 @@ constraints:
 Inverse-match: fires on every function-shaped decl that does
 *not* contain a call to the declared target. `search_depth > 0`
 extends the walker to BFS through resolved callees up to that
-depth (capped at 4 engine-side); use sparingly — cheaper to keep
+depth (capped at 4 engine-side); use sparingly - cheaper to keep
 the walker intra-procedural and add scoping via
 `enclosing_decorator_in` or package gates.
 
@@ -527,11 +527,11 @@ Disabled rules must declare a reason:
 
 `code` is one of:
 
-- `subsumed` — covered by another (more general) rule. Requires
+- `subsumed` - covered by another (more general) rule. Requires
   `subsumed_by`.
-- `over-broad` — original pattern was too permissive.
-- `requires-constraint` — needs an extra constraint arm to fire cleanly.
-- `pending-adapter-fact` — needs an adapter capability not yet exposed.
+- `over-broad` - original pattern was too permissive.
+- `requires-constraint` - needs an extra constraint arm to fire cleanly.
+- `pending-adapter-fact` - needs an adapter capability not yet exposed.
 
 The `subsumed_by` chain must terminate at an enabled rule.
 
@@ -570,7 +570,7 @@ match_examples:
     expect_match_text: [os.system]
 ```
 
-The `code` is parsed and matched at validation time — if the rule wouldn't
+The `code` is parsed and matched at validation time - if the rule wouldn't
 fire on its own example, validation rejects it. Add multiple examples for
 notable variant shapes; see [Pattern Variants](pattern-variants.mdx) for common
 variants worth covering.
@@ -583,7 +583,7 @@ high/error/warning levels.
 
 ## CWE mapping
 
-`cwe: [CWE-78, CWE-77]` — multiple are fine. The first listed CWE drives
+`cwe: [CWE-78, CWE-77]` - multiple are fine. The first listed CWE drives
 SARIF tag selection.
 
 ## Validation tips
