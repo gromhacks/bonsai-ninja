@@ -89,6 +89,11 @@ pub struct TaintRecord {
     pub call_file: String,
     pub call_line: u32,
     pub call_column: u32,
+    /// Source text of the call-site line - the code at this propagation
+    /// edge, so the JSON dump carries the edge's code, not just its
+    /// coordinates. Empty when the line can't be read.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub call_code: String,
     pub tainted_args: Vec<TaintedArgRecord>,
     pub edge_kind: String,
     pub edge_precision: String,
@@ -635,6 +640,8 @@ pub(crate) fn build_taint_record_from_cross_call(
         &id_args,
     );
 
+    let call_code = source_line_text(ws, &ce.call_span);
+
     Some(TaintRecord {
         taint_id,
         caller_name: caller_decl.name.clone(),
@@ -646,10 +653,27 @@ pub(crate) fn build_taint_record_from_cross_call(
         call_file,
         call_line,
         call_column,
+        call_code,
         tainted_args,
         edge_kind: edge_kind_display(ce.call_kind),
         edge_precision: precision_display(ce.precision),
     })
+}
+
+/// Trimmed source text of the line a span starts on. Empty when the file
+/// can't be read - the call-site coordinates still carry the location.
+fn source_line_text(ws: &Workspace, span: &bonsai_common::Span) -> String {
+    let Ok(snapshot) = ws.vfs().snapshot(span.file) else {
+        return String::new();
+    };
+    let src = snapshot.text.as_ref();
+    let span_map = bonsai_common::cached_span_map(span.file, snapshot.version, src);
+    let line = span_map.line_col(span.start).line;
+    src.split('\n')
+        .nth(line.saturating_sub(1) as usize)
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 fn tainted_args_from_cross_call(

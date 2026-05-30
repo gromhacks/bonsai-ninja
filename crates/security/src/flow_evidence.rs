@@ -51,18 +51,18 @@ fn annotate_line(lines: &mut [FlowSourceLine], line: u32, role: FlowRole, step: 
 
 /// Build the per-hop function bodies for a resolved flow.
 ///
-/// `chain_funcs` is the entry -> ... -> sink-enclosing-fn chain; `taint_path[i]`
-/// is the call that leaves `chain_funcs[i]`. Step numbers run in flow order
-/// (source = 1, ..., sink last), matching the text renderer. Returns empty
-/// when there is no multi-hop chain to render.
+/// `chain_funcs` is the entry -> ... -> terminal chain; `taint_path[i]` is the
+/// call that leaves `chain_funcs[i]`. Step numbers run in flow order (source =
+/// 1, ...), matching the text renderer. `terminal_role` is the role of the last
+/// step - `Sink` for a taint finding, `Taint` for a source lineage that ends at
+/// a non-sink terminal. Returns empty when there is no multi-hop chain.
 pub fn build_flow_bodies(
     ws: &Workspace,
     chain_funcs: &[FuncId],
     source: &FindingMatch,
-    sink: &FindingMatch,
     taint_path: &[TaintPropagationStep],
+    terminal_role: FlowRole,
 ) -> Vec<FlowFunctionBody> {
-    let _ = sink; // sink role is carried by the final taint_path step
     if chain_funcs.is_empty() {
         return Vec::new();
     }
@@ -109,7 +109,7 @@ pub fn build_flow_bodies(
         // The call that leaves this hop; the final step is the sink.
         if let Some(call) = taint_path.get(idx) {
             step += 1;
-            let role = if idx == last_step { FlowRole::Sink } else { FlowRole::Taint };
+            let role = if idx == last_step { terminal_role } else { FlowRole::Taint };
             annotate_line(&mut lines, call.line, role, step);
         }
 
