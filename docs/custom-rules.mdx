@@ -17,8 +17,8 @@ Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same l
 | Layer | Precedence | Use case |
 |---|---:|---|
 | Bundled or `--rules-dir` pack | Base | Standard shipped rules. |
-| `<workspace>/.bonsai/rules/langs/<lang>/...` | Overlay | Project-specific sources, sinks, and sanitizers. |
-| `<workspace>/.bonsai/rules/<kind>s/*.yml` | Overlay | Small flat local packs. |
+| `<workspace>/.bonsai/rules/<lang>/...` | Overlay | Project-specific sources, sinks, and sanitizers (local layout drops the `langs/` wrapper). |
+| `<workspace>/.bonsai/rules/<kind>s/*.yml` | Overlay | Small flat local packs (rule must declare `language:`). |
 | Duplicate `id` in overlay | Replaces base rule | Disable or tighten a shipped rule for a workspace. |
 
 ## Disable A Shipped Rule
@@ -27,7 +27,8 @@ Workspace-local rules live under `<workspace>/.bonsai/rules/` and use the same l
 - id: python.cmdi.os_system
   enabled: false
   disabled_reason:
-    code: project-policy
+    code: subsumed
+    subsumed_by: mycompany.cmdi.safe_exec_wrapper
   language: python
   tag: command-injection
   match:
