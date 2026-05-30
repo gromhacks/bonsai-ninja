@@ -1235,15 +1235,12 @@ fn param_decl_site(
         upper_bounds.push(first_event);
     }
     upper_bounds.push(decl.span.end);
-    let Some(body_start) = upper_bounds
+    let body_start = upper_bounds
         .into_iter()
         .filter(|bound| *bound > decl.span.start)
         .map(|bound| bound.min(decl.span.end) as usize)
         .filter(|bound| *bound <= text.len() && *bound > start)
-        .min()
-    else {
-        return None;
-    };
+        .min()?;
     let signature = text.get(start..body_start)?;
     let mut best_start = None;
     for (offset, _) in signature.match_indices(param) {
@@ -1262,7 +1259,7 @@ fn param_decl_site(
 fn first_flow_event_start(events: &[FlowEvent]) -> Option<u64> {
     events
         .iter()
-        .filter_map(|event| match event {
+        .map(|event| match event {
             FlowEvent::Call { span, .. }
             | FlowEvent::Assign { span, .. }
             | FlowEvent::Return { span, .. }
@@ -1271,50 +1268,44 @@ fn first_flow_event_start(events: &[FlowEvent]) -> Option<u64> {
             | FlowEvent::Continue { span, .. }
             | FlowEvent::Yield { span, .. }
             | FlowEvent::Await { span, .. }
-            | FlowEvent::Lifecycle { span, .. } => Some(span.start),
+            | FlowEvent::Lifecycle { span, .. } => span.start,
             FlowEvent::Branch {
                 span,
                 then_events,
                 else_events,
                 ..
-            } => Some(
-                [
-                    Some(span.start),
-                    first_flow_event_start(then_events),
-                    first_flow_event_start(else_events),
-                ]
+            } => [
+                Some(span.start),
+                first_flow_event_start(then_events),
+                first_flow_event_start(else_events),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(span.start),
+            FlowEvent::Loop { span, body, .. }
+            | FlowEvent::Defer { span, body }
+            | FlowEvent::Using { span, body, .. } => [Some(span.start), first_flow_event_start(body)]
                 .into_iter()
                 .flatten()
                 .min()
                 .unwrap_or(span.start),
-            ),
-            FlowEvent::Loop { span, body, .. }
-            | FlowEvent::Defer { span, body }
-            | FlowEvent::Using { span, body, .. } => Some(
-                [Some(span.start), first_flow_event_start(body)]
-                    .into_iter()
-                    .flatten()
-                    .min()
-                    .unwrap_or(span.start),
-            ),
             FlowEvent::Try {
                 span,
                 body,
                 catch_events,
                 finally_events,
                 ..
-            } => Some(
-                [
-                    Some(span.start),
-                    first_flow_event_start(body),
-                    first_flow_event_start(catch_events),
-                    first_flow_event_start(finally_events),
-                ]
-                .into_iter()
-                .flatten()
-                .min()
-                .unwrap_or(span.start),
-            ),
+            } => [
+                Some(span.start),
+                first_flow_event_start(body),
+                first_flow_event_start(catch_events),
+                first_flow_event_start(finally_events),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(span.start),
         })
         .min()
 }
@@ -1415,8 +1406,7 @@ fn decl_target_context_allows(
         return false;
     }
     if let Some(idx) = param_index {
-        if !target.param_index_in.is_empty() && !target.param_index_in.iter().any(|want| *want == idx as u32)
-        {
+        if !target.param_index_in.is_empty() && !target.param_index_in.contains(&(idx as u32)) {
             return false;
         }
     }
