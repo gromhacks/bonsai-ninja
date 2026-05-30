@@ -23,6 +23,7 @@ pub(crate) mod analysis;
 pub(crate) mod compile;
 pub(crate) mod deps;
 pub(crate) mod finding;
+pub mod flow_evidence;
 pub mod loader;
 pub(crate) mod matcher;
 pub(crate) mod pkg;
@@ -52,6 +53,7 @@ pub use finding::{
     compute_finding_id, Finding, FindingMatch, FindingStatus, TaintPropagationArg, TaintPropagationStep,
     TaintedArgInfo,
 };
+pub use flow_evidence::{build_flow_bodies, FlowFunctionBody, FlowRole, FlowSourceLine};
 pub use loader::{load_rulepack, load_workspace_local_rules, parse_severity, LoadError, Rulepack};
 pub use matcher::{
     drain_runtime_disabled_rules, infer_entry_point_sources, match_rule_against_facts,

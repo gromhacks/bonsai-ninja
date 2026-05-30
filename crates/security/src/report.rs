@@ -605,7 +605,7 @@ fn finding_to_sarif_result(
         finding.tag.as_deref().unwrap_or("untagged"),
         finding.sink.text,
     );
-    let sink_location = match_to_sarif_location(&finding.sink, "sink", workspace_root);
+    let sink_location = match_to_sarif_location(&finding.sink, "sink", &finding.hops, workspace_root);
     let is_pattern_finding = finding.source.category.as_deref() == Some("pattern");
     let code_flows = if is_pattern_finding {
         None
@@ -725,7 +725,7 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
     push_thread_flow_location(
         &mut thread_flow_locations,
         thread_flow_location(
-            match_to_sarif_location(&finding.source, "source", workspace_root),
+            match_to_sarif_location(&finding.source, "source", &finding.hops, workspace_root),
             &["source", "taint"],
             "essential",
         ),
@@ -747,7 +747,7 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
             push_thread_flow_location(
                 &mut thread_flow_locations,
                 thread_flow_location(
-                    taint_step_to_sarif_location(step, workspace_root),
+                    taint_step_to_sarif_location(step, &finding.hops, workspace_root),
                     &["taint", "call"],
                     "important",
                 ),
@@ -757,7 +757,7 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
             push_thread_flow_location(
                 &mut thread_flow_locations,
                 thread_flow_location(
-                    match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
+                    match_to_sarif_location(sanitizer, "sanitizer", &finding.hops, workspace_root),
                     &["sanitizer"],
                     "important",
                 ),
@@ -775,7 +775,7 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
         push_thread_flow_location(
             &mut thread_flow_locations,
             thread_flow_location(
-                match_to_sarif_location(sanitizer, "sanitizer", workspace_root),
+                match_to_sarif_location(sanitizer, "sanitizer", &finding.hops, workspace_root),
                 &["sanitizer"],
                 "important",
             ),
@@ -785,7 +785,7 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
     push_thread_flow_location(
         &mut thread_flow_locations,
         thread_flow_location(
-            match_to_sarif_location(&finding.sink, "sink", workspace_root),
+            match_to_sarif_location(&finding.sink, "sink", &finding.hops, workspace_root),
             &["sink"],
             "essential",
         ),
@@ -793,12 +793,12 @@ fn build_sarif_code_flows(finding: &Finding, workspace_root: Option<&str>) -> se
     let flow_summary = if finding.taint_path.is_empty() {
         format!("{} -> {}", finding.source.rule_id, finding.sink.rule_id)
     } else {
-        let hops: Vec<String> = finding
+        let chain: Vec<String> = finding
             .taint_path
             .iter()
             .map(|step| format!("{} -> {}", step.caller, step.callee))
             .collect();
-        hops.join("; ")
+        chain.join("; ")
     };
     serde_json::json!([{
         "message": { "text": flow_summary },
@@ -913,23 +913,28 @@ fn taint_step_matches_match(
 
 fn taint_step_to_sarif_location(
     step: &crate::finding::TaintPropagationStep,
+    hops: &[crate::flow_evidence::FlowFunctionBody],
     workspace_root: Option<&str>,
 ) -> serde_json::Value {
     let artifact = artifact_location_relative(&step.file, workspace_root);
     let display = format!("{} -> {}", step.caller, step.callee);
     let start_column = step.column.max(1);
     let end_column = start_column.saturating_add(u32::try_from(display.chars().count()).unwrap_or(0));
-    serde_json::json!({
-        "physicalLocation": {
-            "artifactLocation": artifact,
-            "region": {
-                "startLine": step.line.max(1),
-                "startColumn": start_column,
-                "endLine": step.line.max(1),
-                "endColumn": end_column.max(start_column + 1),
-                "snippet": { "text": display },
-            },
+    let mut physical = serde_json::json!({
+        "artifactLocation": artifact,
+        "region": {
+            "startLine": step.line.max(1),
+            "startColumn": start_column,
+            "endLine": step.line.max(1),
+            "endColumn": end_column.max(start_column + 1),
+            "snippet": { "text": display },
         },
+    });
+    if let Some(context) = body_context_region(hops, Some(step.caller.as_str()), step.line) {
+        physical["contextRegion"] = context;
+    }
+    serde_json::json!({
+        "physicalLocation": physical,
         "logicalLocations": logical_locations_for(Some(step.caller.as_str()), Some(step.file.as_str())),
         "message": { "text": format!("taint propagates through {display}") },
         "properties": {
@@ -941,6 +946,31 @@ fn taint_step_to_sarif_location(
     })
 }
 
+/// SARIF `contextRegion` for the function enclosing a flow step - the full
+/// body captured in `finding.hops`, located by function name and line
+/// containment so same-named functions at different sites stay distinct.
+/// `None` when no body was captured (pattern findings, unresolved chains).
+fn body_context_region(
+    hops: &[crate::flow_evidence::FlowFunctionBody],
+    func: Option<&str>,
+    line: u32,
+) -> Option<serde_json::Value> {
+    let func = func?;
+    let body = hops.iter().find(|b| {
+        b.function == func
+            && b.lines.first().is_some_and(|first| first.n <= line)
+            && b.lines.last().is_some_and(|last| last.n >= line)
+    })?;
+    let start = body.lines.first()?.n;
+    let end = body.lines.last()?.n;
+    let text = body.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+    Some(serde_json::json!({
+        "startLine": start,
+        "endLine": end,
+        "snippet": { "text": text },
+    }))
+}
+
 /// Render one match site as a SARIF `location` object — physical
 /// region with snippet, logical-location frame for the enclosing fn,
 /// and a `properties.kind` tag identifying the role
@@ -948,6 +978,7 @@ fn taint_step_to_sarif_location(
 fn match_to_sarif_location(
     finding_match: &crate::finding::FindingMatch,
     role: &str,
+    hops: &[crate::flow_evidence::FlowFunctionBody],
     workspace_root: Option<&str>,
 ) -> serde_json::Value {
     let artifact = artifact_location_relative(&finding_match.file, workspace_root);
@@ -958,17 +989,21 @@ fn match_to_sarif_location(
     let start_column = finding_match.column.max(1);
     let end_column =
         start_column.saturating_add(u32::try_from(finding_match.text.chars().count()).unwrap_or(0));
-    serde_json::json!({
-        "physicalLocation": {
-            "artifactLocation": artifact,
-            "region": {
-                "startLine": finding_match.line,
-                "startColumn": start_column,
-                "endLine": finding_match.line,
-                "endColumn": end_column.max(start_column + 1),
-                "snippet": { "text": finding_match.text },
-            },
+    let mut physical = serde_json::json!({
+        "artifactLocation": artifact,
+        "region": {
+            "startLine": finding_match.line,
+            "startColumn": start_column,
+            "endLine": finding_match.line,
+            "endColumn": end_column.max(start_column + 1),
+            "snippet": { "text": finding_match.text },
         },
+    });
+    if let Some(context) = body_context_region(hops, finding_match.enclosing_fn.as_deref(), finding_match.line) {
+        physical["contextRegion"] = context;
+    }
+    serde_json::json!({
+        "physicalLocation": physical,
         "logicalLocations": logical_locations_for(finding_match.enclosing_fn.as_deref(), Some(finding_match.file.as_str())),
         "message": { "text": format!("[{role}] {}", finding_match.text) },
         "properties": {

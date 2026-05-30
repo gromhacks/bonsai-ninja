@@ -256,6 +256,11 @@ pub struct Finding {
     pub chain_display: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub taint_path: Vec<TaintPropagationStep>,
+    /// Full source body of each function along the flow, with `step`/`role`
+    /// marked on the lines that carry a flow event - the same code the text
+    /// view prints. Empty for findings without a resolved multi-hop chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hops: Vec<crate::flow_evidence::FlowFunctionBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
