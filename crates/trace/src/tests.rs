@@ -23,6 +23,7 @@ fn step(id: u64, kind: TraceStepKind, precision: Precision) -> TraceStep {
         module: "app.py".to_string(),
         file: "app.py".to_string(),
         span: source_span(),
+        code: String::new(),
         state_before: None,
         state_after: None,
         precision,

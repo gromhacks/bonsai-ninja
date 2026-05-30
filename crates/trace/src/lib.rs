@@ -97,6 +97,11 @@ pub struct TraceStep {
     pub module: String,
     pub file: String,
     pub span: SourceSpan,
+    /// Trimmed source text of the step's line - the code at this step, so
+    /// the JSON trace carries the code and not just coordinates. Empty when
+    /// the line can't be read.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub code: String,
     pub state_before: Option<u32>,
     pub state_after: Option<u32>,
     pub precision: Precision,
@@ -255,6 +260,7 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
 
     for (idx, raw_step) in raw.steps.iter().enumerate() {
         let source_span = span_to_source(&raw_step.span, vfs, &mut span_caches);
+        let code = span_line_text(&raw_step.span, vfs, &mut span_caches);
         let func_name = (ctx.func_name)(raw_step.func).unwrap_or_else(|| format!("func#{}", raw_step.func));
         let module = (ctx.func_module)(raw_step.func).unwrap_or_default();
         let public_step = public_semantic_step(raw_step, &mut analysis_incomplete_reasons);
@@ -276,6 +282,7 @@ pub fn finalize(raw: RawTrace, ctx: FinalizeCtx<'_>, vfs: &Vfs) -> TraceResult {
             module,
             file: source_span.file.clone(),
             span: source_span,
+            code,
             state_before: None,
             state_after: None,
             precision: public_step.precision,
@@ -600,6 +607,30 @@ fn span_to_source(
         start_byte: span.start,
         end_byte: span.end,
     }
+}
+
+/// Trimmed source text of the line a span starts on. Reuses the per-finalize
+/// `SpanMap` cache. Empty when the file can't be read.
+fn span_line_text(
+    span: &Span,
+    vfs: &Vfs,
+    cache: &mut ahash::AHashMap<bonsai_common::FileId, SpanMap>,
+) -> String {
+    let Ok(snapshot) = vfs.snapshot(span.file) else {
+        return String::new();
+    };
+    let map = cache
+        .entry(span.file)
+        .or_insert_with(|| SpanMap::new(snapshot.text.as_ref()));
+    let line = map.line_col(span.start).line;
+    snapshot
+        .text
+        .as_ref()
+        .split('\n')
+        .nth(line.saturating_sub(1) as usize)
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]
