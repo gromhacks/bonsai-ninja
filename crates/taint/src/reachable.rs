@@ -2594,6 +2594,9 @@ fn tainted_args_for_cross_call_edge(
     }]
 }
 
+// Caller, arg, the two summaries, db/global, and two reuse caches — each is
+// load-bearing; a wrapper struct would only relocate the argument list.
+#[allow(clippy::too_many_arguments)]
 fn tainted_arg_is_clean_nested_call_return(
     caller: FuncId,
     arg_idx: u8,

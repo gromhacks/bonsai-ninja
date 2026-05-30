@@ -631,7 +631,7 @@ fn prune_call_result_source_names(
 
     source_names.retain(|name| {
         let name = name.trim();
-        if name.is_empty() || name == call || arg_texts.iter().any(|arg| name == *arg) {
+        if name.is_empty() || name == call || arg_texts.contains(&name) {
             return false;
         }
         let Some((receiver, tail, receiver_is_type)) = receiver_and_tail else {

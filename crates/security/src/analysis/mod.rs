@@ -3685,11 +3685,11 @@ fn align_terminal_taint_step_to_sink(
     if !terminal_taint_step_should_align_to_sink(step, sink) {
         return path;
     }
-    step.file = sink.file.clone();
+    step.file.clone_from(&sink.file);
     step.line = sink.line;
     step.column = sink.column;
     if !sink.match_text.is_empty() {
-        step.callee = sink.match_text.clone();
+        step.callee.clone_from(&sink.match_text);
     }
     normalize_taint_path(path)
 }
@@ -5433,6 +5433,9 @@ fn sanitizer_is_nested_in_tainted_sink_arg(san: &RuleMatch, sink_tainted_args: &
 /// sink execution even though its callee token appears after the sink
 /// callee token. Cross-fn sanitizers always pass this gate; the
 /// chain-hop check elsewhere handles inter-fn placement.
+// Each argument is a distinct piece of placement context; bundling them
+// into a struct would only move the noise.
+#[allow(clippy::too_many_arguments)]
 fn sanitizer_can_attach(
     src: &RuleMatch,
     source_func: FuncId,
